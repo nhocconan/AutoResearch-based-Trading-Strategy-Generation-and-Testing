@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_RSI2_MeanReversion_1dTrend_VolumeFilter_v1
-Hypothesis: RSI(2) extreme mean reversion with 1d EMA50 trend filter and volume spike confirmation.
-Works in bull markets by buying dips in uptrends and in bear markets by selling rallies in downtrends.
-Low trade frequency expected due to strict RSI(2) <10 or >90 thresholds.
+12h_CamR1S1_Breakout_1dTrend_VolumeConfirm_ATRStop
+Hypothesis: Camarilla pivot levels (R1/S1) from daily chart with 1d EMA trend filter and volume spike confirmation. Designed for low trade frequency (~20-40/year) to minimize fee drag. Uses 12h primary timeframe with 1d HTF for pivot levels, trend, and volume context. Works in bull/bear via trend filter and volatility-based stops.
 """
 
 import numpy as np
@@ -15,77 +13,108 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d HTF data ONCE before loop
+    # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1d trend filter: 50-period EMA ===
+    # === 1d Camarilla pivot levels (R1, S1) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.0 / 12)
+    s1 = pivot - (range_1d * 1.0 / 12)
+    
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === 1d trend filter: 34-period EMA ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === 1d volume average (20-period) for spike detection ===
     volume_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d[np.isnan(vol_ma_1d)] = 1.0
+    vol_ma_1d[np.isnan(vol_ma_1d)] = 1.0  # avoid division by zero
     vol_ratio_1d = volume_1d / vol_ma_1d
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # === RSI(2) on 4h close ===
+    # === ATR for dynamic stoploss (14-period on 12h) ===
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing (alpha = 1/period)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ratio_1d_aligned[i]) or
-            np.isnan(rsi[i])):
+            np.isnan(atr_14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = close[i]
-        trend_1d = ema_50_1d_aligned[i]
+        price_high = high[i]
+        price_low = low[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        trend_1d = ema_34_1d_aligned[i]
         vol_spike = vol_ratio_1d_aligned[i]
-        rsi_val = rsi[i]
+        atr_val = atr_14[i]
         
         if position == 0:
-            # Long: RSI(2) < 10 (extreme oversold) + volume spike > 1.5 + price above 1d EMA50
-            if rsi_val < 10 and vol_spike > 1.5 and price_close > trend_1d:
+            # Long: price breaks above R1 + volume spike > 1.8 + price above 1d EMA34
+            if price_close > r1_level and vol_spike > 1.8 and price_close > trend_1d:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) > 90 (extreme overbought) + volume spike > 1.5 + price below 1d EMA50
-            elif rsi_val > 90 and vol_spike > 1.5 and price_close < trend_1d:
+                entry_price = price_close
+                highest_since_entry = price_close
+            # Short: price breaks below S1 + volume spike > 1.8 + price below 1d EMA34
+            elif price_close < s1_level and vol_spike > 1.8 and price_close < trend_1d:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price_close
+                lowest_since_entry = price_close
         
         elif position != 0:
-            # Exit when RSI returns to neutral zone (40-60) or opposite extreme
-            if position == 1 and (rsi_val >= 40 or rsi_val > 90):
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and (rsi_val <= 60 or rsi_val < 10):
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Update highest/lowest since entry for trailing stop
+            if position == 1:
+                highest_since_entry = max(highest_since_entry, price_high)
+                # Trailing stop: 2.5 * ATR below highest since entry
+                if price_close < highest_since_entry - 2.5 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # position == -1
+                lowest_since_entry = min(lowest_since_entry, price_low)
+                # Trailing stop: 2.5 * ATR above lowest since entry
+                if price_close > lowest_since_entry + 2.5 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "4h_RSI2_MeanReversion_1dTrend_VolumeFilter_v1"
-timeframe = "4h"
+name = "12h_CamR1S1_Breakout_1dTrend_VolumeConfirm_ATRStop"
+timeframe = "12h"
 leverage = 1.0
