@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter
-Hypothesis: Combines 1d Camarilla pivot levels (R1/S1) with 6h price breakouts and volume confirmation (>1.5x 20-bar average). ATR-based stops manage risk. Designed for low trade frequency (target: 15-30/year) to minimize fee drag in 6h timeframe. Uses discrete position sizing (0.25) to reduce churn. Works in both bull and bear markets by trading breakouts in the direction of the pivot level (break above R1 = long, break below S1 = short).
+12h_Weekly_PriceChannelBreakout_VolumeFilter
+Hypothesis: Price breaking above/below weekly Donchian(20) channels on 12h timeframe with volume confirmation and weekly trend filter (price above/below weekly EMA200) creates high-probability trend-following signals. Weekly trend filter ensures alignment with long-term momentum, reducing false signals during corrections. Volume breakout confirms institutional participation. Target: 15-30 trades/year to minimize fee drag. Designed to work in both bull (breakouts up) and bear (breakdowns down) markets.
 """
 
 import numpy as np
@@ -10,48 +10,62 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Load weekly data once for trend filter and Donchian channels
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 200:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA200 for trend filter
+    weekly_close = df_weekly['close'].values
+    ema200_weekly = np.zeros_like(weekly_close)
+    ema200_weekly[0] = weekly_close[0]
+    alpha = 2.0 / (200 + 1)
+    for i in range(1, len(weekly_close)):
+        ema200_weekly[i] = alpha * weekly_close[i] + (1 - alpha) * ema200_weekly[i-1]
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = pivot + 1.1 * (high_1d - low_1d) / 12.0
-    s1 = pivot - 1.1 * (high_1d - low_1d) / 12.0
+    # Weekly Donchian channels (20-period high/low)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    donchian_high = np.full_like(weekly_high, np.nan)
+    donchian_low = np.full_like(weekly_low, np.nan)
     
-    # Align 1d R1/S1 to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    for i in range(len(weekly_high)):
+        if i >= 19:  # 20 periods including current
+            donchian_high[i] = np.max(weekly_high[i-19:i+1])
+            donchian_low[i] = np.min(weekly_low[i-19:i+1])
+        else:
+            donchian_high[i] = np.max(weekly_high[:i+1])
+            donchian_low[i] = np.min(weekly_low[:i+1])
     
-    # Main timeframe data (6h)
+    # Align weekly indicators to 12h timeframe
+    ema200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema200_weekly)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2.0x 20-period average (strict for low frequency)
     volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
         if i >= 20:
             volume_avg[i] = np.mean(volume[i-20:i])
         else:
             volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.5 * volume_avg)
+    volume_filter = volume > (2.0 * volume_avg)
     
     # ATR for stoploss (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr[0] = tr1[0]
     atr = np.zeros_like(close)
     for i in range(len(tr)):
         if i < 14:
@@ -63,53 +77,54 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after volume warmup
+    for i in range(200, n):  # Start after weekly EMA warmup
         # Skip if NaN in critical values
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        if np.isnan(ema200_weekly_aligned[i]) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        ema200 = ema200_weekly_aligned[i]
+        upper_channel = donchian_high_aligned[i]
+        lower_channel = donchian_low_aligned[i]
         vol_ok = volume_filter[i]
         atr_val = atr[i]
         
-        # Stoploss: 2.5 * ATR from entry
-        if position == 1 and price < entry_price - 2.5 * atr_val:
+        # Stoploss: 3.0 * ATR from entry
+        if position == 1 and price < entry_price - 3.0 * atr_val:
             signals[i] = 0.0
             position = 0
             continue
-        elif position == -1 and price > entry_price + 2.5 * atr_val:
+        elif position == -1 and price > entry_price + 3.0 * atr_val:
             signals[i] = 0.0
             position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume
-            if price > r1_val and vol_ok:
+            # Long: price breaks above weekly Donchian high with volume and weekly uptrend (price > weekly EMA200)
+            if price > upper_channel and vol_ok and price > ema200:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S1 with volume
-            elif price < s1_val and vol_ok:
+            # Short: price breaks below weekly Donchian low with volume and weekly downtrend (price < weekly EMA200)
+            elif price < lower_channel and vol_ok and price < ema200:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price falls back below R1
-            if price < r1_val:
+            # Long exit: price falls below weekly Donchian low (channel breakdown) or weekly trend turns down
+            if price < lower_channel or price < ema200:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above S1
-            if price > s1_val:
+            # Short exit: price rises above weekly Donchian high (channel breakout) or weekly trend turns up
+            if price > upper_channel or price > ema200:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "6h"
+name = "12h_Weekly_PriceChannelBreakout_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
