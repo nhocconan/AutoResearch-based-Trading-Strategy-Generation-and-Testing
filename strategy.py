@@ -1,31 +1,31 @@
+# 72637
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume confirmation.
-# Williams %R > -20 indicates overbought (short signal), < -80 indicates oversold (long signal).
-# Only take signals in direction of 1d EMA34 trend to avoid counter-trend trades.
-# Volume > 1.5x 20-period average confirms momentum.
-# Target: 15-30 trades/year by requiring trend alignment + extreme %R + volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1-day EMA(34) trend filter and volume confirmation.
+# In up-trend (price > 1d EMA34): long when price breaks above Donchian upper band.
+# In down-trend (price < 1d EMA34): short when price breaks below Donchian lower band.
+# Volume must exceed 1.5x 20-period average for confirmation. Exit on opposite band touch.
+# Target: 30-60 trades/year by requiring trend alignment + breakout + volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Calculate Williams %R (14-period)
-    highest_high = prices['high'].rolling(window=14, min_periods=14).max()
-    lowest_low = prices['low'].rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - prices['close']) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(-50).values
-    
-    # Calculate 1d EMA34 trend (HTF)
+    # 1. Load 1-day HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Pre-compute volume moving average (20-period)
+    # Calculate 1-day EMA(34)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 2. Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -33,11 +33,18 @@ def generate_signals(prices):
     
     for i in range(34, n):
         # Skip if data not ready
-        if np.isnan(williams_r[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
+        
+        # Calculate Donchian channels (20-period)
+        lookback_start = max(0, i - 19)
+        high_window = prices['high'].iloc[lookback_start:i+1].values
+        low_window = prices['low'].iloc[lookback_start:i+1].values
+        donchian_high = np.max(high_window)
+        donchian_low = np.min(low_window)
         
         # Current price and volume
         price = prices['close'].iloc[i]
@@ -46,18 +53,18 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Trend direction from 1d EMA34
-        uptrend = price > ema_34_aligned[i]
-        downtrend = price < ema_34_aligned[i]
+        # Trend filter: price vs 1-day EMA34
+        price_above_ema = price > ema_34_1d_aligned[i]
+        price_below_ema = price < ema_34_1d_aligned[i]
         
         if position == 0:
             if volume_confirm:
-                # Oversold in uptrend: long
-                if williams_r[i] < -80 and uptrend:
+                # Up-trend: look for long breakout
+                if price_above_ema and price > donchian_high:
                     signals[i] = 0.25
                     position = 1
-                # Overbought in downtrend: short
-                elif williams_r[i] > -20 and downtrend:
+                # Down-trend: look for short breakdown
+                elif price_below_ema and price < donchian_low:
                     signals[i] = -0.25
                     position = -1
         
@@ -66,13 +73,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Williams %R reaches overbought or trend breaks
-                if williams_r[i] > -20 or price < ema_34_aligned[i]:
+                # Exit long when price touches or breaks below Donchian lower band
+                if price <= donchian_low:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when Williams %R reaches oversold or trend breaks
-                if williams_r[i] < -80 or price > ema_34_aligned[i]:
+                # Exit short when price touches or breaks above Donchian upper band
+                if price >= donchian_high:
                     exit_signal = True
             
             if exit_signal:
@@ -84,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_1dEMA34Trend_Volume"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dEMA34Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
