@@ -1,37 +1,40 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_Filter_V2
-Hypothesis: Kaufman's Adaptive Moving Average (KAMA) on 12h timeframe provides adaptive trend direction. 
-Enter long when price crosses above KAMA with volume confirmation (1.5x 20-period average) and ADX > 20. 
-Enter short when price crosses below KAMA with same conditions. 
-Exit when price crosses back below/above KAMA or ADX drops below 15 (weakening trend). 
-KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends. 
-Targets 15-35 trades/year by requiring both volume and trend confirmation. 
-Works in bull/bear markets by following adaptive trend.
+6h_Ichimoku_Cloud_Breakout_Trend
+Hypothesis: Use Ichimoku cloud from 1d timeframe for trend direction and 6h for entry timing.
+Long when price breaks above Kumo cloud (Senkou Span B) with Tenkan > Kijun.
+Short when price breaks below Kumo cloud with Tenkan < Kijun.
+Requires volume > 1.5x 20-period average for confirmation.
+Uses ADX > 20 on 1d to filter for trending conditions only.
+Ichimoku works in all markets as it combines momentum, trend, and support/resistance.
+Target: 20-50 trades/year by requiring multiple confirmations.
+Works in bull/bear markets by only taking trades in direction of higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_period=10, fast_ema=2, slow_ema=30):
-    """Calculate Kaufman's Adaptive Moving Average"""
-    change = np.abs(close - np.roll(close, er_period))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if hasattr(np, 'sum') else np.abs(np.diff(close, prepend=close[0])).sum()
-    # Handle first er_period values
-    for i in range(len(change)):
-        if i < er_period:
-            change[i] = np.abs(close[i] - close[0])
-            volatility = np.sum(np.abs(np.diff(close[:i+1])))
-    # Avoid division by zero
-    volatility = np.where(volatility == 0, 1, volatility)
-    er = change / volatility
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1))**2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
+def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
+    """Calculate Ichimoku components"""
+    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 for past 9 periods
+    tenkan_sen = (pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max() + 
+                  pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min()) / 2
+    
+    # Kijun-sen (Base Line): (highest high + lowest low)/2 for past 26 periods
+    kijun_sen = (pd.Series(high).rolling(window=kijun, min_periods=kijun).max() + 
+                 pd.Series(low).rolling(window=kijun, min_periods=kijun).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 for past 52 periods shifted 26 ahead
+    senkou_span_b = (pd.Series(high).rolling(window=senkou, min_periods=senkou).max() + 
+                     pd.Series(low).rolling(window=senkou, min_periods=senkou).min()) / 2
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for signals)
+    
+    return tenkan_sen.values, kijun_sen.values, senkou_span_a.values, senkou_span_b.values
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)"""
@@ -74,6 +77,7 @@ def calculate_adx(high, low, close, period=14):
     adx = np.zeros_like(dx)
     if len(dx) >= period:
         adx[period-1] = np.mean(dx[:period])  # First ADX value
+        
         for i in range(period, len(dx)):
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
@@ -81,32 +85,41 @@ def calculate_adx(high, low, close, period=14):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data once for ADX filter
+    # Load daily data once for Ichimoku and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Calculate daily ADX for trend filter
+    # Calculate daily Ichimoku
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high_1d, low_1d, close_1d)
+    
+    # Kumo cloud top and bottom (Senkou Span B is the slower one)
+    kumo_top = np.maximum(senkou_a, senkou_b)
+    kumo_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # Calculate daily ADX for trend filter
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align ADX to 12h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate KAMA on 12h price
-    kama = calculate_kama(prices['close'].values, er_period=10, fast_ema=2, slow_ema=30)
+    # Align all indicators to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    kumo_top_6h = align_htf_to_ltf(prices, df_1d, kumo_top)
+    kumo_bottom_6h = align_htf_to_ltf(prices, df_1d, kumo_bottom)
+    adx_1d_6h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
-        # Skip if ADX not ready
-        if np.isnan(adx_1d_aligned[i]):
+    for i in range(100, n):
+        # Skip if indicators not ready
+        if np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(kumo_top_6h[i]) or np.isnan(kumo_bottom_6h[i]) or np.isnan(adx_1d_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,8 +127,6 @@ def generate_signals(prices):
         
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
-        kama_val = kama[i]
-        prev_kama = kama[i-1]
         
         # Volume confirmation: current volume > 1.5 * 20-period average
         if i >= 20:
@@ -125,29 +136,29 @@ def generate_signals(prices):
             volume_ok = False
         
         # Trend filter: ADX > 20 indicates trending market
-        trending = adx_1d_aligned[i] > 20
+        trending = adx_1d_6h[i] > 20
         
         if position == 0:
-            # Long: price crosses above KAMA + volume confirmation + trending market
-            if price > kama_val and price <= prev_kama and volume_ok and trending:
+            # Long: price above cloud AND Tenkan > Kijun AND volume + trend confirmation
+            if price > kumo_top_6h[i] and tenkan_6h[i] > kijun_6h[i] and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below KAMA + volume confirmation + trending market
-            elif price < kama_val and price >= prev_kama and volume_ok and trending:
+            # Short: price below cloud AND Tenkan < Kijun AND volume + trend confirmation
+            elif price < kumo_bottom_6h[i] and tenkan_6h[i] < kijun_6h[i] and volume_ok and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below KAMA or ADX drops below 15 (weakening trend)
-            if price < kama_val or adx_1d_aligned[i] < 15:
+            # Long exit: price drops below cloud base OR Tenkan < Kijun (momentum loss)
+            if price < kumo_bottom_6h[i] or tenkan_6h[i] < kijun_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above KAMA or ADX drops below 15 (weakening trend)
-            if price > kama_val or adx_1d_aligned[i] < 15:
+            # Short exit: price rises above cloud top OR Tenkan > Kijun (momentum loss)
+            if price > kumo_top_6h[i] or tenkan_6h[i] > kijun_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -155,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Trend_Filter_V2"
-timeframe = "12h"
+name = "6h_Ichimoku_Cloud_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
