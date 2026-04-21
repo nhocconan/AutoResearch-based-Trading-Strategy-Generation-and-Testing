@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1d_Camarilla_R1S1_Breakout_Volume_Control_v2
-Hypothesis: Use 1d Camarilla R1/S1 levels on 6h timeframe with volume confirmation and EMA34 trend filter.
-Long when price breaks above 1d R1 with volume > 1.8x 20-period average and EMA34 > EMA89.
-Short when price breaks below 1d S1 with volume > 1.8x 20-period average and EMA34 < EMA89.
-Exit when price crosses 1d pivot point. Higher volume threshold reduces false breaks.
-Designed for 6h timeframe to target 12-37 trades/year (50-150 total over 4 years).
-Works in bull/bear by following higher timeframe trend via EMA34/EMA89 crossover.
+4h_12h_Camarilla_R1S1_Breakout_Volume_Momentum_v1
+Hypothesis: Use 12h timeframe for trend direction (trend and regime) and 4h for entry timing.
+Long when price breaks above 12h R1 with 12h uptrend (price > EMA50) and volume > 1.5x 20-period average.
+Short when price breaks below 12h S1 with 12h downtrend (price < EMA50) and volume > 1.5x 20-period average.
+Exit when price crosses 12h pivot point. Uses volume confirmation to avoid false breaks.
+Target: 20-40 trades/year per symbol. Works in bull/bear by following higher timeframe trends.
 """
 
 import numpy as np
@@ -15,22 +14,22 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data once for Camarilla levels and trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close = np.roll(close_12h, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
@@ -41,23 +40,22 @@ def generate_signals(prices):
     s1 = prev_close - 1.1 * rang / 12
     pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
     
-    # Calculate EMA34 and EMA89 on price data
-    close = prices['close'].values
-    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89 = pd.Series(close).ewm(span=89, adjust=False, min_periods=89).mean().values
+    # Calculate EMA50 on 12h for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(ema34[i]) or np.isnan(ema89[i])):
+            np.isnan(pp_aligned[i]) or np.isnan(ema50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,23 +64,23 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.8 * 20-period average
+        # Volume filter: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.8 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
-        # Trend filter: EMA34 > EMA89 for uptrend, EMA34 < EMA89 for downtrend
-        uptrend = ema34[i] > ema89[i]
-        downtrend = ema34[i] < ema89[i]
+        # 12h trend filter: price > EMA50 for uptrend, price < EMA50 for downtrend
+        uptrend = price > ema50_12h_aligned[i]
+        downtrend = price < ema50_12h_aligned[i]
         
         if position == 0:
-            # Long conditions: break above R1 + volume + uptrend
+            # Long conditions: break above R1 + volume + 12h uptrend
             if price > r1_aligned[i] and volume_ok and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S1 + volume + downtrend
+            # Short conditions: break below S1 + volume + 12h downtrend
             elif price < s1_aligned[i] and volume_ok and downtrend:
                 signals[i] = -0.25
                 position = -1
@@ -105,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_R1S1_Breakout_Volume_Control_v2"
-timeframe = "6h"
+name = "4h_12h_Camarilla_R1S1_Breakout_Volume_Momentum_v1"
+timeframe = "4h"
 leverage = 1.0
