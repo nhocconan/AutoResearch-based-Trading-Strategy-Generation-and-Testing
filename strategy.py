@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_Regime_Volume_V1
-Hypothesis: 4h strategy using Kaufman Adaptive Moving Average (KAMA) for trend direction,
-filtered by 4h choppiness regime (CHOP < 50 = trending) and volume spike (>1.5x 20-period average).
-Enter long when price > KAMA in trending market with volume confirmation.
-Enter short when price < KAMA in trending market with volume confirmation.
-Exit on ATR(14) trailing stop (2.0*ATR) or opposite KAMA cross.
-KAMA adapts to market noise, reducing whipsaws in choppy/ bear markets.
-Volume confirmation ensures institutional participation.
-Target: 20-35 trades/year (~80-140 total over 4 years) to minimize fee drag.
-Works in bull/bear via adaptive trend filter and regime/volume filters.
+6h_WilliamsAlligator_ElderRay_Regime_V1
+Hypothesis: 6h strategy combining Williams Alligator (trend detection) with Elder Ray Index (bull/bear power) filtered by ADX regime.
+- Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs on median price. Trend when aligned (Lips > Teeth > Jaw for uptrend).
+- Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low. Measures buying/selling pressure.
+- ADX > 25 = trending regime (use Alligator/Elder Ray), ADX < 20 = ranging regime (fade extremes).
+- Enter long when: Alligator bullish alignment AND Bull Power > 0 AND ADX > 25.
+- Enter short when: Alligator bearish alignment AND Bear Power > 0 AND ADX > 25.
+- Exit on opposite signal or ATR(10) trailing stop (2.0*ATR).
+- Uses 1d HTF for trend context (price > 1d EMA50 for long bias, < for short bias).
+Target: 12-25 trades/year (~50-100 total over 4 years) to minimize fee drag.
+Works in bull/bear via ADX regime filter and HTF trend bias.
 """
 
 import numpy as np
@@ -21,91 +22,95 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for higher timeframe context if needed, but primary is 4h)
-    # Note: Strategy primarily uses 4h indicators; HTF load is for template compliance but not used in logic
+    # Load HTF data ONCE before loop (1d for trend bias)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h Indicators (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # === 1d EMA50 for HTF trend bias ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === 6h Indicators (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # Kaufman Adaptive Moving Average (KAMA) - 10/2/30
-    # ER = |net change| / sum(|abs change|)
-    change = np.abs(np.diff(close_4h, prepend=close_4h[0]))
-    net_change = np.abs(np.subtract(close_4h, np.roll(close_4h, 10)))
-    net_change[0:10] = 0  # first 10 values invalid
-    sum_abs_change = np.convolve(change, np.ones(10), mode='full')[:len(close_4h)]
-    sum_abs_change[0:9] = 1  # avoid division by zero
-    er = np.where(sum_abs_change > 0, net_change / sum_abs_change, 0)
-    # Smoothing constants: fastest SC=2/(2+1)=0.666, slowest SC=2/(30+1)=0.0645
-    sc = (er * (0.666 - 0.0645) + 0.0645) ** 2
-    kama = np.full_like(close_4h, np.nan)
-    kama[9] = close_4h[9]  # seed
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
+    # Williams Alligator: SMAs of median price
+    median_price = (high_6h + low_6h) / 2.0
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # 13-period
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # 8-period
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values     # 5-period
     
-    # Choppiness Index (CHOP) - 14 period
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = np.convolve(tr, np.ones(14), mode='full')[:len(tr)]
-    atr_sum[0:13] = np.nan  # not enough data
-    highest_high = np.convolve(high_4h, np.ones(14), mode='full')[:len(high_4h)]
-    highest_high[0:13] = np.nan
-    lowest_low = np.convolve(low_4h, np.ones(14), mode='full')[:len(low_4h)]
-    lowest_low[0:13] = np.nan
-    range_14 = highest_high - lowest_low
-    chop = np.where(range_14 > 0, 100 * np.log10(atr_sum / range_14) / np.log10(14), 50)
+    # Elder Ray Index: Bull/Bear Power vs EMA(13)
+    ema_13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_6h - ema_13
+    bear_power = ema_13 - low_6h
     
-    # Volume spike: >1.5x 20-period average
-    vol_ma = np.convolve(volume_4h, np.ones(20), mode='full')[:len(volume_4h)] / 20
-    vol_ma[0:19] = np.nan
-    volume_spike = volume_4h > (1.5 * vol_ma)
+    # ADX (14-period) for regime detection
+    tr1 = pd.Series(high_6h - low_6h)
+    tr2 = pd.Series(np.abs(high_6h - np.roll(close_6h, 1)))
+    tr3 = pd.Series(np.abs(low_6h - np.roll(close_6h, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # ATR (14-period) for stoploss
-    atr = np.convolve(tr, np.ones(14), mode='full')[:len(tr)] / 14
-    atr[0:13] = np.nan
+    # +DI and -DI
+    up_move = pd.Series(high_6h).diff()
+    down_move = pd.Series(low_6h).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Handle division by zero
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = np.where(np.isnan(adx), 0, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(kama[i]) or np.isnan(chop[i]) or np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) 
+            or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) 
+            or np.isnan(adx[i]) or np.isnan(atr[i]) 
+            or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
+        price = close_6h[i]
         
         if position == 0:
-            # Long conditions: price > KAMA, trending market (CHOP < 50), volume spike
-            long_entry = price > kama[i]
-            long_regime = chop[i] < 50
-            long_volume = volume_spike[i]
+            # Alligator alignment
+            alligator_bullish = lips[i] > teeth[i] > jaw[i]
+            alligator_bearish = lips[i] < teeth[i] < jaw[i]
             
-            # Short conditions: price < KAMA, trending market, volume spike
-            short_entry = price < kama[i]
-            short_regime = chop[i] < 50
-            short_volume = volume_spike[i]
+            # Elder Ray power
+            bull_strong = bull_power[i] > 0
+            bear_strong = bear_power[i] > 0
+            
+            # Regime filters
+            trending_regime = adx[i] > 25
+            ranging_regime = adx[i] < 20
+            htf_bullish = price > ema_50_1d_aligned[i]
+            htf_bearish = price < ema_50_1d_aligned[i]
             
             # Entry logic
-            if long_entry and long_regime and long_volume:
+            if alligator_bullish and bull_strong and trending_regime and htf_bullish:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_entry and short_regime and short_volume:
+            elif alligator_bearish and bear_strong and trending_regime and htf_bearish:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -115,8 +120,8 @@ def generate_signals(prices):
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below KAMA
-            elif price < kama[i]:
+            # Exit conditions: Alligator turns bearish OR Bear Power becomes strong
+            elif lips[i] < teeth[i] or bear_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,8 +132,8 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above KAMA
-            elif price > kama[i]:
+            # Exit conditions: Alligator turns bullish OR Bull Power becomes strong
+            elif lips[i] > teeth[i] or bull_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Trend_Regime_Volume_V1"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_ElderRay_Regime_V1"
+timeframe = "6h"
 leverage = 1.0
