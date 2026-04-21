@@ -1,156 +1,113 @@
 #!/usr/bin/env python3
 """
-6h_1d1w_Fibonacci_Time_Zone_Pullback
-Hypothesis: Fibonacci time zones derived from major swing points on 1d chart identify potential reversal zones. 
-Combine with 1w trend filter (price above/below 200 EMA) and 6s RSI pullback entries. 
-Works in bull/bear by aligning with higher timeframe trend while exploiting mean-reversion at time-based zones.
-Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+12h_1d_VWAP_Deviation_MeanReversion
+Hypothesis: Price deviates significantly from daily VWAP and reverts back with volume confirmation. 
+Works in both bull and bear markets by fading extremes at VWAP ± 2*ATR(20) with volume filter.
+Target: 12-37 trades/year to minimize fee drag on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
-from math import floor
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily and weekly data once
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 50 or len(df_1w) < 10:
+    # Load daily data for VWAP and ATR
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # === DAILY: Swing detection for Fibonacci time zones ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
+    volume_daily = df_daily['volume'].values
     
-    # Find swing highs and lows (using 5-bar window)
-    swing_high = np.zeros_like(high_1d, dtype=bool)
-    swing_low = np.zeros_like(low_1d, dtype=bool)
+    # Calculate daily VWAP: cumulative (price * volume) / cumulative volume
+    typical_price = (high_daily + low_daily + close_daily) / 3.0
+    pv = typical_price * volume_daily
+    cum_pv = np.cumsum(pv)
+    cum_vol = np.cumsum(volume_daily)
+    vwap = np.where(cum_vol > 0, cum_pv / cum_vol, typical_price)
     
-    for i in range(2, len(high_1d)-2):
-        if (high_1d[i] >= high_1d[i-1] and high_1d[i] >= high_1d[i-2] and 
-            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
-            swing_high[i] = True
-        if (low_1d[i] <= low_1d[i-1] and low_1d[i] <= low_1d[i-2] and 
-            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
-            swing_low[i] = True
+    # Calculate daily ATR(20)
+    tr1 = high_daily - low_daily
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = np.zeros_like(tr)
+    for i in range(len(tr)):
+        if i < 20:
+            atr[i] = np.mean(tr[:i+1])
+        else:
+            atr[i] = np.mean(tr[i-20:i])
     
-    # Get most recent significant swing (prioritize larger moves)
-    last_swing_idx = -1
-    last_swing_is_high = False
-    max_move = 0
+    # Align daily VWAP and ATR to 12h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_daily, vwap)
+    atr_aligned = align_htf_to_ltf(prices, df_daily, atr)
     
-    for i in range(len(high_1d)-1, -1, -1):
-        if swing_high[i]:
-            move = high_1d[i] - low_1d[max(0, i-5):i+1].min()
-            if move > max_move:
-                max_move = move
-                last_swing_idx = i
-                last_swing_is_high = True
-        elif swing_low[i]:
-            move = high_1d[max(0, i-5):i+1].max() - low_1d[i]
-            if move > max_move:
-                max_move = move
-                last_swing_idx = i
-                last_swing_is_high = False
-    
-    # Calculate Fibonacci time zones from the swing point
-    if last_swing_idx >= 0:
-        fib_ratios = [0.382, 0.618, 1.0, 1.618, 2.618, 4.236]
-        time_zones = []
-        for ratio in fib_ratios:
-            zone_idx = int(last_swing_idx + ratio * (len(high_1d) - last_swing_idx))
-            if zone_idx < len(high_1d):
-                time_zones.append(zone_idx)
-        
-        # Create time zone signal (1 if in zone, 0 otherwise)
-        in_time_zone = np.zeros(len(high_1d), dtype=bool)
-        for zone in time_zones:
-            # Active for 3 days around the zone
-            start = max(0, zone - 1)
-            end = min(len(high_1d), zone + 2)
-            in_time_zone[start:end] = True
-    else:
-        in_time_zone = np.zeros(len(high_1d), dtype=bool)
-    
-    # Align time zone signal to 6h
-    time_zone_signal = align_htf_to_ltf(prices, df_1d, in_time_zone.astype(float))
-    
-    # === WEEKLY: Trend filter (200 EMA) ===
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    weekly_trend_up = align_htf_to_ltf(prices, df_1w, (close_1w > ema_200_1w).astype(float))
-    
-    # === 6H TIMEFRAME: RSI pullback entries ===
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(6) on 6s
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: above average
-    vol_ma = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values  # 24*6h = 6 days
-    volume_filter = volume > vol_ma * 1.2
+    # Volume filter: current volume > 1.3x 20-period average
+    volume_avg = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+        else:
+            volume_avg[i] = np.mean(volume[i-20:i])
+    volume_filter = volume > (1.3 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if NaN
-        if (np.isnan(time_zone_signal[i]) or np.isnan(weekly_trend_up[i]) or 
-            np.isnan(rsi[i])):
+    for i in range(20, n):
+        # Skip if NaN in critical values
+        if (np.isnan(vwap_aligned[i]) or np.isnan(atr_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        tz_signal = time_zone_signal[i]
-        weekly_up = weekly_trend_up[i] > 0.5
-        rsi_val = rsi[i]
+        vwap_val = vwap_aligned[i]
+        atr_val = atr_aligned[i]
         vol_ok = volume_filter[i]
         
+        upper_band = vwap_val + (2.0 * atr_val)
+        lower_band = vwap_val - (2.0 * atr_val)
+        
         if position == 0:
-            # Long setup: uptrend + time zone + RSI pullback from oversold
-            if weekly_up and tz_signal > 0.5 and rsi_val < 35 and vol_ok:
-                # Additional: price above 6s EMA(20) for momentum
-                ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-                if price > ema_20[i]:
+            # Long: price touches/bounces off lower band with volume
+            if price <= lower_band and vol_ok:
+                # Confirmation: closing in upper half of bar
+                if close[i] > (high[i] + low[i]) / 2:
                     signals[i] = 0.25
                     position = 1
-            # Short setup: downtrend + time zone + RSI pullback from overbought
-            elif not weekly_up and tz_signal > 0.5 and rsi_val > 65 and vol_ok:
-                ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-                if price < ema_20[i]:
+            # Short: price touches/rejects upper band with volume
+            elif price >= upper_band and vol_ok:
+                # Confirmation: closing in lower half of bar
+                if close[i] < (high[i] + low[i]) / 2:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: RSI overbought or leaves time zone
-            if rsi_val > 70 or tz_signal < 0.5:
+            # Exit long: price returns to VWAP or hits upper band
+            if price >= vwap_val or price >= upper_band:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI oversold or leaves time zone
-            if rsi_val < 30 or tz_signal < 0.5:
+            # Exit short: price returns to VWAP or hits lower band
+            if price <= vwap_val or price <= lower_band:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -158,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d1w_Fibonacci_Time_Zone_Pullback"
-timeframe = "6h"
+name = "12h_1d_VWAP_Deviation_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
