@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyTrend_DailyMomentum_With_Volume_V2
-Hypothesis: Use weekly EMA34 trend filter to align with long-term momentum, enter on daily RSI(14) extremes with volume confirmation, and exit on opposite RSI extreme. 
-This captures momentum in trending markets while avoiding counter-trend trades. 
-Weekly trend filter reduces whipsaws in sideways markets. Target: 15-25 trades/year.
-Works in bull markets by catching pullbacks in uptrends and in bear markets by shorting bounces in downtrends. 
-Volume confirmation ensures institutional participation. 
-Improved version with adjusted RSI thresholds and volume multiplier to increase trade frequency while maintaining edge.
+6h_ThreeSMA_Turn_Cross_v1
+Hypothesis: Trend changes are signaled by crossovers of short, medium, and long SMAs.
+The 6h timeframe captures medium-term momentum, and the 12h SMA acts as a trend filter to avoid whipsaws.
+Entry occurs when SMA10 crosses SMA20 in the direction of the 12h SMA50 trend, with volume confirmation.
+Exit occurs on the opposite SMA crossover. This aims to catch sustained moves while avoiding sideways chop.
+Works in bull markets by buying dips in uptrends and in bear markets by selling rallies in downtrends.
+Target: 15-35 trades per year per symbol.
 """
 
 import numpy as np
@@ -15,87 +15,68 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # === Weekly EMA34 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 12h SMA50 for trend filter ===
+    close_12h = df_12h['close'].values
+    sma_50_12h = pd.Series(close_12h).rolling(window=50, min_periods=50).mean().values
+    sma_50_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_50_12h)
     
-    # === Daily RSI(14) ===
+    # === 6h SMA10 and SMA20 ===
     close = prices['close'].values
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    sma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
-    # Wilder's smoothing for RSI
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nanmean(arr[1:period]) if period > 1 else arr[0]
-        for i in range(period, len(arr)):
-            if np.isnan(result[i-1]) or np.isnan(arr[i]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    period_rsi = 14
-    avg_gain = wilder_smooth(gain, period_rsi)
-    avg_loss = wilder_smooth(loss, period_rsi)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[np.nan], rsi])  # align with close
-    
-    # === Daily Volume confirmation ===
+    # === Volume confirmation ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(35, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(sma_10[i]) or np.isnan(sma_20[i]) or 
+            np.isnan(sma_50_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = prices['close'].iloc[i]
-        ema_trend = ema_34_1w_aligned[i]
-        rsi_val = rsi[i]
+        sma10_now = sma_10[i]
+        sma20_now = sma_20[i]
+        sma10_prev = sma_10[i-1]
+        sma20_prev = sma_20[i-1]
+        trend_12h = sma_50_12h_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
+        # Bullish crossover: SMA10 crosses above SMA20
+        bullish_cross = (sma10_prev <= sma20_prev) and (sma10_now > sma20_now)
+        # Bearish crossover: SMA10 crosses below SMA20
+        bearish_cross = (sma10_prev >= sma20_prev) and (sma10_now < sma20_now)
+        
         if position == 0:
-            # Long: weekly uptrend + RSI oversold bounce + volume
-            if (price_close > ema_trend and
-                rsi_val < 35 and
-                vol_ratio_val > 1.5):
+            # Long: bullish crossover + price above 12h trend + volume
+            if bullish_cross and (close[i] > trend_12h) and (vol_ratio_val > 1.2):
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + RSI overbought bounce + volume
-            elif (price_close < ema_trend and
-                  rsi_val > 65 and
-                  vol_ratio_val > 1.5):
+            # Short: bearish crossover + price below 12h trend + volume
+            elif bearish_cross and (close[i] < trend_12h) and (vol_ratio_val > 1.2):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when RSI reaches opposite extreme
-            if position == 1 and rsi_val > 65:
+            # Exit on opposite crossover
+            if position == 1 and bearish_cross:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and rsi_val < 35:
+            elif position == -1 and bullish_cross:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_DailyMomentum_With_Volume_V2"
-timeframe = "1d"
+name = "6h_ThreeSMA_Turn_Cross_v1"
+timeframe = "6h"
 leverage = 1.0
