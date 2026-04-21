@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_Chop_ATRStop
-Hypothesis: 4h Camarilla R1/S1 breakouts with volume confirmation and chop regime filter provide edge in both bull and bear markets. 
-Long when price breaks above R1 with volume > 1.5x average and chop < 61.8 (trending). 
-Short when price breaks below S1 with volume > 1.5x average and chop < 61.8 (trending). 
-Uses ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR.
-Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-Works in trending markets (chop < 61.8) and avoids ranging markets where breakouts fail.
+1d_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop_V3
+Hypothesis: Daily Camarilla pivot R1/S1 breakouts with volume confirmation and choppiness regime filter capture institutional breakout/retest patterns. Works in both bull/bear markets: regime filter adapts to trending/choppy conditions, volume confirms institutional participation, ATR stop manages risk. Target: 7-25 trades/year (30-100 total) to minimize fee drag.
 """
 
 import numpy as np
@@ -18,52 +13,57 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for Camarilla calculation)
+    # Load HTF data ONCE before loop (1w for EMA trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # === 1w EMA34 for trend filter (HTF) ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # === 1d indicators (primary timeframe) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Camarilla levels (R1, S1) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + (1.1 * camarilla_range / 12)
-    s1 = close_1d - (1.1 * camarilla_range / 12)
+    # === Camarilla Pivot Points (from previous day) ===
+    # Calculate from previous day's OHLC
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan  # first day has no previous
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # === 4h Indicators (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
+    # Camarilla levels
+    r1 = pivot + (range_hl * 1.1 / 12)
+    s1 = pivot - (range_hl * 1.1 / 12)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # === Volume confirmation (20-period average) ===
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Volume average (20-period) for confirmation
-    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # === Choppiness Index regime filter (14-period) ===
+    # CHOP = 100 * log10(sum(TR over period) / (ATR * period)) / log10(period)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr_14 / (atr_14 * 14)) / np.log10(14)
     
-    # Choppiness Index (14-period) for regime filter
-    # CHOP = 100 * log10(sum(ATR(1)) / (max(high) - min(low))) / log10(N)
-    tr1 = pd.Series(high_4h - low_4h)
-    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
-    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1 = tr.rolling(window=1, min_periods=1).sum()
-    sum_atr = atr_1.rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    chop = 100 * (np.log10(sum_atr) - np.log10(max_high - min_low)) / np.log10(14)
-    
-    # ATR (14-period) for stoploss
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # === ATR (20-period) for stoploss ===
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,35 +71,50 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
-            or np.isnan(vol_ma[i]) or np.isnan(chop[i]) or np.isnan(atr[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(vol_ma[i]) 
+            or np.isnan(chop[i]) or np.isnan(atr_20[i]) or np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
-        volume = volume_4h[i]
+        price = close_1d[i]
+        vol_ratio = volume_1d[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 0:
-            # Long: Price breaks above R1 + volume > 1.5x average + trending regime (CHOP < 61.8)
-            if price > r1_aligned[i] and volume > 1.5 * vol_ma[i] and chop[i] < 61.8:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            # Short: Price breaks below S1 + volume > 1.5x average + trending regime (CHOP < 61.8)
-            elif price < s1_aligned[i] and volume > 1.5 * vol_ma[i] and chop[i] < 61.8:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+            # Regime adaptive: CHOP > 50 = choppy (mean revert), CHOP < 50 = trending (breakout)
+            if chop[i] > 50:
+                # Choppy regime: mean reversion at S1/R1
+                # Long: price crosses above S1 with volume
+                if price > s1[i] and close_1d[i-1] <= s1[i] and vol_ratio > 1.5:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                # Short: price crosses below R1 with volume
+                elif price < r1[i] and close_1d[i-1] >= r1[i] and vol_ratio > 1.5:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+            else:
+                # Trending regime: breakout of R1/S1 with volume
+                # Long: price breaks above R1 with volume
+                if price > r1[i] and close_1d[i-1] <= r1[i] and vol_ratio > 2.0:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                # Short: price breaks below S1 with volume
+                elif price < s1[i] and close_1d[i-1] >= s1[i] and vol_ratio > 2.0:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
+            if price < entry_price - 2.0 * atr_20[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: price back below R1 or chop increases (ranging market)
-            elif price < r1_aligned[i] or chop[i] > 61.8:
+            # Exit conditions: opposite Camarilla level touch or regime shift
+            elif price >= r1[i] or (chop[i] > 60 and price <= pivot[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,11 +122,11 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
+            if price > entry_price + 2.0 * atr_20[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: price back above S1 or chop increases (ranging market)
-            elif price > s1_aligned[i] or chop[i] > 61.8:
+            # Exit conditions: opposite Camarilla level touch or regime shift
+            elif price <= s1[i] or (chop[i] > 60 and price >= pivot[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Chop_ATRStop"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop_V3"
+timeframe = "1d"
 leverage = 1.0
