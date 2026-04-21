@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_Camarilla_R3S3_Fade_V1
-Hypothesis: Fade extreme weekly Camarilla R3/S3 levels on 6h timeframe with 1d trend filter.
-In ranging markets, price reverts from extreme levels (R3/S3). In trending markets,
-only trade with the 1d trend to avoid counter-trend fading. Uses 1w for Camarilla calculation
-to capture major weekly extremes, reducing false signals. Target: 12-37 trades/year per symbol.
-Works in both bull and bear markets via trend filter and mean reversion logic.
+12h_Camarilla_R1S1_Breakout_ChopFilter_V1
+Hypothesis: Camarilla R1/S1 breakouts with choppiness regime filter work on 12h for BTC/ETH in bull/bear markets. Uses 1d Camarilla levels, chop > 61.8 for ranging markets (mean reversion at S1/R1), chop < 38.2 for trending (breakouts). Target: 12-37 trades/year.
 """
 
 import numpy as np
@@ -17,46 +13,34 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data once for Camarilla pivot calculation (primary HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Load daily data once for trend filter
+    # Load daily data once for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous week's OHLC for Camarilla pivot calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Previous day's OHLC for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Camarilla pivot point and R3/S3 levels (extreme levels for fading)
+    # Camarilla pivot point and R1/S1 levels
     pivot = (prev_high + prev_low + prev_close) / 3.0
-    r3 = pivot + (prev_high - prev_low) * 1.1 / 4
-    s3 = pivot - (prev_high - prev_low) * 1.1 / 4
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
     
-    # Align weekly levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Align daily levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 1d EMA50 for trend filter (avoid fading against strong trend)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: 24-period average (approx 6 days on 6h)
-    vol_ma = prices['volume'].rolling(window=24, min_periods=24).mean().values
-    
-    # ATR for stoploss
+    # Choppiness Index (14) on 12h close
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -66,54 +50,58 @@ def generate_signals(prices):
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_tr / (hh - ll)) / np.log10(14)
+    chop[hh == ll] = 100  # avoid division by zero
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume confirmation
-        volume_ok = volume > 1.3 * vol_ma[i]
-        
-        # 1d trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long fade: price reaches S3 extreme in uptrend (mean reversion up)
-            # or price reaches S3 extreme in ranging market (no strong trend)
-            if volume_ok and price <= s3_aligned[i]:
-                if uptrend or (not uptrend and not downtrend):  # uptrend or ranging
+            # Chop > 61.8: ranging market - mean reversion at S1/R1
+            if chop[i] > 61.8:
+                # Long: price crosses above S1 (support) from below
+                if i > 0 and close[i-1] <= s1_aligned[i-1] and price > s1_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-            # Short fade: price reaches R3 extreme in downtrend (mean reversion down)
-            # or price reaches R3 extreme in ranging market (no strong trend)
-            elif volume_ok and price >= r3_aligned[i]:
-                if downtrend or (not uptrend and not downtrend):  # downtrend or ranging
+                # Short: price crosses below R1 (resistance) from above
+                elif i > 0 and close[i-1] >= r1_aligned[i-1] and price < r1_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Chop < 38.2: trending market - breakout continuation
+            elif chop[i] < 38.2:
+                # Long: price breaks above R1 with momentum
+                if price > r1_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price breaks below S1 with momentum
+                elif price < s1_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: price reaches pivot (mean reversion target) or stoploss
-            if price >= pivot_aligned[i] * 0.998 or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
+            # Exit long: price reaches opposite level (R1) or chop shifts to strong trend
+            if price >= r1_aligned[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches pivot (mean reversion target) or stoploss
-            if price <= pivot_aligned[i] * 1.002 or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
+            # Exit short: price reaches opposite level (S1) or chop shifts to strong trend
+            if price <= s1_aligned[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_Camarilla_R3S3_Fade_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_ChopFilter_V1"
+timeframe = "12h"
 leverage = 1.0
