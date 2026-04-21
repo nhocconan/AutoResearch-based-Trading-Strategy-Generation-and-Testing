@@ -3,32 +3,42 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA(34) trend filter and volume confirmation.
-# Long when price breaks above upper Donchian in uptrend (1w EMA > price), short when breaks below lower Donchian in downtrend (1w EMA < price).
-# Volume > 1.5x 20-period average confirms breakout strength. EMA filter avoids whipsaws in ranging markets.
-# Target: 10-25 trades/year by requiring strong trend + volume + breakout alignment.
-# Works in bull/bear: EMA filter ensures only aligned trends are traded, avoiding counter-trend trades.
+# Hypothesis: 6h Chande Momentum Oscillator (CMO) reversal with 1d trend filter and volume confirmation.
+# Long when CMO < -50 (oversold) in 1d uptrend (close > EMA50), short when CMO > 50 (overbought) in 1d downtrend (close < EMA50).
+# Volume > 1.3x 20-period average confirms momentum exhaustion. Uses EMA50 for trend to avoid counter-trend trades.
+# Target: 20-40 trades/year by requiring overextended momentum + trend alignment + volume confirmation.
+# Works in bull/bear: EMA50 filter ensures trades align with higher timeframe trend, reducing whipsaws.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA(34) for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False).values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align EMA to 1d timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 6-period Chande Momentum Oscillator (CMO) on 6h data
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    up = np.where(delta > 0, delta, 0)
+    down = np.where(delta < 0, -delta, 0)
     
-    # Calculate 20-period Donchian channels on 1d data
-    high_roll = prices['high'].rolling(window=20, min_periods=20).max()
-    low_roll = prices['low'].rolling(window=20, min_periods=20).min()
-    upper = high_roll.values
-    lower = low_roll.values
+    def Wilder_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    sum_up = Wilder_smooth(up, 6)
+    sum_down = Wilder_smooth(down, 6)
+    cmo = 100 * (sum_up - sum_down) / (sum_up + sum_down)
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -36,9 +46,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(cmo[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -48,21 +58,21 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirm = volume > 1.3 * vol_ma[i]
         
-        # Trend filter: price above/below 1w EMA
-        price_above_ema = price > ema_1w_aligned[i]
-        price_below_ema = price < ema_1w_aligned[i]
+        # Trend filter: 1d close relative to EMA50
+        uptrend = price > ema50_1d_aligned[i]
+        downtrend = price < ema50_1d_aligned[i]
         
         if position == 0:
             if volume_confirm:
-                # Long: price breaks above upper Donchian and above 1w EMA
-                if price > upper[i] and price_above_ema:
+                # Long: oversold in uptrend
+                if cmo[i] < -50 and uptrend:
                     signals[i] = 0.25
                     position = 1
-                # Short: price breaks below lower Donchian and below 1w EMA
-                elif price < lower[i] and price_below_ema:
+                # Short: overbought in downtrend
+                elif cmo[i] > 50 and downtrend:
                     signals[i] = -0.25
                     position = -1
         
@@ -71,13 +81,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price breaks below lower Donchian or crosses below 1w EMA
-                if price < lower[i] or price < ema_1w_aligned[i]:
+                # Exit if CMO returns to neutral or trend breaks
+                if cmo[i] >= -10 or not uptrend:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price breaks above upper Donchian or crosses above 1w EMA
-                if price > upper[i] or price > ema_1w_aligned[i]:
+                # Exit if CMO returns to neutral or trend breaks
+                if cmo[i] <= 10 or not downtrend:
                     exit_signal = True
             
             if exit_signal:
@@ -89,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_Trend_Volume"
-timeframe = "1d"
+name = "6h_CMO_OversoldOverbought_1dEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
