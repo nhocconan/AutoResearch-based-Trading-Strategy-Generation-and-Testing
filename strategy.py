@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_DailyTrend_Breakout_Volume_V1
-Hypothesis: 6h strategy using weekly pivot points (from 1w HTF) for key support/resistance levels,
-combined with 1d EMA50 trend filter and volume confirmation (>1.5x 20-period average).
-Enter long when price breaks above weekly R1 with 1d uptrend and volume spike.
-Enter short when price breaks below weekly S1 with 1d downtrend and volume spike.
-Exit on opposite weekly level break or ATR(14) trailing stop (2.0*ATR).
-Target: 12-25 trades/year (~50-100 total over 4 years) to minimize fee drag.
-Works in bull/bear via HTF pivot structure and 1d trend alignment.
+1d_KAMA_Regime_Volume_ATRStop
+Hypothesis: Daily strategy using Kaufman Adaptive Moving Average (KAMA) trend direction
+combined with volume confirmation (>1.8x 20-day average) and choppiness regime filter
+(CHOP > 61.8 = ranging market for mean reversion entries). Enters long when price
+pulls back to KAMA in uptrend with high volume in ranging market, short when price
+rallies to KAMA in downtrend with high volume in ranging market. Uses ATR(14) stoploss
+(2.5*ATR) and time-based exit (10 days max hold). Designed for low trade frequency
+(15-25/year) to minimize fee drag while capturing mean reversion in ranging markets
+and trend continuation in trending markets via regime adaptation.
 """
 
 import numpy as np
@@ -19,116 +20,162 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for weekly pivots, 1d for EMA trend)
+    # Load HTF data ONCE before loop (1w for regime, 1d for KAMA/volume/ATR)
     df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 5 or len(df_1d) < 50:
+    if len(df_1w) < 10 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1w Weekly Pivot Points (R1, S1) ===
+    # === 1w Choppiness Index for regime filter ===
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Standard pivot: P = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
+    # True Range
+    tr1 = pd.Series(high_1w - low_1w)
+    tr2 = pd.Series(np.abs(high_1w - np.roll(close_1w, 1)))
+    tr3 = pd.Series(np.abs(low_1w - np.roll(close_1w, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = tr.rolling(window=14, min_periods=14).sum().values
     
-    # Align to 6h timeframe (use previous completed weekly bar)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Highest high and lowest low over 14 periods
+    hh_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    ll_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
     
-    # === 1d EMA50 for trend filter ===
+    # Choppiness Index: CHOP = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    range_1w = hh_1w - ll_1w
+    chop_1w = np.where(
+        range_1w > 0,
+        100 * np.log10(atr_1w / range_1w) / np.log10(14),
+        50  # neutral when range is zero
+    )
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    
+    # === 1d KAMA ( Kaufman Adaptive Moving Average ) ===
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)
+    er = np.where(
+        volatility > 0,
+        change / volatility,
+        0  # no volatility = no trend
+    )
+    # Smoothing constants
+    sc = (er * (2.0 / (2 + 1) - 2.0 / (30 + 1)) + 2.0 / (30 + 1)) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # seed value
+    for i in range(10, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # === 6h Indicators (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
-        return np.zeros(n)
+    # === 1d Indicators (primary timeframe) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.5 * vol_ma
+    # Volume confirmation: current volume > 1.8x 20-day average
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.8 * vol_ma
     
     # ATR (14-period) for stoploss
-    tr1 = pd.Series(high_6h - low_6h)
-    tr2 = pd.Series(np.abs(high_6h - np.roll(close_6h, 1)))
-    tr3 = pd.Series(np.abs(low_6h - np.roll(close_6h, 1)))
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) 
-            or np.isnan(volume_threshold[i]) or np.isnan(atr[i]) 
-            or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(chop_1w_aligned[i]) or np.isnan(kama_aligned[i]) 
+            or np.isnan(volume_threshold[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
-        price = close_6h[i]
+        price = close_1d[i]
+        
+        if position != 0:
+            bars_since_entry += 1
         
         if position == 0:
-            # Long conditions: price > weekly R1, 1d uptrend, volume spike
-            long_breakout = price > r1_1w_aligned[i]
-            long_trend = price > ema_50_1d_aligned[i]
-            long_volume = volume_6h[i] > volume_threshold[i]
-            
-            # Short conditions: price < weekly S1, 1d downtrend, volume spike
-            short_breakout = price < s1_1w_aligned[i]
-            short_trend = price < ema_50_1d_aligned[i]
-            short_volume = volume_6h[i] > volume_threshold[i]
-            
-            # Entry logic
-            if long_breakout and long_trend and long_volume:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            elif short_breakout and short_trend and short_volume:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+            # Regime filter: only trade in ranging markets (CHOP > 61.8)
+            if chop_1w_aligned[i] > 61.8:
+                # Long: price pulls back to KAMA from below with volume spike
+                long_condition = (
+                    price <= kama_aligned[i] * 1.005 and  # within 0.5% above KAMA
+                    price > kama_aligned[i] * 0.995 and   # within 0.5% below KAMA
+                    close_1d[i-1] < kama_aligned[i-1] and # previous close below KAMA
+                    volume_1d[i] > volume_threshold[i]
+                )
+                # Short: price rallies to KAMA from above with volume spike
+                short_condition = (
+                    price >= kama_aligned[i] * 0.995 and  # within 0.5% below KAMA
+                    price < kama_aligned[i] * 1.005 and   # within 0.5% above KAMA
+                    close_1d[i-1] > kama_aligned[i-1] and # previous close above KAMA
+                    volume_1d[i] > volume_threshold[i]
+                )
+                
+                if long_condition:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                    bars_since_entry = 0
+                elif short_condition:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+                    bars_since_entry = 0
         
         elif position == 1:
-            # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
+            # Stoploss
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below weekly S1 (support broken)
-            elif price < s1_1w_aligned[i]:
+                bars_since_entry = 0
+            # Time-based exit (max 10 days hold)
+            elif bars_since_entry >= 10:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
+            # Mean reversion exit: price reaches opposite side of KAMA
+            elif price >= kama_aligned[i] * 1.01:
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
+            # Stoploss
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above weekly R1 (resistance broken)
-            elif price > r1_1w_aligned[i]:
+                bars_since_entry = 0
+            # Time-based exit (max 10 days hold)
+            elif bars_since_entry >= 10:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
+            # Mean reversion exit: price reaches opposite side of KAMA
+            elif price <= kama_aligned[i] * 0.99:
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_WeeklyPivot_DailyTrend_Breakout_Volume_V1"
-timeframe = "6h"
+name = "1d_KAMA_Regime_Volume_ATRStop"
+timeframe = "1d"
 leverage = 1.0
