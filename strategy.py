@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v3
-Hypothesis: Use 1d Camarilla R1/S1 breakouts with volume confirmation and 4h EMA50 trend filter.
-Long when price breaks above R1 with volume > 1.5x 20-bar avg AND price > EMA50.
-Short when price breaks below S1 with volume > 1.5x 20-bar avg AND price < EMA50.
+12h_1d_Camarilla_R1S1_Breakout_With_Trend_Filter
+Hypothesis: Use daily (1d) Camarilla R1/S1 levels on 12h chart with volume confirmation and 12h EMA50 trend filter.
+Long when price breaks above R1 with volume > 1.5x 20-period average AND price > EMA50.
+Short when price breaks below S1 with volume > 1.5x 20-period average AND price < EMA50.
 Exit when price crosses back through the pivot point (PP).
-Designed for 4h timeframe to capture multi-day moves with ~20-40 trades/year.
+Designed for 12h timeframe to capture multi-day moves with ~15-30 trades/year.
 Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
 Volume and trend filters reduce false breakouts and whipsaws.
 """
@@ -53,7 +53,7 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 4h EMA50 for trend filter
+    # 12h EMA50 for trend filter
     close_s = prices['close']
     ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v3"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_With_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
