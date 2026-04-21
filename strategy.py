@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter
-Hypothesis: Camarilla pivot levels on daily timeframe act as strong support/resistance. Price breaking above R1 or below S1 with volume confirmation and aligned weekly trend (EMA34) captures institutional breakouts. Works in bull/bear by filtering with weekly EMA trend. Uses ATR-based stoploss to manage risk. Target 15-25 trades/year to minimize fee drag.
+4h_1d_1w_13_34_EMA_Crossover_Volume_Filter
+Hypothesis: Combining fast (13) and slow (34) EMA crossovers on 4h timeframe with 1w trend filter and volume confirmation creates a robust trend-following system. The 13/34 crossover captures medium-term momentum shifts, while the weekly EMA34 ensures alignment with higher timeframe trend. Volume confirmation filters out false breakouts. Works in both bull and bear markets by following the trend direction as defined by the weekly EMA. Target 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -26,107 +26,105 @@ def generate_signals(prices):
     for i in range(1, len(close_1w)):
         ema34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema34_1w[i-1]
     
-    # Align weekly EMA34 to daily timeframe
+    # Align weekly EMA34 to 4h timeframe
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Daily data for Camarilla calculation
+    # 4h data for EMA13 and EMA34
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for each day using previous day's OHLC
-    R1 = np.full(n, np.nan)
-    S1 = np.full(n, np.nan)
-    PP = np.full(n, np.nan)
+    # Calculate EMA13 with proper initialization
+    ema13 = np.full(n, np.nan)
+    if len(close) >= 13:
+        ema13[12] = np.mean(close[:13])
+        alpha13 = 2.0 / (13 + 1)
+        for i in range(13, n):
+            ema13[i] = alpha13 * close[i] + (1 - alpha13) * ema13[i-1]
     
-    for i in range(1, n):  # Start from 1 to use previous day
-        # Previous day's OHLC
-        phigh = high[i-1]
-        plow = low[i-1]
-        pclose = close[i-1]
-        
-        # Pivot point
-        PP[i] = (phigh + plow + pclose) / 3.0
-        
-        # Camarilla levels
-        range_val = phigh - plow
-        R1[i] = pclose + (range_val * 1.1 / 12)
-        S1[i] = pclose - (range_val * 1.1 / 12)
+    # Calculate EMA34 with proper initialization
+    ema34 = np.full(n, np.nan)
+    if len(close) >= 34:
+        ema34[33] = np.mean(close[:34])
+        alpha34 = 2.0 / (34 + 1)
+        for i in range(34, n):
+            ema34[i] = alpha34 * close[i] + (1 - alpha34) * ema34[i-1]
     
-    # Volume filter: volume > 1.5x 20-day average (institutional participation)
-    volume_avg = np.full(n, np.nan)
+    # Calculate ATR for volatility filter and stoploss
+    atr = np.full(n, np.nan)
+    if len(close) >= 14:
+        tr = np.zeros(n)
+        tr[0] = high[0] - low[0]
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Calculate ATR with Wilder's smoothing
+        atr[13] = np.mean(tr[1:14])
+        for i in range(14, n):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Volume filter: volume > 1.3x 20-period average
+    volume_ma = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
-            volume_avg[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
+            volume_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
-            volume_avg[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (1.5 * volume_avg)
+            volume_ma[i] = np.mean(volume[i-20:i])
+    volume_filter = volume > (1.3 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(34, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(PP[i]) or np.isnan(ema34_1w_aligned[i]):
+        if np.isnan(ema13[i]) or np.isnan(ema34[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r1 = R1[i]
-        s1 = S1[i]
-        pp = PP[i]
-        ema34 = ema34_1w_aligned[i]
+        ema13_val = ema13[i]
+        ema34_val = ema34[i]
+        weekly_trend = ema34_1w_aligned[i]
         vol_confirm = volume_filter[i]
-        
-        # Calculate ATR for stoploss (20-period)
-        if i >= 20:
-            tr_values = []
-            for j in range(1, 21):
-                idx = i - j
-                if idx >= 0:
-                    tr = max(high[idx] - low[idx], abs(high[idx] - close[idx-1]), abs(low[idx] - close[idx-1]))
-                    tr_values.append(tr)
-            atr = np.mean(tr_values) if tr_values else 0
-        else:
-            atr = 0
+        atr_val = atr[i]
         
         # Stoploss: 2.5 * ATR from entry
-        if position == 1 and price < entry_price - 2.5 * atr:
+        if position == 1 and price < entry_price - 2.5 * atr_val:
             signals[i] = 0.0
             position = 0
             continue
-        elif position == -1 and price > entry_price + 2.5 * atr:
+        elif position == -1 and price > entry_price + 2.5 * atr_val:
             signals[i] = 0.0
             position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation in uptrend (price > weekly EMA34)
-            if price > r1 and vol_confirm and price > ema34:
+            # Long: EMA13 crosses above EMA34 with volume confirmation and price above weekly EMA34 (uptrend)
+            if ema13_val > ema34_val and ema13[i-1] <= ema34[i-1] and vol_confirm and price > weekly_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S1 with volume confirmation in downtrend (price < weekly EMA34)
-            elif price < s1 and vol_confirm and price < ema34:
+            # Short: EMA13 crosses below EMA34 with volume confirmation and price below weekly EMA34 (downtrend)
+            elif ema13_val < ema34_val and ema13[i-1] >= ema34[i-1] and vol_confirm and price < weekly_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price returns to pivot point or trend breaks
-            if price < pp or price < ema34:
+            # Long exit: EMA13 crosses below EMA34 or price breaks below weekly EMA34
+            if ema13_val < ema34_val or price < weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to pivot point or trend breaks
-            if price > pp or price > ema34:
+            # Short exit: EMA13 crosses above EMA34 or price breaks above weekly EMA34
+            if ema13_val > ema34_val or price > weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -134,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter"
-timeframe = "1d"
+name = "4h_1d_1w_13_34_EMA_Crossover_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
