@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_Ichimoku_Cloud_Breakout_v1
-Hypothesis: Ichimoku cloud breakout on 6h with 1d trend filter (price > Kumo) and 1w bias (Senkou Span A > B).
-Works in bull/bear: In uptrend (1w bullish), long when price breaks above Kumo; in downtrend (1w bearish), short when price breaks below Kumo.
-Uses volume confirmation to avoid false breakouts. Target: 12-25 trades/year per symbol (50-100 over 4 years).
+4h_Donchian20_Breakout_Regime_Volume_ATRFilter_V1
+Hypothesis: Donchian(20) breakout on 4h with chop regime filter (CHOP>61.8 = range) and volume confirmation.
+In ranging markets (CHOP>61.8), fade breakouts; in trending markets (CHOP<38.2), follow breakouts.
+Uses ATR-based stoploss and discrete position sizing (0.25) to minimize fee churn.
+Target: 25-50 trades/year per symbol (100-200 over 4 years).
 """
 
 import numpy as np
@@ -15,120 +16,98 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Ichimoku calculation (needs 26 periods)
+    # Load 1d data once for chop regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate 14-period ATR on daily
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Calculate 14-period rolling max/min for chop denominator
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Choppiness Index: CHOP = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr14 / (max_high - min_low)) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = ((period52_high + period52_low) / 2)
+    # Donchian(20) on 4h prices
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align Ichimoku components to 6h timeframe (default delay=1 for completed bar)
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    # ATR(20) for stoploss on 4h
+    tr_4h1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr_4h2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr_4h3 = np.abs(low_4h[1:] - close_4h[:-1])
+    close_4h = prices['close'].values
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))])
+    atr_20 = pd.Series(tr_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Kumo (cloud) boundaries: max/min of Senkou Span A and B
-    kumo_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
-    kumo_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
-    
-    # 1w data for weekly bias (Senkou Span A > B = bullish bias)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Weekly Ichimoku for bias (same calculation)
-    period26_high_1w = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
-    period26_low_1w = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
-    period52_high_1w = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    period52_low_1w = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
-    
-    tenkan_sen_1w = (period26_high_1w + period26_low_1w) / 2
-    kijun_sen_1w = (period26_high_1w + period26_low_1w) / 2
-    senkou_span_a_1w = (tenkan_sen_1w + kijun_sen_1w) / 2
-    senkou_span_b_1w = (period52_high_1w + period52_low_1w) / 2
-    
-    # Weekly bullish bias: Senkou Span A > Senkou Span B
-    weekly_bullish_bias = senkou_span_a_1w > senkou_span_b_1w
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish_bias.astype(float))
+    # Volume filter: current volume > 1.3 * 20-period average
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > 1.3 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or 
-            np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(atr_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
+        price = close_4h[i]
+        vol_ok = volume_ok[i] if i < len(volume_ok) else False
+        chop_val = chop_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
-        else:
-            volume_ok = False
-        
-        # Determine weekly bias (convert aligned float back to boolean)
-        weekly_bullish = weekly_bullish_aligned[i] > 0.5 if not np.isnan(weekly_bullish_aligned[i]) else True
+        # Determine regime: chop > 61.8 = range (mean revert), chop < 38.2 = trending (follow)
+        is_range = chop_val > 61.8
+        is_trending = chop_val < 38.2
         
         if position == 0:
-            # Long conditions: price breaks above Kumo TOP AND 1d bullish (price > Kumo) AND weekly bullish bias AND volume
-            if (price > kumo_top[i] and 
-                price > ((kumo_top[i] + kumo_bottom[i]) / 2) and  # price above cloud midpoint
-                weekly_bullish and 
-                volume_ok):
+            # Long conditions
+            long_breakout = price > donch_high[i-1]  # break above upper band
+            # In trending market: follow breakout; in ranging market: fade breakout (so short)
+            if is_trending and long_breakout and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Kumo BOTTOM AND 1d bearish (price < Kumo) AND weekly bearish bias AND volume
-            elif (price < kumo_bottom[i] and 
-                  price < ((kumo_top[i] + kumo_bottom[i]) / 2) and  # price below cloud midpoint
-                  not weekly_bullish and 
-                  volume_ok):
+                entry_price = price
+            # In ranging market: short on breakdown of lower band
+            elif is_range and price < donch_low[i-1] and vol_ok:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: price falls below Kumo BOTTOM (cloud break) or Tenkan-sen < Kijun-sen (momentum loss)
-            if price < kumo_bottom[i] or tenkan_sen_aligned[i] < kijun_sen_aligned[i]:
+            # Long exit: stoploss or time-based
+            stop_price = entry_price - 2.5 * atr_20[i]
+            if price < stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above Kumo TOP (cloud break) or Tenkan-sen > Kijun-sen (momentum loss)
-            if price > kumo_top[i] or tenkan_sen_aligned[i] > kijun_sen_aligned[i]:
+            # Short exit: stoploss or time-based
+            stop_price = entry_price + 2.5 * atr_20[i]
+            if price > stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_Ichimoku_Cloud_Breakout_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_Regime_Volume_ATRFilter_V1"
+timeframe = "4h"
 leverage = 1.0
