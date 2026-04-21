@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_HTF_1d_WilliamsFractal_TrendRegime_V1
-Hypothesis: Use 1d Williams Fractals (bearish = resistance, bullish = support) with 4h EMA trend filter and volume confirmation. 
-Enter short at bearish fractal breaks below in downtrend (EMA50 > EMA200), enter long at bullish fractal breaks above in uptrend (EMA50 < EMA200). 
-ATR trailing stop (2.0x) to manage risk. Position size 0.25. Target 20-40 trades/year per symbol.
-Works in both bull/bear by trend-filtering fractal breaks to trade with the higher-timeframe trend.
+1d_HTF_1w_Camarilla_R1S1_Breakout_ATR_Trail_V1
+Hypothesis: Use 1w Camarilla R1/S1 breakouts on the daily chart with volume confirmation and ATR-based trailing stop to capture major trends while minimizing whipsaw. The weekly timeframe provides stronger structural levels that are more reliable in both bull and bear markets, reducing false breakouts. Position size fixed at 0.25 to balance return and drawdown. Target 15-25 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,35 +14,36 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')  # for 1d Williams Fractals
+    df_1w = get_htf_data(prices, '1w')  # for 1w Camarilla levels
     
-    if len(df_1d) < 5:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 1d Williams Fractals ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1w Camarilla Pivot Levels (R1, S1) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
-    # Fractals need 2 extra bars for confirmation (center bar + 2 right bars)
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Pivot point
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Camarilla levels
+    r1 = close_1w + (high_1w - low_1w) * 1.1 / 12.0
+    s1 = close_1w - (high_1w - low_1w) * 1.1 / 12.0
     
-    # === 4h Indicators ===
+    # Align to 1d timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # === 1d Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA50 and EMA200 for trend filter
-    close_s = pd.Series(close)
-    ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema200 = close_s.ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # Volume MA (20-period) for spike confirmation
+    # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR (14-period) for trailing stop
+    # ATR (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -60,8 +58,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(bearish_aligned[i]) or np.isnan(bullish_aligned[i]) 
-            or np.isnan(ema50[i]) or np.isnan(ema200[i]) 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -72,18 +69,14 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
-        # Trend filter: uptrend if EMA50 > EMA200, downtrend if EMA50 < EMA200
-        uptrend = ema50[i] > ema200[i]
-        downtrend = ema50[i] < ema200[i]
-        
         if position == 0:
-            # Long: bullish fractal break above in uptrend with volume
-            if bullish_aligned[i-1] > 0 and price > bullish_aligned[i-1] and uptrend and vol_ok:
+            # Long: break above 1w Camarilla R1 with volume confirmation
+            if price > r1_aligned[i-1] and vol_ok:
                 signals[i] = 0.25
                 position = 1
                 highest_high = price
-            # Short: bearish fractal break below in downtrend with volume
-            elif bearish_aligned[i-1] > 0 and price < bearish_aligned[i-1] and downtrend and vol_ok:
+            # Short: break below 1w Camarilla S1 with volume confirmation
+            elif price < s1_aligned[i-1] and vol_ok:
                 signals[i] = -0.25
                 position = -1
                 lowest_low = price
@@ -112,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_1d_WilliamsFractal_TrendRegime_V1"
-timeframe = "4h"
+name = "1d_HTF_1w_Camarilla_R1S1_Breakout_ATR_Trail_V1"
+timeframe = "1d"
 leverage = 1.0
