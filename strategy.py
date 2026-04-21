@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1
-Hypothesis: Breakout of daily Camarilla R1/S1 levels with weekly trend filter (EMA34) and volume confirmation (1.5x 20-bar avg) on 12h timeframe.
+4h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v2
+Hypothesis: Breakout of daily Camarilla R1/S1 levels with weekly trend filter (EMA34) and volume confirmation (2.0x 20-bar avg).
 Long when price > daily R1 + weekly EMA34 up + volume spike.
 Short when price < daily S1 + weekly EMA34 down + volume spike.
 Exit when price crosses daily pivot point (PP).
-Uses 12h as primary timeframe for signal generation, with 1d for levels and 1w for trend.
-Target: 12-37 trades/year per symbol (50-150 total over 4 years). Works in bull/bear by following weekly trend.
+Uses 4h as primary timeframe for signal generation, with 1d for levels and 1w for trend.
+Target: 15-30 trades/year per symbol. Works in bull/bear by following weekly trend.
 """
 
 import numpy as np
@@ -41,7 +41,7 @@ def generate_signals(prices):
     s1 = prev_close - 1.1 * rang / 12
     pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
@@ -54,7 +54,7 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     # Calculate EMA34 on weekly
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
@@ -72,10 +72,10 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
+        # Volume filter: current volume > 2.0 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
+            volume_ok = volume > 2.0 * vol_ma
         else:
             volume_ok = False
         
@@ -117,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_1d_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1"
-timeframe = "12h"
+name = "4h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v2"
+timeframe = "4h"
 leverage = 1.0
