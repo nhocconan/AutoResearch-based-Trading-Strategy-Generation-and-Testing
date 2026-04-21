@@ -5,88 +5,128 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Load daily data ONCE for volatility and volume
+    # Load daily data ONCE before loop for key indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Daily Bollinger Bands (20, 2)
     close_1d = df_1d['close'].values
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
+    bb_width = (upper_band - lower_band) / sma_20
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily Bollinger Band Percentile (252-day lookback)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=252, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
     
-    # Daily volatility ratio: current ATR / 50-period average ATR
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_14 / atr_ma_50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Daily RSI (14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    rsi[np.isnan(rsi)] = 50  # neutral for warmup
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Volume confirmation: volume / 20-day average volume
-    vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = prices['volume'].values / vol_ma_20
+    # Daily volume ratio (current / 20-day average)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = vol_1d / vol_ma_20
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    
+    # 4-hour price data for entry timing (using 4h for precision)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # 4h Donchian channels (20-period)
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, highest_20)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, lowest_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+    for i in range(50, n):
+        # Skip if indicators not ready
+        if (np.isnan(bb_width_percentile_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_ratio_aligned[i]) or
+            np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        weekly_ema = ema_34_1w_aligned[i]
-        atr_ratio_val = atr_ratio_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        bb_percentile = bb_width_percentile_aligned[i]
+        rsi_val = rsi_aligned[i]
+        vol_ratio_val = vol_ratio_aligned[i]
+        upper_bband = donchian_upper_aligned[i]
+        lower_bband = donchian_lower_aligned[i]
         
+        # Regime filter: low volatility environment (Bollinger Band width in lowest 30%)
+        low_vol_regime = bb_percentile < 30
+        
+        # Mean reentry conditions with volume confirmation
         if position == 0:
-            # Enter long: price above weekly EMA, volume spike, moderate volatility
-            if (price_close > weekly_ema and 
-                vol_ratio_val > 1.5 and 
-                atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+            # Long setup: price at lower Donchian band + oversold RSI + volume spike + low vol regime
+            if (price_close <= lower_bband * 1.001 and  # slight buffer for entry
+                rsi_val < 30 and 
+                vol_ratio_val > 1.8 and 
+                low_vol_regime):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below weekly EMA, volume spike, moderate volatility
-            elif (price_close < weekly_ema and 
-                  vol_ratio_val > 1.5 and 
-                  atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+            # Short setup: price at upper Donchian band + overbought RSI + volume spike + low vol regime
+            elif (price_close >= upper_bband * 0.999 and  # slight buffer for entry
+                  rsi_val > 70 and 
+                  vol_ratio_val > 1.8 and 
+                  low_vol_regime):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: reverse crossover or volatility extremes
-            if position == 1 and (price_close < weekly_ema or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and (price_close > weekly_ema or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Exit conditions: mean reversion or volatility expansion
+            if position == 1:
+                # Exit long: price reaches midpoint OR RSI overbought OR volatility expands
+                midpoint = (upper_bband + lower_bband) / 2
+                if (price_close >= midpoint or 
+                    rsi_val > 60 or 
+                    bb_percentile > 70):  # volatility expansion
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25  # hold
+            elif position == -1:
+                # Exit short: price reaches midpoint OR RSI oversold OR volatility expands
+                midpoint = (upper_bband + lower_bband) / 2
+                if (price_close <= midpoint or 
+                    rsi_val < 40 or 
+                    bb_percentile > 70):  # volatility expansion
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25  # hold
     
     return signals
 
-name = "12h_WeeklyEMA34_Volume_ATR_Filter"
-timeframe = "12h"
+name = "4h_BollingerBand_Width_Percentile_Donchian_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
