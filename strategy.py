@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Williams_Alligator_Regime_Adaptive_v1
-Hypothesis: Williams Alligator (jaw/teeth/lips) on daily timeframe defines trend regime.
-In bull regime (lips > teeth > jaw): buy pullbacks to teeth with volume confirmation.
-In bear regime (jaw > teeth > lips): sell rallies to teeth with volume confirmation.
-In chop regime (Alligator sleeping): mean revert at Bollinger Bands (20,2) with volume filter.
-Weekly trend filter (EMA34_1w) avoids counter-trend trades in strong weekly trends.
-Designed for 1d timeframe to target 30-100 trades over 4 years (7-25/year).
-Uses discrete sizing (0.25) and ATR-based stoploss (2.0x) for risk control.
+6h_Ichimoku_Cloud_TK_Cross_1dTrend_v2
+Hypothesis: Ichimoku TK cross on 6h with 1d trend filter (price above/below 1d Kumo cloud) to avoid counter-trend trades. 
+The Kumo cloud acts as dynamic support/resistance. In bull markets (price > 1d Senkou Span A/B), we take long TK crosses; 
+in bear markets (price < 1d Senkou Span A/B), we take short TK crosses. Volume confirmation (1.5x average) filters weak signals.
+Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year). Works in bull/bear via 1d trend alignment.
 """
 
 import numpy as np
@@ -16,60 +13,71 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA34 trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
-        return np.zeros(n)
-    
-    # === 1w OHLC for EMA34 trend filter ===
-    df_1w_close = df_1w['close'].values
-    ema_34_1w = pd.Series(df_1w_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # === 1d OHLC for Williams Alligator (SMAs) ===
+    # Load HTF data ONCE before loop (1d for Ichimoku and trend)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    df_1d_close = df_1d['close'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_volume = df_1d['volume'].values
+    # === 1d OHLC for Ichimoku cloud calculation ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs of median price
-    median_price = (df_1d_high + df_1d_low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_sen = (max_high_tenkan + min_low_tenkan) / 2
     
-    # Align Alligator lines to 1d timeframe (already 1d, but using align for consistency)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_sen = (max_high_kijun + min_low_kijun) / 2
     
-    # === Bollinger Bands (20,2) for chop regime mean reversion ===
-    close_s = pd.Series(df_1d_close)
-    bb_mid = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
     
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    # Shift Senkou Spans forward by 26 periods (cloud is plotted ahead)
+    senkou_a_shifted = np.roll(senkou_a, 26)
+    senkou_b_shifted = np.roll(senkou_b, 26)
+    # First 26 values are invalid due to shift
+    senkou_a_shifted[:26] = np.nan
+    senkou_b_shifted[:26] = np.nan
     
-    # === ATR (14-period) for stoploss ===
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_shifted)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_shifted)
+    
+    # === 6h OHLC for TK cross and price ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Tenkan-sen and Kijun-sen on 6h for TK cross
+    period_tenkan_6h = 9
+    period_kijun_6h = 26
+    max_high_tenkan_6h = pd.Series(high).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).max().values
+    min_low_tenkan_6h = pd.Series(low).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).min().values
+    tenkan_sen_6h = (max_high_tenkan_6h + min_low_tenkan_6h) / 2
+    
+    max_high_kijun_6h = pd.Series(high).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).max().values
+    min_low_kijun_6h = pd.Series(low).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).min().values
+    kijun_sen_6h = (max_high_kijun_6h + min_low_kijun_6h) / 2
+    
+    # TK cross: Tenkan-sen crossing above/below Kijun-sen
+    tk_cross_above = (tenkan_sen_6h > kijun_sen_6h) & (np.roll(tenkan_sen_6h, 1) <= np.roll(kijun_sen_6h, 1))
+    tk_cross_below = (tenkan_sen_6h < kijun_sen_6h) & (np.roll(tenkan_sen_6h, 1) >= np.roll(kijun_sen_6h, 1))
     
     # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
@@ -79,10 +87,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) 
-            or np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) 
+            or np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i])
+            or np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) 
+            or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,93 +100,53 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        ema_1w_trend = ema_34_1w_aligned[i]
+        tenkan = tenkan_sen_aligned[i]
+        kijun = kijun_sen_aligned[i]
+        senkou_a = senkou_a_aligned[i]
+        senkou_b = senkou_b_aligned[i]
         vol_avg = vol_ma[i]
-        bb_upper_val = bb_upper_aligned[i]
-        bb_lower_val = bb_lower_aligned[i]
+        
+        # Determine Kumo cloud boundaries (top and bottom of cloud)
+        cloud_top = max(senkou_a, senkou_b)
+        cloud_bottom = min(senkou_a, senkou_b)
         
         # Volume confirmation: current volume > 1.5x average
         volume_confirmed = volume_now > 1.5 * vol_avg
         
-        # Determine Alligator regime
-        # Bull: lips > teeth > jaw
-        # Bear: jaw > teeth > lips
-        # Chop: otherwise (Alligator sleeping)
-        is_bull = (lips_val > teeth_val) and (teeth_val > jaw_val)
-        is_bear = (jaw_val > teeth_val) and (teeth_val > lips_val)
-        is_chop = not (is_bull or is_bear)
-        
         if position == 0:
-            # No position - look for entries
-            if is_bull:
-                # Bull regime: buy pullbacks to teeth with volume
-                long_condition = (price <= teeth_val * 1.005) and (price >= teeth_val * 0.995) and volume_confirmed
-                # Weekly trend filter: avoid longing in strong weekly downtrend
-                weekly_filter = price > ema_1w_trend
-                if long_condition and weekly_filter:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-            elif is_bear:
-                # Bear regime: sell rallies to teeth with volume
-                short_condition = (price <= teeth_val * 1.005) and (price >= teeth_val * 0.995) and volume_confirmed
-                # Weekly trend filter: avoid shorting in strong weekly uptrend
-                weekly_filter = price < ema_1w_trend
-                if short_condition and weekly_filter:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
-            elif is_chop:
-                # Chop regime: mean revert at Bollinger Bands with volume
-                long_condition = (price <= bb_lower_val) and volume_confirmed
-                short_condition = (price >= bb_upper_val) and volume_confirmed
-                if long_condition:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-                elif short_condition:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
+            # Long: price above cloud (bullish 1d trend) + TK cross up + volume
+            long_condition = (price > cloud_top) and tk_cross_above[i] and volume_confirmed
+            # Short: price below cloud (bearish 1d trend) + TK cross down + volume
+            short_condition = (price < cloud_bottom) and tk_cross_below[i] and volume_confirmed
+            
+            if long_condition:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+            elif short_condition:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long position - check exits
-            # Stoploss (2.0x ATR)
-            if price < entry_price - 2.0 * atr[i]:
+            # Exit if price falls below cloud bottom (trend invalidation)
+            if price < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
-            # Regime change exit
-            elif is_bear:  # Flip to bear regime
-                signals[i] = 0.0
-                position = 0
-            # Take profit at opposite BB or Alligator extreme
-            elif price >= bb_upper_val:
-                signals[i] = 0.0
-                position = 0
-            elif is_bull and price >= lips_val * 1.02:  # Extended bull
+            # Exit on TK cross down (momentum loss)
+            elif tk_cross_below[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short position - check exits
-            # Stoploss (2.0x ATR)
-            if price > entry_price + 2.0 * atr[i]:
+            # Exit if price rises above cloud top (trend invalidation)
+            if price > cloud_top:
                 signals[i] = 0.0
                 position = 0
-            # Regime change exit
-            elif is_bull:  # Flip to bull regime
-                signals[i] = 0.0
-                position = 0
-            # Take profit at opposite BB or Alligator extreme
-            elif price <= bb_lower_val:
-                signals[i] = 0.0
-                position = 0
-            elif is_bear and price <= jaw_val * 0.98:  # Extended bear
+            # Exit on TK cross up (momentum loss)
+            elif tk_cross_above[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -184,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Williams_Alligator_Regime_Adaptive_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_TK_Cross_1dTrend_v2"
+timeframe = "6h"
 leverage = 1.0
