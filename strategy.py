@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: Camarilla pivot breakouts at R1/S1 on 12h filtered by 1d EMA50 trend and volume spike (>2.0x 20-period average).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2
+Hypothesis: Camarilla pivot breakouts at R1/S1 on 4h filtered by 1d EMA50 trend and volume spike (>2.0x 20-period average).
 Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to minimize fee churn.
 1d trend filter provides robust directional bias across bull/bear markets while reducing whipsaws.
-Target: 12-37 trades/year per symbol for low fee drag and strong test generalization.
+Target: 19-50 trades/year per symbol for low fee drag and strong test generalization.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop (1d for EMA50 trend filter)
@@ -21,32 +21,24 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 12h OHLC for Camarilla calculation ===
+    # === 4h OHLC for Camarilla calculation ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
     # Calculate previous day's Camarilla levels (using prior 1d bar's daily range)
-    # We need daily high/low from 1d data to compute Camarilla for current 12h period
     cam_high = df_1d['high'].values
     cam_low = df_1d['low'].values
     cam_close = df_1d['close'].values
     
-    # Camarilla levels: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low),
-    # R2 = close + 0.55*(high-low), R1 = close + 0.275*(high-low)
-    # S1 = close - 0.275*(high-low), S2 = close - 0.55*(high-low),
-    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    # Camarilla levels: R1 = close + 0.275*(high-low), S1 = close - 0.275*(high-low)
     rng = cam_high - cam_low
     r1 = cam_close + 0.275 * rng
     s1 = cam_close - 0.275 * rng
-    r4 = cam_close + 1.5 * rng
-    s4 = cam_close - 1.5 * rng
     
-    # Align Camarilla levels to 12h timeframe (use prior day's levels)
+    # Align Camarilla levels to 4h timeframe (use prior day's levels)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # === 1d EMA50 for trend filter ===
     ema_50_1d = pd.Series(cam_close).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -63,7 +55,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
             or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
@@ -124,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
