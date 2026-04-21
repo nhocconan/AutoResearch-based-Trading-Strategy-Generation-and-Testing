@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_HTF_1w_Camarilla_R1S1_Breakout_VolumeSpike_ATRFilter_V1
-Hypothesis: 1d Camarilla pivot breakouts at R1/S1 with volume spike (>1.5x 20-period volume MA) and 1w HTF trend filter (price > weekly EMA21 for longs, < for shorts). 
-Uses 1w HTF for EMA21 trend filter to ensure alignment with higher timeframe direction. 
-Tight entry conditions to avoid overtrading. Target: 7-25 trades/year (30-100 total over 4 years) on BTC/ETH/SOL. 
-Works in bull/bear via 1w trend filter - only takes longs in weekly uptrend, shorts in weekly downtrend.
+6h_HTF_12h_Supertrend_VolumeBreakout_V1
+Hypothesis: 6h breakouts above/below 12h Supertrend with volume confirmation (>1.5x 20-period volume MA). 
+Uses 12h HTF for Supertrend (ATR=10, mult=3.0) to define trend direction and filter false breakouts. 
+Works in bull/bear markets: Supertrend adapts to volatility, volume confirms institutional interest. 
+Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL. Discrete sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -13,88 +13,99 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for Camarilla pivots, 1w for EMA trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load HTF data ONCE before loop (12h for Supertrend)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # === 12h Supertrend (ATR=10, mult=3.0) ===
+    # Calculate ATR
+    tr1 = pd.Series(high_12h[1:]) - pd.Series(low_12h[1:])
+    tr2 = abs(pd.Series(high_12h[1:]) - pd.Series(close_12h[:-1]))
+    tr3 = abs(pd.Series(low_12h[1:]) - pd.Series(close_12h[:-1]))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Supertrend calculation
+    hl2 = (high_12h + low_12h) / 2.0
+    upper = hl2 + (3.0 * atr)
+    lower = hl2 - (3.0 * atr)
+    
+    supertrend = np.zeros_like(close_12h)
+    direction = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
+    
+    supertrend[0] = hl2[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close_12h)):
+        if close_12h[i] > supertrend[i-1]:
+            supertrend[i] = max(lower[i], supertrend[i-1])
+            direction[i] = 1
+        else:
+            supertrend[i] = min(upper[i], supertrend[i-1])
+            direction[i] = -1
+    
+    # Align Supertrend and direction to 6h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+    
+    # === 6h Indicators (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Typical price for pivot calculation
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    camarilla_r1 = close_1d + (range_1d * 1.1 / 12.0)
-    camarilla_s1 = close_1d - (range_1d * 1.1 / 12.0)
-    
-    # Align Camarilla levels to 1d timeframe (no alignment needed - same timeframe)
-    camarilla_r1_aligned = camarilla_r1  # Already 1d
-    camarilla_s1_aligned = camarilla_s1  # Already 1d
-    
-    # === 1w EMA21 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # === 1d Indicators (primary timeframe) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
     # Volume MA (20-period) for spike detection
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after warmup period for volume MA
+    for i in range(30, n):
         # Skip if indicators not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) 
-            or np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) 
+            or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1d[i]
-        vol = volume_1d[i]
+        price = close_6h[i]
+        vol = volume_6h[i]
         vol_ok = vol > 1.5 * vol_ma[i]  # volume spike confirmation
-        weekly_uptrend = price > ema_21_1w_aligned[i]
-        weekly_downtrend = price < ema_21_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 + volume spike + weekly uptrend
-            if price > camarilla_r1_aligned[i] and vol_ok and weekly_uptrend:
+            # Long: price breaks above Supertrend + volume spike + uptrend (direction=1)
+            if price > supertrend_aligned[i] and vol_ok and direction_aligned[i] == 1:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume spike + weekly downtrend
-            elif price < camarilla_s1_aligned[i] and vol_ok and weekly_downtrend:
+            # Short: price breaks below Supertrend + volume spike + downtrend (direction=-1)
+            elif price < supertrend_aligned[i] and vol_ok and direction_aligned[i] == -1:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 or weekly trend turns down
-            if price < camarilla_s1_aligned[i] or not weekly_uptrend:
+            # Exit long: price breaks below Supertrend
+            if price < supertrend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 or weekly trend turns up
-            if price > camarilla_r1_aligned[i] or not weekly_downtrend:
+            # Exit short: price breaks above Supertrend
+            if price > supertrend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_HTF_1w_Camarilla_R1S1_Breakout_VolumeSpike_ATRFilter_V1"
-timeframe = "1d"
+name = "6h_HTF_12h_Supertrend_VolumeBreakout_V1"
+timeframe = "6h"
 leverage = 1.0
