@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_ATRStop_v2
-Hypothesis: Use 1d EMA34 for HTF trend + 4h Camarilla R1/S1 breakout with volume confirmation and ATR stoploss. Target 80-180 trades over 4 years (20-45/year) to stay within fee drag limits. The 1d EMA34 trend filter should work in both bull and bear markets by providing a longer-term trend bias, reducing false breakouts during counter-trend moves.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: Combine 1d EMA34 trend filter with 4h Camarilla R1/S1 breakout, volume confirmation (>2.0x 20-period average), and ATR-based stoploss (2.5x). The 1d EMA34 provides longer-term trend bias to reduce false breakouts during counter-trend moves in both bull and bear markets. Volume confirmation ensures breakouts have conviction. Discrete position sizing (0.25) minimizes fee churn. Target 80-180 trades over 4 years (20-45/year) to stay within fee drag limits.
 """
 
 import numpy as np
@@ -131,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_ATRStop_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
