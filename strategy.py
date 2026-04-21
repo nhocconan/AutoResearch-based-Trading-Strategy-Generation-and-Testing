@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_HTF_DailyVolatilityRegime_DonchianBreakout
-Hypothesis: Use 1d ATR ratio (ATR(5)/ATR(20)) as volatility regime filter + 6h Donchian(20) breakout with volume confirmation.
-In high volatility regimes (ratio > 1.2), trade breakouts; in low volatility (ratio < 0.8), fade reversals at Donchian middle.
-Works in bull (breakouts capture momentum) and bear (mean reversion in low vol captures bounces) via regime adaptation.
-Target: 12-25 trades/year per symbol. Uses discrete sizing (0.25) to minimize fee drag.
+12h_HTF_Donchian20_Breakout_VolumeSpike_ATRStop_V1
+Hypothesis: Use 1d Donchian(20) breakout + 12h volume spike (>1.5x 20-bar MA) for entry + ATR(14) stoploss (1.5x). 
+Add regime filter: only trade when 1d ADX(14) > 25 to avoid choppy markets. 
+Target 12-30 trades/year per symbol. Works in bull (breakouts) and bear (tight stops limit losses) via volume/ADX confluence.
 """
 
 import numpy as np
@@ -17,14 +16,24 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1d = get_htf_data(prices, '1d')  # for daily Donchian channels and ADX
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1d Volatility Regime: ATR(5)/ATR(20) ===
+    # === 1d Donchian Channel (20-period) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    
+    # Donchian high/low (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # === 1d ADX (14-period) for regime filter ===
     close_1d = df_1d['close'].values
     
     # True Range
@@ -34,33 +43,51 @@ def generate_signals(prices):
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    atr_5 = pd.Series(tr).rolling(window=5, min_periods=5).mean().values
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = atr_5 / atr_20  # >1.2 = high vol, <0.8 = low vol
+    # Directional Movement
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = minus_dm[0] = 0
     
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    # Smooth TR and DM
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
+    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
     
-    # === 6h Donchian Channels (20-period) ===
+    # Directional Indicators
+    plus_di = 100 * plus_dm_sum / tr_sum
+    minus_di = 100 * minus_dm_sum / tr_sum
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 12h Indicators ===
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian bands
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_high + donchian_low) / 2.0
-    
-    # Volume MA for confirmation
+    # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period)
+    tr1_12h = high - low
+    tr2_12h = np.abs(high - np.roll(close, 1))
+    tr3_12h = np.abs(low - np.roll(close, 1))
+    tr1_12h[0] = tr2_12h[0] = tr3_12h[0] = np.nan
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    atr = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(vol_ratio_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,65 +95,37 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
-        vr = vol_ratio_aligned[i]
+        vol_ok = vol > 1.5 * vol_ma[i]  # volume spike confirmation
+        adx_ok = adx_aligned[i] > 25.0  # regime filter: only trade when strongly trending
         
         if position == 0:
-            # High volatility regime: trade breakouts
-            if vr > 1.2:
-                if price > donchian_high[i-1] and vol_ok:
-                    signals[i] = 0.25
-                    position = 1
-                elif price < donchian_low[i-1] and vol_ok:
-                    signals[i] = -0.25
-                    position = -1
-            # Low volatility regime: mean reversion at middle
-            elif vr < 0.8:
-                if price < donchian_middle[i-1] and price > donchian_low[i-1]:
-                    # Long from lower half toward middle
-                    signals[i] = 0.25
-                    position = 1
-                elif price > donchian_middle[i-1] and price < donchian_high[i-1]:
-                    # Short from upper half toward middle
-                    signals[i] = -0.25
-                    position = -1
+            # Long: break above 1d Donchian high with volume spike and ADX > 25
+            if price > donchian_high_aligned[i-1] and vol_ok and adx_ok:
+                signals[i] = 0.25
+                position = 1
+            # Short: break below 1d Donchian low with volume spike and ADX > 25
+            elif price < donchian_low_aligned[i-1] and vol_ok and adx_ok:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit conditions
-            if vr > 1.2:
-                # High vol: exit on Donchian middle break or opposite signal
-                if price < donchian_middle[i-1]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: ATR stoploss or opposite signal
+            if price < donchian_high_aligned[i-1] - 1.5 * atr[i] or (price < donchian_low_aligned[i-1] and vol_ok):
+                signals[i] = 0.0
+                position = 0
             else:
-                # Low vol: exit when price reaches opposite band or middle
-                if price >= donchian_high[i-1] or price <= donchian_middle[i-1]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions
-            if vr > 1.2:
-                # High vol: exit on Donchian middle break or opposite signal
-                if price > donchian_middle[i-1]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: ATR stoploss or opposite signal
+            if price > donchian_low_aligned[i-1] + 1.5 * atr[i] or (price > donchian_high_aligned[i-1] and vol_ok):
+                signals[i] = 0.0
+                position = 0
             else:
-                # Low vol: exit when price reaches opposite band or middle
-                if price <= donchian_low[i-1] or price >= donchian_middle[i-1]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_HTF_DailyVolatilityRegime_DonchianBreakout"
-timeframe = "6h"
+name = "12h_HTF_Donchian20_Breakout_VolumeSpike_ATRStop_V1"
+timeframe = "12h"
 leverage = 1.0
