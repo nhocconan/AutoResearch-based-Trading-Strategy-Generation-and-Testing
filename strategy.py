@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_Pivot_R1S1_Breakout_Volume_Trend
-Hypothesis: Use 1d Camarilla R1/S1 breakouts with volume confirmation and 4h EMA50 trend filter.
+12h_1d_Pivot_R1S1_Breakout_Volume_Trend
+Hypothesis: Use 1d Camarilla R1/S1 breakouts with volume confirmation and 1d EMA50 trend filter on 12h timeframe.
 Long when price breaks above R1 with volume > 1.5x 20-bar avg AND price > EMA50.
 Short when price breaks below S1 with volume > 1.5x 20-bar avg AND price < EMA50.
 Exit when price crosses back through the pivot point (PP).
-Designed for 4h timeframe to capture multi-day moves with ~20-40 trades/year.
+Designed for 12h timeframe to capture multi-day moves with ~10-25 trades/year.
 Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
 Volume and trend filters reduce false breakouts and whipsaws.
 """
@@ -19,7 +19,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla pivots
+    # Load 1d data once for Camarilla pivots and EMA
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -53,9 +53,9 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 4h EMA50 for trend filter
-    close_s = prices['close']
-    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA50 for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,7 +63,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50[i])):
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,11 +81,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long conditions: break above R1 + volume confirmation + price above EMA50
-            if price > r1_aligned[i] and volume_ok and price > ema_50[i]:
+            if price > r1_aligned[i] and volume_ok and price > ema_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short conditions: break below S1 + volume confirmation + price below EMA50
-            elif price < s1_aligned[i] and volume_ok and price < ema_50[i]:
+            elif price < s1_aligned[i] and volume_ok and price < ema_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
