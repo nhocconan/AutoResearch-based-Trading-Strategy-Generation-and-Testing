@@ -1,11 +1,3 @@
-# [EXPERIMENT #72008] 12h_Donchian_Breakout_WeeklyTrend_Filter
-# Hypothesis: Donchian(20) breakout on 12h with weekly EMA20 trend filter and volume confirmation.
-# Works in bull (breakouts with trend) and bear (avoids counter-trend breakouts via weekly filter).
-# Target: 12-37 trades/year (50-150 over 4 years) to avoid fee drag.
-# Uses 1w trend filter (EMA20) to avoid false breakouts in choppy markets.
-# Position size: 0.25 (discrete to minimize fee churn).
-# Risk: Exit on reverse breakout or volatility expansion (weekly ATR ratio > 2.5).
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,49 +5,28 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Load daily data ONCE before loop for Donchian channel and ATR
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === Weekly EMA20 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # === Daily Donchian Channel (20-period) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Daily 10-period EMA for trend filter ===
     close_1d = df_1d['close'].values
+    ema_10 = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_aligned = align_htf_to_ltf(prices, df_1d, ema_10)
     
-    # Donchian upper and lower bands
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align to 12h timeframe (use previous day's values)
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    
-    # === Daily ATR for volatility filter ===
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR ratio: current ATR / 50-period average ATR
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_14 / atr_ma_50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # === Daily RSI(14) for mean reversion signals ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -64,44 +35,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if indicators not ready
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_10_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        upper = upper_20_aligned[i]
-        lower = lower_20_aligned[i]
-        ema_20_1w_val = ema_20_1w_aligned[i]
-        atr_ratio_val = atr_ratio_aligned[i]
+        ema_trend = ema_10_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long: price breaks above upper Donchian with volume, above weekly EMA20, and moderate volatility
-            if (price_close > upper and 
-                price_close > ema_20_1w_val and 
-                vol_ratio_val > 1.5 and 
-                atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+            # Enter long: price above EMA (uptrend) + RSI oversold + volume confirmation
+            if (price_close > ema_trend and 
+                rsi_val < 30 and 
+                vol_ratio_val > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Donchian with volume, below weekly EMA20, and moderate volatility
-            elif (price_close < lower and 
-                  price_close < ema_20_1w_val and 
-                  vol_ratio_val > 1.5 and 
-                  atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+            # Enter short: price below EMA (downtrend) + RSI overbought + volume confirmation
+            elif (price_close < ema_trend and 
+                  rsi_val > 70 and 
+                  vol_ratio_val > 1.3):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: reverse breakout or volatility expansion/contraction
-            if position == 1 and (price_close < lower or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
+            # Exit: reverse RSI extreme or trend change
+            if position == 1 and (rsi_val > 70 or price_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > upper or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
+            elif position == -1 and (rsi_val < 30 or price_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_WeeklyTrend_Filter"
-timeframe = "12h"
+name = "4d_EMA10_RSI_MeanReversion_Volume"
+timeframe = "4h"
 leverage = 1.0
