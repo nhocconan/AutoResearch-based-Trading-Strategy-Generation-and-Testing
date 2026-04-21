@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_Regime_ATRStop
-Hypothesis: 4h Camarilla pivot R1/S1 breakout with volume confirmation (>1.5x 20-period volume MA) and 12h chop regime filter (CHOP > 61.8 = range → mean revert at S1/R1). 
-In ranging markets (CHOP > 61.8): fade extremes → short R1 breakdown, long S1 bounce. 
-In trending markets (CHOP ≤ 61.8): follow breakout → long R1 break, short S1 breakdown.
-ATR trailing stop (2.5x ATR) manages risk. Position size 0.25 balances risk/return.
-Target ~25-50 trades/year per symbol (100-200 total over 4 years).
-Uses 4h primary timeframe with 12h HTF for regime filter.
+1h_Camarilla_R1S1_Breakout_Volume_HTFTrend
+Hypothesis: 1h Camarilla pivot R1/S1 breakout with volume confirmation and 4h trend filter (EMA34).
+In uptrend (price > EMA34): long R1 break + volume, short S1 breakdown only if strong.
+In downtrend (price < EMA34): short S1 breakdown + volume, long R1 break only if strong.
+Volume filter: >1.5x 20-period volume MA. Position size 0.20.
+Targets 15-37 trades/year per symbol (60-150 total over 4 years) by using 4h for signal direction,
+1h only for entry timing, and session filter (08-20 UTC) to reduce noise.
+Works in both bull/bear: trend filter adapts to market regime, volume avoids false breakouts.
 """
 
 import numpy as np
@@ -18,45 +19,31 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for chop regime)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
+    # Pre-compute session hours filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # === 12h Chop regime (trend/range filter) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range for Chop calculation
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Chop = 100 * log10(sum(ATR14) / (max(high)-min(low))) / log10(14)
-    sum_atr = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    chop = 100 * (np.log10(sum_atr / (max_high - min_low + 1e-10)) / np.log10(14))
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    
-    # === 4h Indicators (primary timeframe) ===
+    # Load HTF data ONCE before loop (4h for trend filter)
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # EMA34 on 4h close
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    
+    # === 1h Indicators (primary timeframe) ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
     # Calculate Camarilla pivot points (R1, S1) from previous day
-    # Using previous 4h bar's high, low, close (shifted by 1)
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
+    # Using previous 1h bar's high, low, close (shifted by 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
@@ -67,89 +54,73 @@ def generate_signals(prices):
     s1 = pivot - (range_ * 1.1 / 12)
     
     # Volume MA (20-period) for spike detection
-    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR (14-period) for stoploss
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(50, n):
-        # Skip if indicators not ready
-        if (np.isnan(chop_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) 
-            or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        # Skip if indicators not ready or outside session
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) 
+            or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
-        vol = volume_4h[i]
+        # Session filter: only trade 08-20 UTC
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        price = close[i]
+        vol = volume[i]
         vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
-        chop_val = chop_aligned[i]
-        is_ranging = chop_val > 61.8  # CHOP > 61.8 = ranging market
+        # 4h trend filter
+        uptrend = price > ema_34_4h_aligned[i]
+        downtrend = price < ema_34_4h_aligned[i]
         
         if position == 0:
-            if is_ranging:
-                # In ranging market: fade extremes
-                # Long: price bounces off S1 + volume confirmation
-                if price < s1[i] and vol_ok:
-                    signals[i] = 0.25
+            if uptrend and vol_ok:
+                # In uptrend: long R1 break
+                if price > r1[i]:
+                    signals[i] = 0.20
                     position = 1
-                    entry_price = price
-                    highest_since_entry = price
-                # Short: price rejects at R1 + volume confirmation
-                elif price > r1[i] and vol_ok:
-                    signals[i] = -0.25
+            elif downtrend and vol_ok:
+                # In downtrend: short S1 breakdown
+                if price < s1[i]:
+                    signals[i] = -0.20
                     position = -1
-                    entry_price = price
-                    lowest_since_entry = price
-            else:
-                # In trending market: follow breakout
-                # Long: price breaks above R1 + volume confirmation
-                if price > r1[i] and vol_ok:
-                    signals[i] = 0.25
+            # Counter-trend entries only with strong volume (2.0x) and extreme price
+            elif vol > 2.0 * vol_ma[i]:  # stronger volume for counter-trend
+                if price < s1[i] and uptrend:  # pullback in uptrend
+                    signals[i] = 0.20
                     position = 1
-                    entry_price = price
-                    highest_since_entry = price
-                # Short: price breaks below S1 + volume confirmation
-                elif price < s1[i] and vol_ok:
-                    signals[i] = -0.25
+                elif price > r1[i] and downtrend:  # bounce in downtrend
+                    signals[i] = -0.20
                     position = -1
-                    entry_price = price
-                    lowest_since_entry = price
         
         elif position == 1:
-            # Update highest since entry
-            highest_since_entry = max(highest_since_entry, price)
-            # ATR trailing stop: exit if price drops 2.5*ATR from highest since entry
-            if price < highest_since_entry - 2.5 * atr[i]:
+            # Long exit: price breaks below S1 OR loses 4h uptrend
+            if price < s1[i] or price < ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Update lowest since entry
-            lowest_since_entry = min(lowest_since_entry, price)
-            # ATR trailing stop: exit if price rises 2.5*ATR from lowest since entry
-            if price > lowest_since_entry + 2.5 * atr[i]:
+            # Short exit: price breaks above R1 OR gains 4h uptrend
+            if price > r1[i] or price > ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Regime_ATRStop"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_Volume_HTFTrend"
+timeframe = "1h"
 leverage = 1.0
