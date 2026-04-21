@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_ChopFilter_v1
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction, RSI(14) for momentum confirmation, and Choppiness Index (CHOP) as regime filter to avoid whipsaws. Enter long when KAMA rising, RSI>50, and CHOP<61.8 (trending regime); short when KAMA falling, RSI<50, and CHOP<61.8. Exit on opposite signal. Uses 1d primary with 1w HTF for higher-timeframe trend alignment. Designed for low trade frequency (~10-20/year) to minimize fee drag and improve generalization across bull/bear markets.
+6h_ElderRay_BullBearPower_Regime_v1
+Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) with regime filter (ADX < 20 for mean reversion, ADX > 25 for trend) on 6h timeframe. Uses 1d HTF for EMA context and volume confirmation. Designed to capture both trending and mean-reverting markets with low trade frequency (~15-30/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,122 +13,131 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop: 1w trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1w EMA34 for higher-timeframe trend filter ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 1d EMA34 for trend filter ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 1d indicators: KAMA, RSI(14), Choppiness Index(14) ===
-    close = prices['close'].values
+    # === 1d volume ratio (20-period) for confirmation ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d[np.isnan(vol_ma_1d)] = 1.0
+    vol_ratio_1d = volume_1d / vol_ma_1d
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    
+    # === 6h indicators ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # --- KAMA (Efficiency Ratio = 10, Fast=2, Slow=30) ---
-    change = np.abs(np.diff(close, k=10))  # |close - close[10]|
-    change[0:10] = np.nan  # not enough data for first 10 bars
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close - close[1]| over 10 bars
-    # manual rolling sum of volatility
-    volatility_sum = np.zeros_like(close)
-    for i in range(10, n):
-        volatility_sum[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
-    volatility_sum[0:10] = np.nan
-    er = np.where(volatility_sum > 0, change / volatility_sum, 0)  # efficiency ratio
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # smoothing constant
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # --- RSI(14) ---
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Bull Power = High - EMA13
+    bull_power = high - ema_13
+    # Bear Power = EMA13 - Low
+    bear_power = ema_13 - low
     
-    # --- Choppiness Index(14) ---
-    # true range
+    # ADX(14) for regime filter
+    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = np.where((highest_high - lowest_low) != 0,
-                    -100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14),
-                    50)
     
-    # Align 1d indicators (they are already LTF, but we align for consistency)
-    kama_aligned = kama  # no alignment needed for LTF
-    rsi_aligned = rsi
-    chop_aligned = chop
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # warmup for 1w EMA34 and 1d indicators
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(kama_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_ratio_1d_aligned[i]) or
+            np.isnan(ema_13[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Higher-timeframe trend filter: price above/below 1w EMA34
-        htf_uptrend = close[i] > ema_34_1w_aligned[i]
-        htf_downtrend = close[i] < ema_34_1w_aligned[i]
-        
-        # 1d conditions
-        kama_rising = kama_aligned[i] > kama_aligned[i-1]
-        kama_falling = kama_aligned[i] < kama_aligned[i-1]
-        rsi_above_50 = rsi_aligned[i] > 50
-        rsi_below_50 = rsi_aligned[i] < 50
-        chop_trending = chop_aligned[i] < 61.8  # trending regime
+        price_close = close[i]
+        ema_13_val = ema_13[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        adx_val = adx[i]
+        trend_1d = ema_34_1d_aligned[i]
+        vol_spike = vol_ratio_1d_aligned[i]
         
         if position == 0:
-            # Long: KAMA rising, RSI>50, trending regime, and HTF uptrend
-            if kama_rising and rsi_above_50 and chop_trending and htf_uptrend:
-                signals[i] = 0.25
-                position = 1
-            # Short: KAMA falling, RSI<50, trending regime, and HTF downtrend
-            elif kama_falling and rsi_below_50 and chop_trending and htf_downtrend:
-                signals[i] = -0.25
-                position = -1
+            # Regime: ADX < 20 = range (mean reversion), ADX > 25 = trend
+            if adx_val < 20:
+                # Mean reversion: fade extremes
+                # Long: Bear Power > 0 (bullish momentum) + price below 1d EMA34 + volume confirmation
+                if bull > 0 and price_close < trend_1d and vol_spike > 1.5:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Bull Power > 0 (bullish momentum fading) + price above 1d EMA34
+                elif bull > 0 and price_close > trend_1d and vol_spike > 1.5:
+                    signals[i] = -0.25
+                    position = -1
+            elif adx_val > 25:
+                # Trend following: acceleration
+                # Long: Bull Power increasing (bullish acceleration) + price above 1d EMA34
+                if i >= 101 and bull > bull_power[i-1] and price_close > trend_1d and vol_spike > 1.5:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Bear Power increasing (bearish acceleration) + price below 1d EMA34
+                elif i >= 101 and bear > bear_power[i-1] and price_close < trend_1d and vol_spike > 1.5:
+                    signals[i] = -0.25
+                    position = -1
         
-        elif position == 1:
-            # Exit long: KAMA falling OR RSI<50 OR choppy regime (CHOP>61.8)
-            if (not kama_rising) or (rsi_aligned[i] < 50) or (chop_aligned[i] >= 61.8):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: KAMA rising OR RSI>50 OR choppy regime (CHOP>61.8)
-            if (not kama_falling) or (rsi_aligned[i] > 50) or (chop_aligned[i] >= 61.8):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        elif position != 0:
+            # Exit conditions
+            if position == 1:
+                # Exit long: Bear Power turns negative OR price crosses below EMA13
+                if bear < 0 or price_close < ema_13_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # position == -1
+                # Exit short: Bull Power turns negative OR price crosses above EMA13
+                if bull < 0 or price_close > ema_13_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
