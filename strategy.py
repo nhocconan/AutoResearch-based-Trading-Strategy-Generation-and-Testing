@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_VolumeConfirm_ATRStop_V2
-Hypothesis: 4h KAMA(10,2,30) trend direction + volume spike (>1.8x 20-bar MA) + ATR(14) stoploss (2.0x). 
-KAMA adapts to market noise, reducing whipsaw in sideways/choppy markets (common in 2025 BTC/ETH bear/range). 
-Volume confirmation ensures breakout legitimacy. ATR stop manages risk. Designed for fewer, higher-quality trades 
-(~20-30/year) to overcome fee drag in bear markets. Works in bull (catches trends) and bear (avoids false breaks via 
-KAMA's efficiency ratio filtering noise).
+4h_HTF_Camarilla_Pivot_Volume_Spike_ATRStop_V1
+Hypothesis: Use 1d Camarilla R3/S3 levels from daily pivot + 4h volume spike (>2x 20-bar MA) for breakout confirmation + ATR(14) stoploss (2.0x). Camarilla levels provide high-probability intraday support/resistance, volume spike filters weak breakouts, ATR stop manages risk. Designed for both bull (catch momentum) and bear (fade false breaks via tight stops) markets. Target 20-40 trades/year per symbol.
 """
 
 import numpy as np
@@ -17,33 +13,34 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')  # for daily Camarilla pivots
+    
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # === 1d Camarilla Pivot Levels (R3, S3) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    camarilla_r3 = pivot + 1.1 * (high_1d - low_1d) / 2.0
+    camarilla_s3 = pivot - 1.1 * (high_1d - low_1d) / 2.0
+    
+    # Align to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
     # === 4h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA(10,2,30) - Efficiency Ratio based adaptive moving average
-    def kama(close, er_fast=2, er_slow=30):
-        change = np.abs(np.diff(close, n=10))  # 10-period net change
-        vol = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period volatility
-        # Handle first 10 values
-        change = np.concatenate([np.full(10, np.nan), change])
-        vol = np.concatenate([np.full(10, np.nan), vol])
-        er = np.where(vol != 0, change / vol, 0)  # Efficiency Ratio
-        sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2  # Smoothing Constant
-        kama = np.full_like(close, np.nan)
-        kama[9] = close[9]  # Start after first 10 bars
-        for i in range(10, len(close)):
-            if np.isnan(kama[i-1]):
-                kama[i] = close[i]
-            else:
-                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
-    
-    kama_vals = kama(close)
-    
-    # Volume MA (20-period) for spike confirmation
+    # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR (14-period)
@@ -59,7 +56,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(kama_vals[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,30 +65,29 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        vol_ok = vol > 1.8 * vol_ma[i]  # volume spike confirmation
-        kama_dir = 1 if kama_vals[i] > kama_vals[i-1] else -1  # KAMA slope direction
+        vol_ok = vol > 2.0 * vol_ma[i]  # volume spike confirmation
         
         if position == 0:
-            # Long: KAMA turning up + volume spike
-            if kama_dir == 1 and kama_vals[i] > kama_vals[i-1] and vol_ok and price > kama_vals[i]:
+            # Long: break above Camarilla R3 with volume spike
+            if price > camarilla_r3_aligned[i-1] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turning down + volume spike
-            elif kama_dir == -1 and kama_vals[i] < kama_vals[i-1] and vol_ok and price < kama_vals[i]:
+            # Short: break below Camarilla S3 with volume spike
+            elif price < camarilla_s3_aligned[i-1] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: ATR stoploss or KAMA reverses down with volume
-            if price < kama_vals[i] - 2.0 * atr[i] or (kama_dir == -1 and kama_vals[i] < kama_vals[i-1] and vol_ok):
+            # Exit: ATR stoploss or opposite signal
+            if price < camarilla_r3_aligned[i-1] - 2.0 * atr[i] or (price < camarilla_s3_aligned[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: ATR stoploss or KAMA reverses up with volume
-            if price > kama_vals[i] + 2.0 * atr[i] or (kama_dir == 1 and kama_vals[i] > kama_vals[i-1] and vol_ok):
+            # Exit: ATR stoploss or opposite signal
+            if price > camarilla_s3_aligned[i-1] + 2.0 * atr[i] or (price > camarilla_r3_aligned[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Direction_VolumeConfirm_ATRStop_V2"
+name = "4h_HTF_Camarilla_Pivot_Volume_Spike_ATRStop_V1"
 timeframe = "4h"
 leverage = 1.0
