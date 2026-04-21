@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Regime_Filter_DonchianExit
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-combined with choppiness index regime filter to avoid whipsaws, and Donchian(20) breakouts
-for precise entry timing. Uses volume confirmation (>1.5x 20-day average) to filter low-quality
-breakouts. ATR-based stoploss (2.5x) and discrete sizing (0.25). Designed for low trade frequency
-(15-25/year) to minimize fee drag while capturing major trends in both bull and bear markets.
-KAMA adapts to market noise, making it effective in ranging conditions, while the chop filter
-ensures we only trend-follow when markets are truly trending.
+6h_ElderRay_Regime_VolumeFilter
+Hypothesis: Elder Ray (Bull/Bear Power) with 1d regime filter (ADX>25 = trending, ADX<20 = range) and volume confirmation.
+In trending markets: go long when Bear Power < 0 and rising, short when Bull Power > 0 and falling.
+In ranging markets: fade extremes (long when Bull Power < -std, short when Bear Power > std).
+Volume spike (>1.5x 20 MA) confirms entry. Discrete sizing 0.25. Target: 60-120 total trades over 4 years (15-30/year).
+Works in both bull (trend following) and bear (mean reversion in ranges) markets.
 """
 
 import numpy as np
@@ -19,117 +17,118 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly HTF data ONCE before loop for regime context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # === Weekly EMA20 for HTF trend filter ===
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # === Daily OHLC for indicators ===
+    # Load HTF data ONCE before loop (1d for Elder Ray and regime)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    df_1d_open = df_1d['open'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    df_1d_volume = df_1d['volume'].values
+    # === 1d EMA13 for Elder Ray calculation ===
+    ema13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # === Daily KAMA (ER=10, FAST=2, SLOW=30) for trend direction ===
-    close_s = pd.Series(df_1d_close)
-    change = close_s.diff(10).abs()
-    volatility = close_s.diff().abs().rolling(10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = [np.nan] * len(df_1d_close)
-    kama[0] = df_1d_close[0]
-    for i in range(1, len(df_1d_close)):
-        if np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc.iloc[i] * (df_1d_close[i] - kama[i-1])
-    kama = np.array(kama)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # === Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 ===
+    bull_power_1d = df_1d['high'].values - ema13_1d
+    bear_power_1d = df_1d['low'].values - ema13_1d
     
-    # === Daily Choppiness Index (14-period) for regime filter ===
-    high_low = df_1d_high - df_1d_low
-    high_pc = np.abs(df_1d_high - np.roll(df_1d_close, 1))
-    low_pc = np.abs(df_1d_low - np.roll(df_1d_close, 1))
-    tr = np.maximum(high_low, np.maximum(high_pc, low_pc))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    max_high = pd.Series(df_1d_high).rolling(window=14, min_periods=14).max()
-    min_low = pd.Series(df_1d_low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr14 / (max_high - min_low)) / np.log10(14)
-    chop = chop.fillna(50).values  # neutral when undefined
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # === Daily Donchian(20) for entry/exit ===
-    highest_20 = pd.Series(df_1d_high).rolling(window=20, min_periods=20).max()
-    lowest_20 = pd.Series(df_1d_low).rolling(window=20, min_periods=20).min()
-    donchian_high = highest_20.values
-    donchian_low = lowest_20.values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # === 1d ADX for regime detection (trending vs ranging) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Daily volume confirmation (>1.5x 20-day average) ===
-    vol_ma = pd.Series(df_1d_volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # === Daily ATR(14) for stoploss ===
-    tr1 = pd.Series(df_1d_high - df_1d_low)
-    tr2 = pd.Series(np.abs(df_1d_high - np.roll(df_1d_close, 1)))
-    tr3 = pd.Series(np.abs(df_1d_low - np.roll(df_1d_close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    
+    # Smooth DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === 6h ATR (14-period) for stoploss ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # === Volume spike filter (1.5x 20-period MA) ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
+    # Precompute power statistics for regime-based thresholds
+    bull_power_valid = bull_power_aligned[~np.isnan(bull_power_aligned)]
+    bear_power_valid = bear_power_aligned[~np.isnan(bear_power_aligned)]
+    if len(bull_power_valid) > 50:
+        bull_power_std = np.std(bull_power_valid)
+        bear_power_std = np.std(bear_power_valid)
+    else:
+        bull_power_std = bear_power_std = 1.0  # fallback
+    
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_aligned[i]) or np.isnan(atr_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) 
+            or np.isnan(adx_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = df_1d_close[i]
-        volume_now = df_1d_volume[i]
-        kama_val = kama_aligned[i]
-        chop_val = chop_aligned[i]
-        donchian_high_val = donchian_high_aligned[i]
-        donchian_low_val = donchian_low_aligned[i]
-        vol_avg = vol_ma_aligned[i]
-        atr_val = atr_aligned[i]
-        weekly_ema = ema_20_1w_aligned[i]
+        price = close[i]
+        volume_now = volume[i]
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
+        adx = adx_aligned[i]
+        vol_avg = vol_ma[i]
         
-        # Regime filter: only trend-follow when chop < 50 (trending market)
-        trending_regime = chop_val < 50
-        
-        # Volume confirmation: >1.5x average volume
-        volume_confirm = volume_now > 1.5 * vol_avg
+        # Volume spike: current volume > 1.5x average
+        volume_spike = volume_now > 1.5 * vol_avg
         
         if position == 0:
-            # Enter long: price breaks above Donchian high + above KAMA + weekly uptrend + volume + regime
-            long_condition = (price > donchian_high_val) and (price > kama_val) and \
-                           (weekly_ema > np.roll(ema_20_1w_aligned, 1)[i] if i > 0 else True) and \
-                           trending_regime and volume_confirm
-            
-            # Enter short: price breaks below Donchian low + below KAMA + weekly downtrend + volume + regime
-            short_condition = (price < donchian_low_val) and (price < kama_val) and \
-                            (weekly_ema < np.roll(ema_20_1w_aligned, 1)[i] if i > 0 else True) and \
-                            trending_regime and volume_confirm
+            # Regime-based entry logic
+            if adx > 25:  # Trending regime
+                # Long: Bear Power negative and rising (less negative)
+                # Short: Bull Power positive and falling (less positive)
+                if i >= 101:
+                    bear_power_prev = bear_power_aligned[i-1]
+                    bull_power_prev = bull_power_aligned[i-1]
+                    long_condition = (bear_power < 0) and (bear_power > bear_power_prev) and volume_spike
+                    short_condition = (bull_power > 0) and (bull_power < bull_power_prev) and volume_spike
+                else:
+                    long_condition = (bear_power < 0) and volume_spike
+                    short_condition = (bull_power > 0) and volume_spike
+            else:  # Ranging regime (ADX <= 25)
+                # Fade extremes: long when Bull Power very weak, short when Bear Power very strong
+                long_condition = (bull_power < -0.5 * bull_power_std) and volume_spike
+                short_condition = (bear_power > 0.5 * bear_power_std) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -141,31 +140,45 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Exit conditions: stoploss, Donchian low break, or regime change to choppy
-            stoploss = price < entry_price - 2.5 * atr_val
-            donchian_break = price < donchian_low_val
-            regime_change = chop_val >= 55  # hysteresis to avoid whipsaw
-            
-            if stoploss or donchian_break or regime_change:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
+            # Regime/exit logic
+            elif adx > 25:  # Trending: exit when Bear Power turns positive
+                if bear_power > 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # Ranging: exit when Bull Power recovers
+                if bull_power > -0.2 * bull_power_std:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions: stoploss, Donchian high break, or regime change to choppy
-            stoploss = price > entry_price + 2.5 * atr_val
-            donchian_break = price > donchian_high_val
-            regime_change = chop_val >= 55  # hysteresis to avoid whipsaw
-            
-            if stoploss or donchian_break or regime_change:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
+            # Regime/exit logic
+            elif adx > 25:  # Trending: exit when Bull Power turns negative
+                if bull_power < 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # Ranging: exit when Bear Power recovers
+                if bear_power < 0.2 * bear_power_std:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_KAMA_Regime_Filter_DonchianExit"
-timeframe = "1d"
+name = "6h_ElderRay_Regime_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
