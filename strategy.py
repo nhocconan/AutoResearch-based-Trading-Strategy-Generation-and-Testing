@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_Volume_WeeklyTrend_ATRStop
-Hypothesis: Daily Camarilla pivot R1/S1 breakout with volume confirmation (>1.5x 20-day volume MA) and 1-week EMA50 trend filter.
-ATR trailing stop (2.0x ATR) manages risk. Works in bull via R1 breakouts, in bear via S1 breakdowns.
-Position size 0.25 balances risk/return. Target ~7-25 trades/year per symbol (30-100 total over 4 years).
-Uses 1d primary timeframe with 1w HTF for trend alignment, avoiding overtrading while capturing multi-week moves.
+12h_TRIX_VolumeSpike_HTFTrend_ATRStop
+Hypothesis: 12h TRIX momentum with volume confirmation (>1.5x 20-period volume MA) and 1d EMA50 trend filter. 
+ATR trailing stop (2.0x ATR) manages risk. TRIX filters noise and captures sustained moves in both bull and bear markets.
+Position size 0.25 balances risk/return. Target ~12-37 trades/year per symbol (50-150 total over 4 years).
+Uses 12h primary timeframe with 1d HTF for trend alignment, avoiding overtrading while capturing multi-day moves.
 """
 
 import numpy as np
@@ -16,48 +16,41 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # === 1w EMA50 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # === 1d Indicators (primary timeframe) ===
+    # Load HTF data ONCE before loop (1d for trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d EMA50 for trend filter ===
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot points (R1, S1) from previous day
-    # Using previous 1d bar's high, low, close (shifted by 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # === 12h Indicators (primary timeframe) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_ = prev_high - prev_low
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
+    
+    # Calculate TRIX (15-period EMA of EMA of EMA of close, then ROC)
+    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3.pct_change(periods=1) * 100  # ROC of triple EMA
+    trix_values = trix.values
     
     # Volume MA (20-period) for spike detection
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     # ATR (14-period) for stoploss
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
@@ -67,28 +60,28 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(trix_values[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1d[i]
-        vol = volume_1d[i]
-        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation (moderate to balance trades)
+        price = close_12h[i]
+        vol = volume_12h[i]
+        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
         if position == 0:
-            # Long: price breaks above R1 + volume confirmation + price > 1w EMA50
-            if price > r1[i] and vol_ok and price > ema_50_1w_aligned[i]:
+            # Long: TRIX crosses above zero (bullish momentum) + volume confirmation + price > 1d EMA50
+            if trix_values[i] > 0 and trix_values[i-1] <= 0 and vol_ok and price > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
-            # Short: price breaks below S1 + volume confirmation + price < 1w EMA50
-            elif price < s1[i] and vol_ok and price < ema_50_1w_aligned[i]:
+            # Short: TRIX crosses below zero (bearish momentum) + volume confirmation + price < 1d EMA50
+            elif trix_values[i] < 0 and trix_values[i-1] >= 0 and vol_ok and price < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -116,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_Volume_WeeklyTrend_ATRStop"
-timeframe = "1d"
+name = "12h_TRIX_VolumeSpike_HTFTrend_ATRStop"
+timeframe = "12h"
 leverage = 1.0
