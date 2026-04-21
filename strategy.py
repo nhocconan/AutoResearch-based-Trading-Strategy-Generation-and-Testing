@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: Donchian(20) breakouts on 12h timeframe filtered by 1d EMA50 trend for directional bias.
-Volume confirmation (>1.8x 20-period average) ensures breakout validity. ATR-based stoploss with 2.0x ATR.
-Designed for 12-37 trades/year per symbol (~50-150 total over 4 years) to minimize fee drag.
-Works in bull/bear via 1d trend alignment as regime filter. Uses discrete position sizing (0.25) to control drawdown.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: Camarilla R1/S1 breakouts on 4h filtered by 1d EMA50 trend for directional bias and volume spike (>2x 20-period average) for confirmation.
+Only take longs when price > 1d EMA50 (bullish bias) and shorts when price < 1d EMA50 (bearish bias).
+ATR-based stoploss (2.0x ATR) and exit when price closes back inside the Camarilla H-L range.
+Designed for 20-50 trades/year per symbol (~80-200 total over 4 years) to minimize fee drag.
+Uses 1d trend as regime filter to work in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,17 +22,23 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 12h OHLC for Donchian calculation ===
+    # === 4h OHLC for Camarilla calculation (using previous day's data) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian channels: upper = max(high, 20), lower = min(low, 20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate previous day's OHLC for Camarilla levels
+    # We need to group by day to get prior day's H/L/C
+    df = prices.copy()
+    df['date'] = df['open_time'].dt.date
+    # Get prior day's high, low, close for each bar
+    prev_high = df.groupby('date')['high'].shift(1).values
+    prev_low = df.groupby('date')['low'].shift(1).values
+    prev_close = df.groupby('date')['close'].shift(1).values
+    
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
     
     # === 1d EMA50 for trend filter ===
     close_1d = df_1d['close'].values
@@ -45,17 +52,20 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: current volume > 1.8x 20-period average
+    # === Volume filter: current volume > 2.0x 20-period average ===
+    volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) 
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) 
+            or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,23 +74,20 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume filter: current volume > 1.8x 20-period average
-            vol_filter = volume[i] > 1.8 * vol_ma[i]
-            
-            # Long conditions: price > Donchian upper, 1d uptrend, volume filter
-            long_breakout = price > donchian_upper[i]
+            # Long conditions: price > Camarilla R1, 1d uptrend, volume filter
+            long_breakout = price > camarilla_r1[i]
             long_trend = price > ema_50_1d_aligned[i]
             
-            # Short conditions: price < Donchian lower, 1d downtrend, volume filter
-            short_breakout = price < donchian_lower[i]
+            # Short conditions: price < Camarilla S1, 1d downtrend, volume filter
+            short_breakout = price < camarilla_s1[i]
             short_trend = price < ema_50_1d_aligned[i]
             
             # Entry logic - ONLY enter on volume filter + trend alignment
-            if long_breakout and long_trend and vol_filter:
+            if long_breakout and long_trend and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and vol_filter:
+            elif short_breakout and short_trend and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -90,8 +97,8 @@ def generate_signals(prices):
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below Donchian lower (support broken)
-            elif price < donchian_lower[i]:
+            # Exit: price closes back inside Camarilla H-L range (mean reversion)
+            elif camarilla_s1[i] <= price <= camarilla_r1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,8 +109,8 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above Donchian upper (resistance broken)
-            elif price > donchian_upper[i]:
+            # Exit: price closes back inside Camarilla H-L range (mean reversion)
+            elif camarilla_s1[i] <= price <= camarilla_r1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
