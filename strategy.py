@@ -1,87 +1,104 @@
 #!/usr/bin/env python3
 """
-4h_RSI_MeanReversion_BollingerBand_Extremes
-Hypothesis: In both bull and bear markets, RSI extremes (>80 or <20) combined with price outside Bollinger Bands (2,2) signal exhaustion and mean reversion. Trades are taken in the direction of the 1d trend (using EMA50) to avoid counter-trend whipsaw. Works in ranging markets as well as during pullbacks in trends.
+4h_Camarilla_R1S1_Breakout_VolumeFilter_Tight
+Hypothesis: Camarilla pivot levels (R1, S1) from 1d timeframe act as key support/resistance. 
+Breakout above R1 or below S1 with volume confirmation (volume > 1.5x 20-period average) 
+provides high-probability trend continuation. Tight filters to limit trades and reduce fee drag.
+Works in bull/bear by taking breakouts in direction of intraday momentum.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    typical = (high + low + close) / 3
+    range_val = high - low
+    
+    # Camarilla levels
+    R4 = close + range_val * 1.500
+    R3 = close + range_val * 1.250
+    R2 = close + range_val * 1.166
+    R1 = close + range_val * 1.083
+    S1 = close - range_val * 1.083
+    S2 = close - range_val * 1.166
+    S3 = close - range_val * 1.250
+    S4 = close - range_val * 1.500
+    
+    return R1, R2, R3, R4, S1, S2, S3, S4
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
-    # Load 1d data once for trend filter
+    # Load 1d data once for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate Camarilla levels on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 4h indicators
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    R1_1d, _, _, _, S1_1d, _, _, _ = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align Camarilla levels to 4h timeframe
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
-    # Bollinger Bands (20,2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
+    # 4h price and volume data
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = np.zeros_like(volume_4h)
+    for i in range(len(volume_4h)):
+        if i < 19:
+            vol_ma[i] = np.nan
+        else:
+            vol_ma[i] = np.mean(volume_4h[i-19:i+1])
+    volume_filter = volume_4h > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if NaN in critical values
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
+        if np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        rsi_val = rsi[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        ema_50 = ema_50_1d_aligned[i]
+        price = close_4h[i]
+        r1 = R1_1d_aligned[i]
+        s1 = S1_1d_aligned[i]
+        vol_ok = volume_filter[i]
         
-        # Entry conditions
         if position == 0:
-            # Long: RSI < 20 (oversold) + price < lower BB + price > 1d EMA50 (uptrend filter)
-            if rsi_val < 20 and price < lower and price > ema_50:
+            # Long: price breaks above R1 with volume confirmation
+            if price > r1 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 80 (overbought) + price > upper BB + price < 1d EMA50 (downtrend filter)
-            elif rsi_val > 80 and price > upper and price < ema_50:
+            # Short: price breaks below S1 with volume confirmation
+            elif price < s1 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI > 50 (mean reversion) or price > SMA20
-            if rsi_val > 50 or price > sma_20[i]:
+            # Long exit: price drops back below R1
+            if price < r1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI < 50 (mean reversion) or price < SMA20
-            if rsi_val < 50 or price < sma_20[i]:
+            # Short exit: price rises back above S1
+            if price > s1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_MeanReversion_BollingerBand_Extremes"
+name = "4h_Camarilla_R1S1_Breakout_VolumeFilter_Tight"
 timeframe = "4h"
 leverage = 1.0
