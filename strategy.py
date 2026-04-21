@@ -1,124 +1,92 @@
 #!/usr/bin/env python3
 """
-12h_RSI2_Contrarian_With_Volume_Filter
-Hypothesis: Use contrarian RSI(2) signals on 12h timeframe with volume confirmation.
-Buy when RSI(2) < 10 and price > EMA200 (uptrend dip buy).
-Sell when RSI(2) > 90 and price < EMA200 (downtrend rally sell).
-Add volume filter to avoid false signals in low-volume periods.
-Designed for low trade frequency (15-25/year) to minimize fee drag.
-Works in bull markets by buying dips and in bear markets by selling rallies.
+1d_RangeBound_MeanReversion_Bollinger
+Hypothesis: Trade mean-reversion within range-bound markets using Bollinger Bands with Bollinger Band Width percentile as regime filter.
+In range-bound markets (BBW < 30th percentile), buy at lower band and sell at upper band. 
+In trending markets (BBW >= 30th percentile), no trades to avoid whipsaw.
+Designed for 1d timeframe to target 20-50 trades/year with high-conviction entries.
+Works in bull markets by capturing pullbacks in uptrends and in bear markets by capturing bounces in downtrends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(close, period=2):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(close)
-    delta = np.concatenate([[0], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    if len(close) >= period:
-        avg_gain[period-1] = np.mean(gain[:period])
-        avg_loss[period-1] = np.mean(loss[:period])
-        for i in range(period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    ema = np.zeros_like(close)
-    if len(close) >= period:
-        ema[period-1] = np.mean(close[:period])
-        multiplier = 2 / (period + 1)
-        for i in range(period, len(close)):
-            ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
-    return ema
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for EMA200 trend filter
+    # Load daily data once for Bollinger Bands and BBW
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Daily EMA200 for trend filter
-    ema200_1d = calculate_ema(close_1d, 200)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Bollinger Bands (20, 2)
+    sma20 = np.zeros_like(close_1d)
+    std20 = np.zeros_like(close_1d)
+    for i in range(20, len(close_1d)):
+        sma20[i] = np.mean(close_1d[i-20:i])
+        std20[i] = np.std(close_1d[i-20:i])
     
-    # RSI(2) on 12h closes
-    rsi2 = calculate_rsi(prices['close'].values, 2)
+    upper = sma20 + 2 * std20
+    lower = sma20 - 2 * std20
+    
+    # Bollinger Band Width
+    bbw = (upper - lower) / sma20
+    
+    # Align to 1d timeframe (no additional delay needed for BB/BBW)
+    sma20_aligned = align_htf_to_ltf(prices, df_1d, sma20)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    bbw_aligned = align_htf_to_ltf(prices, df_1d, bbw)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if indicators not ready
-        if np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi2[i]):
+        if (np.isnan(sma20_aligned[i]) or np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or np.isnan(bbw_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC only (avoid low-volume Asian session)
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Regime filter: range-bound if BBW < 30th percentile of lookback
+        if i >= 50:
+            bbw_percentile = np.percentile(bbw_aligned[:i+1], 30)
+            range_bound = bbw_aligned[i] < bbw_percentile
+        else:
+            range_bound = True  # Allow trades during warmup
         
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.3 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.3 * vol_ma
-        else:
-            volume_ok = False
-        
-        if position == 0:
-            # Uptrend: price > daily EMA200
-            if price > ema200_1d_aligned[i]:
-                # Contrarian long: RSI(2) < 10 (oversold) with volume confirmation
-                if rsi2[i] < 10 and volume_ok:
-                    signals[i] = 0.25
-                    position = 1
-            # Downtrend: price < daily EMA200
-            elif price < ema200_1d_aligned[i]:
-                # Contrarian short: RSI(2) > 90 (overbought) with volume confirmation
-                if rsi2[i] > 90 and volume_ok:
-                    signals[i] = -0.25
-                    position = -1
+        if position == 0 and range_bound:
+            # Long at lower band
+            if price <= lower_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short at upper band
+            elif price >= upper_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: RSI(2) > 50 (normal) or trend change
-            if rsi2[i] > 50 or price < ema200_1d_aligned[i]:
+            # Long exit: price reaches middle band or regime changes to trending
+            if price >= sma20_aligned[i] or not range_bound:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI(2) < 50 (normal) or trend change
-            if rsi2[i] < 50 or price > ema200_1d_aligned[i]:
+            # Short exit: price reaches middle band or regime changes to trending
+            if price <= sma20_aligned[i] or not range_bound:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI2_Contrarian_With_Volume_Filter"
-timeframe = "12h"
+name = "1d_RangeBound_MeanReversion_Bollinger"
+timeframe = "1d"
 leverage = 1.0
