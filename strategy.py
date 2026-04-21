@@ -1,61 +1,100 @@
 #!/usr/bin/env python3
 """
-4h_PivotPoint_R1S1_Breakout_Volume_Confirmation_V1
-Hypothesis: Price breaking above/below daily Camarilla pivot R1/S1 with volume > 2x 20-period average and aligned with daily EMA21 direction yields high-probability breakouts. Uses daily EMA21 as trend filter to avoid counter-trend trades. Targets 20-40 trades/year with strict entry conditions to minimize fee drag. Works in bull/bear markets by following the daily trend direction.
+4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter
+Hypothesis: Camarilla pivot levels (R1/S1) derived from 1d OHLC provide key support/resistance. 
+Breakouts above R1 or below S1 with volume > 1.5x 20-period average and 1d ADX > 25 (trending regime) 
+yield high-probability trades. Uses 1d ADX to filter for trending markets only, avoiding whipsaws 
+in ranging conditions. Works in bull/bear markets by taking breakouts in direction of trend (ADX 
+confirms trend strength). Targets 20-50 trades/year with tight entry conditions to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    ema = np.zeros_like(close)
-    if len(close) < period:
-        return ema
-    multiplier = 2 / (period + 1)
-    ema[0] = close[0]
-    for i in range(1, len(close)):
-        ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
-    return ema
-
-def calculate_camarilla_pivots(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    r1 = close + (range_val * 1.1 / 12)
-    s1 = close - (range_val * 1.1 / 12)
-    return pivot, r1, s1
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index (ADX)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth using Wilder's smoothing
+    tr_period = np.zeros_like(tr)
+    dm_plus_period = np.zeros_like(dm_plus)
+    dm_minus_period = np.zeros_like(dm_minus)
+    
+    tr_period[0] = tr[0]
+    dm_plus_period[0] = dm_plus[0]
+    dm_minus_period[0] = dm_minus[0]
+    
+    for i in range(1, len(tr)):
+        tr_period[i] = tr_period[i-1] - (tr_period[i-1] / period) + tr[i]
+        dm_plus_period[i] = dm_plus_period[i-1] - (dm_plus_period[i-1] / period) + dm_plus[i]
+        dm_minus_period[i] = dm_minus_period[i-1] - (dm_minus_period[i-1] / period) + dm_minus[i]
+    
+    # Calculate DI+ and DI-
+    di_plus = np.where(tr_period != 0, 100 * dm_plus_period / tr_period, 0)
+    di_minus = np.where(tr_period != 0, 100 * dm_minus_period / tr_period, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    
+    adx = np.zeros_like(dx)
+    if len(dx) >= period:
+        adx[period-1] = np.mean(dx[:period])  # First ADX value
+    
+    for i in range(period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once
+    # Load daily data once for Camarilla and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA21 for trend filter
-    close_1d = df_1d['close'].values
-    ema_21_1d = calculate_ema(close_1d, 21)
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    
-    # Calculate daily Camarilla pivots
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    _, r1_1d, s1_1d = calculate_camarilla_pivots(high_1d, low_1d, close_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    
+    # Calculate daily ADX for trend filter
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    
+    # Align to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if daily indicators not ready
-        if np.isnan(ema_21_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]):
+        # Skip if indicators not ready
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(adx_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,38 +103,37 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 2x 20-period average
+        # Volume confirmation: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
-        # Trend filter: price above/below daily EMA21
-        price_above_ema = price > ema_21_1d_aligned[i]
-        price_below_ema = price < ema_21_1d_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above R1 + volume confirmation + price above daily EMA21
-            if price > r1_1d_aligned[i] and volume_ok and price_above_ema:
+            # Long: price breaks above R1 + volume confirmation + trending market
+            if price > r1_aligned[i] and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume confirmation + price below daily EMA21
-            elif price < s1_1d_aligned[i] and volume_ok and price_below_ema:
+            # Short: price breaks below S1 + volume confirmation + trending market
+            elif price < s1_aligned[i] and volume_ok and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or price crosses below daily EMA21
-            if price < s1_1d_aligned[i] or price < ema_21_1d_aligned[i]:
+            # Long exit: price breaks below S1 or ADX drops below 20 (losing trend)
+            if price < s1_aligned[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or price crosses above daily EMA21
-            if price > r1_1d_aligned[i] or price > ema_21_1d_aligned[i]:
+            # Short exit: price breaks above R1 or ADX drops below 20 (losing trend)
+            if price > r1_aligned[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PivotPoint_R1S1_Breakout_Volume_Confirmation_V1"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
