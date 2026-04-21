@@ -1,87 +1,140 @@
-#1d_HighLowBreakout_with_1wTrend
-
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using weekly EMA trend filter and daily high/low breakout.
-In weekly uptrend (price > weekly EMA50), buy when price breaks above previous day's high.
-In weekly downtrend (price < weekly EMA50), sell when price breaks below previous day's low.
-Uses previous day's high/low for structure (avoids lookahead) and weekly EMA for trend.
-Targets 10-20 trades/year (40-80 total over 4 years) to avoid fee drag.
+Hypothesis: 12h strategy using 1-day Camarilla pivot levels (S1/R1) for mean-reversion entries in ranging markets.
+In ranging conditions (Choppiness Index > 61.8), buy at S1 with volume confirmation, sell at R1 with volume confirmation.
+Uses 1-day structure for pivot calculation (more reliable than intraday) and 12h for execution.
+Trades only during high-liquidity sessions (UTC 8:00-20:00) to avoid low-volume false signals.
+Targets 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for previous day's high/low (structure)
+    # Load 1d data ONCE before loop for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's high and low (no lookahead)
-    prev_high = df_1d['high'].shift(1).values  # Previous day's high
-    prev_low = df_1d['low'].shift(1).values    # Previous day's low
+    # Previous day's OHLC for Camarilla calculation (use prior day to avoid look-ahead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to daily timeframe (already aligned, just need to handle NaN from shift)
-    prev_high_aligned = prev_high  # Already on daily index
-    prev_low_aligned = prev_low    # Already on daily index
+    # Calculate Camarilla levels: S1, R1 based on previous day
+    # Camarilla formulas:
+    # S1 = C - (H - L) * 1.1 / 12
+    # R1 = C + (H - L) * 1.1 / 12
+    range_1d = high_1d - low_1d
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    r1 = close_1d + (range_1d * 1.1 / 12)
     
-    # Load weekly data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Choppiness Index regime filter (14-period) - calculated on 12h data
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
-    # Align weekly EMA to daily timeframe (wait for weekly bar to close)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # True Range
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Sum of absolute price changes over 14 periods
+    abs_close_change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
+    sum_abs_change = pd.Series(abs_close_change).rolling(window=14, min_periods=14).sum().values
+    
+    # Choppiness Index: 100 * log10(sum_abs_change / (atr_14 * 14)) / log10(14)
+    chop = 100 * np.log10(sum_abs_change / (atr_14 * 14)) / np.log10(14)
+    
+    # Volume confirmation (volume > 1.2x 20-period average)
+    vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = prices['volume'].values / vol_ma_20
+    
+    # Session filter: UTC 8:00-20:00 (avoid low-volume Asian session)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have previous day data
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(chop[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        weekly_trend = ema_50_aligned[i]
+        s1_val = s1_aligned[i]
+        r1_val = r1_aligned[i]
+        chop_val = chop[i]
+        vol_ratio_val = vol_ratio[i]
+        in_sess = in_session[i]
         
-        if position == 0:
-            # Enter long: price breaks above previous day's high + weekly uptrend
-            if price_close > prev_high_aligned[i] and price_close > weekly_trend:
+        # Regime filter: only trade in ranging markets (Choppiness > 61.8)
+        if chop_val <= 61.8:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if position == 0 and in_sess:
+            # Enter long at S1 with volume confirmation
+            if (price_close <= s1_val * 1.002 and  # Allow small buffer for slippage
+                vol_ratio_val > 1.2):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below previous day's low + weekly downtrend
-            elif price_close < prev_low_aligned[i] and price_close < weekly_trend:
+            # Enter short at R1 with volume confirmation
+            elif (price_close >= r1_val * 0.998 and  # Allow small buffer for slippage
+                  vol_ratio_val > 1.2):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back below/above previous day's level in opposite direction
-            if position == 1 and price_close < prev_low_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and price_close > prev_high_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Exit conditions
+            if position == 1:
+                # Long exit: price reaches midpoint (mean reversion target) or stop loss
+                midpoint = (s1_val + r1_val) / 2
+                if price_close >= midpoint:
+                    signals[i] = 0.0
+                    position = 0
+                # Stop loss: close below S1 with confirmation
+                elif price_close < s1_val * 0.995:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Short exit: price reaches midpoint or stop loss
+                midpoint = (s1_val + r1_val) / 2
+                if price_close <= midpoint:
+                    signals[i] = 0.0
+                    position = 0
+                # Stop loss: close above R1 with confirmation
+                elif price_close > r1_val * 1.005:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_HighLowBreakout_with_1wTrend"
-timeframe = "1d"
+name = "12h_Camarilla_S1R1_MeanReversion_Chop_Volume"
+timeframe = "12h"
 leverage = 1.0
