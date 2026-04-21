@@ -1,143 +1,144 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_VolumeFilter_Tight
-Hypothesis: Camarilla pivot levels (R1, S1) from 1d timeframe act as key support/resistance.
-Long when price breaks above R1 with volume confirmation; short when price breaks below S1 with volume confirmation.
-Only trade in trending markets (ADX > 25) to avoid whipsaw in chop. Works in bull/bear by following momentum.
-Uses tight entry conditions to limit trades (<50/year) and reduce fee drag.
+6h_Camarilla_1d_R3_S3_Fade_V1
+Hypothesis: Camarilla pivot levels from 1d act as strong reversal zones. Price reaching R3/S3 levels with rejection (wick rejection or close back inside) provides high-probability mean reversion trades. Works in both bull/bear as reversals occur at all market phases. Uses volume confirmation to avoid false breaks.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    plus_dm = np.zeros_like(high)
-    minus_dm = np.zeros_like(high)
-    tr = np.zeros_like(high)
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    typical = (high + low + close) / 3
+    range_val = high - low
     
-    for i in range(1, len(high)):
-        plus_dm[i] = max(0, high[i] - high[i-1])
-        minus_dm[i] = max(0, low[i-1] - low[i])
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # Camarilla levels
+    R4 = close + range_val * 1.1 / 2
+    R3 = close + range_val * 1.1 / 4
+    R2 = close + range_val * 1.1 / 6
+    R1 = close + range_val * 1.1 / 12
+    PP = typical
+    S1 = close - range_val * 1.1 / 12
+    S2 = close - range_val * 1.1 / 6
+    S3 = close - range_val * 1.1 / 4
+    S4 = close - range_val * 1.1 / 2
     
-    # Smooth using Wilder's smoothing (alpha = 1/period)
-    atr = np.zeros_like(high)
-    plus_dm_smooth = np.zeros_like(high)
-    minus_dm_smooth = np.zeros_like(high)
-    
-    atr[period] = np.mean(tr[1:period+1])
-    plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
-    minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
-    
-    for i in range(period+1, len(high)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-    
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    
-    adx = np.zeros_like(high)
-    adx[2*period] = np.mean(dx[period+1:2*period+1])
-    for i in range(2*period+1, len(high)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    return adx
+    return R4, R3, R2, R1, PP, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels and ADX
+    # Load 1d data once for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
+    # Calculate Camarilla levels on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous day's range
-    R1 = np.zeros_like(close_1d)
-    S1 = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        range_ = high_1d[i-1] - low_1d[i-1]
-        close_prev = close_1d[i-1]
-        R1[i] = close_prev + range_ * 1.1 / 12
-        S1[i] = close_prev - range_ * 1.1 / 12
+    # Arrays to store each level
+    R4_1d = np.full_like(close_1d, np.nan)
+    R3_1d = np.full_like(close_1d, np.nan)
+    S3_1d = np.full_like(close_1d, np.nan)
+    S4_1d = np.full_like(close_1d, np.nan)
     
-    # ADX for trend filter
-    adx = calculate_adx(high_1d, low_1d, close_1d, 14)
+    for i in range(len(close_1d)):
+        R4, R3, R2, R1, PP, S1, S2, S3, S4 = calculate_camarilla(
+            high_1d[i], low_1d[i], close_1d[i]
+        )
+        R4_1d[i] = R4
+        R3_1d[i] = R3
+        S3_1d[i] = S3
+        S4_1d[i] = S4
     
-    # Align to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align Camarilla levels to 6h timeframe
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
     
-    # 4h price and volume
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # 6h price data
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
     
-    # Volume spike: current volume > 1.5 * 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(20, len(volume)):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (vol_ma * 1.5)
+    # Volume filter: 20-period average volume
+    vol_ma = np.full_like(volume_6h, np.nan)
+    for i in range(len(volume_6h)):
+        if i >= 19:
+            vol_ma[i] = np.mean(volume_6h[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if NaN in critical values
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(adx_aligned[i]):
+        if np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        vol_spike = volume_spike[i]
-        r1 = R1_aligned[i]
-        s1 = S1_aligned[i]
-        adx_val = adx_aligned[i]
+        price = close_6h[i]
+        r3_level = R3_1d_aligned[i]
+        s3_level = S3_1d_aligned[i]
+        vol_ma_val = vol_ma[i]
+        volume = volume_6h[i]
         
-        # Only trade in trending markets (ADX > 25)
-        trending = adx_val > 25
+        # Volume confirmation: current volume > 1.5x average
+        volume_ok = volume > vol_ma_val * 1.5
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike in trending market
-            if price > r1 and vol_spike and trending:
+            # Long setup: price rejects S3 level (wick below, close above) with volume
+            if low_6h[i] < s3_level and close_6h[i] > s3_level and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike in trending market
-            elif price < s1 and vol_spike and trending:
+            # Short setup: price rejects R3 level (wick above, close below) with volume
+            elif high_6h[i] > r3_level and close_6h[i] < r3_level and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price drops below S1 or loses momentum (ADX < 20)
-            if price < s1 or adx_val < 20:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price reaches midpoint between S3 and S2 (or R1) or volume fails
+            # Simple exit: return to Pivot Point or opposite S2 level
+            # Calculate S2 for exit reference
+            if i < len(df_1d):
+                # Use current day's S2 approximation
+                range_val = high_1d[min(i, len(high_1d)-1)] - low_1d[min(i, len(low_1d)-1)]
+                close_val = close_1d[min(i, len(close_1d)-1)]
+                s2_level = close_val - range_val * 1.1 / 6
+                s2_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, s2_level))[i]
+                
+                if price < s2_aligned:  # Failed to hold above S2
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 or loses momentum (ADX < 20)
-            if price > r1 or adx_val < 20:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price reaches midpoint between R3 and R2
+            if i < len(df_1d):
+                range_val = high_1d[min(i, len(high_1d)-1)] - low_1d[min(i, len(low_1d)-1)]
+                close_val = close_1d[min(i, len(close_1d)-1)]
+                r2_level = close_val + range_val * 1.1 / 6
+                r2_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, r2_level))[i]
+                
+                if price > r2_aligned:  # Failed to hold below R2
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_VolumeFilter_Tight"
-timeframe = "4h"
+name = "6h_Camarilla_1d_R3_S3_Fade_V1"
+timeframe = "6h"
 leverage = 1.0
