@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_Volume_Regime
-Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout signals on 12h timeframe.
+4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight
+Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout signals on 4h timeframe.
 Long when price breaks above R1 with volume > 1.5x average and ADX > 25 (trending).
 Short when price breaks below S1 with volume > 1.5x average and ADX > 25.
 Exit when price crosses back through the daily pivot point.
-Uses ADX regime filter to avoid whipsaws in ranging markets. Designed for 12h to limit
-trade frequency (target: 12-37/year) and reduce fee drift. Works in bull markets by
+Uses ADX regime filter to avoid whipsaws in ranging markets. Designed for 4h to limit
+trade frequency (target: 20-50/year) and reduce fee drift. Works in bull markets by
 buying breakouts and in bear markets by selling breakdowns.
 """
 
@@ -45,7 +45,7 @@ def generate_signals(prices):
     s1 = prev_close - 1.1 * rang / 12
     pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
@@ -153,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Regime"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight"
+timeframe = "4h"
 leverage = 1.0
