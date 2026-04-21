@@ -3,36 +3,36 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d volume surge and ADX trend filter.
-# Works in bull/bear: uses volatility-based pivot levels (not moving averages) and requires volume confirmation.
-# Target: 20-40 trades/year by requiring strict confluence of price, volume, and trend.
-# Entry: Long when price > R1 + volume surge + ADX > 20; Short when price < S1 + volume surge + ADX > 20.
-# Exit: Opposite touch of S1/R1 or volume drops below average.
+# Hypothesis: 4h Donchian breakout with 1d volume surge and ADX trend filter.
+# Works in bull/bear: uses price channel breakouts for trend following, requires volume confirmation.
+# Target: 20-30 trades/year by requiring strict confluence of price breakout, volume, and trend.
+# Entry: Long when price > Donchian upper + volume surge + ADX > 20; Short when price < Donchian lower + volume surge + ADX > 20.
+# Exit: Opposite touch of Donchian channel or volume drops below average.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for pivot levels, volume, and ADX
+    # Load daily data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivot levels (using prior day's OHLC)
+    # Calculate 20-period Donchian channels on 4h data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # Upper and lower bands
+    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Load daily data for volume and ADX
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
     vol_d = df_1d['volume'].values
-    
-    pivot_d = (high_d + low_d + close_d) / 3
-    r1_d = 2 * pivot_d - low_d
-    s1_d = 2 * pivot_d - high_d
-    
-    # Align daily data to 4h (wait for daily close)
-    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
-    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
-    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
     # Calculate 14-period ADX on daily timeframe for trend strength
     # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
@@ -67,6 +67,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilders_smooth(dx, 14)
     
+    # Align daily data to 4h (wait for daily close)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation using 1d volume
@@ -81,8 +82,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pivot_d_aligned[i]) or np.isnan(r1_d_aligned[i]) or np.isnan(s1_d_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_10_1d_aligned[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma_10_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -102,9 +102,9 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         vol_current = align_htf_to_ltf(prices, df_1d, vol_d)[i]  # 1d volume aligned to 4h
         
-        # Daily pivot levels
-        r1_val = r1_d_aligned[i]
-        s1_val = s1_d_aligned[i]
+        # Donchian levels
+        upper_val = upper[i]
+        lower_val = lower[i]
         
         # Trend filter: ADX > 20 indicates trending market
         trending = adx_aligned[i] > 20
@@ -113,15 +113,15 @@ def generate_signals(prices):
         volume_confirm = vol_current > 1.5 * vol_ma_10_1d_aligned[i]
         
         if position == 0:
-            # Enter long: price breaks above R1 with volume surge in trending market
+            # Enter long: price breaks above upper band with volume surge in trending market
             if (trending and 
-                price_close > r1_val and 
+                price_close > upper_val and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 with volume surge in trending market
+            # Enter short: price breaks below lower band with volume surge in trending market
             elif (trending and 
-                  price_close < s1_val and 
+                  price_close < lower_val and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -131,14 +131,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below S1 OR volume drops below average
-                if price_close < s1_val:
+                # Exit long: price breaks below lower band OR volume drops below average
+                if price_close < lower_val:
                     exit_signal = True
                 elif vol_current < vol_ma_10_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short: price breaks above R1 OR volume drops below average
-                if price_close > r1_val:
+                # Exit short: price breaks above upper band OR volume drops below average
+                if price_close > upper_val:
                     exit_signal = True
                 elif vol_current < vol_ma_10_1d_aligned[i]:
                     exit_signal = True
@@ -152,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_VolumeSurge_ADX"
+name = "4h_Donchian20_VolumeSurge_ADX"
 timeframe = "4h"
 leverage = 1.0
