@@ -3,73 +3,60 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d Elder Ray (Bull/Bear Power) filter
-# Combines Williams Alligator (JAWS/TEETH/LIPS) for trend direction and Elder Ray
-# for momentum strength. Long when Lips > Teeth > Jaws AND Bull Power > 0 with rising trend.
-# Short when Lips < Teeth < Jaws AND Bear Power < 0 with falling trend.
-# Uses weekly trend filter to avoid counter-trend trades in strong monthly trends.
-# Designed for 6h timeframe: 12-35 trades/year (~50-140 total over 4 years).
-# Works in bull markets via trend following and in bear markets via short signals
-# when Alligator is bearish and Bear Power confirms selling pressure.
+# Hypothesis: 12h Camarilla R3/S3 pivot breakout with 1d volume spike and 1w EMA trend filter.
+# Captures institutional breakout at key daily pivot levels with volume confirmation.
+# Works in both bull and bear markets by following higher timeframe trend.
+# Target: 15-25 trades/year by requiring confluence of pivot breakout, volume surge, and EMA alignment.
+# Entry: Long when price breaks above daily Camarilla R3 with volume spike and price > 1w EMA50.
+#        Short when price breaks below daily Camarilla S3 with volume spike and price < 1w EMA50.
+# Exit: Opposite pivot touch (S3 for long, R3 for short) or volume drops below average.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load higher timeframe data: weekly for trend filter, daily for Alligator and Elder Ray
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data for pivot calculation and weekly data for EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 50 or len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on daily timeframe (13,8,5 SMAs shifted)
-    close_d = df_1d['close'].values
+    # Calculate daily Camarilla levels (R3, S3)
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
     
-    # Jaw (13-period SMMA, shifted 8 bars forward)
-    jaw = pd.Series(close_d).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # shift forward 8 bars
-    jaw[:8] = np.nan
+    # Pivot point
+    pp = (high_d + low_d + close_d) / 3
+    # Camarilla levels
+    r3 = close_d + (high_d - low_d) * 1.1 / 2
+    s3 = close_d - (high_d - low_d) * 1.1 / 2
     
-    # Teeth (8-period SMMA, shifted 5 bars forward)
-    teeth = pd.Series(close_d).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # shift forward 5 bars
-    teeth[:5] = np.nan
-    
-    # Lips (5-period SMMA, shifted 3 bars forward)
-    lips = pd.Series(close_d).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # shift forward 3 bars
-    lips[:3] = np.nan
-    
-    # Calculate Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
-    ema13_d = pd.Series(close_d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_d - ema13_d
-    bear_power = low_d - ema13_d
-    
-    # Weekly trend filter: price vs 40-week EMA
+    # Calculate 50-period EMA on weekly timeframe
     close_w = df_1w['close'].values
-    ema40_w = pd.Series(close_w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema50_w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to 6h timeframe (wait for daily/weekly close)
-    jaw_6h = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_6h = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_6h = align_htf_to_ltf(prices, df_1d, lips)
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema40_w_6h = align_htf_to_ltf(prices, df_1w, ema40_w)
+    # Volume confirmation using daily volume
+    vol_d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_d).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute session hours (08-20 UTC) for liquidity
+    # Align daily and weekly data to 12h (wait for daily/weekly close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_w)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Pre-compute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaw_6h[i]) or np.isnan(teeth_6h[i]) or np.isnan(lips_6h[i]) or
-            np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or np.isnan(ema40_w_6h[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,29 +72,24 @@ def generate_signals(prices):
                 position = 0
             continue
         
+        # Current values
         price_close = prices['close'].iloc[i]
+        vol_current = align_htf_to_ltf(prices, df_1d, vol_d)[i]  # daily volume aligned to 12h
         
-        # Williams Alligator conditions
-        lips_above_teeth = lips_6h[i] > teeth_6h[i]
-        teeth_above_jaw = teeth_6h[i] > jaw_6h[i]
-        lips_below_teeth = lips_6h[i] < teeth_6h[i]
-        teeth_below_jaw = teeth_6h[i] < jaw_6h[i]
+        # Trend filter: price relative to weekly EMA50
+        above_ema = price_close > ema50_1w_aligned[i]
+        below_ema = price_close < ema50_1w_aligned[i]
         
-        # Elder Ray conditions
-        bull_power_pos = bull_power_6h[i] > 0
-        bear_power_neg = bear_power_6h[i] < 0
-        
-        # Weekly trend filter
-        price_above_weekly_ema = price_close > ema40_w_6h[i]
-        price_below_weekly_ema = price_close < ema40_w_6h[i]
+        # Volume confirmation: current volume > 1.5x 20-day average
+        volume_confirm = vol_current > 1.5 * vol_ma_20_1d_aligned[i]
         
         if position == 0:
-            # Enter long: Lips > Teeth > Jaws (bullish alignment) AND Bull Power > 0 AND price above weekly EMA
-            if (lips_above_teeth and teeth_above_jaw and bull_power_pos and price_above_weekly_ema):
+            # Enter long when price breaks above daily R3 with volume spike and above weekly EMA
+            if (price_close > r3_aligned[i] and volume_confirm and above_ema):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Lips < Teeth < Jaws (bearish alignment) AND Bear Power < 0 AND price below weekly EMA
-            elif (lips_below_teeth and teeth_below_jaw and bear_power_neg and price_below_weekly_ema):
+            # Enter short when price breaks below daily S3 with volume spike and below weekly EMA
+            elif (price_close < s3_aligned[i] and volume_confirm and below_ema):
                 signals[i] = -0.25
                 position = -1
         
@@ -116,12 +98,16 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Alligator turns bearish OR Bull Power turns negative
-                if not (lips_above_teeth and teeth_above_jaw) or bull_power_6h[i] <= 0:
+                # Exit long: price reaches daily S3 (opposite side) or volume drops below average
+                if price_close < s3_aligned[i]:
+                    exit_signal = True
+                elif vol_current < vol_ma_20_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short: Alligator turns bullish OR Bear Power turns positive
-                if not (lips_below_teeth and teeth_below_jaw) or bear_power_6h[i] >= 0:
+                # Exit short: price reaches daily R3 (opposite side) or volume drops below average
+                if price_close > r3_aligned[i]:
+                    exit_signal = True
+                elif vol_current < vol_ma_20_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -133,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_1dElderRay_1wTrendFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
