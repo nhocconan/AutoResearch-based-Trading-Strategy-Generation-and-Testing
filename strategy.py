@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_v1
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and chop regime filter (CHOP > 61.8 = range, avoid breakouts in chop).
-Uses ATR-based stop (2.0x) and minimum holding period of 3 bars to reduce churn.
-Designed for 4h timeframe with 1d HTF trend and chop filter to avoid false breakouts in ranging markets.
-Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-period MA).
+Uses ATR-based stop (2.5x) and minimum holding period of 4 bars to reduce churn.
+Designed for 4h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
+Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drift.
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA trend and chop)
+    # Load HTF data ONCE before loop (1d for EMA trend)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -25,23 +25,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === 1d Chopiness Index (14-period) for regime filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    # True Range for 1d
-    tr1_1d = pd.Series(high_1d - low_1d)
-    tr2_1d = pd.Series(np.abs(high_1d - np.roll(close_1d_arr, 1)))
-    tr3_1d = pd.Series(np.abs(low_1d - np.roll(close_1d_arr, 1)))
-    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
-    atr_1d_sum = tr_1d.rolling(window=14, min_periods=14).sum().values
-    
-    # Absolute price change over 14 periods
-    price_change_1d = np.abs(close_1d_arr - np.roll(close_1d_arr, 14))
-    chop_1d = 100 * np.log10(atr_1d_sum / price_change_1d) / np.log10(14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
@@ -54,7 +37,7 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume confirmation (1.8x 20-period MA) ===
+    # === Volume confirmation (2.0x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -76,8 +59,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or
-            np.isnan(chop_1d_aligned[i])):
+            np.isnan(vol_ma[i]) or np.isnan(r1[i]) or np.isnan(s1[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,18 +72,15 @@ def generate_signals(prices):
         vol_avg = vol_ma[i]
         r1_val = r1[i]
         s1_val = s1[i]
-        chop_val = chop_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x average (stricter threshold)
-        volume_confirm = volume_now > 1.8 * vol_avg
-        # Chop filter: only trade when market is trending (CHOP < 61.8)
-        chop_filter = chop_val < 61.8
+        # Volume confirmation: current volume > 2.0x average (stricter threshold)
+        volume_confirm = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: price breaks above R1, above 1d EMA50, volume confirm, trending regime
-            long_condition = (price > r1_val) and (price > ema_50_1d_val) and volume_confirm and chop_filter
-            # Short: price breaks below S1, below 1d EMA50, volume confirm, trending regime
-            short_condition = (price < s1_val) and (price < ema_50_1d_val) and volume_confirm and chop_filter
+            # Long: price breaks above R1, above 1d EMA50, volume confirm
+            long_condition = (price > r1_val) and (price > ema_50_1d_val) and volume_confirm
+            # Short: price breaks below S1, below 1d EMA50, volume confirm
+            short_condition = (price < s1_val) and (price < ema_50_1d_val) and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -117,14 +96,14 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 4 bars to reduce churn
+            if bars_since_entry < 4:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                if price < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -136,7 +115,7 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                if price > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -150,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_ChopFilter_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
