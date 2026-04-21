@@ -1,99 +1,126 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_VolumeFilter
-Hypothesis: Camarilla pivot levels (R1, S1) from 1-day timeframe act as strong intraday support/resistance.
-Price breaking above R1 or below S1 with volume confirmation indicates institutional interest and continuation.
-Works in both bull and bear markets by only taking breakouts in the direction of the 1-day trend (EMA50).
-Volume filter reduces false breakouts. Target: 15-25 trades/year per symbol.
+6h_1d_ADX_Trend_Filter_V1
+Hypothesis: Use 1-day ADX to filter trend strength; only trade 6h EMA crossovers when daily trend is strong (ADX > 25). This avoids whipsaw in sideways markets and captures strong trends in both bull and bear markets. Uses 6h EMA(9)/EMA(21) crossover with daily ADX filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = np.zeros_like(tr)
+    dm_plus_smooth = np.zeros_like(dm_plus)
+    dm_minus_smooth = np.zeros_like(dm_minus)
+    
+    # Initial values
+    atr[period-1] = np.mean(tr[:period])
+    dm_plus_smooth[period-1] = np.mean(dm_plus[:period])
+    dm_minus_smooth[period-1] = np.mean(dm_minus[:period])
+    
+    # Wilder's smoothing
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_smooth / atr
+    minus_di = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = np.zeros_like(close)
+    dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
+    
+    adx = np.zeros_like(close)
+    adx[2*period-1] = np.mean(dx[period:2*period])
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels and trend
+    # Load 1d data once for ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
+    # Calculate ADX on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Camarilla levels: based on previous day's range
-    R1 = np.zeros_like(close_1d)
-    S1 = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            R1[i] = np.nan
-            S1[i] = np.nan
-        else:
-            range_val = high_1d[i-1] - low_1d[i-1]
-            close_prev = close_1d[i-1]
-            R1[i] = close_prev + (range_val * 1.1 / 12)
-            S1[i] = close_prev - (range_val * 1.1 / 12)
+    # Align ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 1-day EMA50 for trend filter
-    close_series = pd.Series(close_1d)
-    ema50_1d = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 6h EMA crossover
+    close_6h = prices['close'].values
+    ema9 = pd.Series(close_6h).ewm(span=9, adjust=False).values
+    ema21 = pd.Series(close_6h).ewm(span=21, adjust=False).values
     
-    # Align to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume confirmation: current volume > 1.5x average volume of last 4 periods
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=1).mean().values
+    # EMA crossover signal: 1 = golden cross, -1 = death cross
+    ema_cross = np.zeros(n)
+    for i in range(1, n):
+        if ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1]:
+            ema_cross[i] = 1  # golden cross
+        elif ema9[i] < ema21[i] and ema9[i-1] >= ema21[i-1]:
+            ema_cross[i] = -1  # death cross
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if NaN in critical values
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema50_1d_aligned[i]):
+    for i in range(30, n):
+        # Skip if ADX not available
+        if np.isnan(adx_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = prices['close'].iloc[i]
-        price_open = prices['open'].iloc[i]
-        R1_val = R1_aligned[i]
-        S1_val = S1_aligned[i]
-        ema50_val = ema50_1d_aligned[i]
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        
-        # Volume confirmation: at least 1.5x average volume
-        vol_confirmed = vol_ratio >= 1.5
+        adx = adx_1d_aligned[i]
+        cross_signal = ema_cross[i]
         
         if position == 0:
-            # Long: price closes above R1 + volume confirmation + price above 1-day EMA50
-            if price_close > R1_val and vol_confirmed and price_close > ema50_val:
+            # Enter long: golden cross + strong trend (ADX > 25)
+            if cross_signal == 1 and adx > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price closes below S1 + volume confirmation + price below 1-day EMA50
-            elif price_close < S1_val and vol_confirmed and price_close < ema50_val:
+            # Enter short: death cross + strong trend (ADX > 25)
+            elif cross_signal == -1 and adx > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below S1 (reversal) or loses volume momentum
-            if price_close < S1_val:
+            # Exit long: death cross or trend weakening (ADX < 20)
+            if cross_signal == -1 or adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above R1 (reversal) or loses volume momentum
-            if price_close > R1_val:
+            # Exit short: golden cross or trend weakening (ADX < 20)
+            if cross_signal == 1 or adx < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_VolumeFilter"
-timeframe = "12h"
+name = "6h_1d_ADX_Trend_Filter_V1"
+timeframe = "6h"
 leverage = 1.0
