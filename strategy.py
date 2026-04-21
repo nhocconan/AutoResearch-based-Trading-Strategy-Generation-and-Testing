@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_MeanReversion_Plus_Breakout_Filter
-Hypothesis: In 12h timeframe, price tends to mean-revert from daily S1/R1 levels with volume confirmation, but breaks through S4/R4 indicate strong momentum. Uses strict entry conditions to limit trades (target: 12-37/year). Works in bull/bear markets: fades extremes in range, captures breakouts in trends.
+4h_1D_Camarilla_R1S1_Breakout_Volume_Filter
+Hypothesis: Daily Camarilla pivot levels R1/S1 act as mean-reversion zones, while R4/S4 indicate breakout strength. Fade at R1/S1 with volume confirmation, breakout at R4/S4 with volume confirmation. Designed for low trade frequency (target: 12-37/year) to minimize fee drag in 4h timeframe. Works in both bull and bear markets by adapting to regime via price action at key levels.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Load daily data once for Camarilla pivot points
@@ -23,6 +23,12 @@ def generate_signals(prices):
     close_daily = df_daily['close'].values
     
     # Calculate daily Camarilla pivot levels
+    # P = (H + L + C) / 3
+    # Range = H - L
+    # R1 = P + (Range * 0.382)
+    # S1 = P - (Range * 0.382)
+    # R4 = P + (Range * 1.5000)
+    # S4 = P - (Range * 1.5000)
     P = (high_daily + low_daily + close_daily) / 3.0
     range_daily = high_daily - low_daily
     r1_daily = P + (range_daily * 0.382)
@@ -30,31 +36,31 @@ def generate_signals(prices):
     r4_daily = P + (range_daily * 1.5000)
     s4_daily = P - (range_daily * 1.5000)
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
     s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
     r4_daily_aligned = align_htf_to_ltf(prices, df_daily, r4_daily)
     s4_daily_aligned = align_htf_to_ltf(prices, df_daily, s4_daily)
     
-    # Main timeframe data (12h)
+    # Main timeframe data (4h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.8x 24-period average (24*12h = 12 days)
+    # Volume filter: current volume > 1.5x 6-period average (6*4h = 1 day)
     volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i >= 24:
-            volume_avg[i] = np.mean(volume[i-24:i])
+        if i >= 6:
+            volume_avg[i] = np.mean(volume[i-6:i])
         else:
             volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.8 * volume_avg)
+    volume_filter = volume > (1.5 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
+    for i in range(6, n):
         # Skip if NaN in critical values
         if (np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i]) or 
             np.isnan(r4_daily_aligned[i]) or np.isnan(s4_daily_aligned[i])):
@@ -71,38 +77,40 @@ def generate_signals(prices):
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Fade at S1/R1: mean reversion from daily support/resistance with volume
-            # Long: price shows rejection of S1 with volume confirmation
-            if price > s1 and price < (s1 + (r1 - s1) * 0.25) and vol_ok:
-                # Require bullish close (close > midpoint)
+            # Fade at R1/S1: mean reversion from extreme levels
+            # Long: price rejects S1 with volume confirmation (buying pressure)
+            if price > s1 and price < (s1 + (r1 - s1) * 0.3) and vol_ok:
+                # Additional confirmation: price closing near high of bar
                 if close[i] > (high[i] + low[i]) / 2:
                     signals[i] = 0.25
                     position = 1
-            # Short: price shows rejection of R1 with volume confirmation
-            elif price < r1 and price > (r1 - (r1 - s1) * 0.25) and vol_ok:
-                # Require bearish close (close < midpoint)
+            # Short: price rejects R1 with volume confirmation (selling pressure)
+            elif price < r1 and price > (r1 - (r1 - s1) * 0.3) and vol_ok:
+                # Additional confirmation: price closing near low of bar
                 if close[i] < (high[i] + low[i]) / 2:
                     signals[i] = -0.25
                     position = -1
-            # Breakout at S4/R4: strong momentum with volume
+            # Breakout at R4/S4: strong momentum continuation
+            # Long: price breaks above R4 with volume
             elif price > r4 and vol_ok:
                 signals[i] = 0.25
                 position = 1
+            # Short: price breaks below S4 with volume
             elif price < s4 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to S1 (mean reversion) or breaks below S4 (failed breakout)
-            if price < s1 or price < s4:
+            # Long exit: price returns to S1 (mean reversion) or breaks S4 (failed breakout)
+            if price < s1 or price > r4:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to R1 (mean reversion) or breaks above R4 (failed breakdown)
-            if price > r1 or price > r4:
+            # Short exit: price returns to R1 (mean reversion) or breaks S4 (failed breakdown)
+            if price > r1 or price < s4:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_MeanReversion_Plus_Breakout_Filter"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1S1_Breakout_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
