@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1H 4H Trend + Volume Spike + Price Channel Breakout
-Hypothesis: In trending markets (identified by 4h EMA alignment), 1h breakouts of 20-period price channels
-with volume spikes capture momentum moves. Works in bull (uptrend breakouts) and bear (downtrend breakdowns).
-Uses volume confirmation to avoid false breakouts. Low trade frequency via trend filter and volume spike requirement.
+6h Weekly Pivot R2/S2 Breakout with Volume and Momentum Confirmation
+Hypothesis: Weekly pivot points R2/S2 act as significant institutional support/resistance.
+Breakouts above R2 or below S2 with volume and momentum capture sustained moves in both bull and bear markets.
+Volume confirms institutional participation, momentum filters out weak breakouts. Designed for low trade frequency
+(~12-37/year) to minimize fee drag. Uses 6h timeframe for balance between signal quality and trade frequency.
 """
 
 import numpy as np
@@ -15,77 +16,87 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 4h data once for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load weekly data once for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # 4h EMA20 and EMA50 for trend direction
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Trend: 1 = uptrend (EMA20 > EMA50), -1 = downtrend (EMA20 < EMA50), 0 = no trend
-    trend_4h = np.where(ema20_4h > ema50_4h, 1, np.where(ema20_4h < ema50_4h, -1, 0))
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # 1h data
+    # Calculate weekly pivot points: P = (H+L+C)/3, R2 = P + (H-L), S2 = P - (H-L)
+    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
+    r2_weekly = pivot_weekly + (high_weekly - low_weekly)
+    s2_weekly = pivot_weekly - (high_weekly - low_weekly)
+    
+    # Align weekly pivot points to 6h timeframe
+    r2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r2_weekly)
+    s2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s2_weekly)
+    
+    # Main timeframe data (6h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1h price channels: highest high and lowest low of last 20 periods
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike: current volume > 2.0 x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma
+    # Momentum: 12-period ROC (rate of change)
+    roc = np.zeros_like(close)
+    for i in range(12, n):
+        roc[i] = (close[i] - close[i-12]) / close[i-12] * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(trend_4h_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r2_weekly_aligned[i]) or np.isnan(s2_weekly_aligned[i]) or np.isnan(roc[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
+        r2 = r2_weekly_aligned[i]
+        s2 = s2_weekly_aligned[i]
+        vol_current = volume[i]
+        
+        # Volume filter: current volume > 2.0x 24-period average (4 days)
+        vol_ma = np.mean(volume[max(0, i-24):i]) if i >= 24 else volume[i]
+        vol_ok = vol_current > 2.0 * vol_ma
+        
+        # Momentum filter: ROC > 0 for long, ROC < 0 for short
+        mom_long = roc[i] > 0
+        mom_short = roc[i] < 0
+        
         if position == 0:
-            # Look for breakouts in direction of 4h trend
-            if trend_4h_aligned[i] == 1:  # Uptrend
-                # Long breakout: price breaks above 20-period high with volume spike
-                if price > highest_high[i] and vol_spike[i]:
-                    signals[i] = 0.20
-                    position = 1
-            elif trend_4h_aligned[i] == -1:  # Downtrend
-                # Short breakdown: price breaks below 20-period low with volume spike
-                if price < lowest_low[i] and vol_spike[i]:
-                    signals[i] = -0.20
-                    position = -1
+            # Long breakout: price breaks above R2 with volume and momentum confirmation
+            if price > r2 and vol_ok and mom_long:
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown: price breaks below S2 with volume and momentum confirmation
+            elif price < s2 and vol_ok and mom_short:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price breaks below 20-period low or trend changes
-            if price < lowest_low[i] or trend_4h_aligned[i] == -1:
+            # Long exit: price breaks below S2 (failed breakout) or momentum reversal
+            if price < s2 or roc[i] < -1.0:  # momentum turns negative
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above 20-period high or trend changes
-            if price > highest_high[i] or trend_4h_aligned[i] == 1:
+            # Short exit: price breaks above R2 (failed breakdown) or momentum reversal
+            if price > r2 or roc[i] > 1.0:  # momentum turns positive
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1H_4HTrend_VolumeSpike_ChannelBreakout"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R2S2_Breakout_Volume_Momentum"
+timeframe = "6h"
 leverage = 1.0
