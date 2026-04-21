@@ -3,28 +3,39 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend filter with 1d RSI and 12h volume spike.
-# Long when KAMA trending up, RSI < 35 (oversold), and volume > 2x 20-period average.
-# Short when KAMA trending down, RSI > 65 (overbought), and volume > 2x 20-period average.
-# KAMA adapts to market noise, reducing whipsaws in ranging markets.
-# Volume spike confirms momentum behind the move.
-# Target: 20-40 trades/year by requiring adaptive trend + extreme RSI + volume confirmation.
+# Hypothesis: 1d Donchian(20) breakout with 1w ADX(14) trend filter and volume spike confirmation.
+# Long when price breaks above upper Donchian in uptrend (1w ADX > 25), short when breaks below lower Donchian in downtrend.
+# Volume > 1.5x 20-period average confirms breakout strength. Uses ADX to filter weak trends and avoid chop.
+# Target: 15-25 trades/year by requiring strong trend + volume + breakout alignment.
+# Works in bull/bear: ADX filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d RSI(14)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1w ADX(14) for trend strength filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Wilder's smoothing for RSI
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    
+    # Directional Movement
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = -np.diff(low_1w, prepend=low_1w[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) >= period:
@@ -33,45 +44,20 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    avg_gain = wilder_smooth(gain, 14)
-    avg_loss = wilder_smooth(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[0:13] = np.nan  # first 13 periods insufficient
+    atr = wilder_smooth(tr, 14)
+    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, 14)
     
-    # Align RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align ADX to 1d timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Calculate Kaufman's Adaptive Moving Average (KAMA) on 12h data
-    close = prices['close'].values
-    er_period = 10
-    fast_sc = 2 / (2 + 1)  # 2/(fast+1)
-    slow_sc = 2 / (30 + 1)  # 2/(slow+1)
-    
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=er_period, prepend=close[:er_period]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))[er_period-1:], axis=0) if hasattr(np.sum, 'axis') else np.nan
-    # Manual volatility sum for efficiency
-    volatility = np.zeros_like(close)
-    for i in range(er_period, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-er_period+1:i+1])))
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Smoothing Constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.full_like(close, np.nan, dtype=float)
-    kama[er_period] = close[er_period]  # seed
-    for i in range(er_period + 1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # KAMA direction: 1 if rising, -1 if falling, 0 if flat
-    kama_dir = np.where(kama > np.roll(kama, 1), 1, np.where(kama < np.roll(kama, 1), -1, 0))
-    kama_dir[0] = 0
-    
-    # Align KAMA direction to same index (already 12h)
-    # No alignment needed as KAMA is calculated on 12h data
+    # Calculate 20-period Donchian channels on 1d data
+    high_roll = prices['high'].rolling(window=20, min_periods=20).max()
+    low_roll = prices['low'].rolling(window=20, min_periods=20).min()
+    upper = high_roll.values
+    lower = low_roll.values
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -81,7 +67,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(rsi_aligned[i]) or np.isnan(kama_dir[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,31 +77,35 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 2x 20-period average
-        volume_confirm = volume > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume > 1.5 * vol_ma[i]
+        
+        # Trend filter: strong trend (ADX > 25)
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Long conditions: KAMA up, RSI oversold, volume spike
-            if kama_dir[i] == 1 and rsi_aligned[i] < 35 and volume_confirm:
-                signals[i] = 0.25
-                position = 1
-            # Short conditions: KAMA down, RSI overbought, volume spike
-            elif kama_dir[i] == -1 and rsi_aligned[i] > 65 and volume_confirm:
-                signals[i] = -0.25
-                position = -1
+            if volume_confirm and strong_trend:
+                # Long: price breaks above upper Donchian
+                if price > upper[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price breaks below lower Donchian
+                elif price < lower[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position != 0:
             # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if KAMA turns down or RSI becomes overbought
-                if kama_dir[i] == -1 or rsi_aligned[i] > 65:
+                # Exit if price breaks below lower Donchian (failed breakout) or weak trend
+                if price < lower[i] or adx_aligned[i] < 20:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if KAMA turns up or RSI becomes oversold
-                if kama_dir[i] == 1 or rsi_aligned[i] < 35:
+                # Exit if price breaks above upper Donchian (failed breakdown) or weak trend
+                if price > upper[i] or adx_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -127,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_Volume_Spike"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wADX14_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
