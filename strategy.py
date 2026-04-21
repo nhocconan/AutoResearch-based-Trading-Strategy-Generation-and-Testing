@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3/S3 breakout with 1-week volume confirmation and weekly trend filter.
-Long when price breaks above R3 with weekly volume > 1.5x 10-week average and weekly close > weekly EMA(20);
-Short when price breaks below S3 with same conditions reversed.
-Exit on opposite Camarilla break or 1.5x ATR stop.
-Designed for 15-25 trades/year to minimize fee drift while capturing institutional levels.
-Works in bull via breakouts and bear via breakdowns with institutional volume confirmation.
+Hypothesis: 4h Camarilla Pivot R1/S1 breakout with volume confirmation and trend filter.
+Long when price breaks above R1 with volume > 1.5x average and close > daily EMA(34);
+Short when price breaks below S1 with volume > 1.5x average and close < daily EMA(34).
+Exit on opposite pivot touch or 2x ATR stop. Designed for 25-35 trades/year to minimize fee drag.
+Works in bull markets via R1 breakouts and in bear via S1 breakdowns with volume confirmation.
 """
 
 import numpy as np
@@ -14,132 +13,112 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_ata(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly indicators for trend and volume
-    weekly_close = df_1w['close'].values
-    weekly_volume = df_1w['volume'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    
-    # Weekly EMA(20) for trend filter
-    weekly_ema_20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Weekly volume average (10-period)
-    weekly_vol_avg = pd.Series(weekly_volume).rolling(window=10, min_periods=10).mean().values
-    
-    # Daily data for Camarilla levels
+    # Load daily data ONCE before loop for pivot calculation and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate ATR for stop (daily)
-    tr1 = df_1d['high'].values - df_1d['low'].values
-    tr2 = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-    tr3 = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
+    # Calculate Camarilla pivots from previous day's OHLC
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
+    
+    # Camarilla levels
+    R1 = close_prev + (high_prev - low_prev) * 1.1 / 12
+    S1 = close_prev - (high_prev - low_prev) * 1.1 / 12
+    
+    # Align pivots to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Daily EMA(34) for trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Daily volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # ATR for stop (20-period on 4h)
+    tr1 = prices['high'].values - prices['low'].values
+    tr2 = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
+    tr3 = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_daily = pd.Series(tr).rolling(window=5, min_periods=5).mean().values
-    
-    # Align weekly indicators to 12h timeframe
-    weekly_ema_20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_20)
-    weekly_vol_avg_aligned = align_htf_to_ltf(prices, df_1w, weekly_vol_avg)
-    weekly_volume_aligned = align_htf_to_ltf(prices, df_1w, weekly_volume)
-    atr_daily_aligned = align_htf_to_ltf(prices, df_1d, atr_daily)
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(weekly_ema_20_aligned[i]) or np.isnan(weekly_vol_avg_aligned[i]) or
-            np.isnan(weekly_volume_aligned[i]) or np.isnan(atr_daily_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get current day's OHLC for Camarilla calculation
-        if i < len(df_1d):
-            day_idx = i // 2  # Approximate: 2x 12h bars per day
-            if day_idx >= len(df_1d):
-                day_idx = len(df_1d) - 1
-            if day_idx < 0:
-                continue
-                
-            prev_high = df_1d['high'].iloc[day_idx-1] if day_idx > 0 else df_1d['high'].iloc[0]
-            prev_low = df_1d['low'].iloc[day_idx-1] if day_idx > 0 else df_1d['low'].iloc[0]
-            prev_close = df_1d['close'].iloc[day_idx-1] if day_idx > 0 else df_1d['close'].iloc[0]
+        price_close = prices['close'].iloc[i]
+        price_high = prices['high'].iloc[i]
+        price_low = prices['low'].iloc[i]
+        
+        # Current daily volume aligned to 4h
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+        vol_1d_current = vol_1d_aligned[i]
+        
+        if position == 0:
+            # Enter long: break above R1 with volume surge and close > daily EMA34
+            if (price_high > R1_aligned[i] and 
+                vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
+                price_close > ema_34_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # Enter short: break below S1 with volume surge and close < daily EMA34
+            elif (price_low < S1_aligned[i] and 
+                  vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
+                  price_close < ema_34_aligned[i]):
+                signals[i] = -0.25
+                position = -1
+        
+        elif position != 0:
+            # Exit: opposite pivot touch or 2x ATR stop
+            exit_signal = False
             
-            # Calculate Camarilla levels
-            range_val = prev_high - prev_low
-            if range_val <= 0:
-                continue
-                
-            r3 = prev_close + (range_val * 1.1 / 4)
-            s3 = prev_close - (range_val * 1.1 / 4)
-            
-            price_close = prices['close'].iloc[i]
-            price_high = prices['high'].iloc[i]
-            price_low = prices['low'].iloc[i]
-            
-            # Current values
-            weekly_ema = weekly_ema_20_aligned[i]
-            weekly_vol_avg_val = weekly_vol_avg_aligned[i]
-            weekly_vol_current = weekly_volume_aligned[i]
-            atr_val = atr_daily_aligned[i]
-            
-            if position == 0:
-                # Enter long: break above R3 with volume surge and weekly close > weekly EMA20
-                if (price_high > r3 and 
-                    weekly_vol_current > 1.5 * weekly_vol_avg_val and
-                    weekly_close[min(len(weekly_close)-1, i//28)] > weekly_ema):  # Approximate weekly index
-                    signals[i] = 0.25
-                    position = 1
-                # Enter short: break below S3 with volume surge and weekly close < weekly EMA20
-                elif (price_low < s3 and 
-                      weekly_vol_current > 1.5 * weekly_vol_avg_val and
-                      weekly_close[min(len(weekly_close)-1, i//28)] < weekly_ema):
-                    signals[i] = -0.25
-                    position = -1
-            
-            elif position != 0:
-                # Exit: opposite Camarilla break or 1.5x ATR stop
-                exit_signal = False
-                
-                if position == 1:
-                    # Exit long: break below S3 OR price < entry - 1.5*ATR
-                    if price_low < s3:
-                        exit_signal = True
-                    else:
-                        entry_level = r3  # Approximate entry at R3 break
-                        if price_close < entry_level - 1.5 * atr_val:
-                            exit_signal = True
-                elif position == -1:
-                    # Exit short: break above R3 OR price > entry + 1.5*ATR
-                    if price_high > r3:
-                        exit_signal = True
-                    else:
-                        entry_level = s3  # Approximate entry at S3 break
-                        if price_close > entry_level + 1.5 * atr_val:
-                            exit_signal = True
-                
-                if exit_signal:
-                    signals[i] = 0.0
-                    position = 0
+            if position == 1:
+                # Exit long: touch S1 OR price < entry - 2*ATR
+                if price_low < S1_aligned[i]:
+                    exit_signal = True
                 else:
-                    # Hold position
-                    signals[i] = 0.25 if position == 1 else -0.25
+                    # Track entry approximation: use R1 as entry level for long
+                    entry_level = R1_aligned[i-1] if i >= 1 else R1_aligned[0]
+                    if price_close < entry_level - 2.0 * atr[i]:
+                        exit_signal = True
+            elif position == -1:
+                # Exit short: touch R1 OR price > entry + 2*ATR
+                if price_high > R1_aligned[i]:
+                    exit_signal = True
+                else:
+                    # Track entry approximation: use S1 as entry level for short
+                    entry_level = S1_aligned[i-1] if i >= 1 else S1_aligned[0]
+                    if price_close > entry_level + 2.0 * atr[i]:
+                        exit_signal = True
+            
+            if exit_signal:
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12h_Camarilla_R3S3_VolumeSurge1.5x_WeeklyEMA20Trend_ATR1.5x"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_Volume1.5x_EMA34Trend_ATR2x"
+timeframe = "4h"
 leverage = 1.0
