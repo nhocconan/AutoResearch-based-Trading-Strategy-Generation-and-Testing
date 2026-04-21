@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_EMA34_VolumeSpike_ATRStop_v5
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20-period MA).
-Uses ATR-based stop (2.0x) and minimum holding period of 2 bars to reduce churn.
-Designed for 4h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
-Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drift.
+1d_KAMA_Trend_RSI_ChopFilter_v1
+Hypothesis: Daily KAMA trend direction + RSI(14) extremes + Choppiness Index regime filter.
+KAMA adapts to market noise, reducing whipsaw in sideways markets. RSI>70 or <30 with trend alignment captures momentum extremes. Choppiness Index > 61.8 avoids trend-following in strong ranges. Works in both bull/bear by requiring trend alignment and avoiding false signals in chop.
+Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag on 1d timeframe.
 """
 
 import numpy as np
@@ -16,119 +15,105 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # === 1d EMA34 for trend regime ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # === 4h ATR (14-period) for stoploss ===
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # === KAMA (10, 2, 30) for trend direction ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
+    # Pad arrays to match length
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(1, np.nan), volatility])
+    volatility = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # === Volume confirmation (1.8x 20-period MA) ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === RSI(14) ===
+    delta = np.diff(close)
+    delta = np.concatenate([np.full(1, np.nan), delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === 4h Camarilla pivot levels (R1, S1) ===
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+    # === Choppiness Index (14) ===
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
+    # Avoid division by zero
+    chop = np.where((hh - ll) != 0, chop, 50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
     
-    for i in range(100, n):
+    for i in range(14, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(r1[i]) or np.isnan(s1[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
         price = close[i]
-        volume_now = volume[i]
-        ema_34_1d_val = ema_34_1d_aligned[i]
-        vol_avg = vol_ma[i]
-        r1_val = r1[i]
-        s1_val = s1[i]
-        
-        # Volume confirmation: current volume > 1.8x average (balanced threshold)
-        volume_confirm = volume_now > 1.8 * vol_avg
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        chop_val = chop[i]
         
         if position == 0:
-            # Long: price breaks above R1, above 1d EMA34, volume confirm
-            long_condition = (price > r1_val) and (price > ema_34_1d_val) and volume_confirm
-            # Short: price breaks below S1, below 1d EMA34, volume confirm
-            short_condition = (price < s1_val) and (price < ema_34_1d_val) and volume_confirm
+            # Long: price above KAMA (uptrend), RSI > 70 (overbought but momentum), chop < 61.8 (trending market)
+            long_condition = (price > kama_val) and (rsi_val > 70) and (chop_val < 61.8)
+            # Short: price below KAMA (downtrend), RSI < 30 (oversold but momentum), chop < 61.8 (trending market)
+            short_condition = (price < kama_val) and (rsi_val < 30) and (chop_val < 61.8)
             
             if long_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-                bars_since_entry = 0
             elif short_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
-                bars_since_entry = 0
         
         elif position != 0:
-            bars_since_entry += 1
-            
-            # Minimum holding period of 2 bars to reduce churn
-            if bars_since_entry < 2:
-                signals[i] = 0.25 if position == 1 else -0.25
-                continue
-            
-            # Check stoploss (2.0x ATR)
+            # Exit conditions
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                # Exit long: price below KAMA (trend change) or RSI < 50 (momentum loss)
+                if price < kama_val or rsi_val < 50:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
-                # Trend reversal exit (price below 1d EMA34)
-                elif price < ema_34_1d_val:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                # Exit short: price above KAMA (trend change) or RSI > 50 (momentum loss)
+                if price > kama_val or rsi_val > 50:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
-                # Trend reversal exit (price above 1d EMA34)
-                elif price > ema_34_1d_val:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_EMA34_VolumeSpike_ATRStop_v5"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
