@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_RSI_Pullback_1dTrend_Volume
-Hypothesis: Use RSI(14) pullbacks to 40-60 range on 12h with 1d EMA50 trend filter and volume confirmation. Captures mean reversion within strong trends, works in bull/bear by following higher timeframe trend. Target 15-35 trades/year on 12h.
+4h_Camarilla_R1_S1_Breakout_12hEMA20_Trend_Volume
+Hypothesis: Use Camarilla pivot levels (R1/S1) from 12h timeframe as entry triggers on 4h, with 12h EMA20 trend filter and volume confirmation. Designed to capture breakouts from key 12h pivot levels in trending markets, with volume surge confirming institutional interest. Target 18-45 trades/year on 4h.
 """
 
 import numpy as np
@@ -10,30 +10,35 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # === 1d trend filter: 50-period EMA ===
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 12h trend filter: 20-period EMA ===
+    close_12h = df_12h['close'].values
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    # === RSI(14) on 12h ===
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # === Calculate Camarilla pivot levels (R1, S1) from 12h OHLC ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === Volume confirmation: 20-period volume average ===
+    # Pivot point calculation
+    pp = (high_12h + low_12h + close_12h) / 3.0
+    r1 = close_12h + (high_12h - low_12h) * 1.1 / 12
+    s1 = close_12h - (high_12h - low_12h) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    
+    # === Volume confirmation: 20-period volume average on 4h ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.where(vol_ma_20 != 0, volume / vol_ma_20, 1.0)
@@ -41,10 +46,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):  # Start after EMA warmup
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(rsi[i]) or
+        if (np.isnan(ema_20_12h_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -52,30 +58,32 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        trend_1d = ema_50_1d_aligned[i]
-        rsi_val = rsi[i]
+        trend_12h = ema_20_12h_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: RSI pullback to 40-50 in uptrend + volume spike
-            if (40 <= rsi_val <= 50 and 
-                price_close > trend_1d and 
-                vol_spike > 1.8):
+            # Long: Price breaks above R1 + volume spike > 1.5 + price above 12h EMA20
+            if (price_close > r1_level and 
+                vol_spike > 1.5 and 
+                price_close > trend_12h):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI pullback to 50-60 in downtrend + volume spike
-            elif (50 <= rsi_val <= 60 and 
-                  price_close < trend_1d and 
-                  vol_spike > 1.8):
+            # Short: Price breaks below S1 + volume spike > 1.5 + price below 12h EMA20
+            elif (price_close < s1_level and 
+                  vol_spike > 1.5 and 
+                  price_close < trend_12h):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when RSI reaches opposite extreme (60 for long, 40 for short)
-            if position == 1 and rsi_val >= 60:
+            # Exit when price returns to pivot point (PP)
+            pp_level = pp_aligned[i]
+            if position == 1 and price_close < pp_level:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and rsi_val <= 40:
+            elif position == -1 and price_close > pp_level:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_RSI_Pullback_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA20_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
