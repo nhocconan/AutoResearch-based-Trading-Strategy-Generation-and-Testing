@@ -3,50 +3,77 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray with 1d regime filter and 1w volume confirmation.
-# Elder Ray = Bull Power (High - EMA13) and Bear Power (EMA13 - Low).
-# In bull regime (price > 1d EMA50): go long when Bull Power rises and volume confirms.
-# In bear regime (price < 1d EMA50): go short when Bear Power rises and volume confirms.
-# Uses 1w volume spike to filter for institutional participation.
-# Works in both bull and bear by adapting to regime.
-# Target: 20-40 trades/year by requiring regime alignment + Elder Ray expansion + volume spike.
+# Hypothesis: 6h ADX + 1d Williams Alligator combo.
+# ADX(14) > 25 signals trend presence (avoids chop). 
+# Williams Alligator: Jaw(13), Teeth(8), Lips(5) SMAs on median price.
+# Long when price > Teeth and Teeth > Lips and ADX rising.
+# Short when price < Teeth and Teeth < Lips and ADX rising.
+# Uses 1d Alligator for higher timeframe trend filter, ADX on 6h for entry timing.
+# Target: 25-40 trades/year by requiring strong trend + alignment.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d for EMA50 (regime) and EMA13 (Elder Ray)
+    # Load 1d for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Load 1w for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Calculate Williams Alligator on 1d
+    median_price_1d = (df_1d['high'].values + df_1d['low'].values) / 2
+    jaw = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().values  # Blue line (13)
+    teeth = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().values    # Red line (8)
+    lips = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().values     # Green line (5)
     
-    # Calculate daily EMA50 for regime filter
-    close_d = df_1d['close'].values
-    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align Alligator lines to 6h
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Calculate daily EMA13 for Elder Ray
-    ema13_d = pd.Series(close_d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Weekly volume for confirmation
-    vol_w = df_1w['volume'].values
-    vol_ma_20_1w = pd.Series(vol_w).rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1d indicators to 6h
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_d)
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_d)
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
-    
-    # Calculate Elder Ray components using 6h high/low and aligned daily EMA13
+    # Calculate ADX on 6h
     high = prices['high'].values
     low = prices['low'].values
-    bull_power = high - ema13_1d_aligned  # High - EMA13
-    bear_power = ema13_1d_aligned - low   # EMA13 - Low
+    close = prices['close'].values
+    
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth TR, DM+, DM- (Wilder smoothing = EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Adx rising: current > previous
+    adx_rising = adx > np.roll(adx, 1)
+    adx_rising[0] = False
+    
+    # Alligator alignment signals
+    # Bullish: price > teeth and teeth > lips
+    bullish_align = (close > teeth_1d_aligned) & (teeth_1d_aligned > lips_1d_aligned)
+    # Bearish: price < teeth and teeth < lips
+    bearish_align = (close < teeth_1d_aligned) & (teeth_1d_aligned < lips_1d_aligned)
     
     # Pre-compute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -54,10 +81,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(14, n):  # Start after ADX warmup
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema13_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1w_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,27 +100,13 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Current values
-        vol_current = align_htf_to_ltf(prices, df_1w, vol_w)[i]  # weekly volume aligned to 6h
-        
-        # Regime filter: price vs daily EMA50
-        bull_regime = prices['close'].iloc[i] > ema50_1d_aligned[i]
-        bear_regime = prices['close'].iloc[i] < ema50_1d_aligned[i]
-        
-        # Elder Ray strength: current vs previous bar
-        bull_rising = bull_power[i] > bull_power[i-1]
-        bear_rising = bear_power[i] > bear_power[i-1]
-        
-        # Volume confirmation: current volume > 1.8x 20-week average
-        volume_confirm = vol_current > 1.8 * vol_ma_20_1w_aligned[i]
-        
         if position == 0:
-            # Enter long in bull regime when Bull Power rising with volume
-            if bull_regime and bull_rising and volume_confirm:
+            # Enter long: bullish alignment + ADX > 25 + ADX rising
+            if bullish_align[i] and adx[i] > 25 and adx_rising[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short in bear regime when Bear Power rising with volume
-            elif bear_regime and bear_rising and volume_confirm:
+            # Enter short: bearish alignment + ADX > 25 + ADX rising
+            elif bearish_align[i] and adx[i] > 25 and adx_rising[i]:
                 signals[i] = -0.25
                 position = -1
         
@@ -102,16 +115,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Bear Power starts rising (shift to bearish) OR volume drops
-                if bear_power[i] > bear_power[i-1]:  # Bear Power rising
-                    exit_signal = True
-                elif vol_current < vol_ma_20_1w_aligned[i]:  # Volume drop
+                # Exit long: loss of bullish alignment OR ADX < 20
+                if not bullish_align[i] or adx[i] < 20:
                     exit_signal = True
             elif position == -1:
-                # Exit short: Bull Power starts rising (shift to bullish) OR volume drops
-                if bull_power[i] > bull_power[i-1]:  # Bull Power rising
-                    exit_signal = True
-                elif vol_current < vol_ma_20_1w_aligned[i]:  # Volume drop
+                # Exit short: loss of bearish alignment OR ADX < 20
+                if not bearish_align[i] or adx[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -123,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dRegime_1wVolume"
+name = "6h_ADX_WilliamsAlligator"
 timeframe = "6h"
 leverage = 1.0
