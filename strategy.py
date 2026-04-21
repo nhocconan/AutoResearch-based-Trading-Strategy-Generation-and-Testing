@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_ChopFilter_v1
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction, RSI(14) for momentum confirmation, and Choppiness Index(14) for regime filtering. Enter long when KAMA slopes up, RSI > 50, and market is trending (CHOP < 38.2). Enter short when KAMA slopes down, RSI < 50, and CHOP < 38.2. Exit on opposite signal. Uses 1w EMA200 as higher timeframe trend filter to avoid counter-trend trades in strong weekly trends. Designed for low trade frequency (~10-20/year) to minimize fee drag and work in both bull and bear markets by adapting to trending regimes only.
+6h_Ichimoku_Kumo_Breakout_1dTrend_VolumeConfirm_v1
+Hypothesis: Ichimoku cloud breakout with 1d EMA50 trend filter and volume confirmation on 6h timeframe.
+Cloud acts as dynamic support/resistance; TK cross provides entry timing. Uses 1d HTF for trend alignment.
+Designed for low trade frequency (~15-30/year) to minimize fee drag and work in both bull/bear regimes.
 """
 
 import numpy as np
@@ -13,117 +15,106 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop: 1w for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1w EMA200 for higher timeframe trend filter ===
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # === 1d trend filter: 50-period EMA ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Daily KAMA (10, 2, 30) ===
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    close = prices['close'].values
-    direction = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
-    # Correct ER calculation over 10 periods
-    er = np.zeros_like(close)
-    for i in range(10, n):
-        if i >= 10:
-            net_change = abs(close[i] - close[i-10])
-            total_change = np.sum(np.abs(np.diff(close[i-10:i+1])))
-            er[i] = net_change / total_change if total_change != 0 else 0
-    # SC = [ER * (fastest - slowest) + slowest]^2
-    fastest = 2.0 / (2 + 1)
-    slowest = 2.0 / (30 + 1)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    kama_aligned = kama  # already LTF
+    # === 1d volume average (20-period) for spike detection ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d[np.isnan(vol_ma_1d)] = 1.0  # avoid division by zero
+    vol_ratio_1d = volume_1d / vol_ma_1d
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # === Daily RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = rsi  # already LTF
-    
-    # === Daily Choppiness Index(14) ===
+    # === Ichimoku components (9, 26, 52 periods on 6h) ===
     high = prices['high'].values
     low = prices['low'].values
-    atr = np.zeros_like(close)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = np.zeros_like(close)
-    for i in range(14, n):
-        atr_sum = np.sum(atr[i-13:i+1])
-        hhll = highest_high[i] - lowest_low[i]
-        chop[i] = 100 * np.log10(atr_sum / hhll) / np.log10(14) if hhll != 0 else 50
-    chop_aligned = chop  # already LTF
+    close = prices['close'].values
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    # For signals, we use current price vs cloud (no look-ahead needed for cloud)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_200_1w_aligned[i]) or
-            np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ratio_1d_aligned[i]) or
+            np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = close[i]
-        kama_now = kama_aligned[i]
-        kama_prev = kama_aligned[i-1]
-        rsi_now = rsi_aligned[i]
-        chop_now = chop_aligned[i]
-        weekly_trend = ema_200_1w_aligned[i]
+        price_high = high[i]
+        price_low = low[i]
+        trend_1d = ema_50_1d_aligned[i]
+        vol_spike = vol_ratio_1d_aligned[i]
         
-        # KAMA slope: rising if today > yesterday
-        kama_rising = kama_now > kama_prev
-        kama_falling = kama_now < kama_prev
+        # Cloud boundaries (Senkou Span A/B)
+        upper_cloud = max(senkou_a[i], senkou_b[i])
+        lower_cloud = min(senkou_a[i], senkou_b[i])
         
-        # Regime filter: only trade in trending markets (CHOP < 38.2)
-        trending_regime = chop_now < 38.2
+        # TK Cross
+        tk_cross = tenkan[i] > kijun[i]
+        tk_cross_prev = tenkan[i-1] > kijun[i-1] if i > 0 else False
+        tk_cross_up = tk_cross and not tk_cross_prev  # Bullish cross
+        tk_cross_down = not tk_cross and tk_cross_prev  # Bearish cross
         
         if position == 0:
-            # Long: KAMA rising, RSI > 50, trending regime, price above weekly EMA200
-            if kama_rising and rsi_now > 50 and trending_regime and price_close > weekly_trend:
+            # Long: price above cloud + bullish TK cross + volume spike + price above 1d EMA50
+            if price_close > upper_cloud and tk_cross_up and vol_spike > 2.0 and price_close > trend_1d:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling, RSI < 50, trending regime, price below weekly EMA200
-            elif kama_falling and rsi_now < 50 and trending_regime and price_close < weekly_trend:
+            # Short: price below cloud + bearish TK cross + volume spike + price below 1d EMA50
+            elif price_close < lower_cloud and tk_cross_down and vol_spike > 2.0 and price_close < trend_1d:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit on opposite signal
-            if position == 1 and (not kama_rising or rsi_now < 50):
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and (not kama_falling or rsi_now > 50):
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Exit when price re-enters cloud or TK cross reverses
+            if position == 1:
+                if price_close < lower_cloud or not tk_cross:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # position == -1
+                if price_close > upper_cloud or tk_cross:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
