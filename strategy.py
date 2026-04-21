@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h weekly pivot breakout with volume confirmation and daily EMA(50) trend filter.
-Long when price breaks above weekly R1 with volume > 2x average and close > daily EMA(50);
-Short when price breaks below weekly S1 with volume > 2x average and close < daily EMA(50).
-Exit on opposite weekly pivot touch or 2x ATR stop. Weekly pivots provide stronger institutional levels,
-reducing false breaks and capturing longer-term trends. Designed for 15-25 trades/year to minimize fee drag.
-Works in bull markets via upward breakouts and in bear via downward breakdowns with volume confirmation.
+Hypothesis: 6h weekly Camarilla pivot reversal with volume confirmation and daily VWAP filter.
+Long when price touches weekly S3 with volume > 1.5x average and close > daily VWAP;
+Short when price touches weekly R3 with volume > 1.5x average and close < daily VWAP.
+Exit when price returns to weekly pivot or 1.5x ATR stop. Weekly Camarilla levels (S3/R3) represent
+strong institutional support/resistance where reversals often occur. Volume surge confirms institutional
+participation. Designed for 15-25 trades/year to minimize fee drag. Works in ranging markets via
+mean reversion at extremes and in trending markets via continuation after pullbacks to S3/R3.
 """
 
 import numpy as np
@@ -17,34 +18,41 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for pivot calculation
+    # Load weekly data ONCE before loop for Camarilla calculation
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate weekly pivot levels (using prior week's OHLC)
+    # Calculate weekly Camarilla levels (using prior week's OHLC)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
+    # Camarilla pivot levels
+    range_1w = high_1w - low_1w
     pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = close_1w + (high_1w - low_1w) * 1.1 / 12.0
-    s1 = close_1w - (high_1w - low_1w) * 1.1 / 12.0
+    # S3 and R3 are the key reversal levels
+    s3 = close_1w - range_1w * 1.1 / 2.0
+    r3 = close_1w + range_1w * 1.1 / 2.0
+    # Pivot for exit
+    pivot_val = pivot
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align weekly Camarilla levels to 6h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_val)
     
-    # Load daily data ONCE before loop for EMA filter
+    # Load daily data ONCE before loop for VWAP filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Daily VWAP (typical price * volume cumulative)
+    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    vwap_num = np.cumsum(typical_price * df_1d['volume'].values)
+    vwap_den = np.cumsum(df_1d['volume'].values)
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
     
     # Daily volume average (20-period)
     vol_1d = df_1d['volume'].values
@@ -65,9 +73,9 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(vwap_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,40 +90,40 @@ def generate_signals(prices):
         vol_1d_current = vol_1d_aligned[i]
         
         if position == 0:
-            # Enter long: break above weekly R1 with volume surge and close > daily EMA50
-            if (price_high > r1_aligned[i] and 
-                vol_1d_current > 2.0 * vol_ma_20_aligned[i] and
-                price_close > ema_50_aligned[i]):
+            # Enter long: touch weekly S3 with volume surge and close > daily VWAP
+            if (price_low <= s3_aligned[i] and 
+                vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
+                price_close > vwap_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below weekly S1 with volume surge and close < daily EMA50
-            elif (price_low < s1_aligned[i] and 
-                  vol_1d_current > 2.0 * vol_ma_20_aligned[i] and
-                  price_close < ema_50_aligned[i]):
+            # Enter short: touch weekly R3 with volume surge and close < daily VWAP
+            elif (price_high >= r3_aligned[i] and 
+                  vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
+                  price_close < vwap_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: opposite weekly pivot touch or 2x ATR stop
+            # Exit: return to weekly pivot or 1.5x ATR stop
             exit_signal = False
             
             if position == 1:
-                # Exit long: touch weekly S1 OR price < entry - 2*ATR
-                if price_low < s1_aligned[i]:
+                # Exit long: touch weekly pivot OR price < entry - 1.5*ATR
+                if price_low <= pivot_aligned[i]:
                     exit_signal = True
                 else:
-                    # Track entry approximation: use R1 as entry level for long
-                    entry_level = r1_aligned[i-1] if i >= 1 else r1_aligned[0]
-                    if price_close < entry_level - 2.0 * atr[i]:
+                    # Track entry approximation: use S3 as entry level for long
+                    entry_level = s3_aligned[i-1] if i >= 1 else s3_aligned[0]
+                    if price_close < entry_level - 1.5 * atr[i]:
                         exit_signal = True
             elif position == -1:
-                # Exit short: touch weekly R1 OR price > entry + 2*ATR
-                if price_high > r1_aligned[i]:
+                # Exit short: touch weekly pivot OR price > entry + 1.5*ATR
+                if price_high >= pivot_aligned[i]:
                     exit_signal = True
                 else:
-                    # Track entry approximation: use S1 as entry level for short
-                    entry_level = s1_aligned[i-1] if i >= 1 else s1_aligned[0]
-                    if price_close > entry_level + 2.0 * atr[i]:
+                    # Track entry approximation: use R3 as entry level for short
+                    entry_level = r3_aligned[i-1] if i >= 1 else r3_aligned[0]
+                    if price_close > entry_level + 1.5 * atr[i]:
                         exit_signal = True
             
             if exit_signal:
@@ -127,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1_S1_Breakout_1dEMA50_Trend_Volume2x"
+name = "6h_WeeklyCamarilla_S3_R3_Reversal_1dVWAP_Volume1.5x"
 timeframe = "6h"
 leverage = 1.0
