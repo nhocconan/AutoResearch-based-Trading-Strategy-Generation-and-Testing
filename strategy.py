@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_ChopFilter_v1
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-RSI(14) for momentum confirmation, and Choppiness Index(14) for regime filtering.
-Only take longs when price > KAMA, RSI > 50, and CHOP < 61.8 (trending regime).
-Only take shorts when price < KAMA, RSI < 50, and CHOP < 61.8.
-In choppy regimes (CHOP >= 61.8), remain flat to avoid whipsaw.
-Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to limit drawdown and fee drag.
-Designed to work in both bull and bear markets by adapting to trending regimes only.
-Timeframe: 1d, uses 1w HTF for trend filter (EMA34 on weekly close).
-Target: 30-100 total trades over 4 years = 7-25/year.
+6h_Donchian20_Breakout_WeeklyPivotDirection_VolumeFilter_v2
+Hypothesis: 6h Donchian(20) breakout filtered by 1w pivot direction (R1/S1) and volume spike.
+In weekly uptrend (price > weekly R1): long breakouts above 20-period high.
+In weekly downtrend (price < weekly S1): short breakouts below 20-period low.
+Volume confirmation (>1.5x average) filters false breakouts. Works in both bull/bear by aligning with weekly structure.
+Discrete position sizing (0.25) and ATR(14) stoploss (2.0x) limit fee drag and drawdown.
+Target: 75-150 total trades over 4 years = 19-38/year.
 """
 
 import numpy as np
@@ -18,90 +15,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA34 trend filter)
+    # Load HTF data ONCE before loop (1d for weekly pivot via Camarilla on 1d resampled? No, use actual 1w from mtf_data)
+    # Since we need weekly pivot, get 1d data then compute weekly Camarilla from it? But mtf_data only gives specific TFs.
+    # Alternative: use 1d to approximate weekly? Not accurate.
+    # Check available TFs: 5m,15m,30m,1h,4h,6h,12h,1d, HTF ref: 1w
+    # So we can get 1w data via get_htf_data(prices, '1w')? The description says HTF ref: all above + 1w.
+    # Yes, 1w is available as HTF reference.
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w < 60):
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 1w OHLC for EMA34 trend filter ===
+    # === 1w OHLC for Camarilla pivot (R1/S1) ===
+    df_1w_high = df_1w['high'].values
+    df_1w_low = df_1w['low'].values
     df_1w_close = df_1w['close'].values
-    ema_34_1w = pd.Series(df_1w_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === KAMA (10, 2, 30) on daily close ===
-    close = prices['close'].values
-    direction = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) > 1 else np.zeros_like(close)
-    # Avoid division by zero
-    er = np.where(volatility != 0, direction / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    range_1w = df_1w_high - df_1w_low
+    r1_1w = df_1w_close + 0.275 * range_1w
+    s1_1w = df_1w_close - 0.275 * range_1w
     
-    # === RSI(14) on daily close ===
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Handle first 14 values
-    rsi[:14] = 50.0
+    # Align 1w Camarilla levels to 6h timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # === Choppiness Index(14) ===
+    # === 6h Donchian(20) ===
     high = prices['high'].values
     low = prices['low'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = np.where(atr_sum != 0, -100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14), 50)
-    # Handle first 14 values
-    chop[:14] = 50.0
+    close = prices['close'].values
     
-    # === ATR(14) for stoploss ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Donchian channels: 20-period high/low
+    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === Volume confirmation (20-period average) ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === ATR (14-period) for stoploss ===
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) 
-            or np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) 
+            or np.isnan(dc_high[i]) or np.isnan(dc_low[i]) 
+            or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        chop_val = chop[i]
-        ema_trend = ema_34_1w_aligned[i]
+        volume_now = volume[i]
+        r1w = r1_1w_aligned[i]
+        s1w = s1_1w_aligned[i]
+        dch = dc_high[i]
+        dcl = dc_low[i]
+        vol_avg = vol_ma[i]
         
-        # Only trade in trending regime (CHOP < 61.8)
-        trending_regime = chop_val < 61.8
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirmed = volume_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: price > KAMA, RSI > 50, trending regime, and weekly trend alignment (price > weekly EMA34)
-            long_condition = (price > kama_val) and (rsi_val > 50) and trending_regime and (price > ema_trend)
-            # Short: price < KAMA, RSI < 50, trending regime, and weekly trend alignment (price < weekly EMA34)
-            short_condition = (price < kama_val) and (rsi_val < 50) and trending_regime and (price < ema_trend)
+            # Weekly uptrend: price > weekly R1 -> look for long breakouts
+            # Weekly downtrend: price < weekly S1 -> look for short breakouts
+            weekly_uptrend = price > r1w
+            weekly_downtrend = price < s1w
+            
+            long_condition = weekly_uptrend and (price > dch) and volume_confirmed
+            short_condition = weekly_downtrend and (price < dcl) and volume_confirmed
             
             if long_condition:
                 signals[i] = 0.25
@@ -113,32 +105,32 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Stoploss (2.0x ATR)
+            # Stoploss: 2.0x ATR
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price < kama_val:
+            # Exit if weekly trend reverses
+            elif price < r1w:
                 signals[i] = 0.0
                 position = 0
-            # Regime change to choppy
-            elif chop_val >= 61.8:
+            # Mean reversion exit at Donchian low (oversold bounce)
+            elif price < dcl:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Stoploss (2.0x ATR)
+            # Stoploss: 2.0x ATR
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price > kama_val:
+            # Exit if weekly trend reverses
+            elif price > s1w:
                 signals[i] = 0.0
                 position = 0
-            # Regime change to choppy
-            elif chop_val >= 61.8:
+            # Mean reversion exit at Donchian high (overbought bounce)
+            elif price > dch:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -146,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Direction_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_WeeklyPivotDirection_VolumeFilter_v2"
+timeframe = "6h"
 leverage = 1.0
