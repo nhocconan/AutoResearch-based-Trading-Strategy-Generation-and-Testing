@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Reverse_Cross_With_Volume_Filter
-Hypothesis: Kaufman Adaptive Moving Average (KAMA) adapts to market noise, providing reliable trend signals.
-Go long when KAMA turns up from below price with volume confirmation; short when KAMA turns down from above price.
-Use 1-week ADX > 20 to filter for trending markets only. Designed for low trade frequency (7-25 trades/year) to minimize fee drag.
-Works in bull markets by catching trends and in bear markets by avoiding whipsaws via ADX filter.
+4h_Donchian_Breakout_Volume_Trend_Filter
+Hypothesis: Donchian channel breakouts capture strong trends, volume confirms institutional participation,
+and 1-day ADX filters for trending regimes. Works in bull markets by catching breakouts and in bear markets
+by avoiding false signals via ADX filter. Targets low trade frequency (20-50/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -21,26 +20,22 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1-week ADX(14) for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1-day ADX(14) for trend filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate directional movement
-    high_diff = np.diff(high_1w)
-    low_diff = -np.diff(low_1w)  # inverted for calculation
+    high_diff = np.diff(high_1d)
+    low_diff = -np.diff(low_1d)
     
     plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
     minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
     
     # True range
-    tr1 = np.abs(np.diff(high_1w))
-    tr2 = np.abs(np.diff(low_1w))
-    tr3 = np.abs(np.diff(close_1w))
+    tr1 = np.abs(np.diff(high_1d))
+    tr2 = np.abs(np.diff(low_1d))
+    tr3 = np.abs(np.diff(close_1d))
     tr = np.maximum.reduce([tr1, tr2, tr3])
     
     # Add first element (no diff)
@@ -53,9 +48,7 @@ def generate_signals(prices):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
             return result
-        # First value is simple average
         result[period-1] = np.nanmean(arr[1:period]) if period > 1 else arr[0]
-        # Wilder smoothing: today = (yesterday * (period-1) + today) / period
         for i in range(period, len(arr)):
             if np.isnan(result[i-1]) or np.isnan(arr[i]):
                 result[i] = np.nan
@@ -64,82 +57,59 @@ def generate_signals(prices):
         return result
     
     period = 14
-    atr_1w = wilder_smooth(tr, period)
-    plus_di = 100 * wilder_smooth(plus_dm, period) / atr_1w
-    minus_di = 100 * wilder_smooth(minus_dm, period) / atr_1w
+    atr_1d = wilder_smooth(tr, period)
+    plus_di = 100 * wilder_smooth(plus_dm, period) / atr_1d
+    minus_di = 100 * wilder_smooth(minus_dm, period) / atr_1d
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_1w = wilder_smooth(dx, period)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    adx_1d = wilder_smooth(dx, period)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # === 1d KAMA(10,2,30) ===
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d))
-    abs_change = np.abs(np.diff(close_1d))
-    direction = np.abs(np.diff(close_1d, 10))  # 10-period net change
-    volatility = np.nansum(abs_change.reshape(-1, 10), axis=1)  # 10-period sum of absolute changes
-    # Pad arrays
-    change = np.concatenate([[0], change])
-    direction = np.concatenate([np.zeros(9), direction])
-    volatility = np.concatenate([np.zeros(9), volatility])
-    er = np.where(volatility != 0, direction / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = np.nan
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # === 4h Donchian(20) channels ===
+    # Use rolling window on 4h data via high/low from prices (already 4h)
+    high_max = pd.Series(prices['high'].values).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(prices['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Volume spike detection ===
-    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = df_1d['volume'].values / vol_ma
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    # === 4h Volume confirmation ===
+    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = prices['volume'].values / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if indicators not ready
-        if (np.isnan(kama_aligned[i]) or
-            np.isnan(adx_1w_aligned[i]) or
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        kama_val = kama_aligned[i]
-        adx_val = adx_1w_aligned[i]
-        vol_ratio_val = vol_ratio_aligned[i]
+        price_open = prices['open'].iloc[i]
+        adx_val = adx_1d_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Long: KAMA turns up (price crosses above KAMA from below) with volume confirmation and trending market
-            if (price_close > kama_val and 
-                prices['close'].iloc[i-1] <= kama_aligned[i-1] and  # was below or equal yesterday
-                vol_ratio_val > 1.5 and 
-                adx_val > 20):
+            # Long: price breaks above Donchian high with volume and trend
+            if (price_close > high_max[i] and
+                vol_ratio_val > 1.5 and
+                adx_val > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turns down (price crosses below KAMA from above) with volume confirmation and trending market
-            elif (price_close < kama_val and 
-                  prices['close'].iloc[i-1] >= kama_aligned[i-1] and  # was above or equal yesterday
-                  vol_ratio_val > 1.5 and 
-                  adx_val > 20):
+            # Short: price breaks below Donchian low with volume and trend
+            elif (price_close < low_min[i] and
+                  vol_ratio_val > 1.5 and
+                  adx_val > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price crosses KAMA in opposite direction
-            if position == 1 and price_close < kama_val:
+            # Exit when price returns to opposite Donchian level
+            if position == 1 and price_close < low_min[i]:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > kama_val:
+            elif position == -1 and price_close > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -148,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Reverse_Cross_With_Volume_Filter"
-timeframe = "1d"
+name = "4h_Donchian_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
