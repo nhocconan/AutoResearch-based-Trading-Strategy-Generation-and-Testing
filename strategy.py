@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_B
+4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_V1
 Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-period MA).
-Long when price breaks above R1, above 1d EMA50, and volume > 2.0x average.
-Short when price breaks below S1, below 1d EMA50, and volume > 2.0x average.
 Uses ATR-based stop (2.0x) and minimum holding period of 3 bars to reduce churn.
 Designed for 4h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
 Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
