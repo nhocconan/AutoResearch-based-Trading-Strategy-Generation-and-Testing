@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_RSI2_MeanReversion_1dTrendFilter_VolumeSpike_v1
-Hypothesis: On 6h timeframe, use 2-period RSI for extreme mean reversion signals (RSI<10 for long, RSI>90 for short) 
-filtered by 1d EMA34 trend regime and volume confirmation (>2.0x 20-period average). 
-In bull trend (price > EMA34): favor long mean reversion pullsbacks. 
-In bear trend (price < EMA34): favor short mean reversion bounces. 
-Volume spike confirms institutional participation during reversal. 
-Discrete sizing (0.25) targets 50-100 trades/year to balance opportunity with fee drag minimization.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts aligned with 1d EMA34 trend and confirmed by volume spikes (2.0x 20-period average) capture multi-day momentum with controlled trade frequency. Uses ATR-based stoploss (2.0x) to manage risk. Discrete sizing (0.25) targets 12-37 trades/year to minimize fee drag and improve generalization across bull/bear markets.
 """
 
 import numpy as np
@@ -28,32 +23,31 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 6h close, high, low ===
-    close = prices['close'].values
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # === 6h ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 6h volume confirmation (volume > 2.0x 20-period average) ===
+    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 6h RSI(2) for mean reversion signals ===
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # === 12h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,7 +57,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(volume_confirmed[i]) or np.isnan(rsi_values[i])):
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,7 +66,8 @@ def generate_signals(prices):
         
         price = close[i]
         ema_34_1d_val = ema_34_1d_aligned[i]
-        rsi_val = rsi_values[i]
+        r1_val = r1[i]
+        s1_val = s1[i]
         vol_conf = volume_confirmed[i]
         
         # Trend regime
@@ -81,13 +76,13 @@ def generate_signals(prices):
         
         if position == 0:
             if is_bull:
-                # Bull trend: look for long mean reversion (RSI oversold)
-                long_condition = (rsi_val < 10) and vol_conf
-                short_condition = False  # Avoid shorts in bull trend
-            else:  # bear trend
-                # Bear trend: look for short mean reversion (RSI overbought)
-                short_condition = (rsi_val > 90) and vol_conf
-                long_condition = False   # Avoid longs in bear trend
+                # Bull regime: long breakouts favored
+                long_condition = (price > r1_val) and vol_conf
+                short_condition = (price < s1_val) and vol_conf and (price < ema_34_1d_val * 0.995)  # stricter for shorts
+            else:  # bear regime
+                # Bear regime: short breakdowns favored
+                short_condition = (price < s1_val) and vol_conf
+                long_condition = (price > r1_val) and vol_conf and (price > ema_34_1d_val * 1.005)  # stricter for longs
             
             if long_condition:
                 signals[i] = 0.25
@@ -108,26 +103,26 @@ def generate_signals(prices):
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.5x ATR)
+            # Check stoploss (2.0x ATR)
             if position == 1:
-                if price < entry_price - 2.5 * atr[i]:
+                if price < entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if RSI returns to neutral (50) - mean reversion complete
-                elif rsi_val >= 50:
+                # Exit if price breaks below S1 (failed breakout)
+                elif price < s1_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.5 * atr[i]:
+                if price > entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if RSI returns to neutral (50) - mean reversion complete
-                elif rsi_val <= 50:
+                # Exit if price breaks above R1 (failed breakdown)
+                elif price > r1_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -136,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI2_MeanReversion_1dTrendFilter_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
