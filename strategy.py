@@ -1,7 +1,3 @@
-# 1. Hypothesis:
-# Strategy type: 12h timeframe with 1h/4h multi-timeframe confluence, using Williams %R for mean reversion and Donchian breakout for trend confirmation.
-# Why it should work in both bull and bear: Williams %R identifies overbought/oversold conditions for mean reversion in ranging markets, while Donchian breakout with volume confirmation captures strong trends. The combination adapts to market regimes, reducing whipsaws in sideways markets and capturing momentum in trending markets. Volume confirmation filters low-conviction moves. Designed for moderate trade frequency (~15-30 trades/year) to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -12,100 +8,120 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1h data ONCE before loop for entry timing
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 14:
+    # Load daily data ONCE before loop for pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Williams %R(14) on 1h for mean reversion signals
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1h) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    williams_r_1h_aligned = align_htf_to_ltf(prices, df_1h, williams_r)
+    # Typical price
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla range
+    range_1d = high_1d - low_1d
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Camarilla levels (based on previous day)
+    # R4 = close + 1.5 * range
+    # R3 = close + 1.1 * range
+    # R2 = close + 0.6 * range
+    # R1 = close + 0.3 * range
+    # S1 = close - 0.3 * range
+    # S2 = close - 0.6 * range
+    # S3 = close - 1.1 * range
+    # S4 = close - 1.5 * range
     
-    # Donchian Channel(20) on 4h for trend confirmation
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    r1 = close_1d + 0.3 * range_1d
+    r2 = close_1d + 0.6 * range_1d
+    r3 = close_1d + 1.1 * range_1d
+    r4 = close_1d + 1.5 * range_1d
+    s1 = close_1d - 0.3 * range_1d
+    s2 = close_1d - 0.6 * range_1d
+    s3 = close_1d - 1.1 * range_1d
+    s4 = close_1d - 1.5 * range_1d
     
-    # Upper band: highest high over past 20 periods
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over past 20 periods
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Align to 6h timeframe (previous day's levels available at next 6h bar)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    donchian_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    
-    # Volume confirmation: current volume vs 20-period average on 1h
-    vol_1h = df_1h['volume'].values
-    vol_ma_20 = pd.Series(vol_1h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = vol_1h / vol_ma_20
-    vol_ratio_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_ratio)
+    # Volume confirmation: volume / 20-period average volume
+    vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = prices['volume'].values / vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if indicators not ready
-        if (np.isnan(williams_r_1h_aligned[i]) or 
-            np.isnan(donchian_upper_4h_aligned[i]) or 
-            np.isnan(donchian_lower_4h_aligned[i]) or 
-            np.isnan(vol_ratio_1h_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        williams_r_val = williams_r_1h_aligned[i]
-        upper_band = donchian_upper_4h_aligned[i]
-        lower_band = donchian_lower_4h_aligned[i]
-        vol_ratio_val = vol_ratio_1h_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long: Williams %R oversold (< -80) + price above Donchian lower band + volume confirmation
-            if (williams_r_val < -80 and 
-                price_close > lower_band and 
-                vol_ratio_val > 1.3):
-                signals[i] = 0.25
-                position = 1
-            # Enter short: Williams %R overbought (> -20) + price below Donchian upper band + volume confirmation
-            elif (williams_r_val > -20 and 
-                  price_close < upper_band and 
-                  vol_ratio_val > 1.3):
-                signals[i] = -0.25
-                position = -1
+            # Enter long at S3/S4 bounce or break above R4
+            if vol_ratio_val > 1.3:  # Volume confirmation
+                # Bounce from S3 (strong support)
+                if price_close > s3_aligned[i] and price_close < s2_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Breakout above R4 (strong bullish)
+                elif price_close > r4_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Bounce from S4 (extreme support)
+                elif price_close > s4_aligned[i] and price_close < s3_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short at R3/R4 rejection or break below S4
+            elif vol_ratio_val > 1.3:  # Volume confirmation
+                # Rejection at R3 (strong resistance)
+                if price_close < r3_aligned[i] and price_close > r2_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+                # Breakdown below S4 (strong bearish)
+                elif price_close < s4_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+                # Rejection at R4 (extreme resistance)
+                elif price_close < r4_aligned[i] and price_close > r3_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position != 0:
             # Exit conditions
-            if position == 1:
-                # Exit long: Williams %R overbought (> -20) or price breaks below Donchian lower band
-                if williams_r_val > -20 or price_close < lower_band:
+            if position == 1:  # Long position
+                # Exit if price reaches R1 (first resistance) or breaks below S1
+                if price_close >= r1_aligned[i] or price_close <= s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
+                # Hold
                 else:
-                    signals[i] = 0.25  # Hold long
-            elif position == -1:
-                # Exit short: Williams %R oversold (< -80) or price breaks above Donchian upper band
-                if williams_r_val < -80 or price_close > upper_band:
+                    signals[i] = 0.25
+            elif position == -1:  # Short position
+                # Exit if price reaches S1 (first support) or breaks above R1
+                if price_close <= s1_aligned[i] or price_close >= r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
+                # Hold
                 else:
-                    signals[i] = -0.25  # Hold short
+                    signals[i] = -0.25
     
     return signals
 
-name = "12h_WilliamsR_Donchian_Volume_Confluence"
-timeframe = "12h"
+name = "6h_Camarilla_S3_S4_R3_R4_Bounce_Breakout"
+timeframe = "6h"
 leverage = 1.0
