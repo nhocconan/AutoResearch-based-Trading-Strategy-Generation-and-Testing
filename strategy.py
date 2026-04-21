@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_MeanReversion_with_Breakout_Filter
-Hypothesis: In 12h timeframe, price tends to mean-revert from daily Camarilla R1/S1 levels with volume confirmation, but only when intraday volatility is low (ATR-based filter). Breakouts at R4/S4 are ignored to avoid false signals in ranging markets. This reduces trade frequency and improves selectivity, targeting 15-35 trades/year. Works in both bull and bear markets by fading extremes rather than chasing momentum.
+1d_1W_Camarilla_R1S1_Breakout_R4S4_Extension
+Hypothesis: Daily Camarilla pivot levels R1/S1 act as mean-reversion zones, while R4/S4 indicate breakout strength. Fade at R1/S1 with volume confirmation, breakout at R4/S4 with volume confirmation. Designed for low trade frequency (target: 10-25/year) to minimize fee drag in daily timeframe. Works in both bull and bear markets by adapting to regime via price action at key levels.
 """
 
 import numpy as np
@@ -10,7 +10,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
+        return np.zeros(n)
+    
+    # Load weekly data once for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
     # Load daily data once for Camarilla pivot points
@@ -22,57 +27,54 @@ def generate_signals(prices):
     low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
     
-    # Calculate daily Camarilla pivot levels R1 and S1 only
+    # Calculate daily Camarilla pivot levels
+    # P = (H + L + C) / 3
+    # Range = H - L
+    # R1 = P + (Range * 0.382)
+    # S1 = P - (Range * 0.382)
+    # R4 = P + (Range * 1.5000)
+    # S4 = P - (Range * 1.5000)
     P = (high_daily + low_daily + close_daily) / 3.0
     range_daily = high_daily - low_daily
     r1_daily = P + (range_daily * 0.382)
     s1_daily = P - (range_daily * 0.382)
+    r4_daily = P + (range_daily * 1.5000)
+    s4_daily = P - (range_daily * 1.5000)
     
-    # Align daily R1/S1 to 12h timeframe
+    # Align daily Camarilla levels to daily timeframe (no shift needed as daily data aligns with itself)
     r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
     s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
+    r4_daily_aligned = align_htf_to_ltf(prices, df_daily, r4_daily)
+    s4_daily_aligned = align_htf_to_ltf(prices, df_daily, s4_daily)
     
-    # Main timeframe data (12h)
+    # Weekly trend filter: price above/below weekly EMA34
+    close_weekly = df_weekly['close'].values
+    ema34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    
+    # Main timeframe data (daily)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volatility filter: use 12-period ATR to avoid choppy markets
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < 12:
-            atr[i] = np.mean(tr[:i+1]) if i > 0 else tr[0]
-        else:
-            atr[i] = np.mean(tr[i-12:i])
-    # Normalize ATR by price to get % volatility
-    vol_percent = atr / close
-    # Only trade when volatility is below median (avoid high-chop periods)
-    vol_median = np.percentile(vol_percent[~np.isnan(vol_percent)], 50) if np.sum(~np.isnan(vol_percent)) > 0 else 0.02
-    low_vol_filter = vol_percent <= vol_median
-    
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 1.5x 20-day average
     volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
         if i >= 20:
             volume_avg[i] = np.mean(volume[i-20:i])
         else:
             volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.3 * volume_avg)
-    
-    # Combined filter: low volatility AND volume confirmation
-    filter_ok = low_vol_filter & volume_filter
+    volume_filter = volume > (1.5 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(34, n):
         # Skip if NaN in critical values
-        if (np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i])):
+        if (np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i]) or 
+            np.isnan(r4_daily_aligned[i]) or np.isnan(s4_daily_aligned[i]) or
+            np.isnan(ema34_weekly_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,33 +83,46 @@ def generate_signals(prices):
         price = close[i]
         r1 = r1_daily_aligned[i]
         s1 = s1_daily_aligned[i]
-        filt = filter_ok[i]
+        r4 = r4_daily_aligned[i]
+        s4 = s4_daily_aligned[i]
+        ema34 = ema34_weekly_aligned[i]
+        vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: price rejects S1 with volume and low volatility
-            if price > s1 and price < (s1 + (r1 - s1) * 0.25) and filt:
-                # Require bullish close (close > midpoint)
+            # Fade at R1/S1: mean reversion from extreme levels
+            # Long: price rejects S1 with volume confirmation (buying pressure)
+            if price > s1 and price < (s1 + (r1 - s1) * 0.3) and vol_ok:
+                # Additional confirmation: price closing near high of bar
                 if close[i] > (high[i] + low[i]) / 2:
                     signals[i] = 0.25
                     position = 1
-            # Short: price rejects R1 with volume and low volatility
-            elif price < r1 and price > (r1 - (r1 - s1) * 0.25) and filt:
-                # Require bearish close (close < midpoint)
+            # Short: price rejects R1 with volume confirmation (selling pressure)
+            elif price < r1 and price > (r1 - (r1 - s1) * 0.3) and vol_ok:
+                # Additional confirmation: price closing near low of bar
                 if close[i] < (high[i] + low[i]) / 2:
                     signals[i] = -0.25
                     position = -1
+            # Breakout at R4/S4: strong momentum continuation with weekly trend filter
+            # Long: price breaks above R4 with volume AND above weekly EMA34
+            elif price > r4 and vol_ok and price > ema34:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below S4 with volume AND below weekly EMA34
+            elif price < s4 and vol_ok and price < ema34:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price returns to midpoint or breaks above R1 (failure)
-            if price < (r1 + s1) / 2 or price > r1:
+            # Long exit: price returns to S1 (mean reversion) or breaks S4 (failed breakout) or weekly trend turns bearish
+            if price < s1 or price > r4 or price < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to midpoint or breaks below S1 (failure)
-            if price > (r1 + s1) / 2 or price < s1:
+            # Short exit: price returns to R1 (mean reversion) or breaks S4 (failed breakdown) or weekly trend turns bullish
+            if price > r1 or price < s4 or price > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_MeanReversion_with_Breakout_Filter"
-timeframe = "12h"
+name = "1d_1W_Camarilla_R1S1_Breakout_R4S4_Extension"
+timeframe = "1d"
 leverage = 1.0
