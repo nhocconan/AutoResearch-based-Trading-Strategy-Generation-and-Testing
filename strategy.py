@@ -1,97 +1,75 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_VolumeFilter_Tight
-Hypothesis: Camarilla pivot levels (R1/S1) from 1d timeframe act as key intraday support/resistance. 
-Breakout above R1 or below S1 with volume confirmation on 12h provides high-probability trend continuation. 
-Volume filter reduces false breakouts. Works in bull/bear by taking both long and short breakouts.
+4h_RSI_Pullback_Trend_Filter_V1
+Hypothesis: In trending markets (4h), RSI pullbacks to the 50 level provide high-probability entries with the trend. Uses 12h EMA200 as trend filter to avoid counter-trend trades. Works in bull/bear by only taking trades aligned with higher timeframe trend. Low frequency (~25 trades/year) minimizes fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """
-    Calculate Camarilla pivot levels:
-    P = (High + Low + Close) / 3
-    R1 = Close + (High - Low) * 1.1 / 12
-    S1 = Close - (High - Low) * 1.1 / 12
-    """
-    typical = (high + low + close) / 3
-    range_val = high - low
-    R1 = close + range_val * 1.1 / 12
-    S1 = close - range_val * 1.1 / 12
-    return R1, S1
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data once for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 200:
         return np.zeros(n)
     
-    # Calculate Camarilla levels on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA200 on 12h close
+    close_12h = df_12h['close'].values
+    ema200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
     
-    R1_1d, S1_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    # 4h RSI(14)
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align Camarilla levels to 12h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
-    
-    # 12h volume average for confirmation
-    volume_12h = prices['volume'].values
-    vol_avg = np.zeros_like(volume_12h)
-    for i in range(len(volume_12h)):
-        start = max(0, i - 19)  # 20-period average
-        vol_avg[i] = np.mean(volume_12h[start:i+1])
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if NaN in critical values
-        if np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or np.isnan(vol_avg[i]):
+    for i in range(200, n):
+        # Skip if EMA not ready
+        if np.isnan(ema200_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        volume = volume_12h[i]
-        R1 = R1_1d_aligned[i]
-        S1 = S1_1d_aligned[i]
-        vol_average = vol_avg[i]
-        
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirm = volume > 1.5 * vol_average
+        price = close[i]
+        rsi_val = rsi[i]
+        ema200 = ema200_12h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation
-            if price > R1 and volume_confirm:
+            # Long: price above 12h EMA200 + RSI pulls back to 50 from above
+            if price > ema200 and 45 <= rsi_val <= 55 and rsi[i-1] > 55:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume confirmation
-            elif price < S1 and volume_confirm:
+            # Short: price below 12h EMA200 + RSI pulls back to 50 from below
+            elif price < ema200 and 45 <= rsi_val <= 55 and rsi[i-1] < 45:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price drops below S1 (reversal signal)
-            if price < S1:
+            # Long exit: RSI reaches overbought or trend breaks
+            if rsi_val >= 70 or price < ema200:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 (reversal signal)
-            if price > R1:
+            # Short exit: RSI reaches oversold or trend breaks
+            if rsi_val <= 30 or price > ema200:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_VolumeFilter_Tight"
-timeframe = "12h"
+name = "4h_RSI_Pullback_Trend_Filter_V1"
+timeframe = "4h"
 leverage = 1.0
