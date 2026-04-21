@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Pivot_R2S2_Breakout_Volume_ADXFilter
-Hypothesis: Daily pivot levels R2/S2 act as key resistance/support zones. Breakouts above R2 or below S2 with volume and ADX trend confirmation capture strong moves. Works in bull markets via upside breakouts and in bear markets via downside breakdowns. Low trade frequency target (10-30/year) minimizes fee drag.
+12h_1d_Camarilla_R1S1_Breakout_R4S4_Extension
+Hypothesis: Daily Camarilla pivot levels R1/S1 act as mean-reversion zones, while R4/S4 indicate breakout strength. Fade at R1/S1 with volume confirmation, breakout at R4/S4 with volume confirmation. Designed for low trade frequency (target: 12-37/year) to minimize fee drag in 12h timeframe. Works in both bull and bear markets by adapting to regime via price action at key levels.
 """
 
 import numpy as np
@@ -13,94 +13,46 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for ADX trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 14:
-        return np.zeros(n)
-    
-    # Calculate weekly ADX (14)
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_w[1:] - low_w[1:])
-    tr2 = np.abs(high_w[1:] - close_w[:-1])
-    tr3 = np.abs(low_w[1:] - close_w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    # Directional Movement
-    up_move = high_w[1:] - high_w[:-1]
-    down_move = low_w[:-1] - low_w[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        smoothed = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return smoothed
-        smoothed[period-1] = np.nansum(arr[1:period])  # first seed
-        for i in range(period, len(arr)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
-        return smoothed
-    
-    tr_smooth = smooth_wilder(tr, 14)
-    plus_dm_smooth = smooth_wilder(plus_dm, 14)
-    minus_dm_smooth = smooth_wilder(minus_dm, 14)
-    
-    # DI and DX
-    plus_di = np.where(tr_smooth != 0, (plus_dm_smooth / tr_smooth) * 100, 0)
-    minus_di = np.where(tr_smooth != 0, (minus_dm_smooth / tr_smooth) * 100, 0)
-    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    
-    # ADX: smoothed DX
-    adx = np.full_like(dx, np.nan, dtype=float)
-    if len(dx) >= 14:
-        adx[13] = np.nanmean(dx[1:14])  # first seed
-        for i in range(14, len(dx)):
-            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align weekly ADX to daily
-    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
-    
-    # Load daily data for pivot points
+    # Load daily data once for Camarilla pivot points
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 2:
         return np.zeros(n)
     
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Calculate daily pivot points (standard)
+    # Calculate daily Camarilla pivot levels
     # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # R2 = P + (H - L)
-    # S2 = P - (H - L)
-    P = (high_d + low_d + close_d) / 3.0
-    r2 = P + (high_d - low_d)
-    s2 = P - (high_d - low_d)
+    # Range = H - L
+    # R1 = P + (Range * 0.382)
+    # S1 = P - (Range * 0.382)
+    # R4 = P + (Range * 1.5000)
+    # S4 = P - (Range * 1.5000)
+    P = (high_daily + low_daily + close_daily) / 3.0
+    range_daily = high_daily - low_daily
+    r1_daily = P + (range_daily * 0.382)
+    s1_daily = P - (range_daily * 0.382)
+    r4_daily = P + (range_daily * 1.5000)
+    s4_daily = P - (range_daily * 1.5000)
     
-    # Align daily pivot levels
-    r2_aligned = align_htf_to_ltf(prices, df_daily, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_daily, s2)
+    # Align daily Camarilla levels to 12h timeframe
+    r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
+    s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
+    r4_daily_aligned = align_htf_to_ltf(prices, df_daily, r4_daily)
+    s4_daily_aligned = align_htf_to_ltf(prices, df_daily, s4_daily)
     
-    # Main timeframe data (1d)
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-day average
-    volume_avg = np.full_like(volume, np.nan, dtype=float)
+    # Volume filter: current volume > 1.5x 24-period average (24*12h = 12 days)
+    volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i >= 20:
-            volume_avg[i] = np.mean(volume[i-20:i])
+        if i >= 24:
+            volume_avg[i] = np.mean(volume[i-24:i])
         else:
             volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
     volume_filter = volume > (1.5 * volume_avg)
@@ -108,62 +60,64 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(24, n):
         # Skip if NaN in critical values
-        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i]) or 
+            np.isnan(r4_daily_aligned[i]) or np.isnan(s4_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
-        adx_val = adx_aligned[i]
+        r1 = r1_daily_aligned[i]
+        s1 = s1_daily_aligned[i]
+        r4 = r4_daily_aligned[i]
+        s4 = s4_daily_aligned[i]
         vol_ok = volume_filter[i]
         
-        # ADX filter: only trade when trending (ADX > 25)
-        trend_ok = adx_val > 25
-        
         if position == 0:
-            # Long breakout above R2
-            if price > r2 and vol_ok and trend_ok:
+            # Fade at R1/S1: mean reversion from extreme levels
+            # Long: price rejects S1 with volume confirmation (buying pressure)
+            if price > s1 and price < (s1 + (r1 - s1) * 0.3) and vol_ok:
+                # Additional confirmation: price closing near high of bar
+                if close[i] > (high[i] + low[i]) / 2:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: price rejects R1 with volume confirmation (selling pressure)
+            elif price < r1 and price > (r1 - (r1 - s1) * 0.3) and vol_ok:
+                # Additional confirmation: price closing near low of bar
+                if close[i] < (high[i] + low[i]) / 2:
+                    signals[i] = -0.25
+                    position = -1
+            # Breakout at R4/S4: strong momentum continuation
+            # Long: price breaks above R4 with volume
+            elif price > r4 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown below S2
-            elif price < s2 and vol_ok and trend_ok:
+            # Short: price breaks below S4 with volume
+            elif price < s4 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to pivot point or breaks below S2 (failed breakout)
-            P_daily = (high_d + low_d + close_d) / 3.0
-            P_aligned = align_htf_to_ltf(prices, df_daily, P_daily)
-            if not np.isnan(P_aligned[i]):
-                if price < P_aligned[i] or price < s2:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: price returns to S1 (mean reversion) or breaks S4 (failed breakout)
+            if price < s1 or price > r4:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to pivot point or breaks above R2 (failed breakdown)
-            P_daily = (high_d + low_d + close_d) / 3.0
-            P_aligned = align_htf_to_ltf(prices, df_daily, P_daily)
-            if not np.isnan(P_aligned[i]):
-                if price > P_aligned[i] or price > r2:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: price returns to R1 (mean reversion) or breaks S4 (failed breakdown)
+            if price > r1 or price < s4:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "1d_Pivot_R2S2_Breakout_Volume_ADXFilter"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1S1_Breakout_R4S4_Extension"
+timeframe = "12h"
 leverage = 1.0
