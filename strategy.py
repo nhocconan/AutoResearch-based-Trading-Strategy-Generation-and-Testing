@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1d_TRIX_VolumeSpike_Regime
-Hypothesis: TRIX on 4h with volume spike confirmation and 1d Choppiness regime filter.
-Long when TRIX crosses above zero with volume > 2x average and 1d chop > 61.8 (range).
-Short when TRIX crosses below zero with volume > 2x average and 1d chop < 38.2 (trend).
-Exit on opposite TRIX cross.
-Designed for 4h to capture momentum in ranging markets and avoid whipsaws in strong trends.
-Volume spike filters low-conviction moves. Regime filter adapts to market conditions.
+1d_1W_Weekly_Camarilla_R1S1_Breakout_Volume_TrendFilter_v1
+Hypothesis: Weekly timeframe determines trend direction via price position relative to 20-week SMA.
+Daily timeframe provides entry signals via breakouts of weekly-derived Camarilla levels (R1, S1) with volume confirmation.
+In uptrend (price > weekly SMA20), only long breakouts above R1 are taken.
+In downtrend (price < weekly SMA20), only short breakdowns below S1 are taken.
+This avoids counter-trend trades in strong trends, reducing whipsaws. Volume filter ensures breakout strength.
+Designed for 1d timeframe to capture multi-week moves with ~10-25 trades/year.
+Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
 """
 
 import numpy as np
@@ -18,57 +19,50 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Calculate TRIX on 4h (15-period EMA of 15-period EMA of 15-period EMA of close, then ROC)
-    close = prices['close'].values
-    # First EMA
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # Second EMA
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # Third EMA
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # TRIX = 100 * (ema3 - ema3_previous) / ema3_previous
-    trix_raw = np.full_like(close, np.nan)
-    trix_raw[15:] = 100 * (ema3[15:] - ema3[14:-1]) / ema3[14:-1]
-    
-    # Load 1d data for Choppiness index
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load weekly data once for trend filter and Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Choppiness Index (14-period)
-    atr_1d = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        atr_1d[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
-    # Smoothed ATR (14-period)
-    atr_smoothed = pd.Series(atr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    # Chop = 100 * log10(sum(atr14) / (max(high14) - min(low14))) / log10(14)
-    sum_atr14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    chop = np.full_like(close_1d, np.nan)
-    denominator = highest_high - lowest_low
-    chop[13:] = 100 * np.log10(sum_atr14[13:] / denominator[13:]) / np.log10(14)
+    # Weekly SMA20 for trend filter
+    close_s_1w = pd.Series(close_1w)
+    sma20_1w = close_s_1w.rolling(window=20, min_periods=20).mean().values
     
-    # Align TRIX and Chop to 4h
-    trix_aligned = align_htf_to_ltf(prices, prices, trix_raw)  # Already 4h, no alignment needed but safe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Weekly Camarilla pivot levels (based on previous week)
+    pp = np.full_like(close_1w, np.nan)
+    r1 = np.full_like(close_1w, np.nan)
+    s1 = np.full_like(close_1w, np.nan)
+    
+    for i in range(1, len(high_1w)):
+        pp[i] = (high_1w[i-1] + low_1w[i-1] + close_1w[i-1]) / 3.0
+        r1[i] = close_1w[i-1] + (high_1w[i-1] - low_1w[i-1]) * 1.1 / 12.0
+        s1[i] = close_1w[i-1] - (high_1w[i-1] - low_1w[i-1]) * 1.1 / 12.0
+    
+    # Shift to align with current week (levels based on previous week)
+    pp = np.roll(pp, 1)
+    r1 = np.roll(r1, 1)
+    s1 = np.roll(s1, 1)
+    pp[0] = np.nan
+    r1[0] = np.nan
+    s1[0] = np.nan
+    
+    # Align weekly indicators to daily timeframe
+    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(trix_aligned[i-1])):
+        if (np.isnan(sma20_1w_aligned[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,38 +71,38 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2x 20-period average
+        # Volume filter: current volume > 1.5 * 20-day average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
-        # TRIX crossover signals
-        trix_cross_up = trix_aligned[i-1] <= 0 and trix_aligned[i] > 0
-        trix_cross_down = trix_aligned[i-1] >= 0 and trix_aligned[i] < 0
+        # Trend filter: price relative to weekly SMA20
+        uptrend = price > sma20_1w_aligned[i]
+        downtrend = price < sma20_1w_aligned[i]
         
         if position == 0:
-            # Long conditions: TRIX crosses up + volume + chop > 61.8 (range)
-            if trix_cross_up and volume_ok and chop_aligned[i] > 61.8:
+            # Long conditions: break above R1 + volume confirmation + uptrend filter
+            if price > r1_aligned[i] and volume_ok and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: TRIX crosses down + volume + chop < 38.2 (trend)
-            elif trix_cross_down and volume_ok and chop_aligned[i] < 38.2:
+            # Short conditions: break below S1 + volume confirmation + downtrend filter
+            elif price < s1_aligned[i] and volume_ok and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: TRIX crosses below zero
-            if trix_cross_down:
+            # Long exit: price crosses back below weekly pivot point
+            if price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: TRIX crosses above zero
-            if trix_cross_up:
+            # Short exit: price crosses back above weekly pivot point
+            if price > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_TRIX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "1d_1W_Weekly_Camarilla_R1S1_Breakout_Volume_TrendFilter_v1"
+timeframe = "1d"
 leverage = 1.0
