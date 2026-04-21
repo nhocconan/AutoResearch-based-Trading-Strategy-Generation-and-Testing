@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_R1S1_Breakout_Volume_Trend_Tight
-Hypothesis: Use weekly Camarilla pivot levels (R1/S1) for breakout signals on daily timeframe.
-Long when price breaks above weekly R1 with volume > 1.5x 20-day average and ADX > 25 (trending).
-Short when price breaks below weekly S1 with volume > 1.5x 20-day average and ADX > 25.
-Exit when price crosses back through the weekly pivot point.
-Designed for daily to limit trade frequency (target: 7-25/year) and reduce fee drift.
-Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
+6h_1d_Camarilla_R1S1_Breakout_Volume_ADX
+Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout signals on 6h timeframe.
+Long when price breaks above R1 with volume > 1.5x 20-period average and ADX > 25.
+Short when price breaks below S1 with volume > 1.5x 20-period average and ADX > 25.
+Exit when price crosses back through the daily pivot point (PP).
+ADX regime filter avoids whipsaws in ranging markets. Designed for 6h to limit trade
+frequency (target: 12-37/year) and reduce fee drift. Works in bull markets by buying
+breakouts and in bear markets by selling breakdowns.
 """
 
 import numpy as np
@@ -18,19 +19,19 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data once for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous week's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
@@ -44,10 +45,10 @@ def generate_signals(prices):
     s1 = prev_close - 1.1 * rang / 12
     pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    # Align to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
     # ADX for regime filter (trending vs ranging)
     if len(prices) < 14:
@@ -78,9 +79,7 @@ def generate_signals(prices):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
-        # First value is simple average
         result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
         for i in range(period, len(data)):
             if not np.isnan(result[i-1]) and not np.isnan(data[i]):
                 result[i] = result[i-1] - (result[i-1]/period) + data[i]
@@ -152,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Camarilla_R1S1_Breakout_Volume_Trend_Tight"
-timeframe = "1d"
+name = "6h_1d_Camarilla_R1S1_Breakout_Volume_ADX"
+timeframe = "6h"
 leverage = 1.0
