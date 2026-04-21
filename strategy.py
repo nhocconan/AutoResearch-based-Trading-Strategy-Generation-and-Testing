@@ -3,114 +3,77 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d Supertrend + Volume Spike
-# Long when Williams %R < -80 (oversold) + price > Supertrend + volume > 1.5x 20-day avg
-# Short when Williams %R > -20 (overbought) + price < Supertrend + volume > 1.5x 20-day avg
-# Williams %R identifies reversals, Supertrend filters direction, volume confirms conviction
-# Works in both bull (buy oversold dips) and bear (sell overbought rallies) markets
-# Target: 15-25 trades/year by requiring all three conditions
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
+# Long when price breaks above 20-period high AND weekly pivot trend is up AND volume > 1.5x average
+# Short when price breaks below 20-period low AND weekly pivot trend is down AND volume > 1.5x average
+# Exit when price crosses back through the 20-period midpoint or opposite breakout occurs
+# Weekly pivot trend: price > weekly pivot = bullish, price < weekly pivot = bearish
+# This captures strong momentum moves in alignment with higher timeframe structure
+# Volume ensures conviction, reducing false breakouts
+# Target: 15-30 trades/year by requiring confluence of breakout, trend, and volume
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1d Williams %R (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot point (standard formula)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
+    weekly_pivot = (high_weekly + low_weekly + close_weekly) / 3.0
     
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    # Align weekly pivot to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
     
-    # Calculate 1d Supertrend (ATR=10, multiplier=3.0)
-    atr_period = 10
-    multiplier = 3.0
-    
-    # True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Basic Upper and Lower Bands
-    basic_ub = (high_1d + low_1d) / 2 + multiplier * atr
-    basic_lb = (high_1d + low_1d) / 2 - multiplier * atr
-    
-    # Final Supertrend
-    final_ub = np.zeros(len(close_1d))
-    final_lb = np.zeros(len(close_1d))
-    supertrend = np.zeros(len(close_1d))
-    trend = np.ones(len(close_1d))  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_1d)):
-        final_ub[i] = basic_ub[i] if (basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]) else final_ub[i-1]
-        final_lb[i] = basic_lb[i] if (basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]) else final_lb[i-1]
-        
-        if i == 1:
-            supertrend[i] = final_ub[i]
-            trend[i] = 1
-        else:
-            if supertrend[i-1] == final_ub[i-1]:
-                supertrend[i] = final_lb[i] if close_1d[i] > final_lb[i] else final_ub[i]
-                trend[i] = -1 if supertrend[i] == final_ub[i] else 1
-            else:
-                supertrend[i] = final_ub[i] if close_1d[i] < final_ub[i] else final_lb[i]
-                trend[i] = 1 if supertrend[i] == final_lb[i] else -1
-    
-    # Calculate 1d volume moving average (20-period)
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all 1d indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    trend_aligned = align_htf_to_ltf(prices, df_1d, trend)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Calculate 6h price data
+    # Calculate Donchian channels (20-period) on 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    # 20-period highest high and lowest low
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    midpoint_20 = (highest_20 + lowest_20) / 2.0
+    
+    # Calculate 6h volume moving average (20-period)
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after Williams %R warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
-            np.isnan(trend_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Current values
-        wr = williams_r_aligned[i]
-        st = supertrend_aligned[i]
-        tr = trend_aligned[i]
         price = close[i]
-        vol_ma = vol_ma_1d_aligned[i]
+        highest = highest_20[i]
+        lowest = lowest_20[i]
+        midpoint = midpoint_20[i]
+        weekly_pivot_val = weekly_pivot_aligned[i]
+        vol_ma_val = vol_ma[i]
+        current_volume = volume[i]
         
-        # Get current 1d volume (for volume confirmation)
-        # Each 6h bar = 1/4 of a 1d bar, so we need to look at the current 1d bar
-        idx_1d = i // 4
-        if idx_1d >= len(df_1d):
-            idx_1d = len(df_1d) - 1
-        volume = df_1d['volume'].iloc[idx_1d] if idx_1d >= 0 else df_1d['volume'].iloc[0]
-        volume_confirm = volume > 1.5 * vol_ma if vol_ma > 0 else False
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = current_volume > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold), price > Supertrend (uptrend), volume confirmation
-            if wr < -80 and price > st and volume_confirm:
+            # Long breakout: price > 20-period high AND price > weekly pivot (bullish trend) AND volume confirmation
+            if price > highest and price > weekly_pivot_val and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought), price < Supertrend (downtrend), volume confirmation
-            elif wr > -20 and price < st and volume_confirm:
+            # Short breakdown: price < 20-period low AND price < weekly pivot (bearish trend) AND volume confirmation
+            elif price < lowest and price < weekly_pivot_val and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
@@ -119,13 +82,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if Williams %R > -50 (exiting oversold) or price crosses below Supertrend
-                if wr > -50 or price < st:
+                # Exit if price crosses below 20-period midpoint OR breaks below 20-period low
+                if price < midpoint or price < lowest:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if Williams %R < -50 (exiting overbought) or price crosses above Supertrend
-                if wr < -50 or price > st:
+                # Exit if price crosses above 20-period midpoint OR breaks above 20-period high
+                if price > midpoint or price > highest:
                     exit_signal = True
             
             if exit_signal:
@@ -137,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_Supertrend_Volume"
+name = "6h_Donchian20_WeeklyPivot_Volume"
 timeframe = "6h"
 leverage = 1.0
