@@ -1,3 +1,15 @@
+# 1. Hypothesis
+# The strategy uses a 4-hour primary timeframe with 1-day and 1-week higher timeframes.
+# It combines three key elements: 1) Weekly EMA trend filter to capture multi-week bias,
+# 2) Daily ATR-based volatility regime filter to avoid choppy markets, and 
+# 3) Volume confirmation to ensure institutional participation.
+# Entries occur when price crosses the weekly EMA with sufficient volume and 
+# moderate volatility. Exits occur on reverse crossovers or volatility extremes.
+# This approach aims to capture sustained trends while avoiding false signals 
+# in low-volume or choppy conditions, working in both bull and bear markets 
+# by following the higher timeframe trend.
+
+# 2. Implementation
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -88,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyEMA34_Volume_ATR_Filter"
-timeframe = "12h"
+name = "1d_WeeklyEMA34_Volume_ATR_Filter"
+timeframe = "1d"
 leverage = 1.0
