@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Regime_Breakout_v1
-Hypothesis: On 4h timeframe, Vortex indicator detects trend initiation, combined with 12h EMA trend filter and volume spike confirmation. Designed for low trade frequency (<50/year) to minimize fee drag and work in both bull (trend follow) and bear (mean revert in chop) regimes via ADX filter.
+1h_Volume_Weighted_RSI_v1
+Hypothesis: On 1h timeframe, use 4h EMA for trend direction and 1d RSI(14) for mean-reversion extremes.
+Enter long when price > 4h EMA (uptrend) AND 1d RSI < 30 (oversold) with volume confirmation.
+Enter short when price < 4h EMA (downtrend) AND 1d RSI > 70 (overbought) with volume confirmation.
+Use 1h only for precise entry timing via RSI(2) pullback to reduce false signals.
+Target 15-30 trades/year via tight confluence filters. Works in bull (trend follow) and bear (mean revert) regimes.
 """
 
 import numpy as np
@@ -10,77 +14,57 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for EMA trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 21 or len(df_1d) < 14:
         return np.zeros(n)
     
-    # === 12-hour EMA34 for trend filter ===
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 4h EMA21 for trend filter ===
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # === ADX for regime filter (14-period) ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 1d RSI14 for mean reversion ===
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    
+    # === 1h RSI2 for entry timing ===
     close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(span=2, adjust=False, min_periods=2).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_2 = 100 - (100 / (1 + rs))
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM and TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # === Vortex Indicator (14-period) ===
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    
-    sum_vm_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    sum_vm_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    vi_plus = sum_vm_plus / sum_tr
-    vi_minus = sum_vm_minus / sum_tr
-    
-    # === Volume spike filter ===
+    # === Volume confirmation (1h) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
+    # === Session filter: 08-20 UTC ===
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or
+        if (np.isnan(ema_21_4h_aligned[i]) or 
+            np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(rsi_2[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,43 +72,40 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        price_high = prices['high'].iloc[i]
-        price_low = prices['low'].iloc[i]
-        ema_34 = ema_34_12h_aligned[i]
-        adx_val = adx[i]
-        vi_p = vi_plus[i]
-        vi_m = vi_minus[i]
+        ema_21 = ema_21_4h_aligned[i]
+        rsi_1d = rsi_14_1d_aligned[i]
+        rsi_2_val = rsi_2[i]
         vol_spike = vol_ratio[i] > 1.5  # 50% above average volume
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Long: VI+ > VI- (bullish vortex) + above 12h EMA34 + ADX > 20 (trending) + volume spike
-            if vi_p > vi_m and price_close > ema_34 and adx_val > 20 and vol_spike:
-                signals[i] = 0.25
+            # Long: Uptrend (price > 4h EMA21) + 1d RSI oversold (<30) + 1h RSI pullback (<20) + volume spike + session
+            if price_close > ema_21 and rsi_1d < 30 and rsi_2_val < 20 and vol_spike and in_session:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price_close
-            # Short: VI- > VI+ (bearish vortex) + below 12h EMA34 + ADX > 20 (trending) + volume spike
-            elif vi_m > vi_p and price_close < ema_34 and adx_val > 20 and vol_spike:
-                signals[i] = -0.25
+            # Short: Downtrend (price < 4h EMA21) + 1d RSI overbought (>70) + 1h RSI pullback (>80) + volume spike + session
+            elif price_close < ema_21 and rsi_1d > 70 and rsi_2_val > 80 and vol_spike and in_session:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price_close
         
         elif position != 0:
-            # Exit conditions: trend weakening (ADX < 20) or vortex reversal
+            # Exit: 1h RSI mean reversion or trend change
             if position == 1:
-                if adx_val < 20 or vi_m > vi_p:  # trend weakening or bearish vortex
+                if rsi_2_val > 80 or price_close < ema_21:  # overbought or trend break
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if adx_val < 20 or vi_p > vi_m:  # trend weakening or bullish vortex
+                if rsi_2_val < 20 or price_close > ema_21:  # oversold or trend break
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_Vortex_Regime_Breakout_v1"
-timeframe = "4h"
+name = "1h_Volume_Weighted_RSI_v1"
+timeframe = "1h"
 leverage = 1.0
