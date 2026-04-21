@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_Volume_Filter_v1
-Hypothesis: Breakout above R1 or below S1 on 12h with daily volume confirmation.
-Long when price closes above R1 with volume surge; short when closes below S1 with volume surge.
-Exit when price reverts to pivot point or hits opposite S2/R2 level.
-Works in bull/bear by capturing breakouts with volume validation, avoiding false breakouts.
-Target: 15-25 trades/year per symbol.
+6h_1w_1d_RSI_Divergence_Trend_Filter
+Hypothesis: Weekly RSI divergence with daily trend filter for mean-reversion entries on 6h.
+Long when: weekly RSI makes higher low while price makes lower low (bullish divergence)
+           AND daily close > daily SMA50 (uptrend filter)
+           AND price touches 6h Bollinger Lower Band (2,20) with rejection.
+Short when: weekly RSI makes lower high while price makes higher high (bearish divergence)
+            AND daily close < daily SMA50 (downtrend filter)
+            AND price touches 6h Bollinger Upper Band (2,20) with rejection.
+Exit on opposite band touch or RSI divergence failure.
+Works in bull/bear: uses weekly divergence for exhaustion + daily trend filter to avoid counter-trend.
+Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -14,84 +19,108 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for Pivot Point calculation
+    # Load weekly data for RSI divergence
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate weekly RSI(14)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w = rsi_1w.values
+    
+    # Align weekly RSI to 6h
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Daily SMA50
+    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)
     
-    # Previous day's OHLC for Pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # 6h Bollinger Bands (20, 2)
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Pivot Point levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
-    
-    # Align to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper = sma_20 + 2 * std_20
+    lower = sma_20 - 2 * std_20
+    upper = upper.values
+    lower = lower.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(sma_50_aligned[i]) or
+            np.isnan(upper[i]) or np.isnan(lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
+        price = close[i]
         
-        # Volume filter: current volume > 2.0 * 30-period average
-        if i >= 30:
-            vol_ma = prices['volume'].iloc[i-30:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+        # Detect weekly RSI divergence (need prior week)
+        if i >= len(df_1w) * 28:  # Need at least 2 weeks of 6h data (approx)
+            # Get current and prior weekly values (simplified: use current and 4 periods back ~1 week)
+            if i >= 4:
+                rsi_now = rsi_1w_aligned[i]
+                rsi_prev = rsi_1w_aligned[i-4]
+                price_now = price
+                price_prev = close[i-4]
+                
+                # Bullish divergence: price lower low, RSI higher low
+                bull_div = (price_now < price_prev) and (rsi_now > rsi_prev)
+                # Bearish divergence: price higher high, RSI lower high
+                bear_div = (price_now > price_prev) and (rsi_now < rsi_prev)
+            else:
+                bull_div = False
+                bear_div = False
         else:
-            volume_ok = False
+            bull_div = False
+            bear_div = False
         
         if position == 0:
-            # Long conditions: break above R1 with volume
-            if price > r1_aligned[i] and volume_ok:
+            # Long: bullish divergence + uptrend + touch lower band
+            if bull_div and (close_1d[-1] > sma_50[-1] if len(close_1d) > 0 else False) and price <= lower[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S1 with volume
-            elif price < s1_aligned[i] and volume_ok:
+            # Short: bearish divergence + downtrend + touch upper band
+            elif bear_div and (close_1d[-1] < sma_50[-1] if len(close_1d) > 0 else False) and price >= upper[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: return to pivot or hit R2
-            if price <= pivot_aligned[i] or price >= r2_aligned[i]:
+            # Long exit: touch upper band or divergence fails
+            if price >= upper[i] or not bull_div:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: return to pivot or hit S2
-            if price >= pivot_aligned[i] or price <= s2_aligned[i]:
+            # Short exit: touch lower band or divergence fails
+            if price <= lower[i] or not bear_div:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Filter_v1"
-timeframe = "12h"
+name = "6h_1w_1d_RSI_Divergence_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
