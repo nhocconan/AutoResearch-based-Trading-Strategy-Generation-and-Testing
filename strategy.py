@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime_v2
 Hypothesis: Use daily Camarilla pivot levels (R1/S1) on 4h timeframe with 1d EMA34 trend filter, volume confirmation, and ADX regime filter. 
 Long when price breaks above R1 with volume spike and ADX>25 (trending), short when breaks below S1 with volume spike and ADX>25. 
-Exit when price returns to pivot point (PP). Designed to capture institutional breakouts in trending markets with volume confirmation.
+Exit when price returns to pivot point (PP). 
+Key improvements: Reduced volume threshold to 1.3 (from 1.5) and added minimum hold period of 3 bars to reduce whipsaw and trade frequency.
 Target ~20-50 trades/year on 4h by requiring multiple confluence conditions.
 """
 
@@ -81,6 +82,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
     for i in range(50, n):  # Start after warmup
         # Skip if indicators not ready
@@ -93,6 +95,9 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
+            else:
+                bars_since_entry = 0
             continue
         
         price_close = prices['close'].iloc[i]
@@ -107,35 +112,43 @@ def generate_signals(prices):
         is_trending = adx_val > 25
         
         if position == 0:
-            # Long: Price breaks above R1 + volume spike > 1.5 + above 1d EMA34 + trending
+            bars_since_entry = 0
+            # Long: Price breaks above R1 + volume spike > 1.3 + above 1d EMA34 + trending
             if (price_close > r1_level and 
-                vol_spike > 1.5 and 
+                vol_spike > 1.3 and 
                 price_close > trend_1d and 
                 is_trending):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike > 1.5 + below 1d EMA34 + trending
+            # Short: Price breaks below S1 + volume spike > 1.3 + below 1d EMA34 + trending
             elif (price_close < s1_level and 
-                  vol_spike > 1.5 and 
+                  vol_spike > 1.3 and 
                   price_close < trend_1d and 
                   is_trending):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price returns to pivot point (PP)
-            if position == 1 and price_close < pp_level:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and price_close > pp_level:
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position
+            bars_since_entry += 1
+            # Minimum hold period of 3 bars to reduce whipsaw
+            if bars_since_entry < 3:
                 signals[i] = 0.25 if position == 1 else -0.25
+            else:
+                # Exit when price returns to pivot point (PP)
+                if position == 1 and price_close < pp_level:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                elif position == -1 and price_close > pp_level:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    # Hold position
+                    signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime_v2"
 timeframe = "4h"
 leverage = 1.0
