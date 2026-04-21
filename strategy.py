@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Pullback_Volume_Regime_v2
-Hypothesis: Pullback to Camarilla H3/L3 levels with volume confirmation and choppiness regime filter.
-Long when price pulls back to H3 with volume spike in choppy market (CHOP>61.8).
-Short when price pulls back to L3 with volume spike in choppy market (CHOP>61.8).
-Exit when price reaches H4/L4 or reverses at H3/L3.
-Uses 1d Camarilla levels, 4h volume and choppiness filter.
-Designed to work in both bull/bear by fading extremes in ranging markets.
-Target: 20-35 trades/year per symbol.
+1d_1w_Donchian20_VolumeBreakout_ATRStop_v1
+Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
+Long when price breaks above 20-day high with weekly close > weekly EMA34 and volume spike.
+Short when price breaks below 20-day low with weekly close < weekly EMA34 and volume spike.
+Exit via ATR-based trailing stop (3*ATR) or opposite breakout.
+Works in bull via breakouts, in bear via short breakdowns. Volume filter reduces false signals.
+Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -16,74 +15,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
+    # Load daily data once for Donchian and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Daily Donchian(20)
+    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: H3, L3, H4, L4
-    rang = prev_high - prev_low
-    h3 = prev_close + 1.1 * rang / 4
-    l3 = prev_close - 1.1 * rang / 4
-    h4 = prev_close + 1.1 * rang / 2
-    l4 = prev_close - 1.1 * rang / 2
-    
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Calculate 4h choppiness index (CHOP) for regime filter
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Daily ATR(14) for stoploss
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # ATR(14) - sum of TR over 14 periods
-    atr_14 = np.zeros(n)
-    atr_14[13] = np.sum(tr[0:14])
-    for i in range(14, n):
-        atr_14[i] = atr_14[i-1] - (atr_14[i-1] / 14) + (tr[i] / 14)
+    # Align to 1d timeframe (prices is already 1d)
+    highest_20_aligned = highest_20  # no alignment needed for same timeframe
+    lowest_20_aligned = lowest_20
+    atr_aligned = atr
     
-    # Choppiness Index: CHOP = 100 * log10(sum(TR(14)) / (ATR(14) * 14)) / log10(14)
-    sum_tr_14 = np.zeros(n)
-    sum_tr_14[13] = np.sum(tr[0:14])
-    for i in range(14, n):
-        sum_tr_14[i] = sum_tr_14[i-1] - tr[i-14] + tr[i]
+    # Load weekly data for trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    chop = 100 * np.log10(sum_tr_14 / (atr_14 * 14)) / np.log10(14)
-    chop[0:13] = np.nan  # not enough data
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,39 +72,54 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
+        # Volume filter: current volume > 2.0 * 20-day average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
             volume_ok = volume > 2.0 * vol_ma
         else:
             volume_ok = False
         
-        # Regime filter: only trade in choppy/ranging markets (CHOP > 61.8)
-        regime_ok = chop[i] > 61.8
-        
         if position == 0:
-            # Long conditions: pullback to H3 with volume spike in choppy market
-            if (abs(price - h3_aligned[i]) < 0.001 * h3_aligned[i] and  # near H3
-                volume_ok and regime_ok):
+            # Long conditions: break above 20-day high with weekly uptrend and volume
+            if (price > highest_20_aligned[i] and 
+                close_1d[i] > ema_34_1w_aligned[i] and  # weekly close above EMA34
+                volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: pullback to L3 with volume spike in choppy market
-            elif (abs(price - l3_aligned[i]) < 0.001 * l3_aligned[i] and  # near L3
-                  volume_ok and regime_ok):
+                entry_price = price
+                highest_since_entry = price
+            # Short conditions: break below 20-day low with weekly downtrend and volume
+            elif (price < lowest_20_aligned[i] and 
+                  close_1d[i] < ema_34_1w_aligned[i] and  # weekly close below EMA34
+                  volume_ok):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
         
         elif position == 1:
-            # Long exit: reach H4 or reverse at H3
-            if price >= h4_aligned[i] or price <= h3_aligned[i]:
+            # Update highest since entry
+            highest_since_entry = max(highest_since_entry, price)
+            # ATR trailing stop: exit if price drops 3*ATR from highest
+            if price <= highest_since_entry - 3.0 * atr_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            # Opposite breakout exit: break below 20-day low
+            elif price < lowest_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: reach L4 or reverse at L3
-            if price <= l4_aligned[i] or price >= l3_aligned[i]:
+            # Update lowest since entry
+            lowest_since_entry = min(lowest_since_entry, price)
+            # ATR trailing stop: exit if price rises 3*ATR from lowest
+            if price >= lowest_since_entry + 3.0 * atr_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            # Opposite breakout exit: break above 20-day high
+            elif price > highest_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Pullback_Volume_Regime_v2"
-timeframe = "4h"
+name = "1d_1w_Donchian20_VolumeBreakout_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
