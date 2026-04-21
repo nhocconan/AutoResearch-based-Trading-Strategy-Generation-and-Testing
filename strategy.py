@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume
-Hypothesis: Use weekly trend filter (EMA34) with daily Camarilla R1/S1 breakout and volume confirmation. Designed to capture breakouts in trending markets while avoiding chop. Weekly trend ensures we only trade in the direction of the higher timeframe trend, reducing false signals. Target 10-25 trades/year on 1d.
+6h_ParabolicSAR_RangeBreakout_1dTrend
+Hypothesis: Use 1d EMA50 for trend direction, Parabolic SAR (0.02, 0.2) for breakout detection, and volume confirmation. 
+Parabolic SAR performs well in trending markets but whipsaws in ranges; combining with 1d trend filter avoids counter-trend trades. 
+Volume > 1.3x average confirms breakout strength. Works in bull/bear markets by following higher timeframe trend. Target 20-40 trades/year on 6h.
 """
 
 import numpy as np
@@ -13,35 +15,60 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # === Weekly trend filter: 34-period EMA ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Load daily data for Camarilla calculation
+    # Load 1d HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d trend filter: 50-period EMA ===
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels for each day
-    R1 = np.zeros(len(df_1d))
-    S1 = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        R1[i] = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
-        S1[i] = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
+    # === Parabolic SAR (0.02, 0.2) on 6h ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Align Camarilla levels to 1d timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Initialize arrays
+    psar = np.zeros(n)
+    psar[0] = low[0]
+    trend = 1  # 1 for uptrend, -1 for downtrend
+    af = 0.02  # acceleration factor
+    max_af = 0.2
+    ep = high[0] if trend == 1 else low[0]  # extreme point
+    
+    for i in range(1, n):
+        if trend == 1:  # uptrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR does not exceed previous two lows
+            psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
+            # Trend reversal
+            if low[i] < psar[i]:
+                trend = -1
+                psar[i] = ep
+                af = 0.02
+                ep = low[i]
+            else:
+                # Continue uptrend
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+        else:  # downtrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR does not fall below previous two highs
+            psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+            # Trend reversal
+            if high[i] > psar[i]:
+                trend = 1
+                psar[i] = ep
+                af = 0.02
+                ep = high[i]
+            else:
+                # Continue downtrend
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
     
     # === Volume confirmation: 20-period volume average ===
     volume = prices['volume'].values
@@ -53,42 +80,39 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(R1_aligned[i]) or
-            np.isnan(S1_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(psar[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = prices['close'].iloc[i]
-        weekly_trend = ema_34_1w_aligned[i]
-        r1 = R1_aligned[i]
-        s1 = S1_aligned[i]
+        price_close = close[i]
+        trend_1d = ema_50_1d_aligned[i]
+        psar_val = psar[i]
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: price breaks above R1 + weekly uptrend + volume spike
-            if (price_close > r1 and 
-                price_close > weekly_trend and 
-                vol_spike > 1.5):
+            # Long: price > PSAR + volume spike > 1.3 + price above 1d EMA50 (uptrend)
+            if (price_close > psar_val and 
+                vol_spike > 1.3 and 
+                price_close > trend_1d):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + weekly downtrend + volume spike
-            elif (price_close < s1 and 
-                  price_close < weekly_trend and 
-                  vol_spike > 1.5):
+            # Short: price < PSAR + volume spike > 1.3 + price below 1d EMA50 (downtrend)
+            elif (price_close < psar_val and 
+                  vol_spike > 1.3 and 
+                  price_close < trend_1d):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price returns to previous day's close (mean reversion)
-            prev_close = close_1d[i-1] if i-1 < len(close_1d) else close_1d[-1]
-            if position == 1 and price_close < prev_close:
+            # Exit when price crosses PSAR in opposite direction
+            if position == 1 and price_close < psar_val:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > prev_close:
+            elif position == -1 and price_close > psar_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_ParabolicSAR_RangeBreakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
