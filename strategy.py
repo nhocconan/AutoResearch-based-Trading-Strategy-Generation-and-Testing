@@ -3,48 +3,44 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Daily Pivot Point (PP) breakout with 1w EMA(20) trend filter and volume confirmation.
-# Long when price breaks above R1 in uptrend (weekly EMA > previous week EMA), short when breaks below S1 in downtrend.
-# Volume > 1.5x 20-period average confirms breakout. Uses weekly trend to avoid counter-trend trades.
-# Pivot points calculated from prior day's OHLC. Target: 10-25 trades/year by requiring strong weekly trend + volume + pivot breakout.
-# Works in bull/bear: weekly trend filter ensures alignment with higher timeframe momentum, reducing whipsaws in ranging markets.
+# Hypothesis: 6h Williams %R(14) mean reversion with 1d EMA(50) trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) and price > 1d EMA50 (uptrend).
+# Short when Williams %R > -20 (overbought) and price < 1d EMA50 (downtrend).
+# Volume > 1.3x 20-period average confirms mean reversion bounce.
+# Target: 20-40 trades/year by requiring oversold/overbought extremes + trend alignment + volume.
+# Works in bull/bear: EMA filter ensures mean reversion trades align with higher timeframe trend,
+# avoiding counter-trend trades in strong trends while capturing pullbacks in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d and 1w data ONCE before loop
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Rising EMA = current > previous
-    ema_rising = np.zeros_like(ema_20, dtype=bool)
-    ema_rising[1:] = ema_20[1:] > ema_20[:-1]
-    # Align to 1d timeframe
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_rising)
-    
-    # Calculate daily pivot points (using prior day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Pivot Point (PP) = (H + L + C) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Resistance 1 (R1) = (2 * PP) - L
-    r1 = (2 * pp) - low_1d
-    # Support 1 (S1) = (2 * PP) - H
-    s1 = (2 * pp) - high_1d
+    # Align EMA to 6h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Align pivot levels to 1d timeframe (already aligned as calculated from 1d data)
-    # But we need to shift by 1 to use prior day's levels for today's breakout
-    r1_shifted = np.roll(r1, 1)
-    s1_shifted = np.roll(s1, 1)
-    r1_shifted[0] = np.nan  # First day has no prior
-    s1_shifted[0] = np.nan
+    # Calculate Williams %R(14) on 6h data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # Highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        ((highest_high - close) / (highest_high - lowest_low)) * -100,
+        -50  # neutral when range is zero
+    )
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -52,9 +48,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if data not ready
-        if np.isnan(ema_rising_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(r1_shifted[i]) or np.isnan(s1_shifted[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(williams_r[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,21 +60,21 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirm = volume > 1.3 * vol_ma[i]
         
-        # Trend filter: weekly EMA rising (uptrend)
-        uptrend = ema_rising_aligned[i]
-        downtrend = not uptrend  # Simple definition for clarity
+        # Trend filter: price relative to 1d EMA50
+        price_above_ema = price > ema_50_aligned[i]
+        price_below_ema = price < ema_50_aligned[i]
         
         if position == 0:
             if volume_confirm:
-                # Long: price breaks above R1 in uptrend
-                if uptrend and price > r1_shifted[i]:
+                # Long: oversold and price above EMA (bullish mean reversion)
+                if williams_r[i] < -80 and price_above_ema:
                     signals[i] = 0.25
                     position = 1
-                # Short: price breaks below S1 in downtrend
-                elif downtrend and price < s1_shifted[i]:
+                # Short: overbought and price below EMA (bearish mean reversion)
+                elif williams_r[i] > -20 and price_below_ema:
                     signals[i] = -0.25
                     position = -1
         
@@ -87,13 +83,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price breaks below S1 (failed breakout) or trend turns down
-                if price < s1_shifted[i] or downtrend:
+                # Exit if Williams %R returns to overbought or price crosses below EMA
+                if williams_r[i] > -20 or price < ema_50_aligned[i]:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price breaks above R1 (failed breakdown) or trend turns up
-                if price > r1_shifted[i] or uptrend:
+                # Exit if Williams %R returns to oversold or price crosses above EMA
+                if williams_r[i] < -80 or price > ema_50_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -105,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_PivotPoint_R1S1_Breakout_1wEMA20_Trend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR14_1dEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
