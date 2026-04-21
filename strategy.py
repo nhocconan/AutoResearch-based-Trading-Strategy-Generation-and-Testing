@@ -1,42 +1,53 @@
-# Investing in the future: 4h strategy using 1-day Williams Fractal breakouts with 1-week EMA50 trend filter and volume confirmation.
-# In uptrend (price > EMA50), buy breakouts above 1D bearish fractal; in downtrend (price < EMA50), sell breakdowns below 1D bullish fractal.
-# Williams Fractals identify swing points with confirmation, reducing false breakouts. 1W timeframe filters noise.
-# 1W EMA50 provides trend alignment; volume confirms breakout strength. Designed for 4h to target 75-200 total trades.
+#!/usr/bin/env python3
+"""
+Hypothesis: 1d strategy using 1w KAMA trend filter with 1d RSI mean reversion and volume confirmation.
+In uptrend (price > weekly KAMA), buy when RSI < 30 and volume > 1.5x average; in downtrend (price < weekly KAMA), 
+sell when RSI > 70 and volume > 1.5x average. Weekly KAMA filters noise and adapts to volatility.
+1d RSI identifies overextended moves; volume confirms reversal strength. Designed for 1d to target 30-100 total trades.
+"""
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def kama(close, er_fast=2, er_slow=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.subtract.accumulate(change))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1D data ONCE before loop for fractals
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
-        return np.zeros(n)
-    
-    # Calculate Williams Fractals on 1D (requires 5-bar window: 2 left, 2 right)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
-    
-    # Fractal values are at the center bar; need 2-bar confirmation delay
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # Load 1W data ONCE before loop for EMA trend filter
+    # Load 1w data ONCE before loop for KAMA trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 1W EMA50 for trend filter
+    # 1w KAMA for trend filter (adaptive to volatility)
     close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    kama_1w = kama(close_1w, er_fast=2, er_slow=30)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # 4h volume confirmation (volume spike > 1.5x 20-period average)
+    # 1d RSI for mean reversion
+    close_1d = prices['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1d volume confirmation (volume spike > 1.5x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
@@ -45,38 +56,38 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_50_aligned[i]
+        kama_trend = kama_1w_aligned[i]
+        rsi_val = rsi[i]
         vol_ratio_val = vol_ratio[i]
         vol_threshold = 1.5  # Volume spike filter for quality
         
         if position == 0:
-            # Enter long: price breaks above 1D bearish fractal (resistance) + uptrend + volume spike
-            if (price_close > bearish_fractal_aligned[i] and 
-                price_close > ema_trend and 
+            # Enter long: price above weekly KAMA (uptrend) + RSI oversold + volume spike
+            if (price_close > kama_trend and 
+                rsi_val < 30 and 
                 vol_ratio_val > vol_threshold):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 1D bullish fractal (support) + downtrend + volume spike
-            elif (price_close < bullish_fractal_aligned[i] and 
-                  price_close < ema_trend and 
+            # Enter short: price below weekly KAMA (downtrend) + RSI overbought + volume spike
+            elif (price_close < kama_trend and 
+                  rsi_val > 70 and 
                   vol_ratio_val > vol_threshold):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: trend reversal (price crosses EMA50 in opposite direction)
-            if position == 1 and price_close < ema_trend:
+            # Exit: trend reversal (price crosses weekly KAMA in opposite direction) or RSI normalization
+            if position == 1 and (price_close < kama_trend or rsi_val > 70):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > ema_trend:
+            elif position == -1 and (price_close > kama_trend or rsi_val < 30):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsFractal_Breakout_1d_1wEMA50_Volume"
-timeframe = "4h"
+name = "1d_KAMA_RSI_MeanReversion_Volume"
+timeframe = "1d"
 leverage = 1.0
