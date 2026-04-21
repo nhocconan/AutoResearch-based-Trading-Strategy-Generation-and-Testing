@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_FundingRate_MeanReversion_WeeklyTrend_Filter
-Hypothesis: Funding rate mean-reversion on 1d timeframe filtered by weekly EMA trend.
-Enter long when 30d funding rate z-score < -2.0 (extreme pessimism) and weekly uptrend.
-Enter short when 30d funding rate z-score > +2.0 (extreme optimism) and weekly downtrend.
-Exit when z-score reverts toward zero (|z| < 0.5) or opposite extreme.
-Designed for low trade frequency (target: 10-20 trades/year) to minimize fee drag.
-Works in bull/bear via weekly trend alignment and funding extremes as contrarian signal.
+4h_Camarilla_R1_S1_Breakout_VolumeRegime_ATRStop
+Hypothesis: 4h Camarilla pivot (R1/S1) breakouts filtered by daily trend (EMA34) and volume regime (above average).
+Enter long when price breaks above 4h R1 with daily uptrend and above-average volume.
+Enter short when price breaks below 4h S1 with daily downtrend and above-average volume.
+Exit on ATR(14) trailing stop (2.0*ATR) or opposite level break.
+Designed for moderate trade frequency (target: 25-40 trades/year) to balance edge and fees.
+Works in bull/bear via daily trend alignment and volume confirmation as regime filter.
 """
 
 import numpy as np
@@ -18,87 +18,103 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load funding rate data (assuming available as parquet, same structure as prices)
-    try:
-        funding_df = pd.read_parquet('data/processed/funding/BTCUSDT.parquet')
-    except:
-        # Fallback: if funding data not available, use zero signal
+    # Load HTF data ONCE before loop (daily for trend, 4h for pivots)
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Ensure we have funding rate column
-    if 'funding_rate' not in funding_df.columns:
-        return np.zeros(n)
+    # === 4h Camarilla Pivot Levels (R1, S1) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Align funding data to prices timeframe (1d)
-    funding_rates = funding_df['funding_rate'].values
-    funding_times = funding_df['open_time'].values
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_range = (high_4h - low_4h) * 1.1 / 12.0
+    r1_4h = close_4h + camarilla_range
+    s1_4h = close_4h - camarilla_range
     
-    # Create funding series aligned to prices index
-    funding_aligned = np.full(n, np.nan)
-    # Simple alignment: find closest funding rate for each price bar
-    for i in range(n):
-        price_time = prices['open_time'].iloc[i]
-        # Find funding rate from same day (simplified)
-        mask = funding_times <= price_time
-        if np.any(mask):
-            funding_aligned[i] = funding_rates[mask][-1]
+    # Align to 4h timeframe (use previous completed 4h bar)
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
     
-    # Calculate 30-day z-score of funding rate
-    funding_series = pd.Series(funding_aligned)
-    funding_ma = funding_series.rolling(window=30, min_periods=30).mean().values
-    funding_std = funding_series.rolling(window=30, min_periods=30).std().values
-    funding_z = (funding_aligned - funding_ma) / funding_std
-    # Replace infinite/NaN values
-    funding_z = np.nan_to_num(funding_z, nan=0.0, posinf=0.0, neginf=0.0)
+    # === Daily EMA34 for HTF trend filter ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Load HTF data ONCE before loop (weekly for trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # === Volume regime filter (20-period average) ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === Weekly EMA34 for HTF trend filter ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === ATR (14-period) for stoploss ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(funding_z[i]) or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) 
+            or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) 
+            or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        z = funding_z[i]
-        price = prices['close'].iloc[i]
-        ema_trend = ema_34_1w_aligned[i]
+        price = close[i]
         
         if position == 0:
-            # Entry conditions
-            long_signal = (z < -2.0) and (price > ema_trend)  # Extreme pessimism + weekly uptrend
-            short_signal = (z > 2.0) and (price < ema_trend)  # Extreme optimism + weekly downtrend
+            # Volume confirmation: current volume > 20-period average
+            vol_confirm = volume[i] > vol_ma[i]
             
-            if long_signal:
+            # Long conditions: price > 4h R1, daily uptrend, volume spike
+            long_breakout = price > r1_4h_aligned[i]
+            long_trend = price > ema_34_1d_aligned[i]
+            
+            # Short conditions: price < 4h S1, daily downtrend, volume spike
+            short_breakout = price < s1_4h_aligned[i]
+            short_trend = price < ema_34_1d_aligned[i]
+            
+            # Entry logic
+            if long_breakout and long_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            elif short_signal:
+                entry_price = price
+            elif short_breakout and short_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Exit conditions: z-score reverts or extreme optimism
-            if (z > -0.5) or (z > 2.0):  # Reversion to neutral or opposite extreme
+            # Check stoploss
+            if price < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trailing exit: price closes below 4h S1 (support broken)
+            elif price < s1_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions: z-score reverts or extreme pessimism
-            if (z < 0.5) or (z < -2.0):  # Reversion to neutral or opposite extreme
+            # Check stoploss
+            if price > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trailing exit: price closes above 4h R1 (resistance broken)
+            elif price > r1_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_FundingRate_MeanReversion_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_VolumeRegime_ATRStop"
+timeframe = "4h"
 leverage = 1.0
