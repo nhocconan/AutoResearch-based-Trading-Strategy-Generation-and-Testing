@@ -3,97 +3,87 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h RSI(2) mean reversion with 1d trend filter and volume confirmation
-# Long when RSI(2) < 10, price > 1d EMA200, and volume > 1.5x 20-day average
-# Short when RSI(2) > 90, price < 1d EMA200, and volume > 1.5x 20-day average
-# Exit when RSI(2) crosses back to neutral (40-60 range)
-# RSI(2) captures extreme short-term reversals
-# 1d EMA200 ensures we trade with the higher timeframe trend
-# Volume confirmation ensures conviction behind the move
-# Target: 50-150 total trades over 4 years (12-37/year) by requiring multiple confluence factors
+# Hypothesis: 12-hour Donchian breakout with 1-week EMA trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high + price > 1w EMA34 + volume > 1.5x 20-period average
+# Short when price breaks below Donchian(20) low + price < 1w EMA34 + volume > 1.5x 20-period average
+# Exit when price crosses back through Donchian midpoint or EMA trend reverses
+# Donchian provides clear breakout levels, EMA34 filters trend direction, volume confirms conviction
+# Target: 15-30 trades/year by requiring breakout + trend alignment + volume spike
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 6-period RSI(2) equivalent using close prices
-    # RSI(2) = 100 - (100 / (1 + RS)), where RS = avg_gain / avg_loss over 2 periods
+    # Calculate 1-week EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1w EMA34 to 12h timeframe
+    ema34_12h = align_htf_to_ltf(prices, df_1w, ema34)
+    
+    # Calculate Donchian channels (20-period) on 12h data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Use Wilder's smoothing (alpha = 1/period)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi2 = 100 - (100 / (1 + rs))
+    # Donchian high and low (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Calculate 1d volume moving average (20-period)
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all 1d indicators to 6h timeframe
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate 12h volume moving average (20-period)
+    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(2, n):  # Start after RSI(2) warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if data not ready
-        if (np.isnan(rsi2[i]) or np.isnan(ema200_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(ema34_12h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Current values
-        rsi = rsi2[i]
         price = close[i]
-        ema200_val = ema200_aligned[i]
-        vol_ma = vol_ma_1d_aligned[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
+        donch_mid_val = donch_mid[i]
+        ema34_val = ema34_12h[i]
+        vol_ma_val = vol_ma[i]
+        volume = prices['volume'].iloc[i]
         
-        # Get current 1d volume (6 bars per day)
-        day_idx = i // 6
-        if day_idx < len(df_1d):
-            volume = df_1d['volume'].iloc[day_idx]
-        else:
-            volume = df_1d['volume'].iloc[-1] if len(df_1d) > 0 else 0
-        
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        volume_confirm = volume > 1.5 * vol_ma if vol_ma > 0 else False
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: RSI(2) < 10 (oversold), price > EMA200 (uptrend), volume confirmation
-            if rsi < 10 and price > ema200_val and volume_confirm:
+            # Long: Price breaks above Donchian high + above EMA34 + volume confirmation
+            if price > donch_high_val and price > ema34_val and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) > 90 (overbought), price < EMA200 (downtrend), volume confirmation
-            elif rsi > 90 and price < ema200_val and volume_confirm:
+            # Short: Price breaks below Donchian low + below EMA34 + volume confirmation
+            elif price < donch_low_val and price < ema34_val and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: RSI returns to neutral zone (40-60)
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if RSI crosses back above 40 (leaving oversold territory)
-                if rsi >= 40:
+                # Exit if price crosses below Donchian midpoint or below EMA34
+                if price < donch_mid_val or price < ema34_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if RSI crosses back below 60 (leaving overbought territory)
-                if rsi <= 60:
+                # Exit if price crosses above Donchian midpoint or above EMA34
+                if price > donch_mid_val or price > ema34_val:
                     exit_signal = True
             
             if exit_signal:
@@ -105,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI2_MeanReversion_1dEMA200_Trend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
