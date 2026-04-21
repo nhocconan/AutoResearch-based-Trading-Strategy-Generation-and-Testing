@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_Pivot_R2S2_Breakout_Volume_ATRFilter
-Hypothesis: Weekly pivot points R2/S2 are stronger support/resistance than daily levels. Breakouts with volume confirmation and ATR stops capture significant multi-day moves. Designed for very low trade frequency (1d timeframe) to minimize fee drag. Uses weekly pivot points calculated from prior week's OHLC, aligned to daily bars.
+12h_1d_Pivot_R2S2_Breakout_Volume
+Hypothesis: Daily pivot points R2/S2 provide strong support/resistance. Breakouts with volume confirmation capture significant directional moves while minimizing trades. Designed for 12h timeframe to reduce frequency and avoid fee drag. Works in bull via upside breakouts and bear via downside breakdowns.
 """
 
 import numpy as np
@@ -13,36 +13,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Load daily data once for pivot points
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Calculate weekly True Range for ATR
-    tr1 = np.abs(high_weekly - low_weekly)
-    tr2 = np.abs(high_weekly - np.roll(close_weekly, 1))
-    tr3 = np.abs(low_weekly - np.roll(close_weekly, 1))
-    tr1[0] = high_weekly[0] - low_weekly[0]
-    tr2[0] = np.abs(high_weekly[0] - close_weekly[0])
-    tr3[0] = np.abs(low_weekly[0] - close_weekly[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_weekly = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily pivot points: P = (H+L+C)/3, R2 = P + (H-L), S2 = P - (H-L)
+    pivot_daily = (high_daily + low_daily + close_daily) / 3.0
+    r2_daily = pivot_daily + (high_daily - low_daily)
+    s2_daily = pivot_daily - (high_daily - low_daily)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R2 = P + (H-L), S2 = P - (H-L)
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    r2_weekly = pivot_weekly + (high_weekly - low_weekly)
-    s2_weekly = pivot_weekly - (high_weekly - low_weekly)
+    # Align daily pivot levels to 12h timeframe
+    r2_daily_aligned = align_htf_to_ltf(prices, df_daily, r2_daily)
+    s2_daily_aligned = align_htf_to_ltf(prices, df_daily, s2_daily)
     
-    # Align weekly indicators to daily timeframe
-    atr_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr_weekly)
-    r2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r2_weekly)
-    s2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s2_weekly)
-    
-    # Daily price and volume data
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -53,16 +42,15 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if NaN in critical values
-        if (np.isnan(atr_weekly_aligned[i]) or np.isnan(r2_weekly_aligned[i]) or np.isnan(s2_weekly_aligned[i])):
+        if (np.isnan(r2_daily_aligned[i]) or np.isnan(s2_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        atr = atr_weekly_aligned[i]
-        r2 = r2_weekly_aligned[i]
-        s2 = s2_weekly_aligned[i]
+        r2 = r2_daily_aligned[i]
+        s2 = s2_daily_aligned[i]
         vol_current = volume[i]
         
         # Volume filter: current volume > 1.5x 20-period average
@@ -72,31 +60,31 @@ def generate_signals(prices):
         if position == 0:
             # Long breakout: price breaks above R2 with volume confirmation
             if price > r2 and vol_ok:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short breakdown: price breaks below S2 with volume confirmation
             elif price < s2 and vol_ok:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S2 (failed breakout) or ATR-based stop
-            if price < s2 or (i > 0 and close[i-1] > s2 and price < close[i-1] - 2.0 * atr):
+            # Long exit: price breaks below S2 (failed breakout)
+            if price < s2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R2 (failed breakdown) or ATR-based stop
-            if price > r2 or (i > 0 and close[i-1] < r2 and price > close[i-1] + 2.0 * atr):
+            # Short exit: price breaks above R2 (failed breakdown)
+            if price > r2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_1w_Pivot_R2S2_Breakout_Volume_ATRFilter"
-timeframe = "1d"
+name = "12h_1d_Pivot_R2S2_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
