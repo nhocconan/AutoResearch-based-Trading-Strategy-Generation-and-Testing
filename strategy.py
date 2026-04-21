@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v2
-Hypothesis: 4h Donchian channel (20) breakout filtered by 1d EMA50 trend and volume spike (1.8x average).
-Long when price > upper Donchian and above 1d EMA50; short when price < lower Donchian and below 1d EMA50.
-Volume confirmation reduces false breakouts. ATR(14) stoploss (2.5x) and discrete sizing (0.25).
-Designed to work in both bull and bear markets via 1d trend alignment and strict entry filters.
-Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+12h_TRIX_VolumeSpike_1dTrendFilter_v1
+Hypothesis: 12h TRIX (12,20) crossing zero with volume spike (>1.8x avg) and 1d EMA50 trend filter.
+TRIX momentum oscillator identifies trend changes early; volume confirmation reduces false signals.
+Long when TRIX crosses above zero with volume and price > 1d EMA50; short when TRIX crosses below zero with volume and price < 1d EMA50.
+ATR(14) stoploss (2.0x) and discrete sizing (0.25). Works in both bull/bear via 1d trend alignment.
+Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -14,10 +14,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 150:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA trend)
+    # Load HTF data ONCE before loop (1d for trend filter)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -27,16 +27,21 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h Donchian channel (20-period) ===
+    # === 12h TRIX (12,20) ===
+    close = prices['close'].values
+    # EMA1: 12-period
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA2: 12-period of EMA1
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA3: 12-period of EMA2
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX: 1-period percent change of EMA3, then 20-period EMA
+    trix_raw = np.diff(ema3, prepend=ema3[0]) / ema3
+    trix = pd.Series(trix_raw).ewm(span=20, adjust=False, min_periods=20).mean().values * 100
+    
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    
-    # Calculate Donchian channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 4h ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -51,10 +56,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) 
-            or np.isnan(lowest_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trix[i]) or np.isnan(ema_50_1d_aligned[i]) 
+            or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,48 +67,57 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        upper_donchian = highest_high[i]
-        lower_donchian = lowest_low[i]
+        trix_now = trix[i]
+        trix_prev = trix[i-1]
         ema_trend = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
         
         # Volume confirmation: current volume > 1.8x average
         volume_confirmed = volume_now > 1.8 * vol_avg
         
+        # TRIX zero-cross signals
+        trix_cross_up = (trix_prev <= 0) and (trix_now > 0)
+        trix_cross_down = (trix_prev >= 0) and (trix_now < 0)
+        
         if position == 0:
-            # Only enter in trending markets (price > 1d EMA50 for long, < for short)
-            # Volume confirmation required to avoid false breakouts
-            long_condition = (price > upper_donchian) and (price > ema_trend) and volume_confirmed
-            short_condition = (price < lower_donchian) and (price < ema_trend) and volume_confirmed
-            
-            if long_condition:
+            # Long: TRIX crosses up + volume + price above 1d EMA50 (bullish trend)
+            if trix_cross_up and volume_confirmed and (price > ema_trend):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_condition:
+            # Short: TRIX crosses down + volume + price below 1d EMA50 (bearish trend)
+            elif trix_cross_down and volume_confirmed and (price < ema_trend):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.5x ATR)
-            if price < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0x ATR
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
+            # Trend reversal: price below 1d EMA50
             elif price < ema_trend:
+                signals[i] = 0.0
+                position = 0
+            # TRIX cross down exit (momentum fading)
+            elif trix_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (2.5x ATR)
-            if price > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0x ATR
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
+            # Trend reversal: price above 1d EMA50
             elif price > ema_trend:
+                signals[i] = 0.0
+                position = 0
+            # TRIX cross up exit (momentum fading)
+            elif trix_cross_up:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
-timeframe = "4h"
+name = "12h_TRIX_VolumeSpike_1dTrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
