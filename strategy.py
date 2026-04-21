@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v1
-Hypothesis: 4h timeframe with 1d Camarilla R1/S1 breakouts, volume > 1.5x 6-period average, and ADX > 25 for trend confirmation.
-Designed to capture strong breakouts in trending markets while avoiding chop. Target: 15-35 trades/year (60-140 total over 4 years).
+4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v2
+Hypothesis: 4h timeframe with 1d Camarilla R1/S1 breakouts, volume > 2x 48-period average, and ADX > 20 for trend confirmation.
+Designed to reduce trade frequency by tightening volume filter and slightly lowering ADX threshold to capture more trends while avoiding chop.
+Target: 15-25 trades/year (60-100 total over 4 years) to stay well under the 400 trade limit.
 Works in bull/bear by only trading strong trending breaks, avoiding false signals in ranging markets.
 """
 
@@ -33,9 +34,6 @@ def generate_signals(prices):
     prev_close[0] = np.nan
     
     # Camarilla levels: R1, S1, and pivot point (PP)
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    # PP = (High + Low + Close)/3
     rang = prev_high - prev_low
     r1 = prev_close + 1.1 * rang / 12
     s1 = prev_close - 1.1 * rang / 12
@@ -111,15 +109,15 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.5 * 6-period average (4h timeframe: 6 bars = 1 day)
-        if i >= 6:
-            vol_ma = prices['volume'].iloc[i-6:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
+        # Volume filter: current volume > 2.0 * 48-period average (48 * 4h = 8 days)
+        if i >= 48:
+            vol_ma = prices['volume'].iloc[i-48:i].mean()
+            volume_ok = volume > 2.0 * vol_ma
         else:
             volume_ok = False
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending = adx[i] > 25
+        # Regime filter: ADX > 20 indicates trending market (slightly relaxed from 25)
+        trending = adx[i] > 20
         
         if position == 0:
             # Long conditions: break above R1 + volume + trending
@@ -149,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v1"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v2"
 timeframe = "4h"
 leverage = 1.0
