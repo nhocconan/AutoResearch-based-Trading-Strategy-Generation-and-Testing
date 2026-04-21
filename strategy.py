@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_VolumeATRFilter_V1
-Hypothesis: Daily Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 1d timeframe for BTC and ETH in both bull and bear markets. Uses 1w EMA200 for trend filter. Target: 7-25 trades/year per symbol (30-100 over 4 years).
+4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1
+Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 4h timeframe for BTC and ETH in both bull and bear markets. The strategy uses 1d timeframe for Camarilla pivot calculation and 4h EMA34 for trend filter. Target: 19-50 trades/year per symbol (75-200 over 4 years).
 """
 
 import numpy as np
@@ -13,14 +13,14 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # Load 4h data once for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
+        return np.zeros(n)
+    
     # Load daily data once for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Load weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
         return np.zeros(n)
     
     # Previous day's OHLC for Camarilla pivot calculation
@@ -40,17 +40,17 @@ def generate_signals(prices):
     r1 = pivot + (prev_high - prev_low) * 1.1 / 12
     s1 = pivot - (prev_high - prev_low) * 1.1 / 12
     
-    # Align daily levels to daily timeframe (no shift needed as we use previous day's levels)
+    # Align daily levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Weekly EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # 4h EMA34 for trend filter
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Volume filter: 20-period average (approx 20 days)
+    # Volume filter: 20-period average (approx 3.3 days on 4h)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     # ATR for stoploss
@@ -70,7 +70,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,20 +82,20 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume > 1.5 * vol_ma[i]
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_200_1w_aligned[i]
-        downtrend = close[i] < ema_200_1w_aligned[i]
+        # 4h trend filter
+        uptrend = close[i] > ema_34_4h_aligned[i]
+        downtrend = close[i] < ema_34_4h_aligned[i]
         
         if position == 0:
             # Long: price breaks above R1 in uptrend with volume
             if uptrend and volume_ok:
                 if price > r1_aligned[i]:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
             # Short: price breaks below S1 in downtrend with volume
             elif downtrend and volume_ok:
                 if price < s1_aligned[i]:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
         
         elif position == 1:
@@ -104,7 +104,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit: price reaches R1 or stoploss
@@ -112,10 +112,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_VolumeATRFilter_V1"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1"
+timeframe = "4h"
 leverage = 1.0
