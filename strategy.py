@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_VolumeSpike_TrendFilter
-Hypothesis: On 4h timeframe, Donchian(20) breakouts with volume spike and daily trend filter (price above/below daily EMA50) yield high-probability trades. Works in bull/bear markets by only taking breakouts in direction of daily trend. Limited entries via volume confirmation and trend alignment reduce overtrading.
+6h_1w_FundingRateMeanReversion_Bias
+Hypothesis: Funding rate mean reversion works on 6h timeframe with weekly bias filter.
+In BTC/ETH, extreme funding rates (> +0.03% long, < -0.03% short) reverse within 1-3 days.
+Weekly EMA filter ensures we only take reversals in direction of weekly trend.
+Designed for low trade frequency (15-25/year) to avoid fee drag in ranging markets.
 """
 
 import numpy as np
@@ -10,71 +13,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian(20) on 4h close
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Load funding rate data (assuming it's available as a column)
+    # If not available, we'll simulate using price action as proxy
+    # In reality, funding rate would be loaded from external data
+    # For now, we'll use a proxy based on price deviation from weekly VWAP
+    # This approximates funding rate extremes
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Calculate weekly VWAP as proxy for fair value
+    typical_price = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3
+    vwap_1w = (typical_price * df_1w['volume'].values).cumsum() / df_1w['volume'].values.cumsum()
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    
+    # Calculate deviation from weekly VWAP (proxy for funding rate extremes)
+    price_dev = (prices['close'].values - vwap_1w_aligned) / vwap_1w_aligned
+    
+    # Smooth the deviation to avoid noise
+    price_dev_smooth = pd.Series(price_dev).ewm(span=6, adjust=False, min_periods=6).mean().values
+    
     for i in range(50, n):
-        # Skip if daily EMA not ready
-        if np.isnan(ema_50_1d_aligned[i]):
+        # Skip if weekly EMA not ready
+        if np.isnan(ema_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
+        dev = price_dev_smooth[i]
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
-        else:
-            volume_ok = False
+        # Extreme deviation thresholds (proxy for funding rate extremes)
+        extreme_long = dev < -0.005   # Price significantly below weekly VWAP
+        extreme_short = dev > 0.005   # Price significantly above weekly VWAP
         
-        # Trend filter: price > daily EMA50 for long, price < daily EMA50 for short
-        trend_long = price > ema_50_1d_aligned[i]
-        trend_short = price < ema_50_1d_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = prices['close'].iloc[i] > ema_50_1w_aligned[i]
+        weekly_downtrend = prices['close'].iloc[i] < ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian + volume confirmation + uptrend
-            if price > upper[i] and volume_ok and trend_long:
+            # Long: extreme negative deviation + weekly uptrend bias
+            if extreme_long and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + volume confirmation + downtrend
-            elif price < lower[i] and volume_ok and trend_short:
+            # Short: extreme positive deviation + weekly downtrend bias
+            elif extreme_short and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below lower Donchian or trend turns bearish
-            if price < lower[i] or not trend_long:
+            # Long exit: deviation returns to neutral or trend breaks
+            if dev > -0.001 or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above upper Donchian or trend turns bullish
-            if price > upper[i] or not trend_short:
+            # Short exit: deviation returns to neutral or trend breaks
+            if dev < 0.001 or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_VolumeSpike_TrendFilter"
-timeframe = "4h"
+name = "6h_1w_FundingRateMeanReversion_Bias"
+timeframe = "6h"
 leverage = 1.0
