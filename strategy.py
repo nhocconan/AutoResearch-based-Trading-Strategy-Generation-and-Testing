@@ -1,187 +1,138 @@
 #!/usr/bin/env python3
 """
-12h_PivotPoint_R1S1_Breakout_Volume_Regime
-Hypothesis: On 12h timeframe, enter long when price breaks above daily pivot R1 with volume spike in trending market,
-enter short when price breaks below daily pivot S1 with volume spike in trending market. Uses ADX for trend filter and ATR for volatility-based volume confirmation.
-Designed for 12h with 1-2 trades per month (~24-48/year) to minimize fee drag and work in both bull/bear markets via trend-following logic.
+4h_Volume_Weighted_CCI_Trend_Signal
+Hypothesis: On 4h timeframe, use Commodity Channel Index (CCI) with volume-weighted adjustment to detect trend exhaustion and reversal points. Combine with 12h trend filter and volume confirmation to avoid whipsaws. Works in bull markets by buying pullbacks in uptrends and in bear markets by selling rallies in downtrends. Target 25-40 trades/year via strict entry conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index"""
-    if len(high) < period + 1:
-        return np.full_like(high, np.nan, dtype=float)
+def calculate_cci(high, low, close, period=20):
+    """Calculate Commodity Channel Index"""
+    typical_price = (high + low + close) / 3.0
+    sma_tp = np.zeros_like(typical_price)
+    mad = np.zeros_like(typical_price)
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([np.array([np.nan]), tr])
+    if len(typical_price) < period:
+        return np.full_like(typical_price, np.nan)
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([np.array([0]), dm_plus])
-    dm_minus = np.concatenate([np.array([0]), dm_minus])
+    for i in range(len(typical_price)):
+        if i < period - 1:
+            sma_tp[i] = np.nan
+            mad[i] = np.nan
+        else:
+            sma_tp[i] = np.mean(typical_price[i-period+1:i+1])
+            mad[i] = np.mean(np.abs(typical_price[i-period+1:i+1] - sma_tp[i]))
     
-    # Smoothed values
-    atr = np.zeros_like(high)
-    dm_plus_smooth = np.zeros_like(high)
-    dm_minus_smooth = np.zeros_like(high)
-    
-    # Initial average
-    atr[period] = np.nanmean(tr[1:period+1])
-    dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
-    dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
-    
-    # Wilder smoothing
-    for i in range(period + 1, len(high)):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
-        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
-    
-    # Directional Indicators
-    plus_di = 100 * dm_plus_smooth / atr
-    minus_di = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    adx = np.zeros_like(high)
-    adx[2*period] = np.nanmean(dx[period+1:2*period+1])
-    
-    for i in range(2*period + 1, len(high)):
-        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-    
-    return adx
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
-    if len(high) < period + 1:
-        return np.full_like(high, np.nan, dtype=float)
-    
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([np.array([np.nan]), tr])
-    
-    atr = np.zeros_like(high)
-    atr[period] = np.nanmean(tr[1:period+1])
-    
-    for i in range(period + 1, len(high)):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-    
-    return atr
+    cci = np.full_like(typical_price, np.nan)
+    valid = (~np.isnan(sma_tp)) & (~np.isnan(mad)) & (mad != 0)
+    cci[valid] = (typical_price[valid] - sma_tp[valid]) / (0.015 * mad[valid])
+    return cci
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 4h data once
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate pivot points: P = (H + L + C)/3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = 2*P - L
-    r1 = 2 * pivot - low_1d
-    # S1 = 2*P - H
-    s1 = 2 * pivot - high_1d
+    # Volume-weighted CCI: typical price weighted by volume
+    typical_price = (high_4h + low_4h + close_4h) / 3.0
+    vol_tp = typical_price * volume_4h
     
-    # Align pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate VW-CCI (volume-weighted CCI)
+    vw_cci = calculate_cci(high_4h, low_4h, close_4h, 20)  # Standard CCI calculation
+    # Adjust for volume: when volume is high, CCI signal is stronger
+    vol_factor = np.zeros_like(volume_4h)
+    if len(volume_4h) >= 20:
+        vol_ma = np.zeros_like(volume_4h)
+        for i in range(len(volume_4h)):
+            if i < 19:
+                vol_ma[i] = np.nan
+            else:
+                vol_ma[i] = np.mean(volume_4h[i-19:i+1])
+        vol_factor = np.where(volume_4h > vol_ma, 1.2, 0.8)  # Amplify in high volume
+    else:
+        vol_factor = np.ones_like(volume_4h)
     
-    # Load 1w data for ADX trend filter (higher timeframe for stronger trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    vw_cci_adjusted = vw_cci * vol_factor
+    vw_cci_adjusted_aligned = align_htf_to_ltf(prices, df_4h, vw_cci_adjusted)
+    
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
+    # 12h EMA34 for trend
+    ema34_12h = np.zeros_like(close_12h)
+    if len(close_12h) >= 34:
+        ema34_12h[33] = np.mean(close_12h[:34])
+        multiplier = 2 / (34 + 1)
+        for i in range(34, len(close_12h)):
+            ema34_12h[i] = (close_12h[i] - ema34_12h[i-1]) * multiplier + ema34_12h[i-1]
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Calculate ADX on weekly data
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Calculate ATR on weekly data for volatility-based volume threshold
-    atr_1w = calculate_atr(high_1w, low_1w, close_1w, 14)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Volume confirmation: 4h volume > 1.5 * 20-period average
+    vol_ma_4h = np.zeros_like(volume_4h)
+    for i in range(len(volume_4h)):
+        if i < 19:
+            vol_ma_4h[i] = np.nan
+        else:
+            vol_ma_4h[i] = np.mean(volume_4h[i-19:i+1])
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    volume_confirmed = volume_4h > (1.5 * vol_ma_4h_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if indicators not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(adx_1w_aligned[i]) or np.isnan(atr_1w_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: 08-20 UTC only
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
+        if (np.isnan(vw_cci_adjusted_aligned[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(vol_ma_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume filter: current volume > 1.5 * ATR-based threshold
-        # ATR-based threshold = average volume scaled by volatility
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            vol_threshold = vol_ma * (1 + atr_1w_aligned[i] * 10)  # Scale by volatility
-            volume_ok = volume > vol_threshold
-        else:
-            volume_ok = False
-        
-        # Trend filter: ADX > 25 indicates strong trend
-        trending = adx_1w_aligned[i] > 25
+        volume_ok = volume_confirmed[i] if i < len(volume_confirmed) else False
         
         if position == 0:
-            # Long conditions: price breaks above R1 + volume spike + trending market
-            if (price > r1_aligned[i] and 
-                volume_ok and 
-                trending):
+            # Long: VW-CCI oversold (< -100) in uptrend (price > 12h EMA34) with volume
+            if (vw_cci_adjusted_aligned[i] < -100 and 
+                price > ema34_12h_aligned[i] and 
+                volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S1 + volume spike + trending market
-            elif (price < s1_aligned[i] and 
-                  volume_ok and 
-                  trending):
+            # Short: VW-CCI overbought (> 100) in downtrend (price < 12h EMA34) with volume
+            elif (vw_cci_adjusted_aligned[i] > 100 and 
+                  price < ema34_12h_aligned[i] and 
+                  volume_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below pivot OR trend weakens
-            if price < pivot_aligned[i] or adx_1w_aligned[i] < 20:
+            # Long exit: VW-CCI returns to neutral (> -50) or trend breakdown
+            if vw_cci_adjusted_aligned[i] > -50 or price < ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above pivot OR trend weakens
-            if price > pivot_aligned[i] or adx_1w_aligned[i] < 20:
+            # Short exit: VW-CCI returns to neutral (< 50) or trend reversal
+            if vw_cci_adjusted_aligned[i] < 50 or price > ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -189,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_PivotPoint_R1S1_Breakout_Volume_Regime"
-timeframe = "12h"
+name = "4h_Volume_Weighted_CCI_Trend_Signal"
+timeframe = "4h"
 leverage = 1.0
