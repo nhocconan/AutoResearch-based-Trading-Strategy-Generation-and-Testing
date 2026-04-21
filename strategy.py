@@ -33,7 +33,7 @@ def generate_signals(prices):
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # Align ATR percentile to 4h timeframe
+    # Align ATR percentile to 1h timeframe
     atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
     # === Daily SMA50 for trend filter ===
@@ -44,6 +44,10 @@ def generate_signals(prices):
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -52,6 +56,13 @@ def generate_signals(prices):
         if (np.isnan(atr_percentile_aligned[i]) or 
             np.isnan(sma_50_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Skip if outside trading session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,13 +78,13 @@ def generate_signals(prices):
             if (atr_percentile_val < 30 and  # Low volatility regime
                 price_close > sma_trend and
                 vol_ratio_val > 1.5):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Enter short in low volatility (range) + downtrend + volume
             elif (atr_percentile_val < 30 and   # Low volatility regime
                   price_close < sma_trend and
                   vol_ratio_val > 1.5):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
@@ -86,10 +97,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_ATR_Volatility_Regime_SMA50_Trend_Volume"
-timeframe = "4h"
+name = "1h_ATR_Volatility_Regime_SMA50_Trend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
