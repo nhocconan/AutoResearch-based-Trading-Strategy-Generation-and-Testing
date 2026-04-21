@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_ZeroLine_12hTrend_Regime_v1
-Hypothesis: 6h Elder Ray (Bull Power/Bear Power) zero-line cross with 12h trend regime (price vs EMA50) and volume confirmation (>1.5x 20-bar MA). 
-In bull regime (price > 12h EMA50), favor longs when Bull Power crosses above zero; in bear regime (price < 12h EMA50), favor shorts when Bear Power crosses below zero. 
-Discrete sizing (0.25) and ATR-based stop (2.0x) reduce churn. Target: 50-150 total trades over 4 years by requiring confluence of Elder Ray signal, trend, and volume.
-Designed to work in bull (strong buying pressure) and bear (strong selling pressure) markets via Elder Ray's measurement of bull/bear power relative to EMA13.
+4h_KAMA_Direction_1dTrendRegime_VolumeSpike_v1
+Hypothesis: 4h KAMA direction (trend) aligned with 1d EMA34 trend regime and volume confirmation (>2x 20-bar MA). 
+In bull regime (price > 1d EMA34), take longs when KAMA turns up; in bear regime (price < 1d EMA34), take shorts when KAMA turns down. 
+ATR-based stoploss (2.0x) and discrete sizing (0.25) reduce churn. Target: 75-200 total trades over 4 years by requiring confluence of KAMA turn, trend regime, and volume. 
+Designed to work in bull (trend following with KAMA) and bear (counter-trend KAMA turns vs higher timeframe) markets.
 """
 
 import numpy as np
@@ -16,17 +16,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for trend regime)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load HTF data ONCE before loop (1d for trend regime)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 12h EMA50 for trend regime ===
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === 1d EMA34 for trend regime ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 6h ATR (14-period) for stoploss ===
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -37,16 +37,28 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 6h volume confirmation (volume > 1.5x 20-period average) ===
+    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma_20)
+    volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 6h Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 ===
+    # === 4h KAMA (ER=10, fast=2, slow=30) for trend direction ===
     close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # measures bull power above EMA13
-    bear_power = low - ema13   # measures bear power below EMA13
+    change = np.abs(close_s.diff(10).values)  # 10-period net change
+    vol = np.abs(close_s.diff(1).values)      # 1-period volatility
+    sum_vol = pd.Series(vol).rolling(window=10, min_periods=10).sum().values
+    er = np.where(sum_vol > 0, change / sum_vol, 0)  # efficiency ratio
+    sc = (er * (2.0/2 - 2.0/30) + 2.0/30) ** 2     # smoothing constant
+    kama = np.full_like(close, np.nan)
+    kama[9] = close_s.iloc[9]  # seed value at index 9
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # KAMA turning points: up when current > previous, down when current < previous
+    kama_up = kama > np.roll(kama, 1)
+    kama_down = kama < np.roll(kama, 1)
+    kama_up[0] = False
+    kama_down[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,8 +67,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(kama[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,26 +76,24 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_50_12h_val = ema_50_12h_aligned[i]
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
         vol_conf = volume_confirmed[i]
+        kama_up_val = kama_up[i]
+        kama_down_val = kama_down[i]
         
         # Trend regime
-        is_bull_regime = price > ema_50_12h_val
-        is_bear_regime = price < ema_50_12h_val
+        is_bull = price > ema_34_1d_val
+        is_bear = price < ema_34_1d_val
         
         if position == 0:
-            if is_bull_regime:
-                # Bull regime: long when Bull Power crosses above zero (bulls gaining control)
-                long_condition = (bull_val > 0) and (bull_power[i-1] <= 0) and vol_conf
-                # Avoid shorts in bull regime unless strong bear power
-                short_condition = (bear_val < 0) and (bear_power[i-1] >= 0) and vol_conf and (bull_val < -0.5)  # only if weak bull power
+            if is_bull:
+                # Bull regime: long when KAMA turns up
+                long_condition = kama_up_val and vol_conf
+                short_condition = False  # avoid shorts in bull regime
             else:  # bear regime
-                # Bear regime: short when Bear Power crosses below zero (bears gaining control)
-                short_condition = (bear_val < 0) and (bear_power[i-1] >= 0) and vol_conf
-                # Avoid longs in bear regime unless strong bull power
-                long_condition = (bull_val > 0) and (bull_power[i-1] <= 0) and vol_conf and (bear_val > 0.5)  # only if weak bear power
+                # Bear regime: short when KAMA turns down
+                short_condition = kama_down_val and vol_conf
+                long_condition = False   # avoid longs in bear regime
             
             if long_condition:
                 signals[i] = 0.25
@@ -105,8 +115,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if Bull Power turns negative (bulls losing control)
-                elif bull_val <= 0:
+                # Exit if KAMA turns down (trend change)
+                elif kama_down[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -117,8 +127,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if Bear Power turns positive (bears losing control)
-                elif bear_val >= 0:
+                # Exit if KAMA turns up (trend change)
+                elif kama_up[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -127,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_ZeroLine_12hTrend_Regime_v1"
-timeframe = "6h"
+name = "4h_KAMA_Direction_1dTrendRegime_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
