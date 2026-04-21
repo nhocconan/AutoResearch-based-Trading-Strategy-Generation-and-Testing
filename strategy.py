@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_WilliamsAlligator_ElderRay_Regime_V1
-Hypothesis: 6h strategy combining Williams Alligator (trend detection) with Elder Ray Index (bull/bear power) filtered by ADX regime.
-- Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs on median price. Trend when aligned (Lips > Teeth > Jaw for uptrend).
-- Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low. Measures buying/selling pressure.
-- ADX > 25 = trending regime (use Alligator/Elder Ray), ADX < 20 = ranging regime (fade extremes).
-- Enter long when: Alligator bullish alignment AND Bull Power > 0 AND ADX > 25.
-- Enter short when: Alligator bearish alignment AND Bear Power > 0 AND ADX > 25.
-- Exit on opposite signal or ATR(10) trailing stop (2.0*ATR).
-- Uses 1d HTF for trend context (price > 1d EMA50 for long bias, < for short bias).
-Target: 12-25 trades/year (~50-100 total over 4 years) to minimize fee drag.
-Works in bull/bear via ADX regime filter and HTF trend bias.
+12h_Camarilla_R1_S1_Breakout_HTFTrend_ChopFilter_V1
+Hypothesis: 12h strategy using 1d Camarilla pivot levels (R1/S1) for breakout entries,
+filtered by 1w EMA34 trend and 12h choppiness regime (CHOP > 61.8 = range, < 38.2 = trend).
+Enter long when price breaks above 1d R1 with 1w uptrend and trending market (CHOP < 38.2).
+Enter short when price breaks below 1d S1 with 1w downtrend and trending market.
+Exit on ATR(14) trailing stop (2.0*ATR) or opposite level break.
+Target: 12-37 trades/year (~50-150 total over 4 years) to minimize fee drag.
+Uses 12h primary timeframe to reduce trade frequency and avoid overtrading.
+Works in bull/bear via HTF trend alignment and regime filter.
 """
 
 import numpy as np
@@ -22,56 +20,56 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for trend bias)
+    # Load HTF data ONCE before loop (1d for Camarilla pivots, 1w for EMA trend)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 1d EMA50 for HTF trend bias ===
+    # === 1d Camarilla Pivot Levels (R1, S1) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 6h Indicators (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 30:
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12.0
+    r1_1d = close_1d + camarilla_range
+    s1_1d = close_1d - camarilla_range
+    
+    # Align to 12h timeframe (use previous completed daily bar)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # === 1w EMA34 for HTF trend filter ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # === 12h Indicators (primary timeframe) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Williams Alligator: SMAs of median price
-    median_price = (high_6h + low_6h) / 2.0
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # 13-period
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # 8-period
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values     # 5-period
-    
-    # Elder Ray Index: Bull/Bear Power vs EMA(13)
-    ema_13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_6h - ema_13
-    bear_power = ema_13 - low_6h
-    
-    # ADX (14-period) for regime detection
-    tr1 = pd.Series(high_6h - low_6h)
-    tr2 = pd.Series(np.abs(high_6h - np.roll(close_6h, 1)))
-    tr3 = pd.Series(np.abs(low_6h - np.roll(close_6h, 1)))
+    # True Range for ATR and Choppiness
+    tr1 = pd.Series(high_12h - low_12h)
+    tr2 = pd.Series(np.abs(high_12h - np.roll(close_12h, 1)))
+    tr3 = pd.Series(np.abs(low_12h - np.roll(close_12h, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr_sum = tr.rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
     
-    # +DI and -DI
-    up_move = pd.Series(high_6h).diff()
-    down_move = pd.Series(low_6h).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    # Handle division by zero
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = np.where(np.isnan(adx), 0, adx)
+    # Choppiness Index (CHOP) - 14 period
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # avoid div by zero
+    
+    # ATR (14-period) for stoploss
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,38 +77,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) 
-            or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) 
-            or np.isnan(adx[i]) or np.isnan(atr[i]) 
-            or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
+            or np.isnan(chop[i]) or np.isnan(atr[i]) 
+            or np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
+        price = close_12h[i]
         
         if position == 0:
-            # Alligator alignment
-            alligator_bullish = lips[i] > teeth[i] > jaw[i]
-            alligator_bearish = lips[i] < teeth[i] < jaw[i]
+            # Long conditions: price > 1d R1, 1w uptrend, trending market (CHOP < 38.2)
+            long_breakout = price > r1_1d_aligned[i]
+            long_trend = price > ema_34_1w_aligned[i]
+            long_regime = chop[i] < 38.2
             
-            # Elder Ray power
-            bull_strong = bull_power[i] > 0
-            bear_strong = bear_power[i] > 0
-            
-            # Regime filters
-            trending_regime = adx[i] > 25
-            ranging_regime = adx[i] < 20
-            htf_bullish = price > ema_50_1d_aligned[i]
-            htf_bearish = price < ema_50_1d_aligned[i]
+            # Short conditions: price < 1d S1, 1w downtrend, trending market
+            short_breakout = price < s1_1d_aligned[i]
+            short_trend = price < ema_34_1w_aligned[i]
+            short_regime = chop[i] < 38.2
             
             # Entry logic
-            if alligator_bullish and bull_strong and trending_regime and htf_bullish:
+            if long_breakout and long_trend and long_regime:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif alligator_bearish and bear_strong and trending_regime and htf_bearish:
+            elif short_breakout and short_trend and short_regime:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -120,8 +113,8 @@ def generate_signals(prices):
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: Alligator turns bearish OR Bear Power becomes strong
-            elif lips[i] < teeth[i] or bear_power[i] > 0:
+            # Trailing exit: price closes below 1d S1 (support broken)
+            elif price < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,8 +125,8 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: Alligator turns bullish OR Bull Power becomes strong
-            elif lips[i] > teeth[i] or bull_power[i] > 0:
+            # Trailing exit: price closes above 1d R1 (resistance broken)
+            elif price > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -141,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_ElderRay_Regime_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_HTFTrend_ChopFilter_V1"
+timeframe = "12h"
 leverage = 1.0
