@@ -1,77 +1,59 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop
-Hypothesis: 1h Camarilla pivot R1/S1 breakout with volume confirmation (>1.3x 20-period volume MA) and 4h HTF trend filter (price > EMA34 for longs, < EMA34 for shorts). Uses 1d choppiness regime filter (CHOP > 61.8 = mean reversion, CHOP < 38.2 = trend) to adapt strategy. In choppy regimes: mean reversion at S1/R1 with tighter stops. In trending regimes: breakout continuation with momentum filter. Designed for 1h timeframe targeting 15-35 trades/year to minimize fee drag while capturing both bull and bear market moves via regime adaptation and HTF trend alignment.
+6h_WilliamsFractal_Donchian_Breakout_V1
+Hypothesis: 6h strategy using 1-week Williams Fractals to identify major swing points and 1-day Donchian channels for breakout confirmation. Long when price breaks above 1d Donchian(20) high AND a weekly bullish fractal is present (confirmed with 2-bar delay). Short when price breaks below 1d Donchian(20) low AND a weekly bearish fractal is present. Uses volume confirmation (>1.3x 20-period 6h volume MA) and ATR-based stop (2.0*ATR). Designed for low trade frequency (target: 12-37 trades/year) to work in both bull and bear markets by capturing significant swing-driven breakouts.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (4h for trend, 1d for regime)
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop (1w for fractals, 1d for Donchian)
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 34 or len(df_1d) < 14:
+    if len(df_1w) < 10 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 4h EMA34 for trend filter ===
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # === 1w Williams Fractals (requires 2-bar confirmation delay) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1w, low_1w)
+    # Align with 2-bar additional delay for fractal confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
     
-    # === 1d Choppiness Index for regime filter ===
+    # === 1d Donchian Channel (20-period) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # True Range for choppy calculation
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_sum_1d = tr_1d.rolling(window=14, min_periods=14).sum().values
-    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(atr_sum_1d / (highest_high_1d - lowest_low_1d)) / np.log10(14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # === 1h Indicators (primary timeframe) ===
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 20:
+    # === 6h Indicators (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
         return np.zeros(n)
     
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
-    volume_1h = df_1h['volume'].values
-    
-    # Calculate Camarilla pivot levels from previous day using 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume MA (20-period) for spike detection
-    vol_ma = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
     # ATR (14-period) for stoploss
-    tr1 = pd.Series(high_1h - low_1h)
-    tr2 = pd.Series(np.abs(high_1h - np.roll(close_1h, 1)))
-    tr3 = pd.Series(np.abs(low_1h - np.roll(close_1h, 1)))
-    tr_1h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr_1h.rolling(window=14, min_periods=14).mean().values
+    tr1 = pd.Series(high_6h - low_6h)
+    tr2 = pd.Series(np.abs(high_6h - np.roll(close_6h, 1)))
+    tr3 = pd.Series(np.abs(low_6h - np.roll(close_6h, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Volume MA (20-period) for confirmation
+    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,84 +61,56 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
-            or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(chop_1d_aligned[i])
-            or np.isnan(ema_34_4h_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])
+            or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i])
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1h[i]
-        vol = volume_1h[i]
+        price = close_6h[i]
+        vol = volume_6h[i]
         vol_ok = vol > 1.3 * vol_ma[i]  # volume confirmation
         
-        # Regime detection from 1d
-        is_choppy = chop_1d_aligned[i] > 61.8  # mean reversion regime
-        is_trending = chop_1d_aligned[i] < 38.2  # trend following regime
-        
         if position == 0:
-            # Long conditions
-            long_breakout = price > s1_aligned[i]
-            long_volume = vol_ok
-            long_trend = price > ema_34_4h_aligned[i]  # 4h uptrend
-            
-            # Short conditions
-            short_breakout = price < r1_aligned[i]
-            short_volume = vol_ok
-            short_trend = price < ema_34_4h_aligned[i]  # 4h downtrend
-            
-            if is_choppy:
-                # In choppy market: mean reversion at S1/R1 with volume
-                if long_breakout and long_volume:
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = price
-                elif short_breakout and short_volume:
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = price
-            elif is_trending:
-                # In trending market: breakout continuation with trend filter
-                if long_breakout and long_volume and long_trend:
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = price
-                elif short_breakout and short_volume and short_trend:
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = price
+            # Long: 6h price breaks above 1d Donchian high + weekly bullish fractal + volume
+            if price > donchian_high_aligned[i] and bullish_fractal_aligned[i] and vol_ok:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+            # Short: 6h price breaks below 1d Donchian low + weekly bearish fractal + volume
+            elif price < donchian_low_aligned[i] and bearish_fractal_aligned[i] and vol_ok:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 1.5 * atr[i]:
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions
-            elif (is_choppy and price < s1_aligned[i]) or \
-                 (is_trending and price < ema_34_4h_aligned[i]) or \
-                 not vol_ok:
+            # Exit: price breaks below Donchian low or loss of volume/fractal
+            elif price < donchian_low_aligned[i] or not vol_ok or not bullish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 1.5 * atr[i]:
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions
-            elif (is_choppy and price > r1_aligned[i]) or \
-                 (is_trending and price > ema_34_4h_aligned[i]) or \
-                 not vol_ok:
+            # Exit: price breaks above Donchian high or loss of volume/fractal
+            elif price > donchian_high_aligned[i] or not vol_ok or not bearish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop"
-timeframe = "1h"
+name = "6h_WilliamsFractal_Donchian_Breakout_V1"
+timeframe = "6h"
 leverage = 1.0
