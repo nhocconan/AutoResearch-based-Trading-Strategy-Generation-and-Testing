@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Donchian20_Breakout_ATRFilter_v1
-Hypothesis: 6h Donchian(20) breakout filtered by weekly pivot direction and ATR-based volatility regime.
-In bullish weekly bias (price > weekly pivot): long Donchian breakouts, avoid shorts.
-In bearish weekly bias (price < weekly pivot): short Donchian breakouts, avoid longs.
-ATR filter ensures breakouts occur during sufficient volatility to avoid false signals.
-Uses discrete position sizing (0.25) to manage drawdown and minimize fee churn.
-Designed for 6h timeframe with 1w HTF for weekly pivot and 1d for ATR regime.
-Target: 50-150 total trades over 4 years = 12-37/year.
+4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and choppiness regime.
+In trending markets (CHOP < 38.2 and price > EMA50_1d): breakout continuation (long above R1, short below S1).
+In ranging markets (CHOP > 61.8): mean reversion at Camarilla H3/L3 levels.
+Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to balance returns and fee drag.
+Designed to work in both bull and bear markets by adapting to regime.
+Timeframe: 4h, uses 1d HTF for trend and Camarilla pivots.
+Target: 75-200 total trades over 4 years = 19-50/year.
+Improved with volume confirmation to reduce false signals.
 """
 
 import numpy as np
@@ -16,81 +17,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for weekly pivot, 1d for ATR regime)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
-        return np.zeros(n)
-    
+    # Load HTF data ONCE before loop (1d for EMA50 trend and Camarilla)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1w OHLC for weekly pivot calculation (based on previous 1w bar) ===
-    df_1w_open = df_1w['open'].values
-    df_1w_high = df_1w['high'].values
-    df_1w_low = df_1w['low'].values
-    df_1w_close = df_1w['close'].values
-    
-    # Calculate weekly pivot points (standard formula)
-    weekly_pivot = (df_1w_high + df_1w_low + df_1w_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - df_1w_low
-    weekly_s1 = 2 * weekly_pivot - df_1w_high
-    weekly_r2 = weekly_pivot + (df_1w_high - df_1w_low)
-    weekly_s2 = weekly_pivot - (df_1w_high - df_1w_low)
-    
-    # Align 1w weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
-    
-    # === 1d ATR(14) for volatility regime filter ===
+    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
+    df_1d_open = df_1d['open'].values
     df_1d_high = df_1d['high'].values
     df_1d_low = df_1d['low'].values
     df_1d_close = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = pd.Series(df_1d_high - df_1d_low)
-    tr2 = pd.Series(np.abs(df_1d_high - np.roll(df_1d_close, 1)))
-    tr3 = pd.Series(np.abs(df_1d_low - np.roll(df_1d_close, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla levels for each 1d bar
+    range_1d = df_1d_high - df_1d_low
+    r1_1d = df_1d_close + 0.275 * range_1d
+    s1_1d = df_1d_close - 0.275 * range_1d
+    h3_1d = df_1d_close + 1.1 * range_1d
+    l3_1d = df_1d_close - 1.1 * range_1d
+    h4_1d = df_1d_close + 1.382 * range_1d
+    l4_1d = df_1d_close - 1.382 * range_1d
     
-    # Align 1d ATR to 6h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align 1d Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
-    # === 6h Donchian(20) breakout levels ===
+    # === 1d EMA50 for trend filter ===
+    ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === Choppiness Index (14-period) for regime detection ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 6h ATR(14) for stoploss and volatility filter ===
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_6h = tr.rolling(window=14, min_periods=14).mean().values
+    atr_sum = tr.rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # === 6h Volume(20) for confirmation ===
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # avoid division by zero
+    
+    # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === ATR (14-period) for stoploss ===
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) 
-            or np.isnan(atr_6h[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,50 +94,60 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        weekly_pivot = weekly_pivot_aligned[i]
-        weekly_r1 = weekly_r1_aligned[i]
-        weekly_s1 = weekly_s1_aligned[i]
-        weekly_r2 = weekly_r2_aligned[i]
-        weekly_s2 = weekly_s2_aligned[i]
-        upper_donchian = donchian_high[i]
-        lower_donchian = donchian_low[i]
-        atr_now = atr_6h[i]
-        atr_regime = atr_1d_aligned[i]
+        chop_val = chop[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        h3 = h3_1d_aligned[i]
+        l3 = l3_1d_aligned[i]
+        h4 = h4_1d_aligned[i]
+        l4 = l4_1d_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
         
-        # Volatility filter: current 6h ATR > 0.5x 1d ATR (ensures sufficient volatility)
-        vol_filter = atr_now > 0.5 * atr_regime
-        
-        # Volume confirmation: current volume > 1.2x average
-        volume_confirmed = volume_now > 1.2 * vol_avg
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirmed = volume_now > 1.5 * vol_avg
         
         if position == 0:
-            # Weekly bias filter: only trade in direction of weekly pivot
-            bullish_bias = price > weekly_pivot
-            bearish_bias = price < weekly_pivot
-            
-            # Long conditions: price breaks above Donchian high + bullish bias + filters
-            long_condition = (price > upper_donchian) and bullish_bias and vol_filter and volume_confirmed
-            
-            # Short conditions: price breaks below Donchian low + bearish bias + filters
-            short_condition = (price < lower_donchian) and bearish_bias and vol_filter and volume_confirmed
-            
-            if long_condition:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            elif short_condition:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+            # Regime-based entries with volume confirmation
+            if chop_val < 38.2:  # Trending regime
+                # Only enter in direction of 1d trend with volume confirmation
+                long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
+                short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
+                
+                if long_condition:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                elif short_condition:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+                    
+            elif chop_val > 61.8:  # Ranging regime
+                # Mean reversion at H3/L3 levels with volume confirmation
+                long_condition = (price < l3) and (price > l4) and volume_confirmed  # Oversold bounce
+                short_condition = (price > h3) and (price < h4) and volume_confirmed  # Overbought rejection
+                
+                if long_condition:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                elif short_condition:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
         
         elif position == 1:
             # Check stoploss (2.0x ATR)
-            if price < entry_price - 2.0 * atr_now:
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price re-enters Donchian channel (breakout failed)
-            elif price < upper_donchian:
+            # Trend reversal exit (in trending regime)
+            elif chop_val < 38.2 and price < ema_trend:
+                signals[i] = 0.0
+                position = 0
+            # Mean reversion exit (in ranging regime)
+            elif chop_val > 61.8 and price > h3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -149,11 +155,15 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss (2.0x ATR)
-            if price > entry_price + 2.0 * atr_now:
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price re-enters Donchian channel (breakout failed)
-            elif price > lower_donchian:
+            # Trend reversal exit (in trending regime)
+            elif chop_val < 38.2 and price > ema_trend:
+                signals[i] = 0.0
+                position = 0
+            # Mean reversion exit (in ranging regime)
+            elif chop_val > 61.8 and price < l3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -161,6 +171,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Donchian20_Breakout_ATRFilter_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
