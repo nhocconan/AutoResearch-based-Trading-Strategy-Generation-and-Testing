@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 4h_Donchian20_Breakout_Volume_HTFTrend_V1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>1.5x 20-period volume MA).
-Donchian channels capture volatility-based breakouts that work in both bull and bear markets.
-1d EMA50 ensures alignment with higher-timeframe trend to avoid counter-trend trades.
-Volume confirmation reduces false breakouts. Target 20-50 trades/year (80-200 total over 4 years).
-Uses 4h primary timeframe with 1d HTF for trend filter.
+Hypothesis: 4h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
+Long when price breaks above upper Donchian(20) + volume > 1.5x 20-period MA + close > 1d EMA50.
+Short when price breaks below lower Donchian(20) + volume > 1.5x 20-period MA + close < 1d EMA50.
+Exit on opposite Donchian break or trend reversal. Uses 4h primary timeframe with 1d HTF for trend.
+Designed for low trade frequency (<50/year) to minimize fee drag and work in both bull/bear markets via trend filter.
 """
 
 import numpy as np
@@ -29,7 +29,7 @@ def generate_signals(prices):
     
     # === 4h Indicators (primary timeframe) ===
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
     high_4h = df_4h['high'].values
@@ -38,8 +38,8 @@ def generate_signals(prices):
     volume_4h = df_4h['volume'].values
     
     # Donchian channels (20-period)
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    upper_dc = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_dc = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
@@ -49,7 +49,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) 
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) 
             or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -61,26 +61,26 @@ def generate_signals(prices):
         vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume confirmation + 1d uptrend
-            if price > donchian_high[i] and vol_ok and price > ema_50_1d_aligned[i]:
+            # Long: price breaks above upper Donchian + volume confirmation + 1d uptrend
+            if price > upper_dc[i] and vol_ok and price > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + volume confirmation + 1d downtrend
-            elif price < donchian_low[i] and vol_ok and price < ema_50_1d_aligned[i]:
+            # Short: price breaks below lower Donchian + volume confirmation + 1d downtrend
+            elif price < lower_dc[i] and vol_ok and price < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Donchian low or 1d EMA50
-            if price < donchian_low[i] or price < ema_50_1d_aligned[i]:
+            # Exit long: price breaks below lower Donchian or trend reverses
+            if price < lower_dc[i] or price < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian high or 1d EMA50
-            if price > donchian_high[i] or price > ema_50_1d_aligned[i]:
+            # Exit short: price breaks above upper Donchian or trend reverses
+            if price > upper_dc[i] or price > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
