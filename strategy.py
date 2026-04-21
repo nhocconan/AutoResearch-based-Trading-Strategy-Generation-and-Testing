@@ -5,76 +5,95 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Daily Donchian channels (20-period) for breakout signals ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # === Daily Bollinger Bands for volatility regime ===
+    close_1d = df_1d['close'].values
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (std_20 * 2.0)
+    lower_bb = sma_20 - (std_20 * 2.0)
+    bb_width = (upper_bb - lower_bb) / sma_20
     
-    # === 12h EMA50 for trend filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Bollinger Band width percentile (252-day lookback for regime)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=252, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Align BB width percentile to 1h timeframe
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    
+    # === Daily EMA34 for trend filter ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
+    # Hour filter (08-20 UTC)
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):  # Start after warmup
         # Skip if indicators not ready
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(bb_width_percentile_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Skip outside trading session (08-20 UTC)
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
         price_close = prices['close'].iloc[i]
-        upper_break = price_close > donch_high[i]
-        lower_break = price_close < donch_low[i]
-        trend_filter = ema_50_12h_aligned[i]
+        bb_percentile = bb_width_percentile_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long on Donchian breakout + uptrend + volume
-            if upper_break and price_close > trend_filter and vol_ratio_val > 1.5:
-                signals[i] = 0.25
+            # Enter long in low volatility (range) + uptrend + volume
+            if (bb_percentile < 30 and  # Low volatility regime
+                price_close > ema_trend and
+                vol_ratio_val > 1.5):
+                signals[i] = 0.20
                 position = 1
-            # Enter short on Donchian breakdown + downtrend + volume
-            elif lower_break and price_close < trend_filter and vol_ratio_val > 1.5:
-                signals[i] = -0.25
+            # Enter short in low volatility (range) + downtrend + volume
+            elif (bb_percentile < 30 and   # Low volatility regime
+                  price_close < ema_trend and
+                  vol_ratio_val > 1.5):
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
-            # Exit on opposite breakout or loss of trend
-            if position == 1 and (lower_break or price_close < trend_filter):
+            # Exit when volatility increases (trending regime) or opposite condition
+            if position == 1 and (bb_percentile > 70 or price_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (upper_break or price_close > trend_filter):
+            elif position == -1 and (bb_percentile > 70 or price_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_Donchian_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1h_Bollinger_Width_Regime_EMA_Trend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
