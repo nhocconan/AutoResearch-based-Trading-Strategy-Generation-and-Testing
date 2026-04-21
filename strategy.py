@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2
-Hypothesis: Camarilla R1/S1 breakouts on 4h filtered by 1d EMA50 trend for directional bias.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: Camarilla R1/S1 breakouts on 12h timeframe filtered by 1d EMA50 trend for directional bias.
 Volume confirmation (>1.8x 20-period average) filters false breakouts. ATR stoploss (2.0x).
-Uses discrete position sizing (0.25) to minimize fee churn. Designed for 20-40 trades/year per symbol.
+Uses discrete position sizing (0.25) to minimize fee churn. Designed for 12-37 trades/year per symbol.
 Works in bull/bear via 1d trend alignment as regime filter. Focus on BTC/ETH robustness.
 """
 
@@ -21,12 +21,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h OHLC for Camarilla calculation ===
+    # === 12h OHLC for Camarilla calculation ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate previous day's OHLC for Camarilla levels (using 4h data grouped by day)
+    # Calculate previous day's OHLC for Camarilla levels (using 12h data grouped by day)
     df = prices.copy()
     df['date'] = df['open_time'].dt.date
     prev_high = df.groupby('date')['high'].shift(1).values
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
