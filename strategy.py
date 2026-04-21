@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V2
-Hypothesis: Camarilla R1/S1 breakout with volume confirmation (>1.5x 20-bar MA) and ATR-based stoploss works on 12h timeframe for BTC and ETH in both bull and bear markets. Uses 1d timeframe for Camarilla calculation (proven pattern: tight entries, volume confirmation, price channel structure). Target: 12-37 trades/year per symbol (50-150 over 4 years). Version 2 adds ATR-based volatility filter to reduce trades in low-volatility regimes and improve Sharpe.
+4h_HTF_Pivot_R3S3_Breakout_VolumeATRFilter_V1
+Hypothesis: Breakout above 1d Camarilla R3 or below S3 with volume confirmation (>1.8x 20-bar MA) and ATR stoploss (2.5x) works on 4h timeframe. Uses 1d for pivot calculation and 12h for trend filter (EMA34). Tight entries target 20-50 trades/year per symbol. Works in bull/bear via mean-reversion exits at opposite Camarilla levels.
 """
 
 import numpy as np
@@ -13,44 +13,47 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla pivot calculation (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')  # for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')  # for EMA34 trend filter
+    
+    if len(df_1d) < 30 or len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels on 1d timeframe
+    # === 1d Camarilla Pivot Levels (R3/S3) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous day's range
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
-    
-    # First bar: use same values (will be filtered by min_periods later)
     prev_high[0] = high_1d[0]
     prev_low[0] = low_1d[0]
     prev_close[0] = close_1d[0]
     
     range_1d = prev_high - prev_low
-    camarilla_r1 = prev_close + range_1d * 1.1 / 12
-    camarilla_s1 = prev_close - range_1d * 1.1 / 12
+    camarilla_r3 = prev_close + range_1d * 1.1 / 4  # R3 = close + 1.1*range/4
+    camarilla_s3 = prev_close - range_1d * 1.1 / 4  # S3 = close - 1.1*range/4
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume filter: 20-period average on 12h timeframe
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    # === 12h EMA34 for Trend Filter ===
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # ATR for stoploss and volatility filter
+    # === 4h Indicators ===
+    close = prices['close'].values
+    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
+    # Volume MA (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -58,54 +61,45 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # ATR ratio filter: current ATR vs 50-period average (avoid low volatility regimes)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / atr_ma
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(atr_ratio[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume confirmation (>1.5x average to reduce trades)
-        volume_ok = volume > 1.5 * vol_ma[i]
-        
-        # Volatility filter: only trade when ATR ratio > 0.8 (avoid low volatility)
-        vol_filter_ok = atr_ratio[i] > 0.8
+        vol = volume[i]
+        vol_ok = vol > 1.8 * vol_ma[i]  # strict volume filter to reduce trades
+        trend_up = ema_12h_aligned[i] < price  # price above 12h EMA34 = uptrend
+        trend_down = ema_12h_aligned[i] > price  # price below 12h EMA34 = downtrend
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 with volume and volatility
-            if price > camarilla_r1_aligned[i]:
-                if volume_ok and vol_filter_ok:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: price breaks below Camarilla S1 with volume and volatility
-            elif price < camarilla_s1_aligned[i]:
-                if volume_ok and vol_filter_ok:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: break above R3 with volume and uptrend
+            if price > camarilla_r3_aligned[i] and vol_ok and trend_up:
+                signals[i] = 0.25
+                position = 1
+            # Short: break below S3 with volume and downtrend
+            elif price < camarilla_s3_aligned[i] and vol_ok and trend_down:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit: price closes below Camarilla S1 (mean reversion) or ATR stoploss
-            if price < camarilla_s1_aligned[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
+            # Exit: mean reversion to S3 or ATR stoploss
+            if price < camarilla_s3_aligned[i] or price < close[i-1] - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above Camarilla R1 (mean reversion) or ATR stoploss
-            if price > camarilla_r1_aligned[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
+            # Exit: mean reversion to R3 or ATR stoploss
+            if price > camarilla_r3_aligned[i] or price > close[i-1] + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V2"
-timeframe = "12h"
+name = "4h_HTF_Pivot_R3S3_Breakout_VolumeATRFilter_V1"
+timeframe = "4h"
 leverage = 1.0
