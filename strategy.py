@@ -1,12 +1,36 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_1dADXFilter
-Hypothesis: Price breaks above/below Camarilla R1/S1 levels with volume > 1.5x 10-period average and 1d ADX > 25 (trending regime) yields high-probability trades on 12h timeframe. Uses 1d ADX to filter for trending markets only, avoiding whipsaws in ranging conditions. Works in bull/bear markets by taking breakouts in direction of trend (ADX confirms trend strength). Targets 12-30 trades/year with tight entry conditions to minimize fee drag.
+1d_ChaikinMoneyFlow_Reversal
+Hypothesis: On daily timeframe, Chaikin Money Flow (CMF) below -0.25 indicates distribution (sell pressure), above +0.25 indicates accumulation (buy pressure). Combined with price > 200-day SMA for long bias and price < 200-day SMA for short bias, this captures institutional flow extremes. Weekly ADX > 25 filters for trending conditions to avoid whipsaws in ranging markets. Works in bull/bear by taking reversal signals aligned with higher timeframe trend. Targets 10-25 trades/year with strict entry conditions to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_cmf(high, low, close, volume, period=20):
+    """Calculate Chaikin Money Flow (CMF)"""
+    # Money Flow Multiplier
+    mfm = ((close - low) - (high - close)) / (high - low)
+    mfm = np.where((high - low) == 0, 0, mfm)  # Avoid division by zero
+    
+    # Money Flow Volume
+    mfv = mfm * volume
+    
+    # CMF = sum(MFV, period) / sum(volume, period)
+    mfv_sum = np.zeros_like(mfv)
+    vol_sum = np.zeros_like(volume)
+    
+    for i in range(len(mfv)):
+        if i < period:
+            mfv_sum[i] = np.sum(mfv[max(0, i-period+1):i+1])
+            vol_sum[i] = np.sum(volume[max(0, i-period+1):i+1])
+        else:
+            mfv_sum[i] = mfv_sum[i-1] + mfv[i] - mfv[i-period]
+            vol_sum[i] = vol_sum[i-1] + volume[i] - volume[i-period]
+    
+    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0)
+    return cmf
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)"""
@@ -55,91 +79,71 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    range_ = high - low
-    pivot = (high + low + close) / 3
-    r1 = close + (range_ * 1.1 / 12)
-    s1 = close - (range_ * 1.1 / 12)
-    return pivot, r1, s1
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data once for ADX filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data once for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily ADX for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Calculate weekly ADX for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Align ADX to 12h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align ADX to daily timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Calculate daily CMF
+    high_d = prices['high'].values
+    low_d = prices['low'].values
+    close_d = prices['close'].values
+    volume_d = prices['volume'].values
+    cmf = calculate_cmf(high_d, low_d, close_d, volume_d, 20)
+    
+    # Calculate 200-day SMA for bias filter
+    close_series = pd.Series(close_d)
+    sma_200 = close_series.rolling(window=200, min_periods=200).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(10, n):
-        # Skip if ADX not ready
-        if np.isnan(adx_1d_aligned[i]):
+    for i in range(200, n):  # Start after 200-day SMA is ready
+        # Skip if weekly ADX not ready
+        if np.isnan(adx_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate 12h Camarilla levels from previous bar
-        if i >= 1:
-            high_prev = prices['high'].iloc[i-1]
-            low_prev = prices['low'].iloc[i-1]
-            close_prev = prices['close'].iloc[i-1]
-            _, r1, s1 = calculate_camarilla(high_prev, low_prev, close_prev)
-        else:
-            # Not enough data for previous bar
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume confirmation: current volume > 1.5 * 10-period average
-        if i >= 10:
-            vol_ma = prices['volume'].iloc[i-10:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
-        else:
-            volume_ok = False
-        
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
+        # Trend filter: weekly ADX > 25 indicates trending market
+        trending = adx_1w_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above R1 + volume confirmation + trending market
-            if price > r1 and volume_ok and trending:
+            # Long: CMF > 0.25 (accumulation) + price above 200-day SMA + weekly trending
+            if cmf[i] > 0.25 and close_d[i] > sma_200[i] and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume confirmation + trending market
-            elif price < s1 and volume_ok and trending:
+            # Short: CMF < -0.25 (distribution) + price below 200-day SMA + weekly trending
+            elif cmf[i] < -0.25 and close_d[i] < sma_200[i] and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or ADX drops below 20 (losing trend)
-            if price < s1 or adx_1d_aligned[i] < 20:
+            # Long exit: CMF drops below 0 (distribution begins) or weekly ADX < 20 (losing trend)
+            if cmf[i] < 0 or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or ADX drops below 20 (losing trend)
-            if price > r1 or adx_1d_aligned[i] < 20:
+            # Short exit: CMF rises above 0 (accumulation begins) or weekly ADX < 20 (losing trend)
+            if cmf[i] > 0 or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -147,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_1dADXFilter"
-timeframe = "12h"
+name = "1d_ChaikinMoneyFlow_Reversal"
+timeframe = "1d"
 leverage = 1.0
