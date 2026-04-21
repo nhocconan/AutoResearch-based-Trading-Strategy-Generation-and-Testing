@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend_Filter
-Hypothesis: Donchian channel breakouts capture strong trends, volume confirms institutional participation,
-and 1-day ADX filters for trending regimes. Works in bull markets by catching breakouts and in bear markets
-by avoiding false signals via ADX filter. Targets low trade frequency (20-50/year) to minimize fee drag.
+4h_SMA_Crossover_Trend_Filter
+Hypothesis: SMA crossovers capture established trends, volume confirms momentum, and 1-day ADX filters for trending regimes.
+Works in bull markets by riding trends and in bear markets by avoiding false signals via ADX filter. Targets low trade frequency (20-50/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -64,10 +63,10 @@ def generate_signals(prices):
     adx_1d = wilder_smooth(dx, period)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # === 4h Donchian(20) channels ===
-    # Use rolling window on 4h data via high/low from prices (already 4h)
-    high_max = pd.Series(prices['high'].values).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(prices['low'].values).rolling(window=20, min_periods=20).min().values
+    # === 4h SMA(50) and SMA(200) crossover ===
+    close = prices['close'].values
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
     # === 4h Volume confirmation ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -76,9 +75,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(200, n):  # Start after SMA200 warmup
         # Skip if indicators not ready
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+        if (np.isnan(sma_50[i]) or np.isnan(sma_200[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -86,30 +85,29 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        price_open = prices['open'].iloc[i]
         adx_val = adx_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume and trend
-            if (price_close > high_max[i] and
+            # Long: SMA50 crosses above SMA200 with volume and trend
+            if (sma_50[i] > sma_200[i] and
                 vol_ratio_val > 1.5 and
                 adx_val > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume and trend
-            elif (price_close < low_min[i] and
+            # Short: SMA50 crosses below SMA200 with volume and trend
+            elif (sma_50[i] < sma_200[i] and
                   vol_ratio_val > 1.5 and
                   adx_val > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price returns to opposite Donchian level
-            if position == 1 and price_close < low_min[i]:
+            # Exit when SMA50 crosses back in opposite direction
+            if position == 1 and sma_50[i] < sma_200[i]:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > high_max[i]:
+            elif position == -1 and sma_50[i] > sma_200[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Trend_Filter"
+name = "4h_SMA_Crossover_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
