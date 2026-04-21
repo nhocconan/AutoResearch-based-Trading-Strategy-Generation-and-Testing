@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_Regime_v4
-Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume spike confirmation (>2.0), and chop regime (<61.8) reduces false breakouts. ATR trailing stop (2.0x) manages risk. Designed for low trade frequency (~20-40/year) to minimize fee drag and improve test generalization across BTC/ETH/SOL.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v1
+Hypothesis: Camarilla R1/S1 breakout on 12h timeframe with 1d EMA trend filter, volume confirmation, and chop regime filter. Designed for low trade frequency (~12-37/year) to minimize fee drag while capturing institutional moves in both bull and bear markets. ATR-based trailing stop manages risk.
 """
 
 import numpy as np
@@ -14,19 +14,35 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 34:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # === Camarilla levels from prior 4-hour session (HLC of previous 4h bar) ===
+    # === Camarilla levels from prior 12-hour session (HLC of previous 12h bar) ===
+    # Since we don't have direct 12h data, we'll approximate using 4h data and resample conceptually
+    # But per rules, we must use actual Binance data. Let's use 1d for HTF and calculate levels from 12h price action
+    # Alternative: use 4h data to calculate 12h levels (3x 4h bars = 12h)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    # Get the last 3 4h bars to approximate 12h session (since 3*4h = 12h)
+    # We'll calculate Camarilla levels based on the high/low/close of the prior 12h period
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Camarilla R1, S1 levels (breakout signals)
-    camarilla_r1 = close_4h + (high_4h - low_4h) * 1.1 / 12
-    camarilla_s1 = close_4h - (high_4h - low_4h) * 1.1 / 12
+    # For each point, we need the HLC of the prior 12h period (3 bars back)
+    # We'll shift by 3*4 = 12 bars of 4h data to get the completed 12h session
+    # But align_htf_to_ltf will handle the timing, so we calculate on 4h and align
+    # Calculate rolling 3-bar (12h) HLC for Camarilla
+    high_12h = pd.Series(high_4h).rolling(window=3, min_periods=3).max().values
+    low_12h = pd.Series(low_4h).rolling(window=3, min_periods=3).min().values
+    close_12h = pd.Series(close_4h).rolling(window=3, min_periods=3).last().values
+    
+    # Camarilla R1, S1 levels
+    camarilla_r1 = close_12h + (high_12h - low_12h) * 1.1 / 12
+    camarilla_s1 = close_12h - (high_12h - low_12h) * 1.1 / 12
     
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
@@ -39,7 +55,7 @@ def generate_signals(prices):
     # === Volume spike filter (20-period on 4h) ===
     volume_4h = df_4h['volume'].values
     vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_4h = np.where(vol_ma_4h > 0, volume_4h / vol_ma_4h, 0.0)
+    vol_ratio_4h = np.where(vol_ma_4h > 0, volume_4h / vol_ma_4h, 0)
     vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     
     # === Choppiness regime filter (14-period on 1d) ===
@@ -104,14 +120,14 @@ def generate_signals(prices):
         atr_val = atr_14_4h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 + volume spike > 2.0 + price above 1d EMA + chop < 61.8 (trending market)
-            if price_close > r1 and vol_spike > 2.0 and price_close > trend_1d and chop_val < 61.8:
+            # Long: price breaks above R1 + volume spike > 1.5 + price above 1d EMA + chop < 61.8 (trending market)
+            if price_close > r1 and vol_spike > 1.5 and price_close > trend_1d and chop_val < 61.8:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price_close
                 highest_since_entry = price_close
-            # Short: price breaks below S1 + volume spike > 2.0 + price below 1d EMA + chop < 61.8 (trending market)
-            elif price_close < s1 and vol_spike > 2.0 and price_close < trend_1d and chop_val < 61.8:
+            # Short: price breaks below S1 + volume spike > 1.5 + price below 1d EMA + chop < 61.8 (trending market)
+            elif price_close < s1 and vol_spike > 1.5 and price_close < trend_1d and chop_val < 61.8:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price_close
@@ -121,16 +137,16 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position == 1:
                 highest_since_entry = max(highest_since_entry, price_high)
-                # Trailing stop: 2.0 * ATR below highest since entry
-                if price_close < highest_since_entry - 2.0 * atr_val:
+                # Trailing stop: 2.5 * ATR below highest since entry
+                if price_close < highest_since_entry - 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
                 lowest_since_entry = min(lowest_since_entry, price_low)
-                # Trailing stop: 2.0 * ATR above lowest since entry
-                if price_close > lowest_since_entry + 2.0 * atr_val:
+                # Trailing stop: 2.5 * ATR above lowest since entry
+                if price_close > lowest_since_entry + 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -138,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_Regime_v4"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
