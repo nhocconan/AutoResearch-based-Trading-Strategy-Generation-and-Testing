@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_HTFTrend_Volume_V1
-Hypothesis: 4h Camarilla R1/S1 breakout with 12h HTF trend filter (price > EMA34 for long bias, < EMA34 for short bias) 
-captures strong directional moves with proper alignment. Volume confirmation (>1.3x 20-period average) filters weak breakouts. 
-ATR(14) trailing stop via signal=0 when price moves against position by 2.0*ATR. 
-Designed for moderate trade frequency (target: 20-40 trades/year) to minimize fee drag and work in both bull/bear markets 
-via HTF trend alignment and volatility-based stops.
+1d_Donchian_Volume_Trend_ATRStop_V1
+Hypothesis: 1d Donchian(20) breakout with volume confirmation (>1.5x 20-day average volume) 
+and 1w EMA34 trend filter (price > EMA34 for long, < EMA34 for short) captures strong 
+directional moves in both bull and bear markets. ATR(14) trailing stop (2.5x ATR) 
+limits drawdown. Designed for low trade frequency (target: 15-25 trades/year) to 
+minimize fee drag and improve test generalization.
 """
 
 import numpy as np
@@ -17,45 +17,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for EMA trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load HTF data ONCE before loop (1w for EMA trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # === 12h EMA34 for trend filter ===
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 1w EMA34 for trend filter ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 4h Indicators (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # === 1d Indicators (primary timeframe) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Camarilla levels calculation (based on previous day's range)
-    # For intraday, we use previous 4h bar's high/low as proxy for daily range
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
+    # Donchian Channel (20-period) for breakouts
+    donchian_period = 20
+    upper_channel = pd.Series(high_1d).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_channel = pd.Series(low_1d).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Camarilla levels: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 12
-    s1 = prev_close - 1.1 * camarilla_range / 12
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.3 * vol_ma
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.5 * vol_ma
     
     # ATR (14-period) for stoploss
-    tr1 = pd.Series(high_4h - low_4h)
-    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
-    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
@@ -65,35 +59,35 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) 
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) 
             or np.isnan(volume_threshold[i]) or np.isnan(atr[i]) 
-            or np.isnan(ema_34_12h_aligned[i])):
+            or np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
+        price = close_1d[i]
         
         if position == 0:
-            # Long: price breaks above R1 + volume confirmation + long HTF bias
-            if price > r1[i] and volume_4h[i] > volume_threshold[i] and price > ema_34_12h_aligned[i]:
+            # Long: price breaks above upper Donchian + volume confirmation + long HTF bias
+            if price > upper_channel[i] and volume_1d[i] > volume_threshold[i] and price > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S1 + volume confirmation + short HTF bias
-            elif price < s1[i] and volume_4h[i] > volume_threshold[i] and price < ema_34_12h_aligned[i]:
+            # Short: price breaks below lower Donchian + volume confirmation + short HTF bias
+            elif price < lower_channel[i] and volume_1d[i] > volume_threshold[i] and price < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below R1 (breakout failed)
-            elif price < r1[i]:
+            # Trailing exit: price closes below upper channel (breakout failed)
+            elif price < upper_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,11 +95,11 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above S1 (breakout failed)
-            elif price > s1[i]:
+            # Trailing exit: price closes above lower channel (breakout failed)
+            elif price > lower_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_HTFTrend_Volume_V1"
-timeframe = "4h"
+name = "1d_Donchian_Volume_Trend_ATRStop_V1"
+timeframe = "1d"
 leverage = 1.0
