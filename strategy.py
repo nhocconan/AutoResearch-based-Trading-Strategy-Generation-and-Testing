@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d Volume Spike + Chop Regime
-# Long when Alligator jaws (SMMA13) < teeth (SMMA8) < lips (SMMA5) and price > lips
-# Short when jaws > teeth > lips and price < lips
-# Requires 1d volume > 2.0x 20-day average and 12h chop index < 38.2 (trending)
-# Williams Alligator uses smoothed moving averages (SMMA) to identify trends
-# Works in both bull (strong alignment up) and bear (strong alignment down)
-# Volume confirms conviction, chop filter avoids ranging markets
-# Target: 15-25 trades/year by requiring multiple confluence factors
+# Hypothesis: 12h Williams Alligator + 1d Volume Spike + Chop Regime Filter
+# Long when Jaw < Teeth < Lips (bullish alignment), volume > 1.5x 20-day avg, CHOP > 61.8 (range)
+# Short when Jaw > Teeth > Lips (bearish alignment), volume > 1.5x 20-day avg, CHOP > 61.8 (range)
+# Exit when alignment breaks or CHOP < 38.2 (trend)
+# Williams Alligator identifies trend phases via SMAs: Jaw=13, Teeth=8, Lips=5 (all shifted)
+# Chop regime filter ensures we only trade in ranging markets where mean reversion works
+# Volume spike confirms conviction
+# Target: 15-25 trades/year by requiring triple confluence
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,118 +20,89 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d SMMA for Williams Alligator (Smoothed Moving Average)
+    # Calculate Williams Alligator components (all SMAs with shift)
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Jaw: 13-period SMA, shifted 8 bars
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)  # shift 8 bars forward
+    jaw[:8] = np.nan
     
-    # SMMA calculation (similar to EMA but with different smoothing)
-    def smma(data, period):
-        sma = np.full_like(data, np.nan)
-        smma = np.full_like(data, np.nan)
-        sma[period-1] = np.mean(data[:period])
-        smma[period-1] = sma[period-1]
-        for i in range(period, len(data)):
-            sma[i] = (sma[i-1] * (i-1) + data[i]) / i
-            smma[i] = (smma[i-1] * (period-1) + data[i]) / period
-        return smma
+    # Teeth: 8-period SMA, shifted 5 bars
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)  # shift 5 bars forward
+    teeth[:5] = np.nan
     
-    # Alligator lines: Lips (SMMA5), Teeth (SMMA8), Jaw (SMMA13)
-    lips = smma(close_1d, 5)
-    teeth = smma(close_1d, 8)
-    jaw = smma(close_1d, 13)
+    # Lips: 5-period SMA, shifted 3 bars
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)  # shift 3 bars forward
+    lips[:3] = np.nan
     
     # Calculate 1d volume moving average (20-period)
     vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h Chop Index (trend strength indicator)
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0]-low[0], np.abs(high[0]-close[0]), np.abs(low[0]-close[0])])], 
-                        np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # ATR(14)
-    atr = np.full(n, np.nan)
-    atr[13] = np.mean(tr[:14])
-    for i in range(14, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Sum of ATR over 14 periods
-    sum_atr = np.full(n, np.nan)
-    for i in range(13, n):
-        if i == 13:
-            sum_atr[i] = np.sum(atr[max(0, i-13):i+1])
-        else:
-            sum_atr[i] = sum_atr[i-1] - atr[i-14] + atr[i]
-    
-    # Chop Index = 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
-    max_high = np.full(n, np.nan)
-    min_low = np.full(n, np.nan)
-    for i in range(n):
-        if i == 0:
-            max_high[i] = high[i]
-            min_low[i] = low[i]
-        else:
-            max_high[i] = max(max_high[i-1], high[i])
-            min_low[i] = min(min_low[i-1], low[i])
-    
-    chop = np.full(n, np.nan)
-    for i in range(13, n):
-        if max_high[i] > min_low[i]:
-            chop[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral when no range
+    # Calculate Chopiness Index (14-period) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    atr_14 = pd.Series(np.maximum(np.maximum(high_1d - low_1d, 
+                                             np.abs(high_1d - np.roll(close_1d, 1))), 
+                                  np.abs(low_1d - np.roll(close_1d, 1)))).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / np.log(14) / (highest_high - lowest_low))
     
     # Align all 1d indicators to 12h timeframe
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
     jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate 12h price for entry
+    close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):
+    for i in range(14, n):  # Start after Chop warmup
         # Skip if data not ready
-        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or
-            np.isnan(chop[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Current values
-        lips_val = lips_aligned[i]
-        teeth_val = teeth_aligned[i]
         jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        chop_val = chop_aligned[i]
         price = close[i]
+        
+        # Volume confirmation: current 1d volume > 1.5x 20-day average
+        vol_idx = i // 2  # 2 bars per day (24h/12h)
+        if vol_idx >= len(df_1d):
+            vol_idx = len(df_1d) - 1
+        volume = df_1d['volume'].iloc[vol_idx] if vol_idx >= 0 else df_1d['volume'].iloc[0]
         vol_ma = vol_ma_1d_aligned[i]
-        chop_val = chop[i]
+        volume_confirm = volume > 1.5 * vol_ma
         
-        # Get current 1d volume (assuming ~2 bars per day for 12h timeframe)
-        vol_idx = min(i // 2, len(df_1d)-1) if i >= 2 else 0
-        volume = df_1d['volume'].iloc[vol_idx] if hasattr(df_1d['volume'], 'iloc') else df_1d['volume'][vol_idx]
+        # Alligator alignment conditions
+        bullish_align = jaw_val < teeth_val < lips_val  # Jaw < Teeth < Lips
+        bearish_align = jaw_val > teeth_val > lips_val  # Jaw > Teeth > Lips
         
-        # Volume confirmation: current 1d volume > 2.0x 20-day average
-        volume_confirm = volume > 2.0 * vol_ma if not (np.isnan(volume) or np.isnan(vol_ma)) else False
-        
-        # Chop regime: trending when chop < 38.2
-        trending_regime = chop_val < 38.2
+        # Chop regime: only trade in ranging markets (CHOP > 61.8)
+        in_range = chop_val > 61.8
         
         if position == 0:
-            # Long: Jaws < Teeth < Lips (bullish alignment) and price > lips
-            if jaw_val < teeth_val < lips_val and price > lips_val and volume_confirm and trending_regime:
+            # Long: Bullish alignment + volume confirmation + ranging market
+            if bullish_align and volume_confirm and in_range:
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaws > Teeth > Lips (bearish alignment) and price < lips
-            elif jaw_val > teeth_val > lips_val and price < lips_val and volume_confirm and trending_regime:
+            # Short: Bearish alignment + volume confirmation + ranging market
+            elif bearish_align and volume_confirm and in_range:
                 signals[i] = -0.25
                 position = -1
         
@@ -140,13 +111,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if alignment breaks or price crosses below lips
-                if not (jaw_val < teeth_val < lips_val) or price < lips_val:
+                # Exit if bullish alignment breaks OR market starts trending
+                if not bullish_align or chop_val < 38.2:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if alignment breaks or price crosses above lips
-                if not (jaw_val > teeth_val > lips_val) or price > lips_val:
+                # Exit if bearish alignment breaks OR market starts trending
+                if not bearish_align or chop_val < 38.2:
                     exit_signal = True
             
             if exit_signal:
