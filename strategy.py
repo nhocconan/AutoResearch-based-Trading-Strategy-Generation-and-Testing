@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_HTF_12h_Supertrend_VolumeBreakout_V1
-Hypothesis: 6h breakouts above/below 12h Supertrend with volume confirmation (>1.5x 20-period volume MA). 
-Uses 12h HTF for Supertrend (ATR=10, mult=3.0) to define trend direction and filter false breakouts. 
-Works in bull/bear markets: Supertrend adapts to volatility, volume confirms institutional interest. 
-Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL. Discrete sizing (0.25) to minimize fee churn.
+4h_Donchian20_Breakout_Volume_ChopRegime_ATRStop_V3
+Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.3x 20-period volume MA) and choppiness regime filter (CHOP > 61.8 for mean reversion, CHOP < 38.2 for trend following). Uses 1d HTF for trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR. Designed for low trade frequency (<400 total 4h trades) to minimize fee drag and work in both bull/bear markets via regime adaptation.
 """
 
 import numpy as np
@@ -16,96 +13,99 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for Supertrend)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load HTF data ONCE before loop (1d for EMA trend filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1d EMA50 for trend filter ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 12h Supertrend (ATR=10, mult=3.0) ===
-    # Calculate ATR
-    tr1 = pd.Series(high_12h[1:]) - pd.Series(low_12h[1:])
-    tr2 = abs(pd.Series(high_12h[1:]) - pd.Series(close_12h[:-1]))
-    tr3 = abs(pd.Series(low_12h[1:]) - pd.Series(close_12h[:-1]))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Supertrend calculation
-    hl2 = (high_12h + low_12h) / 2.0
-    upper = hl2 + (3.0 * atr)
-    lower = hl2 - (3.0 * atr)
-    
-    supertrend = np.zeros_like(close_12h)
-    direction = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = hl2[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_12h)):
-        if close_12h[i] > supertrend[i-1]:
-            supertrend[i] = max(lower[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(upper[i], supertrend[i-1])
-            direction[i] = -1
-    
-    # Align Supertrend and direction to 6h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
-    
-    # === 6h Indicators (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # === 4h Indicators (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # Volume MA (20-period) for spike detection
-    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) for stoploss
+    tr1 = pd.Series(high_4h - low_4h)
+    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
+    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Choppiness Index (14-period)
+    chop_sum = tr.rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(chop_sum / (highest_high - lowest_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) 
-            or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(chop[i])
+            or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
-        vol = volume_6h[i]
-        vol_ok = vol > 1.5 * vol_ma[i]  # volume spike confirmation
+        price = close_4h[i]
+        vol = volume_4h[i]
+        vol_ok = vol > 1.3 * vol_ma[i]  # volume confirmation
+        
+        # Regime detection
+        is_choppy = chop[i] > 61.8  # mean reversion regime
+        is_trending = chop[i] < 38.2  # trend following regime
         
         if position == 0:
-            # Long: price breaks above Supertrend + volume spike + uptrend (direction=1)
-            if price > supertrend_aligned[i] and vol_ok and direction_aligned[i] == 1:
+            # Long: Donchian breakout + volume + trend filter (in uptrend or choppy market)
+            if price > donchian_high[i] and vol_ok and (price > ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Supertrend + volume spike + downtrend (direction=-1)
-            elif price < supertrend_aligned[i] and vol_ok and direction_aligned[i] == -1:
+                entry_price = price
+            # Short: Donchian breakdown + volume + trend filter (in downtrend or choppy market)
+            elif price < donchian_low[i] and vol_ok and (price < ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Exit long: price breaks below Supertrend
-            if price < supertrend_aligned[i]:
+            # Check stoploss
+            if price < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit conditions: Donchian breakdown or loss of volume/momentum
+            elif price < donchian_low[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Supertrend
-            if price > supertrend_aligned[i]:
+            # Check stoploss
+            if price > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit conditions: Donchian breakout or loss of volume/momentum
+            elif price > donchian_high[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_HTF_12h_Supertrend_VolumeBreakout_V1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_Volume_ChopRegime_ATRStop_V3"
+timeframe = "4h"
 leverage = 1.0
