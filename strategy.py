@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1wTrend_VolumeSpike_v2
-Hypothesis: 4h Donchian(20) breakout in direction of 1w EMA200 trend with volume confirmation and ATR stoploss.
-In strong uptrends (price > EMA200_1w): long on upper band breakout. In strong downtrends (price < EMA200_1w): short on lower band breakout.
-Volume confirmation (>1.5x 20-bar average) filters false breakouts. Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25).
-Designed to capture sustained moves in both bull and bear markets while minimizing whipsaw.
-Timeframe: 4h, uses 1w HTF for trend filter. Target: 75-200 total trades over 4 years = 19-50/year.
+12h_Camarilla_R1_S1_Breakout_1wTrend_RegimeFilter_v1
+Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1w EMA50 trend and choppiness regime.
+In trending markets (CHOP < 38.2 and price > EMA50_1w): breakout continuation (long above R1, short below S1).
+In ranging markets (CHOP > 61.8): mean reversion at Camarilla H3/L3 levels.
+Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to balance returns and fee drag.
+Designed to work in both bull and bear markets by adapting to regime.
+Timeframe: 12h, uses 1w HTF for trend and Camarilla pivots.
+Target: 50-150 total trades over 4 years = 12-37/year.
+Improved with volume confirmation to reduce false signals.
 """
 
 import numpy as np
@@ -17,21 +20,53 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA200 trend)
+    # Load HTF data ONCE before loop (1w for EMA50 trend and Camarilla)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 60:
         return np.zeros(n)
     
-    # === 1w EMA200 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # === 1w OHLC for Camarilla pivot calculation (based on previous 1w bar) ===
+    df_1w_open = df_1w['open'].values
+    df_1w_high = df_1w['high'].values
+    df_1w_low = df_1w['low'].values
+    df_1w_close = df_1w['close'].values
     
-    # === 4h Donchian Channel (20-period) ===
+    # Calculate Camarilla levels for each 1w bar
+    range_1w = df_1w_high - df_1w_low
+    r1_1w = df_1w_close + 0.275 * range_1w
+    s1_1w = df_1w_close - 0.275 * range_1w
+    h3_1w = df_1w_close + 1.1 * range_1w
+    l3_1w = df_1w_close - 1.1 * range_1w
+    h4_1w = df_1w_close + 1.382 * range_1w
+    l4_1w = df_1w_close - 1.382 * range_1w
+    
+    # Align 1w Camarilla levels to 12h timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    h3_1w_aligned = align_htf_to_ltf(prices, df_1w, h3_1w)
+    l3_1w_aligned = align_htf_to_ltf(prices, df_1w, l3_1w)
+    h4_1w_aligned = align_htf_to_ltf(prices, df_1w, h4_1w)
+    l4_1w_aligned = align_htf_to_ltf(prices, df_1w, l4_1w)
+    
+    # === 1w EMA50 for trend filter ===
+    ema_50_1w = pd.Series(df_1w_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # === Choppiness Index (14-period) for regime detection ===
     high = prices['high'].values
     low = prices['low'].values
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    close = prices['close'].values
+    
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_sum = tr.rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # avoid division by zero
     
     # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
@@ -39,8 +74,8 @@ def generate_signals(prices):
     
     # === ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(prices['close'].values, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(prices['close'].values, 1)))
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
@@ -50,44 +85,69 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) 
+            or np.isnan(ema_50_1w_aligned[i]) or np.isnan(chop[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].values[i]
+        price = close[i]
         volume_now = volume[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
-        ema_trend = ema_200_1w_aligned[i]
+        chop_val = chop[i]
+        r1 = r1_1w_aligned[i]
+        s1 = s1_1w_aligned[i]
+        h3 = h3_1w_aligned[i]
+        l3 = l3_1w_aligned[i]
+        h4 = h4_1w_aligned[i]
+        l4 = l4_1w_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         vol_avg = vol_ma[i]
         
         # Volume confirmation: current volume > 1.5x average
         volume_confirmed = volume_now > 1.5 * vol_avg
         
         if position == 0:
-            # Breakout entries in direction of 1w trend with volume confirmation
-            long_condition = (price > donch_high) and (price > ema_trend) and volume_confirmed
-            short_condition = (price < donch_low) and (price < ema_trend) and volume_confirmed
-            
-            if long_condition:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            elif short_condition:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+            # Regime-based entries with volume confirmation
+            if chop_val < 38.2:  # Trending regime
+                # Only enter in direction of 1w trend with volume confirmation
+                long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
+                short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
+                
+                if long_condition:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                elif short_condition:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+                    
+            elif chop_val > 61.8:  # Ranging regime
+                # Mean reversion at H3/L3 levels with volume confirmation
+                long_condition = (price < l3) and (price > l4) and volume_confirmed  # Oversold bounce
+                short_condition = (price > h3) and (price < h4) and volume_confirmed  # Overbought rejection
+                
+                if long_condition:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                elif short_condition:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
         
         elif position == 1:
             # Check stoploss (2.0x ATR)
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price < ema_trend:
+            # Trend reversal exit (in trending regime)
+            elif chop_val < 38.2 and price < ema_trend:
+                signals[i] = 0.0
+                position = 0
+            # Mean reversion exit (in ranging regime)
+            elif chop_val > 61.8 and price > h3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,8 +158,12 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price > ema_trend:
+            # Trend reversal exit (in trending regime)
+            elif chop_val < 38.2 and price > ema_trend:
+                signals[i] = 0.0
+                position = 0
+            # Mean reversion exit (in ranging regime)
+            elif chop_val > 61.8 and price < l3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +171,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1wTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_RegimeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
