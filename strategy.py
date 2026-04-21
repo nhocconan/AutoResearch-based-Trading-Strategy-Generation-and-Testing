@@ -8,9 +8,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for trend and structure
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # 1d EMA34 for trend filter
@@ -36,9 +36,16 @@ def generate_signals(prices):
     vol_ratio_1d = df_1d['volume'].values / vol_ma_30
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # 4h Donchian channel for entry signals
-    high_4h = prices['high'].rolling(window=20, min_periods=20).max().values
-    low_4h = prices['low'].rolling(window=20, min_periods=20).min().values
+    # 12h Donchian(20) channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,44 +53,41 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i]) or np.isnan(high_4h[i]) or np.isnan(low_4h[i])):
+            np.isnan(vol_ratio_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        price_high = prices['high'].iloc[i]
-        price_low = prices['low'].iloc[i]
         ema_trend = ema_34_1d_aligned[i]
         vol_ratio = vol_ratio_aligned[i]
-        vol_threshold = 1.2  # Volume must be above average
+        vol_threshold = 1.5  # Volume must be above average
         atr_ratio_val = atr_ratio_aligned[i]
-        upper_channel = high_4h[i]
-        lower_channel = low_4h[i]
+        upper = donch_high_aligned[i]
+        lower = donch_low_aligned[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian upper channel, uptrend, volume spike
-            if (price_high > upper_channel and 
-                price_close > ema_trend and 
+            # Enter long: price above EMA34 and Donchian high, volume spike, moderate volatility
+            if (price_close > ema_trend and price_close > upper and 
                 vol_ratio > vol_threshold and 
-                atr_ratio_val > 0.5 and atr_ratio_val < 2.5):
+                atr_ratio_val > 0.6 and atr_ratio_val < 2.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian lower channel, downtrend, volume spike
-            elif (price_low < lower_channel and 
-                  price_close < ema_trend and 
+            # Enter short: price below EMA34 and Donchian low, volume spike, moderate volatility
+            elif (price_close < ema_trend and price_close < lower and 
                   vol_ratio > vol_threshold and 
-                  atr_ratio_val > 0.5 and atr_ratio_val < 2.5):
+                  atr_ratio_val > 0.6 and atr_ratio_val < 2.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
             # Exit: reverse trend or volatility extremes
-            if position == 1 and (price_close < ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.3):
+            if position == 1 and (price_close < ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.4):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.3):
+            elif position == -1 and (price_close > ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.4):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_EMA34_Volume_Filter"
-timeframe = "4h"
+name = "12h_EMA34_Donchian_Volume_ATR_Filter"
+timeframe = "12h"
 leverage = 1.0
