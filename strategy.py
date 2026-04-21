@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_ADX_WilliamsAlligator_Trend_V1
-Hypothesis: 4h Williams Alligator (JAW/TEETH/LIPS) trend filter combined with ADX(14) > 25 for strong trend confirmation. Enter long when LIPS > TEETH > JAW and ADX > 25, short when LIPS < TEETH < JAW and ADX > 25. Uses 1d HTF EMA50 as additional trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.5*ATR. Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag and work in both bull/bear markets via strong trend filtering. Focus on BTC/ETH.
+1d_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop_V1
+Hypothesis: Daily timeframe Camarilla pivot R1/S1 breakout with volume confirmation (>1.5x 20-day volume MA) and choppiness regime filter (CHOP > 61.8 for mean reversion, CHOP < 38.2 for trend following). Uses 1w HTF for trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR. Designed for low trade frequency (target: 7-25 trades/year) to minimize fee drag and work in both bull/bear markets via regime adaptation. Focus on BTC/ETH with SOL as secondary.
 """
 
 import numpy as np
@@ -13,79 +13,54 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA trend filter)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load HTF data ONCE before loop (1w for EMA trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 1d EMA50 for trend filter ===
+    # === 1w EMA50 for trend filter ===
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # === 1d Indicators (primary timeframe) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    volume_1d = df_1d['volume'].values
     
-    # === 4h Williams Alligator (primary timeframe) ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Calculate Camarilla pivot levels from previous day using 1d OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Alligator lines: JAW (13,8), TEETH (8,5), LIPS (5,3) - all SMMA
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA*(period-1) + CURRENT) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    jaw = smma(np.median([high, low], axis=0), 13)  # 13-period SMMA of median price
-    jaw = align_htf_to_ltf(prices, prices, jaw, additional_delay_bars=8)  # 8-bar delay for 13,5,3 alignment
+    # Volume MA (20-period) for spike detection
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    teeth = smma(np.median([high, low], axis=0), 8)   # 8-period SMMA of median price
-    teeth = align_htf_to_ltf(prices, prices, teeth, additional_delay_bars=5)  # 5-bar delay
+    # ATR (14-period) for stoploss
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    lips = smma(np.median([high, low], axis=0), 5)    # 5-period SMMA of median price
-    lips = align_htf_to_ltf(prices, prices, lips, additional_delay_bars=3)  # 3-bar delay
-    
-    # === ADX(14) for trend strength ===
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Wilder's smoothing: today = (prev * (period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, 14)
-    
-    # === ATR for stoploss ===
-    atr_stop = atr  # Reuse ATR calculated above
+    # Choppiness Index (14-period)
+    chop_sum = tr.rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(chop_sum / (highest_high - lowest_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -93,43 +68,41 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) 
-            or np.isnan(adx[i]) or np.isnan(atr_stop[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(chop[i])
+            or np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        price = close_1d[i]
+        vol = volume_1d[i]
+        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
-        # Alligator alignment
-        lips_above_teeth = lips[i] > teeth[i]
-        teeth_above_jaw = teeth[i] > jaw[i]
-        lips_below_teeth = lips[i] < teeth[i]
-        teeth_below_jaw = teeth[i] < jaw[i]
-        
-        # ADX trend strength
-        strong_trend = adx[i] > 25
+        # Regime detection
+        is_choppy = chop[i] > 61.8  # mean reversion regime
+        is_trending = chop[i] < 38.2  # trend following regime
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw + strong trend + price > 1d EMA50
-            if lips_above_teeth and teeth_above_jaw and strong_trend and price > ema_50_1d_aligned[i]:
+            # Long: Camarilla S1 breakout + volume + trend filter (in uptrend or choppy market)
+            if price > s1_aligned[i] and vol_ok and (price > ema_50_1w_aligned[i] or is_choppy):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Lips < Teeth < Jaw + strong trend + price < 1d EMA50
-            elif lips_below_teeth and teeth_below_jaw and strong_trend and price < ema_50_1d_aligned[i]:
+            # Short: Camarilla R1 breakdown + volume + trend filter (in downtrend or choppy market)
+            elif price < r1_aligned[i] and vol_ok and (price < ema_50_1w_aligned[i] or is_choppy):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.5 * atr_stop[i]:
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: Alligator reverses or trend weakens
-            elif not (lips_above_teeth and teeth_above_jaw) or adx[i] < 20:
+            # Exit conditions: price back below S1 or loss of volume/momentum
+            elif price < s1_aligned[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,11 +110,11 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.5 * atr_stop[i]:
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: Alligator reverses or trend weakens
-            elif not (lips_below_teeth and teeth_below_jaw) or adx[i] < 20:
+            # Exit conditions: price back above R1 or loss of volume/momentum
+            elif price > r1_aligned[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -149,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ADX_WilliamsAlligator_Trend_V1"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop_V1"
+timeframe = "1d"
 leverage = 1.0
