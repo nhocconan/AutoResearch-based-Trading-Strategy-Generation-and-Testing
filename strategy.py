@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with volume confirmation and trend filter.
-Long when price breaks above 20-period high with volume > 2x average and close > daily EMA(50);
-Short when price breaks below 20-period low with volume > 2x average and close < daily EMA(50).
-Exit on opposite Donchian band touch or 1.5x ATR stop. Designed for 15-25 trades/year to minimize fee drag.
+Hypothesis: 4h Camarilla pivot level (R1/S1) breakout with volume confirmation and daily EMA(34) trend filter.
+Long when price breaks above R1 with volume > 2x average and close > daily EMA(34);
+Short when price breaks below S1 with volume > 2x average and close < daily EMA(34).
+Exit on opposite pivot touch or 1.5x ATR stop. Designed for 20-30 trades/year to minimize fee drag.
 Works in bull markets via upward breakouts and in bear via downward breakdowns with volume confirmation.
 """
 
@@ -16,18 +16,28 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for EMA
+    # Load daily data ONCE before loop for pivot calculation and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 4h
-    high_max = prices['high'].rolling(window=20, min_periods=20).max().values
-    low_min = prices['low'].rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from daily OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily EMA(50) for trend filter
-    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    
+    # Align daily pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Daily EMA(34) for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Daily volume average (20-period)
     vol_1d = df_1d['volume'].values
@@ -48,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,39 +75,39 @@ def generate_signals(prices):
         vol_1d_current = vol_1d_aligned[i]
         
         if position == 0:
-            # Enter long: break above Donchian high with volume surge and close > daily EMA50
-            if (price_high > high_max[i] and 
+            # Enter long: break above R1 with volume surge and close > daily EMA34
+            if (price_high > r1_aligned[i] and 
                 vol_1d_current > 2.0 * vol_ma_20_aligned[i] and
-                price_close > ema_50_aligned[i]):
+                price_close > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below Donchian low with volume surge and close < daily EMA50
-            elif (price_low < low_min[i] and 
+            # Enter short: break below S1 with volume surge and close < daily EMA34
+            elif (price_low < s1_aligned[i] and 
                   vol_1d_current > 2.0 * vol_ma_20_aligned[i] and
-                  price_close < ema_50_aligned[i]):
+                  price_close < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: opposite Donchian band touch or 1.5x ATR stop
+            # Exit: opposite pivot touch or 1.5x ATR stop
             exit_signal = False
             
             if position == 1:
-                # Exit long: touch Donchian low OR price < entry - 1.5*ATR
-                if price_low < low_min[i]:
+                # Exit long: touch S1 OR price < entry - 1.5*ATR
+                if price_low < s1_aligned[i]:
                     exit_signal = True
                 else:
-                    # Track entry approximation: use Donchian high as entry level for long
-                    entry_level = high_max[i-1] if i >= 1 else high_max[0]
+                    # Track entry approximation: use R1 as entry level for long
+                    entry_level = r1_aligned[i-1] if i >= 1 else r1_aligned[0]
                     if price_close < entry_level - 1.5 * atr[i]:
                         exit_signal = True
             elif position == -1:
-                # Exit short: touch Donchian high OR price > entry + 1.5*ATR
-                if price_high > high_max[i]:
+                # Exit short: touch R1 OR price > entry + 1.5*ATR
+                if price_high > r1_aligned[i]:
                     exit_signal = True
                 else:
-                    # Track entry approximation: use Donchian low as entry level for short
-                    entry_level = low_min[i-1] if i >= 1 else low_min[0]
+                    # Track entry approximation: use S1 as entry level for short
+                    entry_level = s1_aligned[i-1] if i >= 1 else s1_aligned[0]
                     if price_close > entry_level + 1.5 * atr[i]:
                         exit_signal = True
             
@@ -110,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume2x_EMA50Trend_ATR1.5x"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume2x"
 timeframe = "4h"
 leverage = 1.0
