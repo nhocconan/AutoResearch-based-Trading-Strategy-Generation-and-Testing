@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_KAMA_Direction_With_Volume_Confirmation
-Hypothesis: Use KAMA on 1d to determine trend direction (adaptive trend strength) and 4h for entry timing with volume confirmation.
-Long when KAMA slope positive on 1d, price > KAMA on 4h, and volume > 1.5x 20-period average.
-Short when KAMA slope negative on 1d, price < KAMA on 4h, and volume > 1.5x 20-period average.
-Exit when price crosses back below/above KAMA on 4h.
-Uses adaptive trend strength to capture trends while avoiding whipsaws in ranging markets.
-Target: 20-40 trades/year per symbol. Works in bull/bear by following adaptive trend.
+1d_1w_Alligator_Momentum_V1
+Hypothesis: Use Williams Alligator on 1d (Jaws, Teeth, Lips) to identify trend direction and momentum. 
+Go long when Lips > Teeth > Jaws (bullish alignment) and price > Lips; short when Lips < Teeth < Jaws (bearish alignment) and price < Lips.
+Use 1w ADX > 25 to filter for trending markets only, avoiding whipsaws in ranging periods.
+Exit when Alligator alignment breaks (Lips crosses Teeth) or ADX falls below 20.
+Designed for low frequency (10-25 trades/year) to minimize fee drag and work in both bull/bear markets by following higher timeframe trends.
 """
 
 import numpy as np
@@ -18,117 +17,98 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for KAMA trend direction
+    # Load 1d data for Alligator calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    median_price_1d = (df_1d['high'].values + df_1d['low'].values) / 2
     
-    # Calculate KAMA on 1d
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, 10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)  # 10-period volatility
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    # Williams Alligator: SMAs of median price
+    jaws = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Align Alligator lines to lower timeframe
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Calculate KAMA
-    kama_1d = np.full_like(close_1d, np.nan)
-    kama_1d[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if not np.isnan(sc[i-1]):
-            kama_1d[i] = kama_1d[i-1] + sc[i-1] * (close_1d[i] - kama_1d[i-1])
-        else:
-            kama_1d[i] = kama_1d[i-1]
-    
-    # KAMA slope (trend direction)
-    kama_slope_1d = np.diff(kama_1d, 1)
-    kama_slope_1d = np.concatenate([[np.nan], kama_slope_1d])
-    
-    # Align to 4h timeframe
-    kama_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_slope_1d)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    
-    # Load 4h data for entry timing
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate KAMA on 4h
-    change_4h = np.abs(np.diff(close_4h, 10))
-    volatility_4h = np.sum(np.abs(np.diff(close_4h)), axis=1)
-    er_4h = np.divide(change_4h, volatility_4h, out=np.zeros_like(change_4h), where=volatility_4h!=0)
+    # Calculate ADX (14) on 1w
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = np.nan  # First value has no previous close
     
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc_4h = (er_4h * (fast_sc - slow_sc) + slow_sc) ** 2
+    plus_dm = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    kama_4h = np.full_like(close_4h, np.nan)
-    kama_4h[0] = close_4h[0]
-    for i in range(1, len(close_4h)):
-        if not np.isnan(sc_4h[i-1]):
-            kama_4h[i] = kama_4h[i-1] + sc_4h[i-1] * (close_4h[i] - kama_4h[i-1])
-        else:
-            kama_4h[i] = kama_4h[i-1]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align 4h KAMA to lower timeframe (if needed, but we're using 4h as primary)
-    # Since we're using 4h as primary timeframe, we need to align it to the actual prices timeframe
-    # But prices is already at 4h? Let's check the timeframe - we'll set timeframe="4h" below
-    # For now, we'll assume prices is at 4h and use kama_4h directly
+    # Align ADX to lower timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(kama_slope_1d_aligned[i]) or np.isnan(kama_1d_aligned[i]) or 
-            i >= len(kama_4h) or np.isnan(kama_4h[i])):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
-        else:
-            volume_ok = False
+        # Alligator alignment conditions
+        bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaws_aligned[i]
+        bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaws_aligned[i]
         
-        # 1d KAMA slope for trend direction
-        upward_trend = kama_slope_1d_aligned[i] > 0
-        downward_trend = kama_slope_1d_aligned[i] < 0
+        # ADX trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20  # Exit when trend weakens
         
         if position == 0:
-            # Long conditions: upward trend on 1d, price > KAMA on 4h, volume confirmation
-            if upward_trend and price > kama_4h[i] and volume_ok:
+            # Long: bullish alignment + price above lips + strong trend
+            if bullish_alignment and price > lips_aligned[i] and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: downward trend on 1d, price < KAMA on 4h, volume confirmation
-            elif downward_trend and price < kama_4h[i] and volume_ok:
+            # Short: bearish alignment + price below lips + strong trend
+            elif bearish_alignment and price < lips_aligned[i] and strong_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below KAMA on 4h
-            if price < kama_4h[i]:
+            # Exit long: alignment breaks or trend weakens
+            if not bullish_alignment or price < lips_aligned[i] or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above KAMA on 4h
-            if price > kama_4h[i]:
+            # Exit short: alignment breaks or trend weakens
+            if not bearish_alignment or price > lips_aligned[i] or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_KAMA_Direction_With_Volume_Confirmation"
-timeframe = "4h"
+name = "1d_1w_Alligator_Momentum_V1"
+timeframe = "1d"
 leverage = 1.0
