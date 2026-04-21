@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation.
 Long when price breaks above R1, above 1d EMA50, and volume > 1.8x 20-period MA.
 Short when price breaks below S1, below 1d EMA50, and volume > 1.8x 20-period MA.
 Uses ATR-based stop (1.5x) and minimum holding period of 2 bars.
-Designed for low trade frequency (~20-40/year) to work in both bull and bear markets via 1d trend alignment.
+Designed for low trade frequency (~12-37/year) to work in both bull and bear markets via 1d trend alignment.
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -42,7 +42,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 4h Camarilla pivot levels (R1, S1) ===
+    # === 12h Camarilla pivot levels (R1, S1) ===
     # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     # where C = (H+L+Close)/3 of previous bar
     prev_high = np.roll(high, 1)
@@ -132,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
