@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_VolumeTrend
-Hypothesis: Camarilla pivot levels (R1/S1) from daily data provide institutional support/resistance.
-Breakouts with volume confirmation and 1-week EMA34 trend filter capture momentum while avoiding whipsaw.
-Works in bull/bear markets by filtering breakouts with higher timeframe trend. Target 20-40 trades/year.
+4h_KAMA_Direction_RSI_ChopFilter
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing reliable trend direction.
+In ranging markets (high Chop), we avoid trades; in trending markets (low Chop), we follow KAMA direction with RSI filter for entry timing.
+Works in both bull and bear markets by adapting to volatility and using Chop to filter regimes.
+Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -12,119 +13,156 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for Camarilla pivots
+    # --- 1d data for Chop and RSI ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
+    # True Range for Chop calculation
+    tr1 = np.zeros(len(high_1d))
+    tr1[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr1[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
     
-    # Align daily Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Chop: EMA of TR / (max(high) - min(low)) over 14 days
+    atr_14 = np.zeros(len(tr1))
+    for i in range(len(tr1)):
+        if i < 13:
+            atr_14[i] = np.mean(tr1[:i+1]) if i >= 0 else tr1[i]
+        else:
+            atr_14[i] = np.mean(tr1[i-13:i+1])
     
-    # Load weekly data once for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    max_high_14 = np.zeros(len(high_1d))
+    min_low_14 = np.zeros(len(low_1d))
+    for i in range(len(high_1d)):
+        if i < 13:
+            max_high_14[i] = np.max(high_1d[:i+1])
+            min_low_14[i] = np.min(low_1d[:i+1])
+        else:
+            max_high_14[i] = np.max(high_1d[i-13:i+1])
+            min_low_14[i] = np.min(low_1d[i-13:i+1])
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema34_1w = np.zeros_like(close_1w)
-    ema34_1w[0] = close_1w[0]
-    alpha = 2.0 / (34 + 1)
-    for i in range(1, len(close_1w)):
-        ema34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema34_1w[i-1]
+    # Avoid division by zero
+    range_14 = max_high_14 - min_low_14
+    range_14[range_14 == 0] = 1e-10
     
-    # Align weekly EMA34 to 4h timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    chop_raw = (np.sum(atr_14[-14:]) / range_14[-1]) * 100 if len(atr_14) >= 14 else 50
+    # For simplicity, we use a rolling Chop approximation; in practice, precompute full series
+    chop = np.full(len(high_1d), 50.0)  # placeholder; will compute properly below
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Proper Chop calculation over rolling window
+    chop = np.full(len(high_1d), np.nan)
+    for i in range(13, len(high_1d)):
+        atr_sum = np.sum(atr_14[i-13:i+1])
+        r = max_high_14[i] - min_low_14[i]
+        if r > 0:
+            chop[i] = (atr_sum / r) * 100
+        else:
+            chop[i] = 50.0
+    
+    # Align Chop to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # RSI(14) on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    for i in range(len(gain)):
+        if i < 13:
+            avg_gain[i] = np.mean(gain[:i+1]) if i >= 0 else gain[i]
+            avg_loss[i] = np.mean(loss[:i+1]) if i >= 0 else loss[i]
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # --- 4h data for KAMA ---
+    close = prices['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10, prepend=close[:10]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=0)), axis=0) if hasattr(np.sum, 'axis') else None
+    # Manual volatility sum over 10 periods
+    volatility = np.zeros_like(close)
+    for i in range(len(close)):
+        if i < 10:
+            volatility[i] = np.sum(np.abs(np.diff(close[:i+1], prepend=0)))
+        else:
+            volatility[i] = np.sum(np.abs(np.diff(close[i-9:i+1], prepend=0)))
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # --- Volume filter: 1.5x 20-period average ---
     volume = prices['volume'].values
-    volume_avg = np.full(n, np.nan)
+    vol_avg = np.zeros(n)
     for i in range(n):
         if i < 19:
-            volume_avg[i] = np.mean(volume[0:i+1]) if i >= 0 else volume[i]
+            vol_avg[i] = np.mean(volume[:i+1]) if i >= 0 else volume[i]
         else:
-            volume_avg[i] = np.mean(volume[i-19:i+1])
-    volume_filter = volume > (1.5 * volume_avg)
+            vol_avg[i] = np.mean(volume[i-19:i+1])
+    volume_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(20, n):
-        # Skip if NaN in critical values
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_1w_aligned[i]):
+    for i in range(30, n):  # warmup for indicators
+        if np.isnan(chop_aligned[i]) or np.isnan(rsi_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema34 = ema34_1w_aligned[i]
+        price = close[i]
+        kama_val = kama[i]
+        chop_val = chop_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol_confirm = volume_filter[i]
         
-        # Calculate ATR for stoploss (20-period)
-        if i >= 20:
-            tr_values = []
-            for j in range(1, 21):
-                idx = i - j
-                if idx >= 0:
-                    tr = max(prices['high'].iloc[idx] - prices['low'].iloc[idx], 
-                             abs(prices['high'].iloc[idx] - prices['close'].iloc[idx-1]), 
-                             abs(prices['low'].iloc[idx] - prices['close'].iloc[idx-1]))
-                    tr_values.append(tr)
-            atr = np.mean(tr_values) if tr_values else 0
-        else:
-            atr = 0
-        
-        # Stoploss: 2.5 * ATR from entry
-        if position == 1 and price < entry_price - 2.5 * atr:
-            signals[i] = 0.0
-            position = 0
-            continue
-        elif position == -1 and price > entry_price + 2.5 * atr:
-            signals[i] = 0.0
-            position = 0
+        # Chop filter: only trade when Chop < 50 (trending market)
+        if chop_val >= 50:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation in uptrend (price > weekly EMA34)
-            if price > r1_val and vol_confirm and price > ema34:
+            # Long: price > KAMA and RSI > 50 (bullish momentum)
+            if price > kama_val and rsi_val > 50 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price breaks below S1 with volume confirmation in downtrend (price < weekly EMA34)
-            elif price < s1_val and vol_confirm and price < ema34:
+            # Short: price < KAMA and RSI < 50 (bearish momentum)
+            elif price < kama_val and rsi_val < 50 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-        
         elif position == 1:
-            # Long exit: price returns to S1 or trend breaks
-            if price < s1_val or price < ema34:
+            # Long exit: price < KAMA or RSI < 40
+            if price < kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Short exit: price returns to R1 or trend breaks
-            if price > r1_val or price > ema34:
+            # Short exit: price > KAMA or RSI > 60
+            if price > kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -132,6 +170,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_VolumeTrend"
+name = "4h_KAMA_Direction_RSI_ChopFilter"
 timeframe = "4h"
 leverage = 1.0
