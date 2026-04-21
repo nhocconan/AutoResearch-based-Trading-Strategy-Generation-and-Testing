@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1
-Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 6h timeframe for BTC and ETH in both bull and bear markets. The strategy uses 1d timeframe for Camarilla pivot calculation and 6h EMA50 for trend filter. Target: 12-37 trades/year per symbol (50-150 over 4 years).
+12h_Camarilla_R1S1_Breakout_VolumeATRFilter_V2
+Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 12h timeframe for BTC and ETH in both bull and bear markets. The strategy uses 1d timeframe for Camarilla pivot calculation and 12h EMA50 for trend filter. Added tighter volume filter (2.0x average) and reduced position size to 0.25 to minimize fee drag and improve test generalization. Target: 12-30 trades/year per symbol (50-120 over 4 years).
 """
 
 import numpy as np
@@ -13,9 +13,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 6h data once for trend filter
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 50:
+    # Load 12h data once for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
     # Load daily data once for Camarilla pivot calculation
@@ -40,17 +40,17 @@ def generate_signals(prices):
     r1 = pivot + (prev_high - prev_low) * 1.1 / 12
     s1 = pivot - (prev_high - prev_low) * 1.1 / 12
     
-    # Align daily levels to 6h timeframe
+    # Align daily levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 6h EMA50 for trend filter
-    close_6h = df_6h['close'].values
-    ema_50_6h = pd.Series(close_6h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h_aligned = align_htf_to_ltf(prices, df_6h, ema_50_6h)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume filter: 20-period average (approx 5 days on 6h)
+    # Volume filter: 20-period average (approx 10 days on 12h)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     # ATR for stoploss
@@ -70,7 +70,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_6h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,23 +79,23 @@ def generate_signals(prices):
         price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation
-        volume_ok = volume > 1.5 * vol_ma[i]
+        # Tighter volume confirmation: 2.0x average volume
+        volume_ok = volume > 2.0 * vol_ma[i]
         
-        # 6h trend filter
-        uptrend = close[i] > ema_50_6h_aligned[i]
-        downtrend = close[i] < ema_50_6h_aligned[i]
+        # 12h trend filter
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         if position == 0:
             # Long: price breaks above R1 in uptrend with volume
             if uptrend and volume_ok:
                 if price > r1_aligned[i]:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
                     position = 1
             # Short: price breaks below S1 in downtrend with volume
             elif downtrend and volume_ok:
                 if price < s1_aligned[i]:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
                     position = -1
         
         elif position == 1:
@@ -104,7 +104,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit: price reaches R1 or stoploss
@@ -112,10 +112,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_VolumeATRFilter_V2"
+timeframe = "12h"
 leverage = 1.0
