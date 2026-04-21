@@ -1,10 +1,3 @@
-# This strategy implements a 6H Fibonacci extension bounce system with weekly trend filter
-# Long entries occur when price retraces to Fibonacci levels (38.2%, 50%, 61.8%) during a weekly uptrend
-# Short entries occur at the same levels during a weekly downtrend
-# Uses volume confirmation to filter out low-probability retracements
-# Target: 50-150 trades over 4 years on 6H timeframe
-# Designed to work in both bull and bear markets by following weekly trend direction
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -12,117 +5,106 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Weekly EMA50 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === Daily RSI(14) for mean reversion signals ===
+    close_1d = df_1d['close'].values
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # === 6H price data for swing detection ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Align RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    # === Swing high/low detection (20-period lookback) ===
-    # Swing high: highest high in 20 bars
-    rolling_max_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Swing low: lowest low in 20 bars
-    rolling_min_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Daily ADX(14) for trend strength filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Volume confirmation ===
+    # Calculate True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - pd.Series(close_1d).shift(1)))
+    tr3 = pd.Series(np.abs(low_1d - pd.Series(close_1d).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    # Calculate Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff().multiply(-1)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Calculate DI values
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    adx_values = adx.values
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(rolling_max_high[i]) or 
-            np.isnan(rolling_min_low[i]) or 
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = close[i]
-        weekly_trend = ema_50_1w_aligned[i]
-        swing_high = rolling_max_high[i]
-        swing_low = rolling_min_low[i]
+        price_close = prices['close'].iloc[i]
+        rsi_val = rsi_aligned[i]
+        adx_val = adx_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
-        # Calculate Fibonacci retracement levels from recent swing
-        price_range = swing_high - swing_low
-        if price_range <= 0:  # Avoid division by zero
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # Fibonacci levels: 38.2%, 50%, 61.8% retracement
-        fib_382 = swing_high - (price_range * 0.382)
-        fib_500 = swing_high - (price_range * 0.500)
-        fib_618 = swing_high - (price_range * 0.618)
-        
-        # Tolerance for level touches (0.5% of price)
-        tolerance = price_close * 0.005
-        
         if position == 0:
-            # Long setup: weekly uptrend + price at Fibonacci support + volume
-            if (price_close > weekly_trend and  # Weekly uptrend
-                vol_ratio_val > 1.3):           # Volume confirmation
-                
-                # Check if price is near any Fibonacci support level
-                near_fib = (abs(price_close - fib_382) < tolerance or
-                           abs(price_close - fib_500) < tolerance or
-                           abs(price_close - fib_618) < tolerance)
-                
-                if near_fib:
-                    signals[i] = 0.25
-                    position = 1
-            
-            # Short setup: weekly downtrend + price at Fibonacci resistance + volume
-            elif (price_close < weekly_trend and  # Weekly downtrend
-                  vol_ratio_val > 1.3):           # Volume confirmation
-                
-                # Check if price is near any Fibonacci resistance level
-                near_fib = (abs(price_close - fib_382) < tolerance or
-                           abs(price_close - fib_500) < tolerance or
-                           abs(price_close - fib_618) < tolerance)
-                
-                if near_fib:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long when RSI oversold in weak trend + volume
+            if (rsi_val < 30 and  # Oversold
+                adx_val < 25 and  # Weak trend (favors mean reversion)
+                vol_ratio_val > 1.3):
+                signals[i] = 0.25
+                position = 1
+            # Enter short when RSI overbought in weak trend + volume
+            elif (rsi_val > 70 and   # Overbought
+                  adx_val < 25 and   # Weak trend (favors mean reversion)
+                  vol_ratio_val > 1.3):
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit conditions
-            if position == 1:
-                # Exit long: weekly trend turns down OR price breaks above swing high (failed bounce)
-                if (price_close < weekly_trend or price_close > swing_high):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25  # Hold long
-            
-            elif position == -1:
-                # Exit short: weekly trend turns up OR price breaks below swing low (failed bounce)
-                if (price_close > weekly_trend or price_close < swing_low):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25  # Hold short
+            # Exit when RSI returns to neutral or trend strengthens
+            if position == 1 and (rsi_val > 50 or adx_val > 30):
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and (rsi_val < 50 or adx_val > 30):
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "6H_Fibonacci_Bounce_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_RSI_MeanReversion_ADXFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
