@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_TrendFilter_VolumeSpike_ED
-Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 4h EMA200 trend and volume spike (2.0x average).
-Long when price > R1 and above EMA200; short when price < S1 and below EMA200.
-Volume confirmation reduces false breakouts. ATR(14) stoploss (2.5x) and discrete sizing (0.25).
-Uses only 4h and 1d timeframes to minimize overtrading (< 50 trades/year per symbol).
-Designed to work in both bull and bear markets via trend alignment and strict entry filters.
+4h_Donchian20_Breakout_VolumeSpike_ChopRegime_v2
+Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.8x average) and choppiness regime filter (CHOP>61.8 = range). 
+Long when price breaks above Donchian upper band in ranging markets; short when price breaks below lower band.
+Mean reversion logic works in both bull and bear markets by fading extremes during consolidation.
+Volume confirmation reduces false breakouts. ATR(14) stoploss (2.0x) and discrete sizing (0.25).
+Designed to avoid overtrading (< 30 trades/year per symbol) via tight entry conditions.
 """
 
 import numpy as np
@@ -14,63 +14,49 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for Camarilla pivot)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
-    df_1d_open = df_1d['open'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    range_1d = df_1d_high - df_1d_low
-    r1_1d = df_1d_close + 0.275 * range_1d
-    s1_1d = df_1d_close - 0.275 * range_1d
-    h3_1d = df_1d_close + 1.1 * range_1d
-    l3_1d = df_1d_close - 1.1 * range_1d
-    h4_1d = df_1d_close + 1.382 * range_1d
-    l4_1d = df_1d_close - 1.382 * range_1d
-    
-    # Align 1d Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    
-    # === 4h EMA200 for trend filter ===
+    # === 4h Donchian channels (20-period) ===
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Upper band: highest high over past 20 bars
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low over past 20 bars
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === Volume confirmation (50-period average) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     # === ATR (14-period) for stoploss ===
-    high = prices['high'].values
-    low = prices['low'].values
-    
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
+    # === Choppiness Index regime filter (14-period) ===
+    # CHOP = 100 * log10(sum(TR over n) / (n * (max(high) - min(low)))) / log10(n)
+    # Range: 0-100, >61.8 = ranging, <38.2 = trending
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    denominator = 14 * (max_high - min_low)
+    # Avoid division by zero
+    chop_raw = np.where(denominator != 0, sum_tr / denominator, 1.0)
+    chop = 100 * np.log10(np.maximum(chop_raw, 1e-10)) / np.log10(14)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_200[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) 
+            or np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,23 +64,19 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        h3 = h3_1d_aligned[i]
-        l3 = l3_1d_aligned[i]
-        h4 = h4_1d_aligned[i]
-        l4 = l4_1d_aligned[i]
-        ema_trend = ema_200[i]
         vol_avg = vol_ma[i]
+        chop_value = chop[i]
         
-        # Volume confirmation: current volume > 2.0x average (strict filter)
-        volume_confirmed = volume_now > 2.0 * vol_avg
+        # Volume confirmation: current volume > 1.8x average (tight filter)
+        volume_confirmed = volume_now > 1.8 * vol_avg
+        
+        # Regime filter: only trade in ranging markets (CHOP > 61.8)
+        ranging_market = chop_value > 61.8
         
         if position == 0:
-            # Only enter in trending markets (price > EMA200 for long, < for short)
-            # Volume confirmation required to avoid false breakouts
-            long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
-            short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
+            # Enter only in ranging markets with volume confirmation
+            long_condition = (price > highest_high[i]) and volume_confirmed and ranging_market
+            short_condition = (price < lowest_low[i]) and volume_confirmed and ranging_market
             
             if long_condition:
                 signals[i] = 0.25
@@ -106,32 +88,24 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.5x ATR)
-            if price < entry_price - 2.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price < ema_trend:
-                signals[i] = 0.0
-                position = 0
-            # Mean reversion exit at H4 (extreme overbought)
-            elif price > h4:
+            # Exit when price re-enters Donchian channel (mean reversion complete)
+            elif price < highest_high[i] and price > lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (2.5x ATR)
-            if price > entry_price + 2.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price > ema_trend:
-                signals[i] = 0.0
-                position = 0
-            # Mean reversion exit at L4 (extreme oversold)
-            elif price < l4:
+            # Exit when price re-enters Donchian channel (mean reversion complete)
+            elif price < highest_high[i] and price > lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_TrendFilter_VolumeSpike_ED"
+name = "4h_Donchian20_Breakout_VolumeSpike_ChopRegime_v2"
 timeframe = "4h"
 leverage = 1.0
