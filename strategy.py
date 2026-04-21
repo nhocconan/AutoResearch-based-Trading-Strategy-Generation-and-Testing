@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike.
-Camarilla levels provide strong intraday support/resistance. Breakouts above R1 or below S1 with
-volume confirmation and aligned daily trend capture momentum. EMA34 filter avoids counter-trend trades.
-Designed for ~20-40 trades/year to minimize fee drag, works in bull/bear via trend filter.
+Hypothesis: 1d KAMA (Kaufman Adaptive Moving Average) with RSI(14) filter and chop regime filter.
+KAMA adapts to market noise - slows in ranging markets, speeds in trending markets.
+Combined with RSI for momentum confirmation and Choppiness Index to avoid false signals in high-chop environments.
+Designed for low frequency (~10-25 trades/year) to minimize fee drag, works in bull/bear via adaptive trend filter.
 """
 
 import numpy as np
@@ -12,78 +12,99 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for Camarilla levels and EMA34
+    # Load 1w data ONCE before loop for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Weekly RSI(14) for regime filter - avoids choppy weekly regimes
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Load 1d data ONCE before loop for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
-    
-    # Camarilla: R4 = close + 1.5*(high-low)*1.1/2, R3 = close + 1.25*(high-low)*1.1/2, etc.
-    # We only need R1 and S1 for breakout
-    r1 = close_prev + 1.1 * (high_prev - low_prev) * 1.05 / 2
-    s1 = close_prev - 1.1 * (high_prev - low_prev) * 1.05 / 2
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 1d EMA34 for trend filter
+    # KAMA(10, 2, 30) - Kaufman Adaptive Moving Average
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, n=10, prepend=close_1d[:10]))
+    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)
+    # Fix volatility calculation - rolling sum of absolute changes
+    volatility = pd.Series(np.abs(np.diff(close_1d, prepend=close_1d[0]))).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Volume confirmation: volume / 20-period average volume (1d)
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = df_1d['volume'].values / vol_ma_20
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # RSI(14) for momentum
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align indicators to lower timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(35, n):
+    for i in range(30, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(rsi_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_trend = ema_34_1d_aligned[i]
-        vol_ratio = vol_ratio_aligned[i]
-        vol_threshold = 1.5  # Volume must be 1.5x average
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
+        rsi_1w_val = rsi_1w_aligned[i]
+        
+        # Weekly regime filter: avoid extreme RSI levels that indicate exhaustion
+        weekly_regime_ok = (rsi_1w_val > 20) and (rsi_1w_val < 80)
         
         if position == 0:
-            # Enter long: price breaks above R1, volume spike, uptrend
-            if (price_close > r1_val and 
-                vol_ratio > vol_threshold and 
-                price_close > ema_trend):
+            # Enter long: price > KAMA, RSI > 50 (bullish momentum), weekly not overbought
+            if (price_close > kama_val and 
+                rsi_val > 50 and 
+                weekly_regime_ok):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1, volume spike, downtrend
-            elif (price_close < s1_val and 
-                  vol_ratio > vol_threshold and 
-                  price_close < ema_trend):
+            # Enter short: price < KAMA, RSI < 50 (bearish momentum), weekly not oversold
+            elif (price_close < kama_val and 
+                  rsi_val < 50 and 
+                  weekly_regime_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price returns to previous day's close or trend reversal
-            close_prev_val = close_prev[i] if not np.isnan(close_prev[i]) else 0
-            
-            if position == 1 and (price_close < close_prev_val or price_close < ema_trend):
+            # Exit: price crosses KAMA in opposite direction or RSI extreme
+            if position == 1 and (price_close < kama_val or rsi_val < 30):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > close_prev_val or price_close > ema_trend):
+            elif position == -1 and (price_close > kama_val or rsi_val > 70):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_RSI_WeeklyFilter"
+timeframe = "1d"
 leverage = 1.0
