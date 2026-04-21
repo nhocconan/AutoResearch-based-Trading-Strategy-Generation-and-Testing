@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA34 trend and volume spike (volume > 1.5x 20-period MA).
-In trending markets (price > EMA34_1d): breakout continuation (long above R1, short below S1).
-In ranging/weak trend markets: no entries to avoid whipsaw.
-Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to balance returns and fee drag.
-Designed to work in both bull and bear markets by only taking trades aligned with 1d trend.
+4h_Camarilla_R1_S1_Breakout_1dTrend_TRIXVolume_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d TRIX trend (TRIX > 0 for long, < 0 for short) and volume spike (volume > 2.0x 20-period MA).
+Only trade in direction of 1d TRIX to avoid whipsaw in ranging markets. Uses ATR(14) stoploss (1.5x) and discrete position sizing (0.25) to minimize fee drag.
+Designed to work in both bull and bear markets by aligning with 1d momentum via TRIX.
 """
 
 import numpy as np
@@ -17,7 +15,7 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA34 trend)
+    # Load HTF data ONCE before loop (1d for TRIX trend)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
@@ -33,18 +31,23 @@ def generate_signals(prices):
     r1_1d = df_1d_close + 0.275 * range_1d
     s1_1d = df_1d_close - 0.275 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # === 1d EMA34 for trend filter ===
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 1d TRIX for trend filter (15-period EMA of 15-period EMA of 15-period EMA) ===
+    close_1d = pd.Series(df_1d_close)
+    ema1 = close_1d.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix_raw = 100 * (ema3.pct_change())
+    trix = trix_raw.fillna(0).values  # TRIX(15)
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # === Volume spike filter (volume > 1.5x 20-period MA) ===
+    # === Volume spike filter (volume > 2.0x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     # === ATR (14-period) for stoploss ===
     high = prices['high'].values
@@ -63,7 +66,7 @@ def generate_signals(prices):
     for i in range(60, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
+            or np.isnan(trix_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,12 +76,12 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
-        ema_trend = ema_34_1d_aligned[i]
+        trix_val = trix_aligned[i]
         
         if position == 0:
-            # Only enter in direction of 1d trend with volume spike
-            long_condition = (price > r1) and (price > ema_trend) and vol_spike
-            short_condition = (price < s1) and (price < ema_trend) and vol_spike
+            # Only enter in direction of 1d TRIX with volume spike
+            long_condition = (price > r1) and (trix_val > 0) and vol_spike
+            short_condition = (price < s1) and (trix_val < 0) and vol_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -90,24 +93,24 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.0x ATR)
-            if price < entry_price - 2.0 * atr[i]:
+            # Check stoploss (1.5x ATR)
+            if price < entry_price - 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price < ema_trend:
+            # TRIX trend reversal exit
+            elif trix_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (2.0x ATR)
-            if price > entry_price + 2.0 * atr[i]:
+            # Check stoploss (1.5x ATR)
+            if price > entry_price + 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price > ema_trend:
+            # TRIX trend reversal exit
+            elif trix_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_TRIXVolume_v1"
+timeframe = "4h"
 leverage = 1.0
