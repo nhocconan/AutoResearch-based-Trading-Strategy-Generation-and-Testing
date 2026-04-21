@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KeltnerChannel_Breakout_1wTrend_VolumeConfirm_ATRStop_v1
-Hypothesis: Daily Keltner Channel (20,2.0) breakout with weekly EMA34 trend filter and volume spike confirmation. Designed for low trade frequency (~10-25/year) to minimize fee drag and improve generalization across bull/bear markets. Uses 1d primary timeframe with 1w HTF for trend context.
+6h_Ichimoku_Cloud_Filter_1dTK_Cross_v4
+Hypothesis: Ichimoku cloud with TK cross on 6h, filtered by 1d trend (price above/below 1d Kijun-sen) and volume confirmation. Designed for low trade frequency (~15-25/year) to minimize fee drag. Works in bull/bear markets by only taking trades in direction of 1d trend, using cloud as dynamic support/resistance.
 """
 
 import numpy as np
@@ -14,51 +14,79 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1w trend filter: 34-period EMA ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 1d Ichimoku components for trend filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 1w volume average (20-period) for spike detection ===
-    volume_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w[np.isnan(vol_ma_1w)] = 1.0  # avoid division by zero
-    vol_ratio_1w = volume_1w / vol_ma_1w
-    vol_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio_1w)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    highest_10_1d = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    lowest_10_1d = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_1d = (highest_10_1d + lowest_10_1d) / 2
     
-    # === ATR for Keltner Channel and dynamic stoploss (14-period on 1d) ===
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    highest_26_1d = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    lowest_26_1d = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_1d = (highest_26_1d + lowest_26_1d) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    highest_52_1d = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    lowest_52_1d = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b_1d = (highest_52_1d + lowest_52_1d) / 2
+    
+    # Align 1d Ichimoku components to 6h timeframe (no extra delay needed for these)
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    
+    # === 6h Ichimoku components for entry signal ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Tenkan-sen (6h)
+    highest_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    lowest_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_6h = (highest_9 + lowest_9) / 2
     
-    # === Keltner Channels (20-period, 2.0 multiplier on 1d) ===
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema_20 + 2.0 * atr_14
-    lower_keltner = ema_20 - 2.0 * atr_14
+    # Kijun-sen (6h)
+    highest_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    lowest_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_6h = (highest_26 + lowest_26) / 2
+    
+    # Senkou Span A (6h)
+    senkou_a_6h = (tenkan_6h + kijun_6h) / 2
+    # Senkou Span B (6h)
+    highest_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    lowest_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b_6h = (highest_52 + lowest_52) / 2
+    
+    # === 6h volume confirmation (20-period average) ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma[np.isnan(vol_ma)] = 1.0  # avoid division by zero
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(vol_ratio_1w_aligned[i]) or
-            np.isnan(atr_14[i]) or
-            np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i])):
+        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
+            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,40 +95,41 @@ def generate_signals(prices):
         price_close = close[i]
         price_high = high[i]
         price_low = low[i]
-        trend_1w = ema_34_1w_aligned[i]
-        vol_spike = vol_ratio_1w_aligned[i]
-        upper_kt = upper_keltner[i]
-        lower_kt = lower_keltner[i]
-        atr_val = atr_14[i]
+        
+        # 6h Ichimoku cloud boundaries
+        cloud_top = max(senkou_a_6h[i], senkou_b_6h[i])
+        cloud_bottom = min(senkou_a_6h[i], senkou_b_6h[i])
+        
+        # 1d trend filter: price relative to 1d Kijun-sen
+        trend_1d = kijun_1d_aligned[i]
+        
+        # Volume confirmation
+        vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: price breaks above upper Keltner + volume spike > 2.0 + price above 1w EMA34
-            if price_close > upper_kt and vol_spike > 2.0 and price_close > trend_1w:
+            # Long: TK cross bullish + price above cloud + above 1d Kijun + volume spike
+            if (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1] and  # TK cross bullish
+                price_close > cloud_top and price_close > trend_1d and vol_spike > 1.5):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price_close
-                highest_since_entry = price_close
-            # Short: price breaks below lower Keltner + volume spike > 2.0 + price below 1w EMA34
-            elif price_close < lower_kt and vol_spike > 2.0 and price_close < trend_1w:
+            # Short: TK cross bearish + price below cloud + below 1d Kijun + volume spike
+            elif (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1] and  # TK cross bearish
+                  price_close < cloud_bottom and price_close < trend_1d and vol_spike > 1.5):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price_close
-                lowest_since_entry = price_close
         
         elif position != 0:
-            # Update highest/lowest since entry for trailing stop
+            # Exit when TK cross reverses or price exits cloud in opposite direction
             if position == 1:
-                highest_since_entry = max(highest_since_entry, price_high)
-                # Trailing stop: 2.5 * ATR below highest since entry
-                if price_close < highest_since_entry - 2.5 * atr_val:
+                # Exit on bearish TK cross or price falls below cloud
+                if (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]) or price_close < cloud_bottom:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                lowest_since_entry = min(lowest_since_entry, price_low)
-                # Trailing stop: 2.5 * ATR above lowest since entry
-                if price_close > lowest_since_entry + 2.5 * atr_val:
+                # Exit on bullish TK cross or price rises above cloud
+                if (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]) or price_close > cloud_top:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -108,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KeltnerChannel_Breakout_1wTrend_VolumeConfirm_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Filter_1dTK_Cross_v4"
+timeframe = "6h"
 leverage = 1.0
