@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ParabolicSAR_RangeBreakout_1dTrend
-Hypothesis: Use 1d EMA50 for trend direction, Parabolic SAR (0.02, 0.2) for breakout detection, and volume confirmation. 
-Parabolic SAR performs well in trending markets but whipsaws in ranges; combining with 1d trend filter avoids counter-trend trades. 
-Volume > 1.3x average confirms breakout strength. Works in bull/bear markets by following higher timeframe trend. Target 20-40 trades/year on 6h.
+4h_RSI2_Stochastic_1dTrend_Volume
+Hypothesis: Combine RSI(2) oversold/overbought with Stochastic(14,3,3) cross and 1d EMA50 trend filter. Designed to capture mean-reversion bounces in strong trends with volume confirmation. Works in bull/bear markets by following higher timeframe trend while using RSI2/Stoch for entry timing. Target 20-40 trades/year on 4h.
 """
 
 import numpy as np
@@ -25,50 +23,26 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Parabolic SAR (0.02, 0.2) on 6h ===
+    # === RSI(2) on 4h ===
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Stochastic(14,3,3) on 4h ===
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    
-    # Initialize arrays
-    psar = np.zeros(n)
-    psar[0] = low[0]
-    trend = 1  # 1 for uptrend, -1 for downtrend
-    af = 0.02  # acceleration factor
-    max_af = 0.2
-    ep = high[0] if trend == 1 else low[0]  # extreme point
-    
-    for i in range(1, n):
-        if trend == 1:  # uptrend
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Ensure SAR does not exceed previous two lows
-            psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
-            # Trend reversal
-            if low[i] < psar[i]:
-                trend = -1
-                psar[i] = ep
-                af = 0.02
-                ep = low[i]
-            else:
-                # Continue uptrend
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + 0.02, max_af)
-        else:  # downtrend
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Ensure SAR does not fall below previous two highs
-            psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
-            # Trend reversal
-            if high[i] > psar[i]:
-                trend = 1
-                psar[i] = ep
-                af = 0.02
-                ep = high[i]
-            else:
-                # Continue downtrend
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + 0.02, max_af)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    stoch_k = np.where(highest_high - lowest_low != 0, 
+                       100 * (close - lowest_low) / (highest_high - lowest_low), 50)
+    stoch_k_series = pd.Series(stoch_k)
+    stoch_k_smooth = stoch_k_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    stoch_d = pd.Series(stoch_k_smooth).ewm(span=3, adjust=False, min_periods=3).mean().values
     
     # === Volume confirmation: 20-period volume average ===
     volume = prices['volume'].values
@@ -81,7 +55,9 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if indicators not ready
         if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(psar[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(stoch_k_smooth[i]) or
+            np.isnan(stoch_d[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -90,29 +66,35 @@ def generate_signals(prices):
         
         price_close = close[i]
         trend_1d = ema_50_1d_aligned[i]
-        psar_val = psar[i]
+        rsi_val = rsi[i]
+        stoch_k_val = stoch_k_smooth[i]
+        stoch_d_val = stoch_d[i]
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: price > PSAR + volume spike > 1.3 + price above 1d EMA50 (uptrend)
-            if (price_close > psar_val and 
+            # Long: RSI2 < 10 + Stoch K crosses above D + volume spike > 1.3 + price above 1d EMA50
+            if (rsi_val < 10 and 
+                stoch_k_val > stoch_d_val and 
+                stoch_k_smooth[i-1] <= stoch_d[i-1] and
                 vol_spike > 1.3 and 
                 price_close > trend_1d):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < PSAR + volume spike > 1.3 + price below 1d EMA50 (downtrend)
-            elif (price_close < psar_val and 
+            # Short: RSI2 > 90 + Stoch K crosses below D + volume spike > 1.3 + price below 1d EMA50
+            elif (rsi_val > 90 and 
+                  stoch_k_val < stoch_d_val and 
+                  stoch_k_smooth[i-1] >= stoch_d[i-1] and
                   vol_spike > 1.3 and 
                   price_close < trend_1d):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price crosses PSAR in opposite direction
-            if position == 1 and price_close < psar_val:
+            # Exit when RSI2 crosses 50 in opposite direction
+            if position == 1 and rsi_val < 50 and rsi[i-1] >= 50:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > psar_val:
+            elif position == -1 and rsi_val > 50 and rsi[i-1] <= 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ParabolicSAR_RangeBreakout_1dTrend"
-timeframe = "6h"
+name = "4h_RSI20_Stochastic_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
