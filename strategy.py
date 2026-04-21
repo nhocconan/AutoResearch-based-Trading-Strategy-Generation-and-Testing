@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20-period MA). Uses ATR-based stop (2.0x) and minimum holding period of 2 bars to reduce churn. Designed for 12h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v6
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-period MA).
+Uses ATR-based stop (2.0x) and minimum holding period of 2 bars to reduce churn.
+Designed for 4h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
+Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -23,7 +26,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 12h ATR (14-period) for stoploss ===
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -34,11 +37,11 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume confirmation (1.8x 20-period MA) ===
+    # === Volume confirmation (1.5x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 12h Camarilla pivot levels (R1, S1) ===
+    # === 4h Camarilla pivot levels (R1, S1) ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -70,8 +73,8 @@ def generate_signals(prices):
         r1_val = r1[i]
         s1_val = s1[i]
         
-        # Volume confirmation: current volume > 1.8x average (balanced threshold)
-        volume_confirm = volume_now > 1.8 * vol_avg
+        # Volume confirmation: current volume > 1.5x average (balanced threshold)
+        volume_confirm = volume_now > 1.5 * vol_avg
         
         if position == 0:
             # Long: price breaks above R1, above 1d EMA34, volume confirm
@@ -126,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v6"
+timeframe = "4h"
 leverage = 1.0
