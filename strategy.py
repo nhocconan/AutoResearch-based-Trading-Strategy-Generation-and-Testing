@@ -13,72 +13,92 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR (14-period)
+    # Calculate 1d Williams %R (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Highest High and Lowest Low over 14 periods
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # ATR calculation
-    atr = np.zeros_like(tr)
-    atr[13] = np.mean(tr[1:14])
-    for i in range(14, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Williams %R: -100 * (HH - Close) / (HH - LL)
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        -100 * (highest_high - close_1d) / (highest_high - lowest_low),
+        -50  # neutral when range is zero
+    )
     
-    # Calculate 1d EMA34
-    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    dc_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    dc_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Wilder's smoothing for RSI
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Align 1d indicators to 4h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to lower timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(20, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(atr_aligned[i]) or np.isnan(ema34_aligned[i]) or
-            np.isnan(dc_upper[i]) or np.isnan(dc_lower[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Current price and volume
         price_close = prices['close'].iloc[i]
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)[i]
         
         if position == 0:
-            # Enter long: Price breaks above Donchian upper + above daily EMA34
-            if (price_close > dc_upper[i] and price_close > ema34_aligned[i]):
+            # Enter long: Williams %R oversold + RSI rising from oversold + volume surge
+            if (williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80 and
+                rsi_aligned[i] > 30 and rsi_aligned[i-1] <= 30 and
+                vol_1d_current > 2.0 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below Donchian lower + below daily EMA34
-            elif (price_close < dc_lower[i] and price_close < ema34_aligned[i]):
+            # Enter short: Williams %R overbought + RSI falling from overbought + volume surge
+            elif (williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20 and
+                  rsi_aligned[i] < 70 and rsi_aligned[i-1] >= 70 and
+                  vol_1d_current > 2.0 * vol_ma_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: Price reverses back through Donchian opposite side
+            # Exit: Williams %R returns to neutral range or volume drops
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls back below Donchian lower
-                if price_close < dc_lower[i]:
+                # Exit long: Williams %R returns above -50 or volume < average
+                if (williams_r_aligned[i] > -50 or
+                    vol_1d_current < vol_ma_20_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: Price rises back above Donchian upper
-                if price_close > dc_upper[i]:
+                # Exit short: Williams %R returns below -50 or volume < average
+                if (williams_r_aligned[i] < -50 or
+                    vol_1d_current < vol_ma_20_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -90,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_EMA34_Breakout"
-timeframe = "4h"
+name = "1d_WilliamsR_RSI_Volume2x"
+timeframe = "1d"
 leverage = 1.0
