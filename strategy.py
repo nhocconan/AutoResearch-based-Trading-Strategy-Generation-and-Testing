@@ -5,12 +5,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     # === Daily ATR for volatility regime ===
@@ -25,15 +25,15 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ATR(20)
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) percentile (100-day lookback for regime)
-    atr_percentile = pd.Series(atr_14).rolling(window=100, min_periods=20).apply(
+    # ATR(20) percentile (252-day lookback for regime)
+    atr_percentile = pd.Series(atr_20).rolling(window=252, min_periods=50).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # Align ATR percentile to 12h timeframe
+    # Align ATR percentile to 4h timeframe
     atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
     # === Daily SMA50 for trend filter ===
@@ -47,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if indicators not ready
         if (np.isnan(atr_percentile_aligned[i]) or 
             np.isnan(sma_50_1d_aligned[i]) or 
@@ -90,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ATR_Volatility_Regime_SMA50_Trend_Volume"
-timeframe = "12h"
+name = "4h_ATR_Volatility_Regime_SMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
