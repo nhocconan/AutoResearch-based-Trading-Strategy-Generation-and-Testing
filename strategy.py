@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_HTF_1d_Camarilla_R3S3_Fade_v2
-Hypothesis: Fade extreme intraday moves at Camarilla R3/S3 levels using 1d pivot structure.
-In ranging/mean-reverting markets (common in 2025 bear), price tends to revert from R3/S3.
-Use 1d trend filter (EMA34) to avoid fading strong trends. Volume confirmation ensures
-fade occurs with participation. Target 50-150 trades over 4 years.
+12h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
+Hypothesis: Use 12h primary timeframe with 1d Camarilla R1/S1 breakout for trend capture.
+Add volume confirmation (>1.5x 20-bar volume MA) and ATR trailing stop (2.5x ATR) to reduce whipsaw.
+Position size 0.25 balances risk/return. Target 12-37 trades/year per symbol.
+Works in bull/bear via breakout logic and trailing stop protecting downside.
 """
 
 import numpy as np
@@ -19,55 +19,47 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 35:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d EMA34 Trend Filter ===
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # === 1d Camarilla Pivot Levels (from previous day) ===
+    # === 1d Camarilla Pivot Levels (R1, S1) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    close_1d = df_1d['close'].values
     
-    # True range for Camarilla calculation
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - np.roll(close_1d_prev, 1)),
-                                  np.abs(low_1d - np.roll(close_1d_prev, 1))))
-    tr_1d[0] = 0  # first bar has no previous
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = pivot + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = pivot - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Camarilla levels based on previous day's range
-    camarilla_multiplier = 1.1 / 12  # Camarilla uses 1.1 * range / 12 for R3/S3
-    camarilla_range = pd.Series(tr_1d).rolling(window=1, min_periods=1).sum().values  # daily range
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate R3, S3, R4, S4 from previous day's close
-    r3 = close_1d_prev + camarilla_range * camarilla_multiplier * 3
-    s3 = close_1d_prev - camarilla_range * camarilla_multiplier * 3
-    r4 = close_1d_prev + camarilla_range * camarilla_multiplier * 4
-    s4 = close_1d_prev - camarilla_range * camarilla_multiplier * 4
-    
-    # Align Camarilla levels to 6h timeframe (using previous day's values)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # === 6h Indicators ===
+    # === 12h Indicators ===
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume MA (20-period) for spike confirmation
+    # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0.0  # for long trailing stop
+    lowest_low_since_entry = 0.0    # for short trailing stop
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) 
-            or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,40 +67,37 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        vol_ok = vol > 1.3 * vol_ma[i]  # volume confirmation for fade
+        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
         if position == 0:
-            # Fade long: price rejects at R3 (or breaks above R4 for continuation)
-            if price <= r3_aligned[i] and price > s3_aligned[i] and vol_ok:
-                # Additional filter: only fade if 1d trend is not strongly bullish
-                if price < ema_1d_aligned[i] or abs(price - ema_1d_aligned[i]) < 0.5 * (r3_aligned[i] - s3_aligned[i]):
-                    signals[i] = 0.25
-                    position = 1
-            # Fade short: price rejects at S3 (or breaks below S4 for continuation)
-            elif price >= s3_aligned[i] and price < r3_aligned[i] and vol_ok:
-                # Additional filter: only fade if 1d trend is not strongly bearish
-                if price > ema_1d_aligned[i] or abs(price - ema_1d_aligned[i]) < 0.5 * (r3_aligned[i] - s3_aligned[i]):
-                    signals[i] = -0.25
-                    position = -1
-            # Breakout continuation: strong break above R4 or below S4 with volume
-            elif price > r4_aligned[i] and vol_ok and price > ema_1d_aligned[i]:
+            # Long: price breaks above 1d R1 + volume confirmation
+            if price > r1_aligned[i-1] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            elif price < s4_aligned[i] and vol_ok and price < ema_1d_aligned[i]:
+                highest_high_since_entry = price
+            # Short: price breaks below 1d S1 + volume confirmation
+            elif price < s1_aligned[i-1] and vol_ok:
                 signals[i] = -0.25
                 position = -1
+                lowest_low_since_entry = price
         
         elif position == 1:
-            # Exit long: price moves back toward mean (S3) or stops at R4
-            if price >= r4_aligned[i] or price <= s3_aligned[i]:
+            # Update highest high since entry
+            if price > highest_high_since_entry:
+                highest_high_since_entry = price
+            # ATR trailing stop: exit if price drops 2.5*ATR from highest high since entry
+            if price < highest_high_since_entry - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price moves back toward mean (R3) or stops at S4
-            if price <= s4_aligned[i] or price >= r3_aligned[i]:
+            # Update lowest low since entry
+            if price < lowest_low_since_entry:
+                lowest_low_since_entry = price
+            # ATR trailing stop: exit if price rises 2.5*ATR from lowest low since entry
+            if price > lowest_low_since_entry + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_HTF_1d_Camarilla_R3S3_Fade_v2"
-timeframe = "6h"
+name = "12h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
+timeframe = "12h"
 leverage = 1.0
