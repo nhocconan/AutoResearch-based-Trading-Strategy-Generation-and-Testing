@@ -1,97 +1,90 @@
-# -*- coding: utf-8 -*-
-# -*- mode: python; -*-
 #!/usr/bin/env python3
-"""
-Hypothesis:
-- 1d timeframe strategy combining weekly trend filter with daily price action.
-- Uses weekly EMA20 for trend direction and daily Donchian breakout for entry.
-- Volume confirmation and volatility filter reduce false signals.
-- Designed for low trade frequency (~10-25 trades/year) to minimize fee drag.
-- Works in both bull and bear markets via trend filter and breakout logic.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop for trend and structure
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily Donchian(20) channels for breakout signals
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d Donchian(20) channels for breakout signals
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Daily ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # 1d ATR(14) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
     atr_ratio = atr_14 / atr_ma_50
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Volume confirmation: volume / 20-period average volume
-    vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = prices['volume'].values / vol_ma_20
+    # Volume confirmation: volume / 30-period average volume (1d)
+    vol_ma_30 = pd.Series(df_1d['volume'].values).rolling(window=30, min_periods=30).mean().values
+    vol_ratio_1d = df_1d['volume'].values / vol_ma_30
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or np.isnan(atr_ratio[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = close[i]
-        ema_trend = ema_20_1w_aligned[i]
-        upper_band = donch_high[i]
-        lower_band = donch_low[i]
-        vol_ratio_val = vol_ratio[i]
-        atr_ratio_val = atr_ratio[i]
+        price_close = prices['close'].iloc[i]
+        ema_trend = ema_50_1d_aligned[i]
+        upper_band = donch_high_aligned[i]
+        lower_band = donch_low_aligned[i]
+        vol_ratio = vol_ratio_aligned[i]
+        vol_threshold = 1.3  # Volume must be above average
+        atr_ratio_val = atr_ratio_aligned[i]
         
         if position == 0:
             # Enter long: price breaks above Donchian high, uptrend, volume spike, moderate volatility
             if (price_close > upper_band and 
                 price_close > ema_trend and 
-                vol_ratio_val > 1.5 and 
-                atr_ratio_val > 0.6 and atr_ratio_val < 2.0):
+                vol_ratio > vol_threshold and 
+                atr_ratio_val > 0.7 and atr_ratio_val < 2.2):
                 signals[i] = 0.25
                 position = 1
             # Enter short: price breaks below Donchian low, downtrend, volume spike, moderate volatility
             elif (price_close < lower_band and 
                   price_close < ema_trend and 
-                  vol_ratio_val > 1.5 and 
-                  atr_ratio_val > 0.6 and atr_ratio_val < 2.0):
+                  vol_ratio > vol_threshold and 
+                  atr_ratio_val > 0.7 and atr_ratio_val < 2.2):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
             # Exit: reverse breakout or volatility extremes
-            if position == 1 and (price_close < lower_band or atr_ratio_val > 2.2 or atr_ratio_val < 0.4):
+            if position == 1 and (price_close < lower_band or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > upper_band or atr_ratio_val > 2.2 or atr_ratio_val < 0.4):
+            elif position == -1 and (price_close > upper_band or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA20_DonchianBreakout_VolumeATR"
-timeframe = "1d"
+name = "6h_DonchianBreakout_1dTrend_VolumeATR"
+timeframe = "6h"
 leverage = 1.0
