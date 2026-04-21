@@ -1,3 +1,10 @@
+# 4h_Camarilla_Pivot_Breakout_Volume_Regime
+# Hypothesis: Camarilla pivot levels act as institutional support/resistance.
+# Breakout above R3 or below S3 with volume surge indicates institutional participation.
+# Combines with 12h EMA trend filter and daily ATR percentile regime filter to avoid whipsaws.
+# Works in bull/bear: breakouts capture momentum, regime filter avoids chop, volume confirms validity.
+# Target: 20-40 trades/year per symbol.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -8,47 +15,51 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for Camarilla pivots and ATR
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Load 12h data ONCE for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # === Weekly EMA21 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # === Daily ATR for volatility regime ===
+    # === Daily Camarilla Pivot Levels (from previous day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range
+    # Calculate pivot and Camarilla levels using previous day's data
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    
+    # Camarilla levels: R3/S3 are most significant for breakouts
+    r3 = close_1d + (range_hl * 1.1 / 2)
+    s3 = close_1d - (range_hl * 1.1 / 2)
+    
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === 12h EMA50 for trend filter ===
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # === Daily ATR percentile for regime filter ===
+    # True Range calculation
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
-    # ATR(20)
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR(20) percentile (100-day lookback for regime)
-    atr_percentile = pd.Series(atr_20).rolling(window=100, min_periods=20).apply(
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_percentile = pd.Series(atr_14).rolling(window=100, min_periods=14).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
-    
-    # Align ATR percentile to 12h timeframe
     atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
-    
-    # === Daily SMA50 for trend filter ===
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
     # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -57,11 +68,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_21_1w_aligned[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(sma_50_1d_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr_percentile_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,41 +79,40 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_21_1w_aligned[i]
+        r3_level = r3_aligned[i]
+        s3_level = s3_aligned[i]
+        ema_trend = ema_50_12h_aligned[i]
         atr_percentile_val = atr_percentile_aligned[i]
-        sma_trend = sma_50_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long in low volatility (range) + weekly uptrend + daily uptrend + volume
-            if (atr_percentile_val < 30 and  # Low volatility regime
-                price_close > ema_trend and
-                price_close > sma_trend and
-                vol_ratio_val > 1.5):
-                signals[i] = 0.30
+            # Enter long: price breaks above R3 (resistance) with volume in favorable regime
+            if (price_close > r3_level and  # Breakout above R3
+                vol_ratio_val > 1.8 and     # Volume surge
+                atr_percentile_val < 40):   # Low-moderate volatility (avoid extreme chop)
+                signals[i] = 0.25
                 position = 1
-            # Enter short in low volatility (range) + weekly downtrend + daily downtrend + volume
-            elif (atr_percentile_val < 30 and   # Low volatility regime
-                  price_close < ema_trend and
-                  price_close < sma_trend and
-                  vol_ratio_val > 1.5):
-                signals[i] = -0.30
+            # Enter short: price breaks below S3 (support) with volume in favorable regime
+            elif (price_close < s3_level and   # Breakdown below S3
+                  vol_ratio_val > 1.8 and      # Volume surge
+                  atr_percentile_val < 40):    # Low-moderate volatility
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when volatility increases (trending regime) or opposite condition
-            if position == 1 and (atr_percentile_val > 70 or price_close < ema_trend or price_close < sma_trend):
+            # Exit conditions: reverse breakdown/breakout or volatility expansion
+            if position == 1 and (price_close < s3_level or atr_percentile_val > 80):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (atr_percentile_val > 70 or price_close > ema_trend or price_close > sma_trend):
+            elif position == -1 and (price_close > r3_level or atr_percentile_val > 80):
                 signals[i] = 0.0
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12h_WeeklyEMA21_DailyATR_Regime_SMA50_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_Breakout_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
