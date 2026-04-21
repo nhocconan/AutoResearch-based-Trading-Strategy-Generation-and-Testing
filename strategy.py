@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Use Camarilla pivot levels from 1d timeframe (R1/S1) as entry triggers on 12h, with 1d EMA34 trend filter and volume confirmation. Designed to capture breakouts from key daily pivot levels in trending markets, with volume surge confirming institutional interest. Works in bull/bear markets by following higher timeframe trend (1d EMA) while using Camarilla levels for precise entry/exit. Target 12-37 trades/year on 12h.
+4h_RSI20_Stochastic_1dTrend_Volume
+Hypothesis: Use RSI(20) with overbought/oversold levels (80/20) combined with 1d EMA trend filter and volume confirmation. Stochastic(14,3,3) confirms momentum exhaustion. Designed for mean reversion in ranging markets while following higher timeframe trend. Target 20-50 trades/year on 4h.
 """
 
 import numpy as np
@@ -23,22 +23,27 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Calculate Camarilla pivot levels (R1, S1) from 1d OHLC ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === RSI(20) on 4h ===
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Pivot point calculation
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # === Stochastic(14,3,3) on 4h ===
+    high = prices['high'].values
+    low = prices['low'].values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k = 100 * (close - lowest_low) / (highest_high - lowest_low)
+    k = np.where((highest_high - lowest_low) != 0, k, 50)
+    d = pd.Series(k).rolling(window=3, min_periods=3).mean().values
+    d_slow = pd.Series(d).rolling(window=3, min_periods=3).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Volume confirmation: 20-period volume average on 12h ===
+    # === Volume confirmation: 20-period volume average on 4h ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.where(vol_ma_20 != 0, volume / vol_ma_20, 1.0)
@@ -46,11 +51,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if indicators not ready
         if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(d_slow[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,31 +64,32 @@ def generate_signals(prices):
         
         price_close = prices['close'].iloc[i]
         trend_1d = ema_34_1d_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
+        rsi_val = rsi[i]
+        stoch_d = d_slow[i]
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: Price breaks above R1 + volume spike > 1.5 + price above 1d EMA34
-            if (price_close > r1_level and 
+            # Long: RSI < 20 (oversold) + Stochastic < 20 + volume spike > 1.5 + price above 1d EMA
+            if (rsi_val < 20 and 
+                stoch_d < 20 and 
                 vol_spike > 1.5 and 
                 price_close > trend_1d):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike > 1.5 + price below 1d EMA34
-            elif (price_close < s1_level and 
+            # Short: RSI > 80 (overbought) + Stochastic > 80 + volume spike > 1.5 + price below 1d EMA
+            elif (rsi_val > 80 and 
+                  stoch_d > 80 and 
                   vol_spike > 1.5 and 
                   price_close < trend_1d):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price returns to pivot point (PP)
-            pp_level = pp_aligned[i]
-            if position == 1 and price_close < pp_level:
+            # Exit when RSI returns to neutral zone (40-60)
+            if position == 1 and rsi_val > 40:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > pp_level:
+            elif position == -1 and rsi_val < 60:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI20_Stochastic_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
