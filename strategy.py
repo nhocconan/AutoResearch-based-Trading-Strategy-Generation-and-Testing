@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1d_PriceChannel_Breakout_Volume_Tight_v2
-Hypothesis: Use 1d Donchian(20) breakout with volume confirmation and 4h EMA21 trend filter.
-Long when price breaks above 1d Donchian upper band + volume > 2x 20-period avg + 4h EMA21 rising.
-Short when price breaks below 1d Donchian lower band + volume > 2x 20-period avg + 4h EMA21 falling.
-Exit when price crosses 1d EMA21. Designed for <30 trades/year to minimize fee drag.
-Works in bull (follows 1d breakouts) and bear (avoids false breaks via volume+trend filter).
+6h_Donchian20_WeeklyPivot_Direction_Volume_Confirmation_v1
+Hypothesis: On 6h timeframe, go long when price breaks above 20-period Donchian high
+with weekly pivot direction bullish (price > weekly pivot) and volume > 1.5x 20-period average.
+Go short when price breaks below 20-period Donchian low with weekly pivot direction bearish
+(price < weekly pivot) and volume > 1.5x average. Exit when price crosses back through
+the 20-period Donchian midpoint. Uses weekly pivot for regime filter to avoid counter-trend
+trades and volume confirmation to avoid false breakouts. Target: 15-30 trades/year per symbol.
+Works in bull/bear by following higher timeframe (weekly) regime.
 """
 
 import numpy as np
@@ -17,89 +19,83 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Donchian channels and EMA21
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    # Load weekly data once for pivot direction
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # 1d Donchian(20) channels
-    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Previous week's OHLC for weekly pivot point
+    prev_high_w = np.roll(high_w, 1)
+    prev_low_w = np.roll(low_w, 1)
+    prev_close_w = np.roll(close_w, 1)
+    prev_high_w[0] = np.nan
+    prev_low_w[0] = np.nan
+    prev_close_w[0] = np.nan
     
-    # 1d EMA21 for exit
-    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align to 4h timeframe
-    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
-    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
-    
-    # Load 4h data for EMA21 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    # Weekly pivot point: (H + L + C) / 3
+    pp_w = (prev_high_w + prev_low_w + prev_close_w) / 3
+    pp_w_aligned = align_htf_to_ltf(prices, df_w, pp_w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if indicators not ready
-        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
-            np.isnan(ema21_1d_aligned[i]) or np.isnan(ema21_4h_aligned[i])):
+    for i in range(20, n):
+        # Skip if weekly pivot not ready
+        if np.isnan(pp_w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        high = prices['high'].iloc[i]
+        low = prices['low'].iloc[i]
+        close = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
+        # Calculate 20-period Donchian channels
         if i >= 20:
+            lookback_high = prices['high'].iloc[i-20:i].max()
+            lookback_low = prices['low'].iloc[i-20:i].min()
+            donchian_high = lookback_high
+            donchian_low = lookback_low
+            donchian_mid = (donchian_high + donchian_low) / 2
+            
+            # Volume filter: current volume > 1.5 * 20-period average
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
+            donchian_high = np.nan
+            donchian_low = np.nan
+            donchian_mid = np.nan
             volume_ok = False
         
-        # 4h EMA21 trend filter: rising for long, falling for short
-        if i >= 1:
-            ema21_4h_prev = ema21_4h_aligned[i-1]
-            ema21_4h_curr = ema21_4h_aligned[i]
-            ema_rising = ema21_4h_curr > ema21_4h_prev
-            ema_falling = ema21_4h_curr < ema21_4h_prev
-        else:
-            ema_rising = False
-            ema_falling = False
-        
         if position == 0:
-            # Long conditions: break above Donchian upper + volume + rising EMA
-            if price > highest_20_aligned[i] and volume_ok and ema_rising:
+            # Long conditions: break above Donchian high + weekly pivot bullish + volume
+            if (not np.isnan(donchian_high) and high > donchian_high and 
+                close > pp_w_aligned[i] and volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below Donchian lower + volume + falling EMA
-            elif price < lowest_20_aligned[i] and volume_ok and ema_falling:
+            # Short conditions: break below Donchian low + weekly pivot bearish + volume
+            elif (not np.isnan(donchian_low) and low < donchian_low and 
+                  close < pp_w_aligned[i] and volume_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below 1d EMA21
-            if price < ema21_1d_aligned[i]:
+            # Long exit: price crosses back below Donchian midpoint
+            if not np.isnan(donchian_mid) and close < donchian_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above 1d EMA21
-            if price > ema21_1d_aligned[i]:
+            # Short exit: price crosses back above Donchian midpoint
+            if not np.isnan(donchian_mid) and close > donchian_mid:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_PriceChannel_Breakout_Volume_Tight_v2"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPivot_Direction_Volume_Confirmation_v1"
+timeframe = "6h"
 leverage = 1.0
