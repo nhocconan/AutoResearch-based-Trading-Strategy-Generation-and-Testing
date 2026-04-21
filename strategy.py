@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Bollinger Band Width Breakout with 1d Volume Spike and ADX Trend Filter.
-Bollinger Band Width contraction precedes expansion; breakouts from low volatility
-capture momentum. Volume surge confirms breakout strength. ADX > 25 ensures trending
-market to avoid whipsaws. Designed for ~30-50 trades/year to minimize fee drag,
-works in bull/bear via trend filter.
+6h Williams Alligator + 1d Volume Spike + 1d Price Reversal
+Williams Alligator identifies trend alignment (Jaws/Teeth/Lips). Enter when price closes
+outside the Alligator's mouth with volume spike (>2x 20-period average). Exit on reversal
+signal (price crosses back into mouth) or volatility contraction. Designed for 6h timeframe
+to capture medium-term trends with minimal trades (~30-60/year) to reduce fee drag.
 """
 
 import numpy as np
@@ -16,91 +16,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for BBands, volume, and ADX
+    # Load 1d data ONCE before loop for Williams Alligator and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Bollinger Bands (20, 2)
-    close_1d = df_1d['close'].values
-    bb_mid = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Williams Alligator: SMAs of median price
+    # Median price = (high + low) / 2
+    median_price = (df_1d['high'].values + df_1d['low'].values) / 2
     
-    # Bollinger Band Width percentile (250-day lookback for stability)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=250, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Jaws: 13-period SMMA, shifted 8 bars
+    jaws = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
+    jaws = jaws.shift(8)
     
-    # Volume spike: volume / 20-period average
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Teeth: 8-period SMMA, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)
+    
+    # Lips: 5-period SMMA, shifted 3 bars
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)
+    
+    # Align Alligator lines
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws.values)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth.values)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips.values)
+    
+    # Volume spike: current volume / 20-period average
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean()
     vol_ratio = df_1d['volume'].values / vol_ma_20
-    
-    # ADX (14) for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first value
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align all indicators to 4h
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(bb_width_percentile_aligned[i]) or np.isnan(vol_ratio_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i])):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        bb_width_pct = bb_width_percentile_aligned[i]
-        vol_ratio_val = vol_ratio_aligned[i]
-        adx_val = adx_aligned[i]
-        bb_upper = bb_upper_aligned[i]
-        bb_lower = bb_lower_aligned[i]
+        jaw_val = jaws_aligned[i]
+        tooth_val = teeth_aligned[i]
+        lip_val = lips_aligned[i]
+        vol_ratio = vol_ratio_aligned[i]
+        vol_threshold = 2.0  # Volume must be 2x average for confirmation
         
-        # Entry conditions: low volatility (BB width < 20th percentile) + volume spike + trend
         if position == 0:
-            if bb_width_pct < 20 and vol_ratio_val > 1.5 and adx_val > 25:
-                # Breakout above upper band -> long
-                if price_close > bb_upper:
-                    signals[i] = 0.25
-                    position = 1
-                # Breakout below lower band -> short
-                elif price_close < bb_lower:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: price above all three lines (bullish alignment) + volume spike
+            if (price_close > jaw_val and price_close > tooth_val and price_close > lip_val and
+                vol_ratio > vol_threshold):
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price below all three lines (bearish alignment) + volume spike
+            elif (price_close < jaw_val and price_close < tooth_val and price_close < lip_val and
+                  vol_ratio > vol_threshold):
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit: volatility expansion (BB width > 80th percentile) or trend weakening
-            if bb_width_pct > 80 or adx_val < 20:
+            # Exit: price crosses back into the Alligator's mouth (between jaws and lips)
+            # or volume drops significantly (loss of momentum)
+            if position == 1 and (price_close < jaw_val or price_close > lip_val):
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and (price_close > jaw_val or price_close < lip_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BBW_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_1dVolumeSpike_Reversal"
+timeframe = "6h"
 leverage = 1.0
