@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_WeeklyTrend_VolumeSpike_v1
-Hypothesis: Daily Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation (>2.0x 20-period MA).
-Uses ATR-based stop (2.5x) to manage risk. Designed for 1d timeframe with 1w HTF trend to capture medium-term moves in both bull and bear markets.
-Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and improve test generalization.
+6h_Donchian20_Breakout_WeeklyTrend_VolumeSpike_ATRStop_v1
+Hypothesis: 6h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation (>2.0x 20-period MA).
+Uses ATR-based stop (2.0x) and minimum holding period of 3 bars to reduce churn.
+Designed for 6h timeframe with 1w HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
+Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -25,7 +26,7 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === Daily ATR (14-period) for stoploss ===
+    # === 6h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -40,11 +41,9 @@ def generate_signals(prices):
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === Daily Donchian(20) channels ===
-    # Upper band: 20-period high
-    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower band: 20-period low
-    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h Donchian channels (20-period) ===
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,7 +53,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i])):
+            np.isnan(vol_ma[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,17 +64,17 @@ def generate_signals(prices):
         volume_now = volume[i]
         ema_50_1w_val = ema_50_1w_aligned[i]
         vol_avg = vol_ma[i]
-        upper_val = upper[i]
-        lower_val = lower[i]
+        upper_channel = high_roll[i]
+        lower_channel = low_roll[i]
         
         # Volume confirmation: current volume > 2.0x average (strict threshold)
         volume_confirm = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: price breaks above upper band, above weekly EMA50, volume confirm
-            long_condition = (price > upper_val) and (price > ema_50_1w_val) and volume_confirm
-            # Short: price breaks below lower band, below weekly EMA50, volume confirm
-            short_condition = (price < lower_val) and (price < ema_50_1w_val) and volume_confirm
+            # Long: price breaks above upper channel, above 1w EMA50, volume confirm
+            long_condition = (price > upper_channel) and (price > ema_50_1w_val) and volume_confirm
+            # Short: price breaks below lower channel, below 1w EMA50, volume confirm
+            short_condition = (price < lower_channel) and (price < ema_50_1w_val) and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -91,16 +90,31 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Check stoploss (2.5x ATR)
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
+                signals[i] = 0.25 if position == 1 else -0.25
+                continue
+            
+            # Check stoploss (2.0x ATR)
             if position == 1:
-                if price < entry_price - 2.5 * atr[i]:
+                if price < entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Trend reversal exit (price below 1w EMA50)
+                elif price < ema_50_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.5 * atr[i]:
+                if price > entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Trend reversal exit (price above 1w EMA50)
+                elif price > ema_50_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -109,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_WeeklyTrend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_WeeklyTrend_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
