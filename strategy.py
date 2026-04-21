@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_VolumeATRFilter_V2
-Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 12h timeframe for BTC and ETH in both bull and bear markets. Uses 1d Camarilla pivots and 12h EMA50 trend filter. Tightened volume filter (2.0x average) and added choppiness regime filter to reduce overtrading and improve selectivity. Target: 12-30 trades/year per symbol (50-120 over 4 years).
+4h_Donchian20_Breakout_VolumeATRFilter_Tight_V3
+Hypothesis: Donchian(20) breakout with volume confirmation and ATR-based stoploss on 4h timeframe works for BTC and ETH in both bull and bear markets. Uses 12h EMA50 for trend filter and 1d ATR for stoploss scaling. Target: 20-50 trades/year per symbol (80-200 over 4 years).
 """
 
 import numpy as np
@@ -18,66 +18,48 @@ def generate_signals(prices):
     if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Load daily data once for Camarilla pivot calculation
+    # Load daily data once for ATR calculation (more stable)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla pivot calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels on primary timeframe (4h)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Camarilla pivot point and R1/S1 levels
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align daily levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Donchian(20) - upper and lower bands
+    lookback = 20
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # 12h EMA50 for trend filter
     close_12h = df_12h['close'].values
     ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume filter: 20-period average (approx 10 days on 12h)
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for stoploss
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # 1d ATR for stoploss (more stable than lower TF ATR)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Choppiness index regime filter (14-period)
-    chop_range = pd.Series(high).rolling(window=14, min_periods=14).max() - \
-                 pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    chop = 100 * np.log10(chop_sum / chop_range) / np.log10(14)
-    chop = chop.values
+    # Volume filter: 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(chop[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,55 +68,43 @@ def generate_signals(prices):
         price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation (tightened to 2.0x average)
-        volume_ok = volume > 2.0 * vol_ma[i]
+        # Volume confirmation
+        volume_ok = volume > 1.5 * vol_ma[i]
         
         # 12h trend filter
         uptrend = close[i] > ema_50_12h_aligned[i]
         downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Choppiness regime: only trade in trending markets (CHOP < 38.2) or strong breakouts
-        # In ranging markets (CHOP > 61.8), require stronger volume confirmation
-        if chop[i] > 61.8:
-            # Ranging market: need even stronger volume to avoid false breakouts
-            volume_ok = volume > 3.0 * vol_ma[i]
-        elif chop[i] < 38.2:
-            # Trending market: normal volume confirmation
-            volume_ok = volume > 2.0 * vol_ma[i]
-        else:
-            # Neutral chop: standard volume confirmation
-            volume_ok = volume > 2.0 * vol_ma[i]
-        
         if position == 0:
-            # Long: price breaks above R1 in uptrend with volume
+            # Long: price breaks above upper Donchian in uptrend with volume
             if uptrend and volume_ok:
-                if price > r1_aligned[i]:
-                    signals[i] = 0.30
+                if price > upper[i]:
+                    signals[i] = 0.25
                     position = 1
-            # Short: price breaks below S1 in downtrend with volume
+            # Short: price breaks below lower Donchian in downtrend with volume
             elif downtrend and volume_ok:
-                if price < s1_aligned[i]:
-                    signals[i] = -0.30
+                if price < lower[i]:
+                    signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: price reaches S1 or stoploss
-            if price <= s1_aligned[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
+            # Exit: price reaches lower Donchian or ATR-based stoploss
+            if price <= lower[i] or price < prices['close'].iloc[i-1] - 1.5 * atr_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches R1 or stoploss
-            if price >= r1_aligned[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
+            # Exit: price reaches upper Donchian or ATR-based stoploss
+            if price >= upper[i] or price > prices['close'].iloc[i-1] + 1.5 * atr_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_VolumeATRFilter_V2"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_VolumeATRFilter_Tight_V3"
+timeframe = "4h"
 leverage = 1.0
