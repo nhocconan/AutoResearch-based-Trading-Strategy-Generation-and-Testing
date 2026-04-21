@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_PriceChannel_Breakout_Volume_Tight_v1
-Hypothesis: 4h timeframe with 1-day high/low breakouts, volume > 1.5x 20-period average, and ADX > 25 for trend confirmation.
-Target: 15-40 trades/year (60-160 total over 4 years) to stay under 400 trade limit.
-Uses tight volume filter and trend filter to reduce false signals. Works in bull/bear by only trading strong trending breaks.
+12h_1d_Camarilla_R1S1_Breakout_VolumeTrend_v2
+Hypothesis: 12h timeframe with 1d Camarilla R1/S1 breakouts, volume > 1.8x 24-period average (12*24h = 12 days), and ADX > 28 for strong trend confirmation.
+Target: 12-37 trades/year (50-150 total over 4 years) to stay under the 200 trade limit for 12h.
+Uses stricter volume filter and higher ADX threshold to reduce false signals in ranging markets.
+Works in bull/bear by only trading strong trending breaks, avoiding false signals in ranging markets.
 """
 
 import numpy as np
@@ -15,23 +16,33 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for daily high/low
+    # Load 1d data once for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous day's high and low for breakout levels
+    # Previous day's OHLC for Camarilla calculation
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align to 4h timeframe
-    daily_high_breakout = align_htf_to_ltf(prices, df_1d, prev_high)
-    daily_low_breakout = align_htf_to_ltf(prices, df_1d, prev_low)
+    # Camarilla levels: R1, S1, and pivot point (PP)
+    rang = prev_high - prev_low
+    r1 = prev_close + 1.1 * rang / 12
+    s1 = prev_close - 1.1 * rang / 12
+    pp = (prev_high + prev_low + prev_close) / 3
+    
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
     # ADX for regime filter (trending vs ranging)
     if len(prices) < 14:
@@ -57,7 +68,7 @@ def generate_signals(prices):
     dm_plus[0] = 0
     dm_minus[0] = 0
     
-    # Wilder's smoothing function
+    # Smoothed values (Wilder's smoothing)
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -88,8 +99,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(daily_high_breakout[i]) or np.isnan(daily_low_breakout[i]) or 
-            np.isnan(adx[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,37 +109,37 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
+        # Volume filter: current volume > 1.8 * 24-period average (24 * 12h = 12 days)
+        if i >= 24:
+            vol_ma = prices['volume'].iloc[i-24:i].mean()
+            volume_ok = volume > 1.8 * vol_ma
         else:
             volume_ok = False
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending = adx[i] > 25
+        # Regime filter: ADX > 28 indicates strong trending market
+        trending = adx[i] > 28
         
         if position == 0:
-            # Long conditions: break above daily high + volume + trending
-            if price > daily_high_breakout[i] and volume_ok and trending:
+            # Long conditions: break above R1 + volume + trending
+            if price > r1_aligned[i] and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below daily low + volume + trending
-            elif price < daily_low_breakout[i] and volume_ok and trending:
+            # Short conditions: break below S1 + volume + trending
+            elif price < s1_aligned[i] and volume_ok and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below daily low (opposite side)
-            if price < daily_low_breakout[i]:
+            # Long exit: price crosses back below pivot point
+            if price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above daily high (opposite side)
-            if price > daily_high_breakout[i]:
+            # Short exit: price crosses back above pivot point
+            if price > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_PriceChannel_Breakout_Volume_Tight_v1"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_VolumeTrend_v2"
+timeframe = "12h"
 leverage = 1.0
