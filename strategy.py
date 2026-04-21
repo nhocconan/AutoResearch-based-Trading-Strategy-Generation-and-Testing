@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1wTrendRegime_v1
-Hypothesis: Elder Ray Index (Bull Power = High - EMA13, Bear Power = EMA13 - Low) on 6h with 1-week EMA34 trend filter captures institutional buying/selling pressure. Long when Bull Power > 0 and Bear Power improving (less negative) in bull weekly trend; Short when Bear Power < 0 and Bull Power worsening (less positive) in bear weekly trend. Uses discrete sizing (0.25) and ATR-based stop (2.0x) to minimize fee drag. Target: 50-150 total trades over 4 years.
+12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1
+Hypothesis: 12h Donchian(20) breakouts aligned with 1d EMA34 trend and volume spike (>2.0x 20-period average) capture strong momentum moves while minimizing whipsaws. Uses discrete sizing (0.30) and ATR-based stoploss (2.5x) for risk control. Designed for lower trade frequency (target: 50-150 total trades over 4 years) to reduce fee drag and improve generalization across BTC/ETH/SOL in both bull and bear regimes.
 """
 
 import numpy as np
@@ -13,32 +13,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for trend regime)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop (1d for trend regime)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1-week EMA34 for trend regime ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 1d EMA34 for trend regime ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 6h EMA13 for Elder Ray calculation ===
-    close = prices['close'].values
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    close = prices['close'].values
     
-    # === 6h ATR (14-period) for stoploss ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Elder Ray: Bull Power and Bear Power ===
-    bull_power = high - ema_13  # Buying power
-    bear_power = ema_13 - low   # Selling power
+    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (2.0 * vol_ma_20)
+    
+    # === 12h Donchian channels (20-period) based on PREVIOUS bar's high/low ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_high[0] = prev_low[0] = np.nan  # first bar invalid
+    
+    upper_channel = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(prev_low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,34 +63,32 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_34_1w_val = ema_34_1w_aligned[i]
-        ema_13_val = ema_13[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
+        upper_val = upper_channel[i]
+        lower_val = lower_channel[i]
+        vol_conf = volume_confirmed[i]
         
-        # Trend regime from weekly EMA34
-        is_bull_week = price > ema_34_1w_val
-        is_bear_week = price < ema_34_1w_val
+        # Trend regime
+        is_bull = price > ema_34_1d_val
+        is_bear = price < ema_34_1d_val
         
         if position == 0:
-            # Long conditions: Bullish weekly + buying pressure improving
-            if is_bull_week:
-                long_condition = (bull > 0) and (bull > bull_power[i-1])  # Bull Power > 0 and rising
-                # Short only if strong selling pressure in bull trend (unlikely but possible)
-                short_condition = (bear > 0) and (bear > bear_power[i-1]) and (price < ema_13_val * 0.98)
-            # Short conditions: Bearish weekly + selling pressure improving
-            else:  # is_bear_week
-                short_condition = (bear > 0) and (bear > bear_power[i-1])  # Bear Power > 0 and rising
-                # Long only if strong buying pressure in bear trend (unlikely but possible)
-                long_condition = (bull > 0) and (bull > bull_power[i-1]) and (price > ema_13_val * 1.02)
+            if is_bull:
+                # Bull regime: long breakouts favored
+                long_condition = (price > upper_val) and vol_conf
+                short_condition = (price < lower_val) and vol_conf and (price < ema_34_1d_val * 0.995)  # stricter for shorts
+            else:  # bear regime
+                # Bear regime: short breakdowns favored
+                short_condition = (price < lower_val) and vol_conf
+                long_condition = (price > upper_val) and vol_conf and (price > ema_34_1d_val * 1.005)  # stricter for longs
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
                 bars_since_entry = 0
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
                 bars_since_entry = 0
@@ -91,39 +96,39 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 2 bars to reduce churn
-            if bars_since_entry < 2:
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Minimum holding period of 4 bars to reduce churn
+            if bars_since_entry < 4:
+                signals[i] = 0.30 if position == 1 else -0.30
                 continue
             
-            # Check stoploss (2.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                if price < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if Elder Ray turns negative (buying pressure gone)
-                elif bull_power[i] <= 0:
+                # Exit if price breaks below lower channel (failed breakout)
+                elif price < lower_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                if price > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if Elder Ray turns positive (selling pressure gone)
-                elif bear_power[i] <= 0:
+                # Exit if price breaks above upper channel (failed breakdown)
+                elif price > upper_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_1wTrendRegime_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
