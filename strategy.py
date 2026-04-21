@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_HTF_12h_Donchian20_VolumeSpike_ATRStop_V1
-Hypothesis: Combine 4h Donchian(20) breakout with 12h trend filter (EMA34) and volume confirmation to capture strong trends. 
-Use ATR-based trailing stop (2.5x ATR) to limit drawdowns in both bull and bear markets. 
-Position size fixed at 0.25 to balance risk and return. Target 30-60 trades/year per symbol.
+1d_HTF_1w_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
+Hypothesis: Use 1d Camarilla R1/S1 breakout with 1w trend filter (EMA34) and volume confirmation. 
+ATR-based trailing stop (2.5x ATR) to limit drawdowns. Target 30-100 trades over 4 years.
+Works in bull/bear via trend filter and volatility-adjusted stops.
 """
 
 import numpy as np
@@ -16,25 +16,33 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')  # for 12h EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')  # for 1w EMA34 trend filter
     
-    if len(df_12h) < 35:
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # === 12h EMA34 Trend Filter ===
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # === 1w EMA34 Trend Filter ===
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === 4h Indicators ===
+    # === 1d Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C, H, L are from previous day
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    
+    # Calculate R1 and S1 for current bar using previous day's OHLC
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
     
     # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) 
-            or np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(ema_1w_aligned[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,13 +74,13 @@ def generate_signals(prices):
         vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
         if position == 0:
-            # Long: price breaks above 20-period high + above 12h EMA34 + volume
-            if price > highest_high[i-1] and price > ema_12h_aligned[i] and vol_ok:
+            # Long: price breaks above R1 + above 1w EMA34 + volume
+            if price > r1[i] and price > ema_1w_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = price
-            # Short: price breaks below 20-period low + below 12h EMA34 + volume
-            elif price < lowest_low[i-1] and price < ema_12h_aligned[i] and vol_ok:
+            # Short: price breaks below S1 + below 1w EMA34 + volume
+            elif price < s1[i] and price < ema_1w_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = price
@@ -101,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_12h_Donchian20_VolumeSpike_ATRStop_V1"
-timeframe = "4h"
+name = "1d_HTF_1w_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
+timeframe = "1d"
 leverage = 1.0
