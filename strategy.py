@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_1w_Donchian_Breakout_Volume_Trend
-Hypothesis: Use weekly Donchian channel breakouts with volume confirmation and daily trend filter.
-Long when price breaks above weekly Donchian upper with volume > 1.5x 20-day avg AND price > daily EMA20.
-Short when price breaks below weekly Donchian lower with volume > 1.5x 20-day avg AND price < daily EMA20.
-Exit when price crosses back through weekly Donchian midpoint.
-Designed for 1d timeframe to capture weekly trends with ~10-20 trades/year.
+12h_1d_Keltner_Channel_Breakout_Volume
+Hypothesis: Use 1d Keltner Channel breakouts with volume confirmation on 12h timeframe.
+Long when price breaks above upper KC with volume > 1.5x 20-bar avg.
+Short when price breaks below lower KC with volume > 1.5x 20-bar avg.
+Exit when price returns to middle line (EMA).
+Designed for 12h timeframe to capture multi-day trends with ~15-35 trades/year.
 Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
-Volume and trend filters reduce false breakouts and whipsaws.
+Volume filter reduces false breakouts and whipsaws.
 """
 
 import numpy as np
@@ -19,42 +19,46 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Load 1d data once for Keltner Channel
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly Donchian channel (20-period)
-    lookback = 20
-    upper = np.full_like(high_weekly, np.nan)
-    lower = np.full_like(low_weekly, np.nan)
+    # Keltner Channel parameters
+    kc_period = 20
+    kc_multiplier = 2.0
     
-    for i in range(lookback, len(high_weekly)):
-        upper[i] = np.max(high_weekly[i-lookback:i])
-        lower[i] = np.min(low_weekly[i-lookback:i])
+    # Calculate EMA (middle line)
+    ema = pd.Series(close_1d).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
     
-    # Midpoint for exit
-    midpoint = (upper + lower) / 2.0
+    # Calculate ATR
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
     
-    # Align to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_weekly, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_weekly, lower)
-    midpoint_aligned = align_htf_to_ltf(prices, df_weekly, midpoint)
+    # Upper and lower channels
+    upper_kc = ema + (kc_multiplier * atr)
+    lower_kc = ema - (kc_multiplier * atr)
     
-    # Daily EMA20 for trend filter
-    close_s = prices['close']
-    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align to 12h timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema)
+    upper_kc_aligned = align_htf_to_ltf(prices, df_1d, upper_kc)
+    lower_kc_aligned = align_htf_to_ltf(prices, df_1d, lower_kc)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(midpoint_aligned[i]) or np.isnan(ema_20[i])):
+        if (np.isnan(ema_aligned[i]) or np.isnan(upper_kc_aligned[i]) or 
+            np.isnan(lower_kc_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,26 +75,26 @@ def generate_signals(prices):
             volume_ok = False
         
         if position == 0:
-            # Long conditions: break above weekly upper + volume confirmation + price above EMA20
-            if price > upper_aligned[i] and volume_ok and price > ema_20[i]:
+            # Long conditions: break above upper KC + volume confirmation
+            if price > upper_kc_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below weekly lower + volume confirmation + price below EMA20
-            elif price < lower_aligned[i] and volume_ok and price < ema_20[i]:
+            # Short conditions: break below lower KC + volume confirmation
+            elif price < lower_kc_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below weekly midpoint
-            if price < midpoint_aligned[i]:
+            # Long exit: price returns to middle line (EMA)
+            if price < ema_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above weekly midpoint
-            if price > midpoint_aligned[i]:
+            # Short exit: price returns to middle line (EMA)
+            if price > ema_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "12h_1d_Keltner_Channel_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
