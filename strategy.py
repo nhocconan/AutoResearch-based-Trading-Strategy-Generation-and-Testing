@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 6h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.5x 20-period average).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.0x 20-period average).
 Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to minimize fee churn.
 1d trend filter provides robust directional bias across bull/bear markets while reducing whipsaws.
-Target: 12-37 trades/year per symbol for low fee drag and strong test generalization.
-Enhanced with stricter volume filter and 1d trend confirmation to reduce overtrading.
+Target: 20-50 trades/year per symbol for low fee drag and strong test generalization.
 """
 
 import numpy as np
@@ -39,7 +38,7 @@ def generate_signals(prices):
     r4_1d = df_1d_close + 1.5 * range_1d
     s4_1d = df_1d_close - 1.5 * range_1d
     
-    # Align 1d Camarilla levels to 6h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
@@ -81,8 +80,8 @@ def generate_signals(prices):
         vol_average = vol_ma[i]
         
         if position == 0:
-            # Stricter volume filter: current volume > 2.5x 20-period average
-            vol_filter = vol_current > 2.5 * vol_average
+            # Volume filter: current volume > 2.0x 20-period average
+            vol_filter = vol_current > 2.0 * vol_average
             
             # Long conditions: price > R1 (breakout), 1d uptrend, volume filter
             long_breakout = price > r1_1d_aligned[i]
@@ -128,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
