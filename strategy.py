@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h strategy using 4h RSI divergence for momentum shift detection and volume confirmation.
-In both bull and bear markets, RSI divergence on higher timeframe (4h) signals weakening momentum
-before price reversals. Combines with 1h volume spike and price action for precise entry.
-Uses 4h for signal direction (lower frequency) and 1h for entry timing to reduce overtrading.
+Hypothesis: 6h strategy using 1-week Williams Fractal breakout with volume confirmation and ADX filter.
+Weekly fractals provide strong support/resistance levels. Breakouts above/below these levels with
+volume surge and ADX > 25 indicate strong momentum. Works in bull markets (breakouts continue) 
+and bear markets (breakdowns continue). Uses weekly for structure, 6h for execution.
 Target: 15-35 trades/year to minimize fee drag.
 """
 
@@ -11,124 +11,138 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_williams_fractals(high, low):
+    """Calculate Williams Fractals: bearish (peak) and bullish (turtle) fractals."""
+    n = len(high)
+    bearish = np.zeros(n, dtype=bool)
+    bullish = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n - 2):
+        # Bearish fractal: high[i] is highest of 5 bars
+        if (high[i] > high[i-1] and high[i] > high[i-2] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            bearish[i] = True
+        # Bullish fractal: low[i] is lowest of 5 bars
+        if (low[i] < low[i-1] and low[i] < low[i-2] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            bullish[i] = True
+    
+    return bearish, bullish
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop for RSI divergence
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load weekly data ONCE before loop for fractals
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h RSI(14) for divergence detection
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Weekly Williams Fractals (need 2 extra bars for confirmation)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_1w, low_1w)
+    # Williams fractal needs 2 extra weekly bars after the center bar for confirmation
+    bearish_fractal_1w = align_htf_to_ltf(prices, df_1w, bearish_fractal.astype(float), additional_delay_bars=2)
+    bullish_fractal_1w = align_htf_to_ltf(prices, df_1w, bullish_fractal.astype(float), additional_delay_bars=2)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Daily ADX for trend strength filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_4h = 100 - (100 / (1 + rs))
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Bearish divergence: price makes higher high, RSI makes lower high
-    # Bullish divergence: price makes lower low, RSI makes higher low
-    lookback = 10
-    bearish_div = np.zeros(len(rsi_4h), dtype=bool)
-    bullish_div = np.zeros(len(rsi_4h), dtype=bool)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
+                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
+                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
+                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
+                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
     
-    for i in range(lookback, len(rsi_4h)):
-        # Bearish divergence
-        if (close_4h[i] == np.max(close_4h[i-lookback:i+1]) and 
-            rsi_4h[i] < np.max(rsi_4h[i-lookback:i])):
-            bearish_div[i] = True
-        # Bullish divergence
-        if (close_4h[i] == np.min(close_4h[i-lookback:i+1]) and 
-            rsi_4h[i] > np.min(rsi_4h[i-lookback:i])):
-            bullish_div[i] = True
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.mean(data[0:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    bearish_div_aligned = align_htf_to_ltf(prices, df_4h, bearish_div.astype(float))
-    bullish_div_aligned = align_htf_to_ltf(prices, df_4h, bullish_div.astype(float))
+    tr14 = wilders_smoothing(tr, 14)
+    dm_plus_14 = wilders_smoothing(dm_plus, 14)
+    dm_minus_14 = wilders_smoothing(dm_minus, 14)
     
-    # Volume confirmation: 1h volume / 20-period average
+    # DI+ and DI-
+    di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus_14 / tr14, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    adx_1d = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: 6h volume / 20-period average
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(bearish_div_aligned[i]) or np.isnan(bullish_div_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(bearish_fractal_1w[i]) or np.isnan(bullish_fractal_1w[i]) or 
+            np.isnan(adx_1d[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
+        adx_val = adx_1d[i]
         vol_ratio_val = vol_ratio[i]
-        vol_threshold = 1.8  # Volume spike filter
         
         if position == 0:
-            # Enter long: bullish divergence on 4h + volume spike + price above VWAP(20)
-            vwap_20 = (pd.Series(prices['close'].values * prices['volume'].values).rolling(20, min_periods=20).sum() / 
-                      pd.Series(prices['volume'].values).rolling(20, min_periods=20).sum()).values[i]
-            
-            if (bullish_div_aligned[i] > 0.5 and 
-                vol_ratio_val > vol_threshold and 
-                price_close > vwap_20):
-                signals[i] = 0.20
+            # Enter long: price above bullish fractal (support) + ADX > 25 + volume surge
+            if (bullish_fractal_1w[i] > 0.5 and 
+                price_close > low_1w[-1] and  # Above most recent weekly low (fractal level)
+                adx_val > 25 and 
+                vol_ratio_val > 2.0):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: bearish divergence on 4h + volume spike + price below VWAP(20)
-            elif (bearish_div_aligned[i] > 0.5 and 
-                  vol_ratio_val > vol_threshold and 
-                  price_close < vwap_20):
-                signals[i] = -0.20
+            # Enter short: price below bearish fractal (resistance) + ADX > 25 + volume surge
+            elif (bearish_fractal_1w[i] > 0.5 and 
+                  price_close < high_1w[-1] and  # Below most recent weekly high (fractal level)
+                  adx_val > 25 and 
+                  vol_ratio_val > 2.0):
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: RSI returns to neutral zone (40-60) or divergence fails
-            # Approximate 1h RSI for exit signal
-            if i >= 14:
-                # Calculate 1h RSI properly
-                delta_1h = np.diff(prices['close'].values[:i+1], prepend=prices['close'].values[0])
-                gain_1h = np.where(delta_1h > 0, delta_1h, 0)
-                loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
-                avg_gain_1h = np.zeros_like(gain_1h)
-                avg_loss_1h = np.zeros_like(loss_1h)
-                if len(gain_1h) > 13:
-                    avg_gain_1h[13] = np.mean(gain_1h[1:14])
-                    avg_loss_1h[13] = np.mean(loss_1h[1:14])
-                    for j in range(14, len(gain_1h)):
-                        avg_gain_1h[j] = (avg_gain_1h[j-1] * 13 + gain_1h[j]) / 14
-                        avg_loss_1h[j] = (avg_loss_1h[j-1] * 13 + loss_1h[j]) / 14
-                    rs_1h = np.where(avg_loss_1h != 0, avg_gain_1h / avg_loss_1h, 100)
-                    rsi_1h_val = 100 - (100 / (1 + rs_1h[-1]))
-                else:
-                    rsi_1h_val = 50
-                
-                if position == 1 and (rsi_1h_val < 40 or bullish_div_aligned[i] < 0.5):
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and (rsi_1h_val > 60 or bearish_div_aligned[i] < 0.5):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    # Hold position
-                    signals[i] = 0.20 if position == 1 else -0.20
+            # Exit: ADX falls below 20 (trend weakening) or opposite fractal touched
+            if position == 1 and (adx_val < 20 or bearish_fractal_1w[i] > 0.5):
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and (adx_val < 20 or bullish_fractal_1w[i] > 0.5):
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_RSIDivergence_Volume_Spike_VWAP"
-timeframe = "1h"
+name = "6h_WilliamsFractal_Breakout_ADX_Volume"
+timeframe = "6h"
 leverage = 1.0
