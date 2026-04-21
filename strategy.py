@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRFilter_V1
-Hypothesis: Daily Camarilla pivot R1/S1 breakout with volume spike (>1.5x 20-day volume MA) and ATR-based stoploss. Uses 1w HTF trend filter (price > EMA34 weekly for longs, < EMA34 weekly for shorts). Designed for very low trade frequency (~50-80 total over 4 years) to minimize fee drag and work in both bull/bear markets via weekly trend alignment. Focus on BTC/ETH as primary targets.
+12h_Camarilla_R1S1_Breakout_Volume_ChopRegime_ATRStop_V1
+Hypothesis: 12h Camarilla R1/S1 breakout with volume confirmation (>1.3x 20-period volume MA) and choppiness regime filter (CHOP > 61.8 for mean reversion, CHOP < 38.2 for trend following). Uses 1d HTF for trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR. Designed for low trade frequency (50-150 total over 4 years) to minimize fee drag and work in both bull/bear markets via regime adaptation. Primary timeframe: 12h.
 """
 
 import numpy as np
@@ -13,96 +13,114 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # === 1w EMA34 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Load daily data for Camarilla pivots
+    # Load HTF data ONCE before loop (1d for EMA trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    # === 1d EMA50 for trend filter ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === 12h Indicators (primary timeframe) ===
+    # Since we don't have direct 12h data, we'll use 4h and resample manually but only for calculation
+    # However, per rules we should avoid resampling. Instead, we use 4h data as proxy for 12h logic
+    # But we must use the actual 12h timeframe. Since mtf_data doesn't have 12h, we'll use 4h and aggregate
+    # However, the instruction says to use timeframe="12h", so we need to get 12h data.
+    # Checking available timeframes: 5m,15m,30m,1h,4h,6h,12h,1d - so 12h should be available.
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
+    
+    # Calculate typical price for Camarilla (using previous day's OHLC)
+    # Camarilla levels are based on previous day's range
+    # We need to calculate from daily data but align to 12h bars
+    # Actually, Camarilla is typically intraday, but we can adapt for 12h using previous 12h bar's range
+    # For simplicity, we'll use the 1d data to calculate Camarilla levels for the 12h timeframe
+    # Camarilla levels: based on previous day's (OHLC)
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # But we need to align these to 12h bars
+    
+    # Instead, let's use the 1d data to calculate Camarilla levels and align to 12h
+    # We'll calculate the Camarilla levels from 1d OHLC and then align to 12h bars
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Volume MA (20-day) for spike detection
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla R1 and S1 from 1d data
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    camarilla_r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # ATR (14-day) for stoploss
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    # Align Camarilla levels from 1d to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    
+    # Volume MA (20-period) for spike detection on 12h
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) for stoploss on 12h
+    tr1 = pd.Series(high_12h - low_12h)
+    tr2 = pd.Series(np.abs(high_12h - np.roll(close_12h, 1)))
+    tr3 = pd.Series(np.abs(low_12h - np.roll(close_12h, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr_12h = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Choppiness Index (14-period) on 12h
+    chop_sum = tr.rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    chop_12h = 100 * np.log10(chop_sum / (highest_high - lowest_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after volume MA warmup
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(vol_ma[i]) or np.isnan(atr[i]) 
-            or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) 
+            or np.isnan(vol_ma_12h[i]) or np.isnan(atr_12h[i]) or np.isnan(chop_12h[i])
+            or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Need at least 2 days of data for Camarilla calculation (yesterday's OHLC)
-        if i < 1:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # Camarilla pivot levels based on PREVIOUS day's OHLC
-        # (lookback by 1 to avoid look-ahead)
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
+        price = close_12h[i]
+        vol = volume_12h[i]
+        vol_ok = vol > 1.3 * vol_ma_12h[i]  # volume confirmation
         
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        range_hl = prev_high - prev_low
-        
-        # Camarilla R1 and S1 levels
-        r1 = pivot + (range_hl * 1.1 / 12.0)
-        s1 = pivot - (range_hl * 1.1 / 12.0)
-        
-        price = close_1d[i]
-        vol = volume_1d[i]
-        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
-        
-        # Weekly trend filter
-        weekly_uptrend = price > ema_34_1w_aligned[i]
-        weekly_downtrend = price < ema_34_1w_aligned[i]
+        # Regime detection
+        is_choppy = chop_12h[i] > 61.8  # mean reversion regime
+        is_trending = chop_12h[i] < 38.2  # trend following regime
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and weekly uptrend
-            if price > r1 and vol_ok and weekly_uptrend:
+            # Long: price breaks above Camarilla R1 + volume + trend filter (in uptrend or choppy market)
+            if price > camarilla_r1_aligned[i] and vol_ok and (price > ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S1 with volume spike and weekly downtrend
-            elif price < s1 and vol_ok and weekly_downtrend:
+            # Short: price breaks below Camarilla S1 + volume + trend filter (in downtrend or choppy market)
+            elif price < camarilla_s1_aligned[i] and vol_ok and (price < ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
+            if price < entry_price - 2.0 * atr_12h[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit: price re-enters Camarilla H3-L3 range (mean reversion exit)
-            elif price < pivot + (range_hl * 1.1 / 6.0) and price > pivot - (range_hl * 1.1 / 6.0):
+            # Exit conditions: price breaks below Camarilla S1 or loss of volume/momentum
+            elif price < camarilla_s1_aligned[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,11 +128,11 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
+            if price > entry_price + 2.0 * atr_12h[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit: price re-enters Camarilla H3-L3 range
-            elif price < pivot + (range_hl * 1.1 / 6.0) and price > pivot - (range_hl * 1.1 / 6.0):
+            # Exit conditions: price breaks above Camarilla R1 or loss of volume/momentum
+            elif price > camarilla_r1_aligned[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRFilter_V1"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_Volume_ChopRegime_ATRStop_V1"
+timeframe = "12h"
 leverage = 1.0
