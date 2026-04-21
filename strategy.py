@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using weekly pivot points (R1/S1) with 1w EMA34 trend filter and volume confirmation.
+12h strategy using weekly pivot points (R1/S1) with 1d EMA34 trend filter and volume confirmation.
 In uptrend (price > EMA34), buy breakouts above weekly R1; in downtrend (price < EMA34), sell breakdowns below weekly S1.
-Weekly R1/S1 provide strong institutional support/resistance with higher success rate than daily pivots.
-1w EMA34 filters for stronger trend alignment; volume confirms breakout strength.
-Designed for low trade frequency (target: 10-20 trades/year) to minimize fee drag on 1d timeframe.
-Works in bull markets (buy R1 breaks) and bear markets (sell S1 breaks).
+Weekly R1/S1 provide institutional support/resistance with higher success rate than R2/S2.
+1d EMA34 filters for stronger trend alignment; volume confirms breakout strength.
+Works in bull markets (buy R1 breaks) and bear markets (sell S1 breaks). Target: 12-37 trades/year for 12h timeframe.
 """
 
 import numpy as np
@@ -34,17 +33,21 @@ def generate_signals(prices):
     # S1 = Pivot - (High - Low)
     s1_1w = pivot_1w - (high_1w - low_1w)
     
-    # Align weekly R1/S1 to daily timeframe (wait for weekly bar to close)
+    # Align weekly R1/S1 to 12h timeframe (wait for weekly bar to close)
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Load weekly data ONCE before loop for EMA trend filter
-    # 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    # Load 1d data ONCE before loop for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Daily volume confirmation (volume spike > 2.0x 20-period average)
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # 12h volume confirmation (volume spike > 1.5x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
@@ -63,7 +66,7 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         ema_trend = ema_34_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        vol_threshold = 2.0  # Volume spike filter for quality (higher threshold for lower frequency)
+        vol_threshold = 1.5  # Volume spike filter for quality
         
         if position == 0:
             # Enter long: price breaks above weekly R1 + uptrend (price > EMA34) + volume spike
@@ -93,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1S1_1wEMA34_Volume"
-timeframe = "1d"
+name = "12h_WeeklyPivot_R1S1_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
