@@ -1,133 +1,89 @@
 #!/usr/bin/env python3
 """
-6h_RSI_PriceAction_Confluence_V1
-Hypothesis: Combine RSI extremes with price action patterns (inside bars and engulfing candles) on 6h timeframe, filtered by daily trend (EMA50). 
-In bull markets: look for bullish engulfing at RSI < 30. In bear markets: look for bearish engulfing at RSI > 70.
-Inside bars provide low-risk entry points with tight stops. Works in both regimes by adapting to higher timeframe trend.
-Target: 15-30 trades/year per symbol with disciplined entries.
+4h_Volume_Weighted_CCI_Trend_Filter_V1
+Hypothesis: Volume-weighted CCI (VW-CCI) identifies overbought/oversold conditions with institutional participation. 
+Trend filter (4h EMA34) ensures trades align with medium-term momentum. 
+Volume confirmation filters out low-conviction moves. Works in bull/bear by taking both long and short signals.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing: alpha = 1/period
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    # First average: simple mean
-    avg_gain[period] = np.mean(gain[1:period+1])
-    avg_loss[period] = np.mean(loss[1:period+1])
-    
-    # Subsequent: Wilder's smoothing
-    for i in range(period+1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate EMA50 on daily close for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = np.zeros_like(close_1d)
-    ema50_1d[:] = np.nan
+    # VW-CCI: Typical Price * Volume, then standard CCI calculation
+    tp = (high + low + close) / 3.0
+    vw_tp = tp * volume
     
-    # Calculate EMA manually with proper initialization
-    alpha = 2.0 / (50 + 1)
-    ema50_1d[49] = np.mean(close_1d[:50])  # First EMA value
-    for i in range(50, len(close_1d)):
-        ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    # Calculate VW-CCI(20)
+    period = 20
+    sma_vw_tp = np.full(n, np.nan)
+    mad_vw_tp = np.full(n, np.nan)
     
-    # Align EMA50 to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    for i in range(period-1, n):
+        sma_vw_tp[i] = np.mean(vw_tp[i-period+1:i+1])
+        mad_vw_tp[i] = np.mean(np.abs(vw_tp[i-period+1:i+1] - sma_vw_tp[i]))
     
-    # 6h data
-    open_6h = prices['open'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    vw_cci = np.full(n, np.nan)
+    for i in range(period-1, n):
+        if mad_vw_tp[i] != 0:
+            vw_cci[i] = (vw_tp[i] - sma_vw_tp[i]) / (0.015 * mad_vw_tp[i])
     
-    # Calculate RSI(14) on 6h
-    rsi_6h = calculate_rsi(close_6h, 14)
-    
-    # Price action patterns
-    # Bullish engulfing: current green candle engulfs previous red candle
-    bullish_engulf = np.zeros(n, dtype=bool)
-    bearish_engulf = np.zeros(n, dtype=bool)
-    inside_bar = np.zeros(n, dtype=bool)
-    
-    for i in range(1, n):
-        # Bullish engulfing
-        if (close_6h[i] > open_6h[i] and  # current bullish
-            open_6h[i] <= close_6h[i-1] and  # current open <= prev close
-            close_6h[i] >= open_6h[i-1] and  # current close >= prev open
-            open_6h[i-1] > close_6h[i-1]):   # previous bearish
-            bullish_engulf[i] = True
-        
-        # Bearish engulfing
-        if (close_6h[i] < open_6h[i] and  # current bearish
-            open_6h[i] >= close_6h[i-1] and  # current open >= prev close
-            close_6h[i] <= open_6h[i-1] and  # current close <= prev open
-            open_6h[i-1] < close_6h[i-1]):   # previous bullish
-            bearish_engulf[i] = True
-        
-        # Inside bar: current range within previous bar's range
-        if (high_6h[i] <= high_6h[i-1] and low_6h[i] >= low_6h[i-1]):
-            inside_bar[i] = True
+    # Trend filter: EMA34 on 4h close
+    ema34 = np.full(n, np.nan)
+    alpha = 2.0 / (34 + 1)
+    for i in range(n):
+        if i == 0:
+            ema34[i] = close[i]
+        else:
+            ema34[i] = alpha * close[i] + (1 - alpha) * ema34[i-1]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if EMA50 not available
-        if np.isnan(ema50_1d_aligned[i]):
+    for i in range(34, n):  # Wait for EMA34 warmup
+        if np.isnan(vw_cci[i]) or np.isnan(ema34[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
-        rsi = rsi_6h[i]
-        trend_up = price > ema50_1d_aligned[i]
+        cci_value = vw_cci[i]
+        price = close[i]
+        ema = ema34[i]
+        
+        # Entry conditions
+        long_entry = cci_value < -100 and price > ema
+        short_entry = cci_value > 100 and price < ema
+        
+        # Exit conditions
+        long_exit = cci_value > 0
+        short_exit = cci_value < 0
         
         if position == 0:
-            # Long conditions: bullish engulfing OR inside bar + RSI oversold in uptrend
-            if (bullish_engulf[i] or inside_bar[i]) and rsi < 35 and trend_up:
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: bearish engulfing OR inside bar + RSI overbought in downtrend
-            elif (bearish_engulf[i] or inside_bar[i]) and rsi > 65 and not trend_up:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
-        
         elif position == 1:
-            # Long exit: RSI overbought OR bearish engulfing
-            if rsi > 70 or bearish_engulf[i]:
+            if long_exit:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Short exit: RSI oversold OR bullish engulfing
-            if rsi < 30 or bullish_engulf[i]:
+            if short_exit:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI_PriceAction_Confluence_V1"
-timeframe = "6h"
+name = "4h_Volume_Weighted_CCI_Trend_Filter_V1"
+timeframe = "4h"
 leverage = 1.0
