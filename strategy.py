@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_Volume_And_Chop_Filter
-Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on 1d for trend direction, 
-filtered by choppiness index (range/trend regime) and volume confirmation on 1d.
-Works in bull/bear: KAMA adapts to market noise, chop filter avoids whipsaws in ranging markets,
-volume ensures institutional participation. Weekly trend from 1w EMA200 for long-term bias.
-Target: 15-25 trades/year per symbol (60-100 over 4 years).
+6h_12h1d_Ichimoku_Breakout_v1
+Hypothesis: Ichimoku TK cross with cloud filter from 12h/1d timeframes on 6h chart.
+- Bullish: Tenkan > Kijun AND price > Senkou Span A/B (cloud) from 12h
+- Bearish: Tenkan < Kijun AND price < Senkou Span A/B (cloud) from 1d
+- Uses weekly trend filter (EMA50) to avoid counter-trend trades
+- Target: 15-30 trades/year per symbol (60-120 over 4 years)
 """
 
 import numpy as np
@@ -17,89 +17,86 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for KAMA, chop, and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for KAMA and chop
+    # Load 12h data for Ichimoku cloud (primary trend)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 52:  # need 26*2 for Ichimoku
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Ichimoku components (12h)
+    # Tenkan-sen: (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
+    
+    # Kijun-sen: (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A: (Tenkan + Kijun) / 2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    # Senkou Span B: (52-period high + 52-period low) / 2 shifted 26 periods ahead
+    high_52 = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((high_52 + low_52) / 2)
+    
+    # Align Ichimoku to 6h
+    tenkan_aligned = align_htf_to_ltf(prices, df_12h, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_12h, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_a, additional_delay_bars=26)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_b, additional_delay_bars=26)
+    
+    # Load 1d data for additional cloud confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # === KAMA (Kaufman Adaptive Moving Average) on 1d ===
-    # ER (Efficiency Ratio) = |net change| / sum of absolute changes
-    # Smooth constant = [ER * (fastest SC - slowest SC) + slowest SC]^2
-    # where fastest SC = 2/(2+1) = 0.6667, slowest SC = 2/(30+1) = 0.0645
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    abs_change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    # Ichimoku components (1d) for secondary confirmation
+    high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_1d = (high_9_1d + low_9_1d) / 2
     
-    # 10-period ER
-    net_change = np.abs(np.subtract(close_1d, np.roll(close_1d, 10)))
-    net_change[:10] = np.nan
-    vol_sum = np.nancumsum(abs_change) - np.nancumsum(np.roll(abs_change, 10))
-    vol_sum[:10] = np.nan
-    er = np.where(vol_sum != 0, net_change / vol_sum, 0)
+    high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_1d = (high_26_1d + low_26_1d) / 2
     
-    # Smooth constant
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
+    high_52_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    low_52_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b_1d = ((high_52_1d + low_52_1d) / 2)
     
-    # KAMA calculation
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d, additional_delay_bars=26)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d, additional_delay_bars=26)
     
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # === Choppiness Index on 1d (14-period) ===
-    # Chop = 100 * log10(sum(TR) / (HHV - LLV)) / log10(14)
-    # where TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    # 14-period sums and ranges
-    tr_sum = np.nancumsum(tr) - np.nancumsum(np.roll(tr, 14))
-    tr_sum[:14] = np.nan
-    hh = np.maximum.accumulate(high_1d)
-    ll = np.minimum.accumulate(low_1d)
-    hh_14 = hh - np.roll(hh, 14)
-    ll_14 = ll - np.roll(ll, 14)
-    range_14 = np.maximum(hh_14, ll_14)
-    range_14[:14] = np.nan
-    
-    chop = 100 * np.log10(tr_sum / range_14) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # === Volume confirmation on 1d ===
-    # Volume > 1.5 * 20-period average
-    vol_ma = np.nancumsum(volume_1d) - np.nancumsum(np.roll(volume_1d, 20))
-    vol_ma[:20] = np.nan
-    vol_ma = vol_ma / 20
-    volume_ok = volume_1d > (1.5 * vol_ma)
-    volume_ok_aligned = align_htf_to_ltf(prices, df_1d, volume_ok.astype(float))
-    
-    # === Weekly trend bias from 1w EMA200 ===
+    # Load weekly data for trend filter (EMA50)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_ok_aligned[i]) or np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -107,37 +104,53 @@ def generate_signals(prices):
         
         price = prices['close'].iloc[i]
         
-        # Regime filter: chop < 61.8 = trending (favor trend following), chop > 61.8 = ranging (avoid)
-        # We'll use chop < 61.8 to ensure we're in a trending environment
-        is_trending = chop_aligned[i] < 61.8
+        # Cloud boundaries (top and bottom of cloud)
+        cloud_top_12h = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom_12h = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_top_1d = np.maximum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        cloud_bottom_1d = np.minimum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        
+        # TK cross signals
+        tk_bullish_12h = tenkan_aligned[i] > kijun_aligned[i]
+        tk_bearish_12h = tenkan_aligned[i] < kijun_aligned[i]
+        tk_bullish_1d = tenkan_1d_aligned[i] > kijun_1d_aligned[i]
+        tk_bearish_1d = tenkan_1d_aligned[i] < kijun_1d_aligned[i]
+        
+        # Price relative to cloud
+        price_above_cloud_12h = price > cloud_top_12h
+        price_below_cloud_12h = price < cloud_bottom_12h
+        price_above_cloud_1d = price > cloud_top_1d
+        price_below_cloud_1d = price < cloud_bottom_1d
+        
+        # Weekly trend filter
+        weekly_uptrend = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] if i > 0 else True
+        weekly_downtrend = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] if i > 0 else False
         
         if position == 0:
-            # Long: price > KAMA AND trending regime AND volume OK AND weekly bullish (price > weekly EMA200)
-            if (price > kama_aligned[i] and 
-                is_trending and 
-                volume_ok_aligned[i] and 
-                price > ema_200_1w_aligned[i]):
+            # Long: bullish TK cross + price above cloud (both timeframes) + weekly uptrend
+            if (tk_bullish_12h and tk_bullish_1d and 
+                price_above_cloud_12h and price_above_cloud_1d and 
+                weekly_uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA AND trending regime AND volume OK AND weekly bearish (price < weekly EMA200)
-            elif (price < kama_aligned[i] and 
-                  is_trending and 
-                  volume_ok_aligned[i] and 
-                  price < ema_200_1w_aligned[i]):
+            # Short: bearish TK cross + price below cloud (both timeframes) + weekly downtrend
+            elif (tk_bearish_12h and tk_bearish_1d and 
+                  price_below_cloud_12h and price_below_cloud_1d and 
+                  weekly_downtrend):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < KAMA (trend reversal) OR chop > 61.8 (entered ranging market)
-            if price < kama_aligned[i] or chop_aligned[i] > 61.8:
+            # Long exit: price drops below cloud OR TK cross turns bearish
+            if (price < cloud_bottom_12h or tk_bearish_12h):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > KAMA (trend reversal) OR chop > 61.8 (entered ranging market)
-            if price > kama_aligned[i] or chop_aligned[i] > 61.8:
+            # Short exit: price rises above cloud OR TK cross turns bullish
+            if (price > cloud_top_12h or tk_bullish_12h):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -145,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_With_Volume_And_Chop_Filter"
-timeframe = "1d"
+name = "6h_12h1d_Ichimoku_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
