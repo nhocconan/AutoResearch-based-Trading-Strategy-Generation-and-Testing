@@ -3,36 +3,42 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA crossover with 4h trend filter and volume confirmation
-# Long when 1h EMA(9) crosses above EMA(21) AND 4h EMA(50) is rising AND volume > 1.5x average
-# Short when 1h EMA(9) crosses below EMA(21) AND 4h EMA(50) is falling AND volume > 1.5x average
-# Uses 4h for trend direction (reduces whipsaws), 1h for entry timing
-# Volume filter ensures momentum confirmation
-# Target: 15-30 trades/year by requiring trend alignment + volume spike
-# Works in bull/bear: 4h EMA filter avoids counter-trend trades, volume confirms strength
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d EMA200 Trend Filter + Volume Spike
+# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (13-period EMA on 6h)
+# Long when Bull Power > 0 and Bear Power turning up (from negative) in uptrend (price > 1d EMA200)
+# Short when Bear Power < 0 and Bull Power turning down (from positive) in downtrend (price < 1d EMA200)
+# Volume spike (>1.5x 20-period average) confirms conviction
+# Works in bull/bear: 1d EMA200 filter ensures we trade with higher timeframe trend
+# Target: 20-35 trades/year by requiring EMA200 trend + Elder Ray divergence + volume
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate 4h EMA(50) slope (rising/falling)
-    ema_slope_4h = np.diff(ema_50_4h_aligned, prepend=ema_50_4h_aligned[0])
-    ema_rising_4h = ema_slope_4h > 0
-    ema_falling_4h = ema_slope_4h < 0
-    
-    # Pre-compute 1h EMAs
+    # Calculate 13-period EMA for Elder Ray (on 6d data)
     close = prices['close'].values
-    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    high = prices['high'].values
+    low = prices['low'].values
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = low - ema13   # Low - EMA13
+    
+    # Previous values for crossover detection
+    bull_power_prev = np.roll(bull_power, 1)
+    bear_power_prev = np.roll(bear_power, 1)
+    bull_power_prev[0] = np.nan
+    bear_power_prev[0] = np.nan
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -40,9 +46,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(21, n):
+    for i in range(13, n):
         # Skip if data not ready
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_9[i]) or np.isnan(ema_21[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema200_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,29 +61,33 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume > 1.5 * vol_ma[i]
         
+        # Trend filter: price vs 1d EMA200
+        uptrend = price > ema200_1d_aligned[i]
+        downtrend = price < ema200_1d_aligned[i]
+        
         if position == 0:
-            # Look for EMA crossover with volume confirmation and 4h trend alignment
-            if ema_9[i] > ema_21[i] and ema_9[i-1] <= ema_21[i-1]:  # bullish crossover
-                if ema_rising_4h[i] and volume_confirm:
-                    signals[i] = 0.20
+            if volume_confirm:
+                # Long: Bull Power > 0 AND Bear Power turning up (from negative) in uptrend
+                if bull_power[i] > 0 and bear_power[i] > bear_power_prev[i] and bear_power_prev[i] <= 0 and uptrend:
+                    signals[i] = 0.25
                     position = 1
-            elif ema_9[i] < ema_21[i] and ema_9[i-1] >= ema_21[i-1]:  # bearish crossover
-                if ema_falling_4h[i] and volume_confirm:
-                    signals[i] = -0.20
+                # Short: Bear Power < 0 AND Bull Power turning down (from positive) in downtrend
+                elif bear_power[i] < 0 and bull_power[i] < bull_power_prev[i] and bull_power_prev[i] >= 0 and downtrend:
+                    signals[i] = -0.25
                     position = -1
         
         elif position != 0:
-            # Exit conditions: EMA crossover in opposite direction
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on bearish EMA crossover
-                if ema_9[i] < ema_21[i] and ema_9[i-1] >= ema_21[i-1]:
+                # Exit if Bull Power turns negative or trend fails
+                if bull_power[i] <= 0 or not uptrend:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on bullish EMA crossover
-                if ema_9[i] > ema_21[i] and ema_9[i-1] <= ema_21[i-1]:
+                # Exit if Bear Power turns positive or trend fails
+                if bear_power[i] >= 0 or not downtrend:
                     exit_signal = True
             
             if exit_signal:
@@ -85,10 +95,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_EMA9_21_Crossover_4hEMA50_Trend_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_BullBearPower_1dEMA200_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
