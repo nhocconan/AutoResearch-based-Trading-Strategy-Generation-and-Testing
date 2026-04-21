@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot + 1d Volume Spike + 1d ADX Trend Filter
-# Long when price touches S1 or S2 with bullish reversal candle and 1d volume > 1.5x average and ADX > 20
-# Short when price touches R1 or R2 with bearish reversal candle and 1d volume > 1.5x average and ADX > 20
-# Exit when price crosses the pivot point (PP)
-# Camarilla levels provide precise support/resistance in ranging markets
-# Volume confirms institutional interest
-# ADX ensures we avoid whipsaws in weak trends
-# Target: 25-40 trades/year by requiring confluence of level, volume, and trend
+# Hypothesis: 6h Donchian(20) Breakout + 1d RSI Filter + Volume Confirmation
+# Long when price breaks above Donchian(20) high, 1d RSI < 40 (avoid overbought), and volume > 1.5x average
+# Short when price breaks below Donchian(20) low, 1d RSI > 60 (avoid oversold), and volume > 1.5x average
+# Exit when price crosses Donchian midpoint
+# RSI filter prevents buying strength/weakness, focusing on mean-reversion within trend
+# Volume confirms breakout authenticity
+# Target: 15-25 trades/year via strict RSI + volume + breakout confluence
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,95 +19,48 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ADX(14) for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d RSI(14)
     close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+
-    tr_period = 14
-    tr_sum = np.zeros_like(tr)
-    dm_plus_sum = np.zeros_like(dm_plus)
-    dm_minus_sum = np.zeros_like(dm_minus)
-    
-    # Initial smoothed values
-    tr_sum[tr_period-1] = np.nansum(tr[:tr_period])
-    dm_plus_sum[tr_period-1] = np.nansum(dm_plus[:tr_period])
-    dm_minus_sum[tr_period-1] = np.nansum(dm_minus[:tr_period])
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
     # Wilder's smoothing
-    for i in range(tr_period, len(tr)):
-        tr_sum[i] = tr_sum[i-1] - (tr_sum[i-1] / tr_period) + tr[i]
-        dm_plus_sum[i] = dm_plus_sum[i-1] - (dm_plus_sum[i-1] / tr_period) + dm_plus[i]
-        dm_minus_sum[i] = dm_minus_sum[i-1] - (dm_minus_sum[i-1] / tr_period) + dm_minus[i]
+    rsi_period = 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
+    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
     
-    # Directional Indicators
-    plus_di = 100 * dm_plus_sum / tr_sum
-    minus_di = 100 * dm_minus_sum / tr_sum
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx[np.isnan(dx) | np.isinf(dx)] = 0
+    for i in range(rsi_period+1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
     
-    # ADX: smoothed DX
-    adx = np.zeros_like(dx)
-    adx[2*tr_period-1] = np.nanmean(dx[tr_period:2*tr_period])
-    for i in range(2*tr_period, len(dx)):
-        adx[i] = (adx[i-1] * (tr_period-1) + dx[i]) / tr_period
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0] = 50  # First value neutral
     
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # Calculate 1d volume moving average (20-period)
     vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate Camarilla levels from previous day
-    # Typical Price = (H + L + C) / 3
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    # Camarilla levels based on previous day's range
-    range_1d = high_1d - low_1d
+    # Calculate Donchian(20) on 6h data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Shift by 1 to use previous day's data for today's levels
-    pp = np.roll(typical_price, 1)  # Pivot Point
-    r1 = pp + (range_1d * 1.1 / 12)
-    r2 = pp + (range_1d * 1.1 / 6)
-    s1 = pp - (range_1d * 1.1 / 12)
-    s2 = pp - (range_1d * 1.1 / 6)
-    
-    # Handle first value
-    pp[0] = typical_price[0]
-    r1[0] = pp[0] + (range_1d[0] * 1.1 / 12)
-    r2[0] = pp[0] + (range_1d[0] * 1.1 / 6)
-    s1[0] = pp[0] - (range_1d[0] * 1.1 / 12)
-    s2[0] = pp[0] - (range_1d[0] * 1.1 / 6)
-    
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i])):
+        if np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -119,37 +71,39 @@ def generate_signals(prices):
         
         # Volume confirmation: current 1d volume > 1.5x 20-period average
         vol_ma = vol_ma_1d_aligned[i]
-        vol_ratio = df_1d['volume'].iloc[i // 96] / vol_ma if i >= 96 and vol_ma > 0 else 1.0
-        volume_confirm = vol_ratio > 1.5
+        # Get current 1d volume (same for all 6h bars within the day)
+        idx_1d = i // 4  # 4 six-hour bars per day
+        if idx_1d >= len(df_1d):
+            idx_1d = len(df_1d) - 1
+        current_vol = df_1d['volume'].iloc[idx_1d]
+        volume_confirm = current_vol > 1.5 * vol_ma
         
-        # Trend filter: ADX > 20 indicates sufficient trend strength
-        trend_filter = adx_aligned[i] > 20
-        
-        # Reversal candle detection
-        is_bullish = prices['close'].iloc[i] > prices['open'].iloc[i]
-        is_bearish = prices['close'].iloc[i] < prices['open'].iloc[i]
+        # RSI filter: avoid extremes
+        rsi_val = rsi_aligned[i]
+        rsi_long_filter = rsi_val < 40  # Not overbought
+        rsi_short_filter = rsi_val > 60  # Not oversold
         
         if position == 0:
-            if volume_confirm and trend_filter:
-                # Long: price touches S1 or S2 with bullish candle
-                if (abs(price - s1_aligned[i]) < 0.001 * price or abs(price - s2_aligned[i]) < 0.001 * price) and is_bullish:
+            if volume_confirm:
+                # Long: price breaks above Donchian high with RSI < 40
+                if price > donchian_high[i] and rsi_long_filter:
                     signals[i] = 0.25
                     position = 1
-                # Short: price touches R1 or R2 with bearish candle
-                elif (abs(price - r1_aligned[i]) < 0.001 * price or abs(price - r2_aligned[i]) < 0.001 * price) and is_bearish:
+                # Short: price breaks below Donchian low with RSI > 60
+                elif price < donchian_low[i] and rsi_short_filter:
                     signals[i] = -0.25
                     position = -1
         
         elif position != 0:
-            # Exit when price crosses pivot point
+            # Exit when price crosses Donchian midpoint
             exit_signal = False
             
             if position == 1:  # long position
-                if price < pp_aligned[i]:
+                if price < donchian_mid[i]:
                     exit_signal = True
             
             elif position == -1:  # short position
-                if price > pp_aligned[i]:
+                if price > donchian_mid[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -161,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_1dVolume_ADX_Trend"
-timeframe = "4h"
+name = "6h_Donchian20_Breakout_1dRSI_Filter_Volume"
+timeframe = "6h"
 leverage = 1.0
