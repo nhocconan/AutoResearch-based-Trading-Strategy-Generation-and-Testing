@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_VolumeATRStop_v3
-Hypothesis: Breakout at Camarilla R1/S1 levels with volume confirmation and ATR-based trailing stop.
-Uses 4h timeframe with 12h HTF trend filter to reduce false breakouts. Works in bull/bear: 
-In uptrend (12h close > 12h EMA34), buy R1 breakouts; in downtrend (12h close < 12h EMA34), sell S1 breakdowns.
-Volume confirmation and ATR trailing stop reduce whipsaws. Target: 20-40 trades/year per symbol (80-160 over 4 years).
+6h_1w_1d_PivotPoint_SR_Bounce_v1
+Hypothesis: Price bounces off weekly pivot support/resistance levels with 1d trend confirmation on 6h timeframe.
+In uptrend (1d close > 1d EMA50), buy near weekly S1/S2; in downtrend (1d close < 1d EMA50), sell near weekly R1/R2.
+Uses volume confirmation to avoid false bounces. Works in bull/bear markets by trading mean reversion within the trend.
+Target: 12-30 trades/year per symbol (50-120 over 4 years).
 """
 
 import numpy as np
@@ -16,46 +16,51 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
+    # Load weekly data once for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Load daily data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Load 12h data once for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 35:
-        return np.zeros(n)
+    # Previous week's OHLC for weekly pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Camarilla levels: R1, S1
-    rang = prev_high - prev_low
-    r1 = prev_close + rang * 1.0 / 12
-    s1 = prev_close - rang * 1.0 / 12
+    # Weekly pivot point and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # 12h EMA34 for trend filter
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: 20-period average
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    # Volume filter: 24-period average (4 days on 6h)
+    vol_ma = prices['volume'].rolling(window=24, min_periods=24).mean().values
     
-    # ATR for stoploss and position sizing
+    # ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -68,14 +73,12 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,44 +87,36 @@ def generate_signals(prices):
         price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Update trailing extremes
-        if position == 1:
-            highest_since_entry = max(highest_since_entry, price)
-        elif position == -1:
-            lowest_since_entry = min(lowest_since_entry, price)
-        
         # Volume confirmation
-        volume_ok = volume > 1.5 * vol_ma[i]
+        volume_ok = volume > 1.3 * vol_ma[i]
         
-        # 12h trend filter: uptrend if close > EMA34, downtrend if close < EMA34
-        uptrend = price > ema_34_12h_aligned[i]
-        downtrend = price < ema_34_12h_aligned[i]
+        # 1d trend filter
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume in uptrend
-            if price > r1_aligned[i] and volume_ok and uptrend:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-                highest_since_entry = price
-            # Short: price breaks below S1 with volume in downtrend
-            elif price < s1_aligned[i] and volume_ok and downtrend:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
-                lowest_since_entry = price
+            # Long: price near weekly support in uptrend with volume
+            if uptrend and volume_ok:
+                if abs(price - s1_aligned[i]) <= 0.3 * atr[i] or abs(price - s2_aligned[i]) <= 0.5 * atr[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: price near weekly resistance in downtrend with volume
+            elif downtrend and volume_ok:
+                if abs(price - r1_aligned[i]) <= 0.3 * atr[i] or abs(price - r2_aligned[i]) <= 0.5 * atr[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Trailing stop: exit if price drops 2.0 * ATR from highest
-            if price < highest_since_entry - 2.0 * atr[i]:
+            # Exit: price reaches weekly pivot or resistance, or stoploss
+            if price >= pivot_aligned[i] or price >= r1_aligned[i] or price < s1_aligned[i] - 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Trailing stop: exit if price rises 2.0 * ATR from lowest
-            if price > lowest_since_entry + 2.0 * atr[i]:
+            # Exit: price reaches weekly pivot or support, or stoploss
+            if price <= pivot_aligned[i] or price <= s1_aligned[i] or price > r1_aligned[i] + 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_VolumeATRStop_v3"
-timeframe = "4h"
+name = "6h_1w_1d_PivotPoint_SR_Bounce_v1"
+timeframe = "6h"
 leverage = 1.0
