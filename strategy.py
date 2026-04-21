@@ -1,111 +1,150 @@
-# 6h_Donchian_20_1dPivot_Structure_V1
-# Hypothesis: Donchian(20) breakout on 6h filtered by daily pivot structure (R1/S1, R2/S2) and volume confirmation.
-# Uses higher timeframe pivot levels as structural support/resistance to filter breakouts.
-# Works in bull markets (breakouts continue) and bear markets (fades at pivot levels) by only taking
-# breakouts aligned with pivot structure (long above R1, short below S1) with volume filter.
-# Target: 50-150 total trades over 4 years = 12-37/year.
+#!/usr/bin/env python3
+"""
+12h_WVAF_Momentum_Breakout_V1
+Hypothesis: Combine Williams %R momentum with Volume-Weighted Average Price (VWAP) on 12h timeframe.
+Enter long when price crosses above VWAP and Williams %R exits oversold (< -80), short when price crosses below VWAP and Williams %R exits overbought (> -20).
+Use 1-week trend filter: only take trades aligned with weekly EMA20 direction.
+Includes ATR-based stop loss via signal=0 when price moves against position by 2*ATR.
+Designed for low trade frequency (target 15-30/year) to minimize fee drag while capturing momentum shifts in both bull and bear markets.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_pivots(high, low, close):
-    """Calculate classic pivot points: P, R1, S1, R2, S2"""
-    P = (high + low + close) / 3
-    R1 = 2 * P - low
-    S1 = 2 * P - high
-    R2 = P + (high - low)
-    S2 = P - (high - low)
-    return P, R1, S1, R2, S2
+def calculate_williams_r(high, low, close, period=14):
+    """Calculate Williams %R"""
+    highest_high = np.maximum.accumulate(high)
+    lowest_low = np.minimum.accumulate(low)
+    wr = np.full_like(high, np.nan)
+    for i in range(len(high)):
+        start = max(0, i - period + 1)
+        hh = np.max(high[start:i+1])
+        ll = np.min(low[start:i+1])
+        if hh != ll:
+            wr[i] = (hh - close[i]) / (hh - ll) * -100
+        else:
+            wr[i] = -50
+    return wr
+
+def calculate_vwap(high, low, close, volume):
+    """Calculate Volume Weighted Average Price"""
+    typical_price = (high + low + close) / 3
+    vwap = np.full_like(close, np.nan)
+    cum_tpv = np.zeros(len(close))
+    cum_vol = np.zeros(len(close))
+    for i in range(len(close)):
+        cum_tpv[i] = cum_tpv[i-1] + typical_price[i] * volume[i] if i > 0 else typical_price[i] * volume[i]
+        cum_vol[i] = cum_vol[i-1] + volume[i] if i > 0 else volume[i]
+        if cum_vol[i] > 0:
+            vwap[i] = cum_tpv[i] / cum_vol[i]
+    return vwap
+
+def calculate_atr(high, low, close, period=14):
+    """Calculate Average True Range"""
+    tr = np.full_like(high, np.nan)
+    for i in range(len(high)):
+        if i == 0:
+            tr[i] = high[i] - low[i]
+        else:
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = np.full_like(high, np.nan)
+    for i in range(len(high)):
+        if i < period - 1:
+            atr[i] = np.nan
+        else:
+            start = i - period + 1
+            atr[i] = np.mean(tr[start:i+1])
+    return atr
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
-    # Load 1d data once for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 1w data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily pivots
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = np.full_like(close_1w, np.nan)
+    alpha = 2 / (20 + 1)
+    for i in range(len(close_1w)):
+        if i == 0:
+            ema_20_1w[i] = close_1w[i]
+        elif not np.isnan(close_1w[i]):
+            ema_20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_20_1w[i-1]
+        else:
+            ema_20_1w[i] = ema_20_1w[i-1]
     
-    P_1d, R1_1d, S1_1d, R2_1d, S2_1d = calculate_pivots(high_1d, low_1d, close_1d)
+    # Align weekly EMA to 12h
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Align pivot levels to 6h timeframe
-    P_1d_aligned = align_htf_to_ltf(prices, df_1d, P_1d)
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
-    R2_1d_aligned = align_htf_to_ltf(prices, df_1d, R2_1d)
-    S2_1d_aligned = align_htf_to_ltf(prices, df_1d, S2_1d)
+    # 12h data for signals
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 6h Donchian(20) channels
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    
-    # Donchian upper (20-period high) and lower (20-period low)
-    donchian_high = np.full_like(close_6h, np.nan)
-    donchian_low = np.full_like(close_6h, np.nan)
-    
-    for i in range(len(close_6h)):
-        start = max(0, i - 19)
-        donchian_high[i] = np.max(high_6h[start:i+1])
-        donchian_low[i] = np.min(low_6h[start:i+1])
-    
-    # Volume filter: volume > 1.5 * 20-period average
-    volume_6h = prices['volume'].values
-    vol_ma = np.full_like(volume_6h, np.nan)
-    for i in range(len(volume_6h)):
-        if i >= 19:
-            vol_ma[i] = np.mean(volume_6h[i-19:i+1])
+    # Calculate indicators
+    williams_r = calculate_williams_r(high, low, close, 14)
+    vwap = calculate_vwap(high, low, close, volume)
+    atr = calculate_atr(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(20, n):
         # Skip if NaN in critical values
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vwap[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
-        vol = volume_6h[i]
-        vol_avg = vol_ma[i]
+        price = close[i]
+        ema_20 = ema_20_1w_aligned[i]
+        wr = williams_r[i]
+        vwap_val = vwap[i]
+        atr_val = atr[i]
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        volume_filter = vol > 1.5 * vol_avg
+        # Trend filter: only trade in direction of weekly EMA20
+        trend_up = price > ema_20
+        trend_down = price < ema_20
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume + above daily R1
-            if (price > donchian_high[i] and volume_filter and 
-                price > R1_1d_aligned[i]):
+            # Long: price crosses above VWAP, WR exits oversold, uptrend
+            if price > vwap_val and williams_r[i-1] <= -80 and wr > -80 and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + volume + below daily S1
-            elif (price < donchian_low[i] and volume_filter and 
-                  price < S1_1d_aligned[i]):
+                entry_price = price
+            # Short: price crosses below VWAP, WR exits overbought, downtrend
+            elif price < vwap_val and williams_r[i-1] >= -20 and wr < -20 and trend_down:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: price breaks below Donchian low or drops below daily S1
-            if price < donchian_low[i] or price < S1_1d_aligned[i]:
+            # Long exit: stop loss or reversal signal
+            if price < entry_price - 2.0 * atr_val:  # stop loss
+                signals[i] = 0.0
+                position = 0
+            elif price < vwap_val and wr < -50:  # momentum loss
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above Donchian high or rises above daily R1
-            if price > donchian_high[i] or price > R1_1d_aligned[i]:
+            # Short exit: stop loss or reversal signal
+            if price > entry_price + 2.0 * atr_val:  # stop loss
+                signals[i] = 0.0
+                position = 0
+            elif price > vwap_val and wr > -50:  # momentum loss
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_20_1dPivot_Structure_V1"
-timeframe = "6h"
+name = "12h_WVAF_Momentum_Breakout_V1"
+timeframe = "12h"
 leverage = 1.0
