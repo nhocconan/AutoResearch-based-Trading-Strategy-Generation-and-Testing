@@ -5,86 +5,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend and structure
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 1d RSI(14)
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Weekly Donchian(20) channels for breakout signals
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    # Align RSI to 6h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Weekly ATR(14) for volatility filter
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_14 / atr_ma_20
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
+    # Calculate 6d RSI(14)
+    close_6h = prices['close'].values
+    delta_6h = np.diff(close_6h, prepend=close_6h[0])
+    gain_6h = np.where(delta_6h > 0, delta_6h, 0)
+    loss_6h = np.where(delta_6h < 0, -delta_6h, 0)
+    avg_gain_6h = pd.Series(gain_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_6h = pd.Series(loss_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_6h = avg_gain_6h / (avg_loss_6h + 1e-10)
+    rsi_6h = 100 - (100 / (1 + rs_6h))
     
-    # Volume confirmation: volume / 20-period average volume (weekly)
-    vol_ma_20 = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1w = df_1w['volume'].values / vol_ma_20
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio_1w)
+    # Volume ratio: current volume / 20-period average
+    vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = prices['volume'].values / vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi_6h[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = prices['close'].iloc[i]
-        ema_trend = ema_20_1w_aligned[i]
-        upper_band = donch_high_aligned[i]
-        lower_band = donch_low_aligned[i]
-        vol_ratio = vol_ratio_aligned[i]
-        vol_threshold = 1.2  # Volume must be above average
-        atr_ratio_val = atr_ratio_aligned[i]
+        rsi_1d_val = rsi_1d_aligned[i]
+        rsi_6h_val = rsi_6h[i]
+        vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long: price breaks above weekly Donchian high, uptrend, volume spike, moderate volatility
-            if (price_close > upper_band and 
-                price_close > ema_trend and 
-                vol_ratio > vol_threshold and 
-                atr_ratio_val > 0.6 and atr_ratio_val < 2.5):
+            # Enter long: 1d RSI oversold (<30) + 6h RSI rising from oversold + volume confirmation
+            if (rsi_1d_val < 30 and 
+                rsi_6h_val < 35 and 
+                rsi_6h_val > rsi_6h[i-1] and  # RSI rising
+                vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly Donchian low, downtrend, volume spike, moderate volatility
-            elif (price_close < lower_band and 
-                  price_close < ema_trend and 
-                  vol_ratio > vol_threshold and 
-                  atr_ratio_val > 0.6 and atr_ratio_val < 2.5):
+            # Enter short: 1d RSI overbought (>70) + 6h RSI falling from overbought + volume confirmation
+            elif (rsi_1d_val > 70 and 
+                  rsi_6h_val > 65 and 
+                  rsi_6h_val < rsi_6h[i-1] and  # RSI falling
+                  vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: reverse breakout or volatility extremes
-            if position == 1 and (price_close < lower_band or atr_ratio_val > 3.0 or atr_ratio_val < 0.5):
+            # Exit: RSI returns to neutral zone (40-60) or volume drops
+            if position == 1 and (rsi_6h_val > 50 or vol_ratio_val < 0.8):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > upper_band or atr_ratio_val > 3.0 or atr_ratio_val < 0.5):
+            elif position == -1 and (rsi_6h_val < 50 or vol_ratio_val < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchianBreakout_Trend_VolumeATR"
-timeframe = "1d"
+name = "6h_RSIOversold_1dFilter_Volume"
+timeframe = "6h"
 leverage = 1.0
