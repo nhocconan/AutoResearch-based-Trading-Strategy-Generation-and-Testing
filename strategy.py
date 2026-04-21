@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1W_1D_Camarilla_R1_S1_Breakout_With_Volume_Spike
-Hypothesis: On 12h timeframe, breakouts above Camarilla R1 level (from prior 1d) or below S1 level (from prior 1d) with volume spike (>2x median) and trend filter (1w EMA50) provide high-probability entries. Uses 12h close for signal generation. Designed for low trade frequency (12-37/year) to minimize fee drag while capturing breakouts in both bull and bear markets.
+1d_MeanReversion_BB_Bounce_with_Volume
+Hypothesis: Mean reversion on Bollinger Bands (20,2) at extremes (price touches upper/lower band) with volume confirmation (>1.5x 20-period average volume) and RSI filter (RSI<30 for long, RSI>70 for short). Uses 1w EMA50 trend filter to avoid counter-trend trades. Designed for low trade frequency (target 15-25 trades/year) to minimize fee drag while capturing reversals in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -16,80 +16,95 @@ def generate_signals(prices):
     # Load 1d and 1w HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 50:
+    if len(df_1d) < 30 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 1d Camarilla pivot levels (based on prior day) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d Bollinger Bands (20,2) ===
     close_1d = df_1d['close'].values
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
     
-    # Calculate pivot and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # === 1d RSI(14) ===
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
+    if len(close_1d) > 14:
+        avg_gain[13] = np.nanmean(gain[1:14])
+        avg_loss[13] = np.nanmean(loss[1:14])
+        for i in range(14, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    
-    # Align 1d levels to 12h timeframe (use prior day's levels for today's trading)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # === 1d Volume Average (20-period) ===
+    volume_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # === 1w EMA50 trend filter ===
     close_1w = df_1w['close'].values
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === Volume spike detection (12h) ===
-    volume = prices['volume'].values
-    # Calculate median volume over last 28 periods (14 days)
-    vol_median = np.full_like(volume, np.nan)
-    for i in range(28, len(volume)):
-        vol_median[i] = np.median(volume[i-28:i])
-    volume_spike = volume > (vol_median * 2.0)
+    # Align 1d indicators to lower timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after warmup
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(vol_median[i])):
+        if (np.isnan(upper_band_aligned[i]) or
+            np.isnan(lower_band_aligned[i]) or
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_avg_20_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        volume_current = prices['volume'].iloc[i]
+        upper = upper_band_aligned[i]
+        lower = lower_band_aligned[i]
+        rsi_val = rsi_aligned[i]
+        vol_avg = vol_avg_20_aligned[i]
         ema_50_val = ema_50_1w_aligned[i]
-        vol_spike = volume_spike[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * vol_avg
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike and above 1w EMA50 (uptrend)
-            if (price_close > r1_val and 
-                vol_spike and 
+            # Long: Price touches/lower band, RSI < 30 (oversold), volume confirmation, and above 1w EMA50 (uptrend bias)
+            if (price_close <= lower and 
+                rsi_val < 30 and 
+                vol_confirm and 
                 price_close > ema_50_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume spike and below 1w EMA50 (downtrend)
-            elif (price_close < s1_val and 
-                  vol_spike and 
+            # Short: Price touches/upper band, RSI > 70 (overbought), volume confirmation, and below 1w EMA50 (downtrend bias)
+            elif (price_close >= upper and 
+                  rsi_val > 70 and 
+                  vol_confirm and 
                   price_close < ema_50_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price crosses back through the pivot level
-            pivot_val = (high_1d[i//16] + low_1d[i//16] + close_1d[i//16]) / 3.0 if i >= 16 else np.nan
-            if position == 1 and price_close < pivot_val:
+            # Exit when price returns to middle (SMA20) or opposite band touch
+            sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
+            if position == 1 and price_close >= sma_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > pivot_val:
+            elif position == -1 and price_close <= sma_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1W_1D_Camarilla_R1_S1_Breakout_With_Volume_Spike"
-timeframe = "12h"
+name = "1d_MeanReversion_BB_Bounce_with_Volume"
+timeframe = "1d"
 leverage = 1.0
