@@ -1,103 +1,175 @@
 #!/usr/bin/env python3
 """
-1h_RSI2_4hTrend_MeanReversion_v1
-Hypothesis: On 1h timeframe, use 4h EMA50 trend filter and RSI(2) extreme readings for mean reversion entries.
-In bull regime (price > 4h EMA50): long when RSI(2) < 10 (oversold pullback).
-In bear regime (price < 4h EMA50): short when RSI(2) > 90 (overbought bounce).
-Add 08-20 UTC session filter to avoid low-liquidity hours. Use discrete sizing 0.20.
-Target: 60-120 total trades over 4 years (15-30/year) by combining tight RSI extremes with HTF trend filter.
+6h_Ichimoku_Cloud_1wTrend_v1
+Hypothesis: 6h Ichimoku cloud breakouts with 1w trend filter (price above/below weekly Kumo) for regime alignment. Uses TK cross for entry timing, cloud thickness for volatility filter, and discrete sizing (0.25). Target: 50-150 total trades over 4 years for BTC/ETH/SOL by combining multiple confirmation layers. Works in bull/bear via weekly trend filter that adapts to longer-term structure.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
+    """Calculate Ichimoku components: Tenkan-sen, Kijun-sen, Senkou Span A/B, Chikou Span"""
+    if len(high) < kijun:
+        return (np.full_like(high, np.nan, dtype=float),
+                np.full_like(high, np.nan, dtype=float),
+                np.full_like(high, np.nan, dtype=float),
+                np.full_like(high, np.nan, dtype=float),
+                np.full_like(high, np.nan, dtype=float))
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max().values
+    period9_low = pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min().values
+    tenkan_sen = (period9_high + period9_low) / 2.0
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=kijun, min_periods=kijun).max().values
+    period26_low = pd.Series(low).rolling(window=kijun, min_periods=kijun).min().values
+    kijun_sen = (period26_high + period26_low) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2.0
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    period52_high = pd.Series(high).rolling(window=senkou, min_periods=senkou).max().values
+    period52_low = pd.Series(low).rolling(window=senkou, min_periods=senkou).min().values
+    senkou_span_b = (period52_high + period52_low) / 2.0
+    
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    chikou_span = np.roll(close, -kijun)  # shifted left (future values)
+    
+    return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (4h for trend regime)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load HTF data ONCE before loop (1w for trend regime)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 4h EMA50 for trend regime ===
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # === 1w Ichimoku for trend regime ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 1h RSI(2) for mean reversion signals ===
+    tenkan_1w, kijun_1w, senkou_a_1w, senkou_b_1w, chikou_1w = calculate_ichimoku(
+        high_1w, low_1w, close_1w
+    )
+    
+    # Kumo (cloud) top and bottom
+    kumO_top_1w = np.maximum(senkou_a_1w, senkou_b_1w)
+    kumO_bottom_1w = np.minimum(senkou_a_1w, senkou_b_1w)
+    kumO_top_1w_aligned = align_htf_to_ltf(prices, df_1w, kumO_top_1w)
+    kumO_bottom_1w_aligned = align_htf_to_ltf(prices, df_1w, kumO_bottom_1w)
+    
+    # Cloud thickness (volatility filter)
+    cloud_thickness_1w = kumO_top_1w - kumO_bottom_1w
+    cloud_thickness_aligned = align_htf_to_ltf(prices, df_1w, cloud_thickness_1w)
+    
+    # === 6h Ichimoku for entry signals ===
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
     
-    # === Session filter: 08-20 UTC ===
-    # open_time is already datetime64[ms], use DatetimeIndex for .hour
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    tenkan_6h, kijun_6h, senkou_a_6h, senkou_b_6h, chikou_6h = calculate_ichimoku(
+        high, low, close
+    )
+    
+    # Kumo (cloud) top and bottom for 6h
+    kumO_top_6h = np.maximum(senkou_a_6h, senkou_b_6h)
+    kumO_bottom_6h = np.minimum(senkou_a_6h, senkou_b_6h)
+    
+    # TK Cross (Tenkan-sen crosses Kijun-sen)
+    tk_cross_up = (tenkan_6h > kijun_6h) & (np.roll(tenkan_6h, 1) <= np.roll(kijun_6h, 1))
+    tk_cross_down = (tenkan_6h < kijun_6h) & (np.roll(tenkan_6h, 1) >= np.roll(kijun_6h, 1))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    bars_since_entry = 0
     
-    for i in range(50, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
+    for i in range(52, n):  # wait for Ichimoku to warm up
         # Skip if indicators not ready
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]):
+        if (np.isnan(kumO_top_1w_aligned[i]) or np.isnan(kumO_bottom_1w_aligned[i]) or
+            np.isnan(cloud_thickness_aligned[i]) or np.isnan(tenkan_6h[i]) or 
+            np.isnan(kijun_6h[i]) or np.isnan(kumO_top_6h[i]) or np.isnan(kumO_bottom_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
         price = close[i]
-        ema_50_4h_val = ema_50_4h_aligned[i]
-        rsi_val = rsi[i]
+        kumO_top_1w = kumO_top_1w_aligned[i]
+        kumO_bottom_1w = kumO_bottom_1w_aligned[i]
+        cloud_thickness = cloud_thickness_aligned[i]
+        tenkan = tenkan_6h[i]
+        kijun = kijun_6h[i]
+        kumO_top = kumO_top_6h[i]
+        kumO_bottom = kumO_bottom_6h[i]
+        tk_up = tk_cross_up[i]
+        tk_down = tk_cross_down[i]
         
-        # Trend regime
-        is_bull = price > ema_50_4h_val
-        is_bear = price < ema_50_4h_val
+        # Trend regime: price relative to weekly Kumo
+        is_bull = price > kumO_top_1w
+        is_bear = price < kumO_bottom_1w
+        
+        # Cloud thickness filter: avoid choppy clouds
+        thick_cloud = cloud_thickness > (0.01 * price)  # cloud > 1% of price
         
         if position == 0:
-            if is_bull:
-                # Bull regime: long oversold pullbacks
-                if rsi_val < 10:
-                    signals[i] = 0.20
-                    position = 1
-            else:  # bear regime
-                # Bear regime: short overbought bounces
-                if rsi_val > 90:
-                    signals[i] = -0.20
-                    position = -1
+            if is_bull and thick_cloud:
+                # Bull regime: long on TK cross up, price above cloud
+                long_condition = tk_up and (price > kumO_top)
+            elif is_bear and thick_cloud:
+                # Bear regime: short on TK cross down, price below cloud
+                short_condition = tk_down and (price < kumO_bottom)
+            else:
+                long_condition = False
+                short_condition = False
+            
+            if long_condition:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                bars_since_entry = 0
+            elif short_condition:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                bars_since_entry = 0
         
         elif position != 0:
-            # Exit conditions: RSI mean reversion or regime change
-            if position == 1:  # long
-                if rsi_val > 50 or not is_bull:  # RSI mean reverted or regime turned bear
+            bars_since_entry += 1
+            
+            # Minimum holding period of 4 bars to reduce churn
+            if bars_since_entry < 4:
+                signals[i] = 0.25 if position == 1 else -0.25
+                continue
+            
+            # Exit conditions
+            if position == 1:
+                # Exit long: TK cross down OR price breaks below cloud bottom
+                if tk_down or (price < kumO_bottom):
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
-                    signals[i] = 0.20
-            else:  # position == -1, short
-                if rsi_val < 50 or not is_bear:  # RSI mean reverted or regime turned bull
+                    signals[i] = 0.25
+            else:  # position == -1
+                # Exit short: TK cross up OR price breaks above cloud top
+                if tk_up or (price > kumO_top):
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI2_4hTrend_MeanReversion_v1"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_1wTrend_v1"
+timeframe = "6h"
 leverage = 1.0
