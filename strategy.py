@@ -1,53 +1,27 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend
-Hypothesis: Breakouts of Donchian channels (20-period) on 4h timeframe with 
-volume confirmation and 4h trend filter (HMA 21). Trend filter prevents 
-counter-trend trades. Volume ensures breakout strength. Works in bull markets 
-by capturing breakouts and in bear markets by capturing breakdowns. 
-Target: 20-40 trades/year per symbol, low frequency to minimize fee drag.
+1h_4h_1d_Pivot_R1S1_Breakout_With_Volume
+Hypothesis: Use 4h and 1d timeframe Pivot R1/S1 levels for trend direction, with 1h breakout entries.
+In uptrend (price > 4h pivot AND price > 1d pivot), buy when price breaks above 4h R1 with volume confirmation.
+In downtrend (price < 4h pivot AND price < 1d pivot), sell when price breaks below 4h S1 with volume confirmation.
+Uses 4h ATR for volatility filter to avoid choppy markets.
+Session filter (08-20 UTC) to avoid low-volume sessions.
+Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_hma(arr, period):
-    """Hull Moving Average"""
-    n = len(arr)
-    if n < period:
-        return np.full(n, np.nan)
-    half = period // 2
-    sqrt = int(np.sqrt(period))
-    
-    # WMA function
-    def wma(x, w):
-        if len(x) < w:
-            return np.full_like(x, np.nan)
-        weights = np.arange(1, w + 1)
-        return np.convolve(x, weights, 'valid') / weights.sum()
-    
-    wma_half = wma(arr, half)
-    wma_full = wma(arr, period)
-    if len(wma_half) == 0 or len(wma_full) == 0:
-        return np.full(n, np.nan)
-    
-    raw = 2 * wma_half - wma_full
-    hma = wma(raw, sqrt)
-    
-    # Pad with NaN to match original length
-    result = np.full(n, np.nan)
-    start_idx = period - half  # rough approximation
-    if start_idx < len(hma):
-        end_idx = start_idx + len(hma)
-        if end_idx <= n:
-            result[start_idx:end_idx] = hma[:n-start_idx]
-        else:
-            result[start_idx:n] = hma[:n-start_idx]
-    return result
+def calculate_pivots(high, low, close):
+    """Calculate Pivot Points: P, R1, R2, S1, S2"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    return pivot, r1, s1
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Calculate Average True Range"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -68,45 +42,53 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for Donchian, HMA trend
+    # Load 4h and 1d data once for pivots and ATR
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
+    # Calculate 4h pivots and ATR
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Donchian channels (20-period)
-    if len(high_4h) >= 20:
-        dc_high = np.full(len(high_4h), np.nan)
-        dc_low = np.full(len(high_4h), np.nan)
-        for i in range(19, len(high_4h)):
-            dc_high[i] = np.max(high_4h[i-19:i+1])
-            dc_low[i] = np.min(low_4h[i-19:i+1])
-    else:
-        dc_high = np.full(len(high_4h), np.nan)
-        dc_low = np.full(len(high_4h), np.nan)
-    
-    # HMA 21 for trend
-    hma_21 = calculate_hma(close_4h, 21)
-    
-    # Align to lower timeframe
-    dc_high_aligned = align_htf_to_ltf(prices, df_4h, dc_high)
-    dc_low_aligned = align_htf_to_ltf(prices, df_4h, dc_low)
-    hma_21_aligned = align_htf_to_ltf(prices, df_4h, hma_21)
-    
-    # 4h ATR for volatility filter
+    pivot_4h, r1_4h, s1_4h = calculate_pivots(high_4h, low_4h, close_4h)
     atr_4h = calculate_atr(high_4h, low_4h, close_4h, 14)
+    
+    # Calculate 1d pivots
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    pivot_1d, _, _ = calculate_pivots(high_1d, low_1d, close_1d)
+    
+    # Align to 1h timeframe
+    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
     atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(dc_high_aligned[i]) or np.isnan(dc_low_aligned[i]) or 
-            np.isnan(hma_21_aligned[i]) or np.isnan(atr_4h_aligned[i])):
+        if (np.isnan(pivot_4h_aligned[i]) or np.isnan(r1_4h_aligned[i]) or 
+            np.isnan(s1_4h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
+            np.isnan(pivot_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: 08-20 UTC only (avoid low-volume Asian session)
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -115,53 +97,53 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.3 * 20-period average
+        # Volume filter: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.3 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
-        # Volatility filter: avoid extremely low volatility
-        if i >= 30:
-            vol_filter = atr_4h_aligned[i] > np.percentile(atr_4h_aligned[:i+1], 25)
+        # Volatility filter: avoid extremely low volatility (choppy markets)
+        if i >= 20:
+            vol_filter = atr_4h_aligned[i] > np.percentile(atr_4h_aligned[:i+1], 30)
         else:
             vol_filter = True
         
         if position == 0:
-            # Uptrend: price > HMA21
-            if price > hma_21_aligned[i]:
-                # Long: price breaks above Donchian high with volume
-                if (price > dc_high_aligned[i] and 
+            # Uptrend: price > 4h pivot AND price > 1d pivot
+            if price > pivot_4h_aligned[i] and price > pivot_1d_aligned[i]:
+                # Long: price breaks above 4h R1 with volume confirmation
+                if (price > r1_4h_aligned[i] and 
                     volume_ok and vol_filter):
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                     position = 1
-            # Downtrend: price < HMA21
-            elif price < hma_21_aligned[i]:
-                # Short: price breaks below Donchian low with volume
-                if (price < dc_low_aligned[i] and 
+            # Downtrend: price < 4h pivot AND price < 1d pivot
+            elif price < pivot_4h_aligned[i] and price < pivot_1d_aligned[i]:
+                # Short: price breaks below 4h S1 with volume confirmation
+                if (price < s1_4h_aligned[i] and 
                     volume_ok and vol_filter):
-                    signals[i] = -0.25
+                    signals[i] = -0.20
                     position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or Donchian low break
-            if price < hma_21_aligned[i] or price < dc_low_aligned[i]:
+            # Long exit: trend reversal (price below either pivot) or volatility drops
+            if price < pivot_4h_aligned[i] or price < pivot_1d_aligned[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: trend reversal or Donchian high break
-            if price > hma_21_aligned[i] or price > dc_high_aligned[i]:
+            # Short exit: trend reversal (price above either pivot) or volatility drops
+            if price > pivot_4h_aligned[i] or price > pivot_1d_aligned[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1h_4h_1d_Pivot_R1S1_Breakout_With_Volume"
+timeframe = "1h"
 leverage = 1.0
