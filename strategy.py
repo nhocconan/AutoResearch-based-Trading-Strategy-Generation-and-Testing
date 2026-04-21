@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_ChopRegime_v2
-Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.8x average) and choppiness regime filter (CHOP>61.8 = range). 
-Long when price breaks above Donchian upper band in ranging markets; short when price breaks below lower band.
-Mean reversion logic works in both bull and bear markets by fading extremes during consolidation.
-Volume confirmation reduces false breakouts. ATR(14) stoploss (2.0x) and discrete sizing (0.25).
-Designed to avoid overtrading (< 30 trades/year per symbol) via tight entry conditions.
+12h_KAMA_Regime_Filter_DonchianExit
+Hypothesis: On 12h timeframe, use KAMA trend direction as primary signal, filtered by 1d chop regime (range = mean reversion, trend = trend follow). 
+Enter long when KAMA bullish AND chop < 38.2 (trending) OR KAMA bullish AND chop > 61.8 (mean revert to upside); short when KAMA bearish AND chop < 38.2 OR KAMA bearish AND chop > 61.8 (mean revert to downside).
+Use 1d Donchian(20) breakout for exit to capture larger moves. Discrete sizing 0.25. Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull and bear markets via regime adaptation.
 """
 
 import numpy as np
@@ -14,98 +12,119 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # === 4h Donchian channels (20-period) ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Load HTF data ONCE before loop (1d for KAMA, chop, Donchian)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Upper band: highest high over past 20 bars
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over past 20 bars
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === Volume confirmation (50-period average) ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    
-    # === ATR (14-period) for stoploss ===
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # === Choppiness Index regime filter (14-period) ===
-    # CHOP = 100 * log10(sum(TR over n) / (n * (max(high) - min(low)))) / log10(n)
-    # Range: 0-100, >61.8 = ranging, <38.2 = trending
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    denominator = 14 * (max_high - min_low)
+    # === 1d KAMA for trend direction ===
+    close_1d = df_1d['close'].values
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close_1d, n=10))  # 10-period net change
+    vol = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # 10-period volatility
     # Avoid division by zero
-    chop_raw = np.where(denominator != 0, sum_tr / denominator, 1.0)
-    chop = 100 * np.log10(np.maximum(chop_raw, 1e-10)) / np.log10(14)
+    er = np.zeros_like(close_1d)
+    er[10:] = change[9:] / np.where(vol[9:] == 0, 1, vol[9:])
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Initialize KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # seed
+    for i in range(10, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # === 1d Choppiness Index (CHOP) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    # Sum of TR over 14 periods
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # CHOP formula
+    chop = np.full_like(close_1d, np.nan)
+    for i in range(13, len(close_1d)):
+        if sum_tr[i] > 0 and hh[i] != ll[i]:
+            chop[i] = 100 * np.log10(sum_tr[i] / (hh[i] - ll[i])) / np.log10(14)
+        else:
+            chop[i] = 50.0  # neutral
+    
+    # === 1d Donchian(20) for exit ===
+    donch_h = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_l = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align all 1d indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    donch_h_aligned = align_htf_to_ltf(prices, df_1d, donch_h)
+    donch_l_aligned = align_htf_to_ltf(prices, df_1d, donch_l)
+    
+    # === 12h price for entry/exit ===
+    close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if indicators not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) 
-            or np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) 
+            or np.isnan(donch_h_aligned[i]) or np.isnan(donch_l_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        volume_now = volume[i]
-        vol_avg = vol_ma[i]
-        chop_value = chop[i]
+        kama_val = kama_aligned[i]
+        chop_val = chop_aligned[i]
+        donch_h_val = donch_h_aligned[i]
+        donch_l_val = donch_l_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x average (tight filter)
-        volume_confirmed = volume_now > 1.8 * vol_avg
-        
-        # Regime filter: only trade in ranging markets (CHOP > 61.8)
-        ranging_market = chop_value > 61.8
+        # Determine market regime and entry conditions
+        is_trending = chop_val < 38.2
+        is_ranging = chop_val > 61.8
         
         if position == 0:
-            # Enter only in ranging markets with volume confirmation
-            long_condition = (price > highest_high[i]) and volume_confirmed and ranging_market
-            short_condition = (price < lowest_low[i]) and volume_confirmed and ranging_market
-            
-            if long_condition:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            elif short_condition:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+            # Long conditions: KAMA bullish (price > KAMA)
+            if price > kama_val:
+                if is_trending or is_ranging:  # enter in both regimes but with different logic
+                    signals[i] = 0.25
+                    position = 1
+            # Short conditions: KAMA bearish (price < KAMA)
+            elif price < kama_val:
+                if is_trending or is_ranging:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Check stoploss (2.0x ATR)
-            if price < entry_price - 2.0 * atr[i]:
+            # Exit conditions
+            # Stop and reverse if KAMA turns bearish
+            if price < kama_val:
                 signals[i] = 0.0
                 position = 0
-            # Exit when price re-enters Donchian channel (mean reversion complete)
-            elif price < highest_high[i] and price > lowest_low[i]:
+            # Donchian breakout exit (profit target)
+            elif price > donch_h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (2.0x ATR)
-            if price > entry_price + 2.0 * atr[i]:
+            # Exit conditions
+            # Stop and reverse if KAMA turns bullish
+            if price > kama_val:
                 signals[i] = 0.0
                 position = 0
-            # Exit when price re-enters Donchian channel (mean reversion complete)
-            elif price < highest_high[i] and price > lowest_low[i]:
+            # Donchian breakout exit (profit target)
+            elif price < donch_l_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ChopRegime_v2"
-timeframe = "4h"
+name = "12h_KAMA_Regime_Filter_DonchianExit"
+timeframe = "12h"
 leverage = 1.0
