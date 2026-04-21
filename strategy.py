@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_1d_Keltner_Channel_Breakout_Volume
-Hypothesis: Use 1d Keltner Channel breakouts with volume confirmation on 12h timeframe.
-Long when price breaks above upper KC with volume > 1.5x 20-bar avg.
-Short when price breaks below lower KC with volume > 1.5x 20-bar avg.
-Exit when price returns to middle line (EMA).
-Designed for 12h timeframe to capture multi-day trends with ~15-35 trades/year.
+1h_4h_1D_Camarilla_Breakout_Scalp
+Hypothesis: Use 1d Camarilla R1/S1 breakouts on 1h timeframe with volume confirmation and 4h EMA trend filter.
+Long when price breaks above R1 with volume > 1.5x 20-bar avg AND price > EMA50(4h).
+Short when price breaks below S1 with volume > 1.5x 20-bar avg AND price < EMA50(4h).
+Exit when price crosses back through the pivot point (PP).
+Designed for 1h timeframe with 4h/1d filters to capture multi-day moves with ~15-37 trades/year.
 Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
-Volume filter reduces false breakouts and whipsaws.
+Volume and trend filters reduce false breakouts and whipsaws.
 """
 
 import numpy as np
@@ -19,7 +19,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Keltner Channel
+    # Load 1d data once for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -28,37 +28,44 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Keltner Channel parameters
-    kc_period = 20
-    kc_multiplier = 2.0
+    # Camarilla pivot levels (based on previous day)
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pp = np.full_like(close_1d, np.nan)
+    r1 = np.full_like(close_1d, np.nan)
+    s1 = np.full_like(close_1d, np.nan)
     
-    # Calculate EMA (middle line)
-    ema = pd.Series(close_1d).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
+    for i in range(1, len(high_1d)):
+        pp[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
+        r1[i] = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
+        s1[i] = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
     
-    # Calculate ATR
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
+    # Shift to align with current day (levels are based on previous day)
+    pp = np.roll(pp, 1)
+    r1 = np.roll(r1, 1)
+    s1 = np.roll(s1, 1)
+    pp[0] = np.nan
+    r1[0] = np.nan
+    s1[0] = np.nan
     
-    # Upper and lower channels
-    upper_kc = ema + (kc_multiplier * atr)
-    lower_kc = ema - (kc_multiplier * atr)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Align to 12h timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema)
-    upper_kc_aligned = align_htf_to_ltf(prices, df_1d, upper_kc)
-    lower_kc_aligned = align_htf_to_ltf(prices, df_1d, lower_kc)
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_aligned[i]) or np.isnan(upper_kc_aligned[i]) or 
-            np.isnan(lower_kc_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,33 +82,33 @@ def generate_signals(prices):
             volume_ok = False
         
         if position == 0:
-            # Long conditions: break above upper KC + volume confirmation
-            if price > upper_kc_aligned[i] and volume_ok:
-                signals[i] = 0.25
+            # Long conditions: break above R1 + volume confirmation + price above EMA50(4h)
+            if price > r1_aligned[i] and volume_ok and price > ema_50_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: break below lower KC + volume confirmation
-            elif price < lower_kc_aligned[i] and volume_ok:
-                signals[i] = -0.25
+            # Short conditions: break below S1 + volume confirmation + price below EMA50(4h)
+            elif price < s1_aligned[i] and volume_ok and price < ema_50_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle line (EMA)
-            if price < ema_aligned[i]:
+            # Long exit: price crosses back below pivot point
+            if price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price returns to middle line (EMA)
-            if price > ema_aligned[i]:
+            # Short exit: price crosses back above pivot point
+            if price > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_1d_Keltner_Channel_Breakout_Volume"
-timeframe = "12h"
+name = "1h_4h_1D_Camarilla_Breakout_Scalp"
+timeframe = "1h"
 leverage = 1.0
