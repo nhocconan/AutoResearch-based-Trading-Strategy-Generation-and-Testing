@@ -3,37 +3,36 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout (20) + volume confirmation + 12h EMA trend filter
-# Long when price breaks above 20-period Donchian upper band in uptrend (12h EMA50 rising)
-# Short when price breaks below 20-period Donchian lower band in downtrend (12h EMA50 falling)
-# Volume spike (>1.5x 20-period average) confirms breakout strength
-# Stop loss: exit when price reverses to opposite Donchian band
-# Target: 20-40 trades/year by requiring confluence of breakout, volume, and trend
-# Works in bull/bear: Trend filter prevents counter-trend trades, volatility-based stops adapt to market conditions
+# Hypothesis: 1h EMA crossover with 4h trend filter and volume confirmation
+# Long when 1h EMA(9) crosses above EMA(21) AND 4h EMA(50) is rising AND volume > 1.5x average
+# Short when 1h EMA(9) crosses below EMA(21) AND 4h EMA(50) is falling AND volume > 1.5x average
+# Uses 4h for trend direction (reduces whipsaws), 1h for entry timing
+# Volume filter ensures momentum confirmation
+# Target: 15-30 trades/year by requiring trend alignment + volume spike
+# Works in bull/bear: 4h EMA filter avoids counter-trend trades, volume confirms strength
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA(50) for trend direction
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align EMA50 to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Calculate 4h EMA(50) slope (rising/falling)
+    ema_slope_4h = np.diff(ema_50_4h_aligned, prepend=ema_50_4h_aligned[0])
+    ema_rising_4h = ema_slope_4h > 0
+    ema_falling_4h = ema_slope_4h < 0
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # Upper band: highest high of last 20 periods
-    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pre-compute 1h EMAs
+    close = prices['close'].values
+    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -41,9 +40,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(21, n):
         # Skip if data not ready
-        if np.isnan(ema_50_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_9[i]) or np.isnan(ema_21[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,39 +55,29 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Trend filter: EMA50 slope (rising/falling)
-        if i >= 21:
-            ema_now = ema_50_aligned[i]
-            ema_prev = ema_50_aligned[i-1]
-            ema_rising = ema_now > ema_prev
-            ema_falling = ema_now < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
-        
         if position == 0:
-            if volume_confirm:
-                # Long: price breaks above upper band in uptrend
-                if price > upper[i] and ema_rising:
-                    signals[i] = 0.25
+            # Look for EMA crossover with volume confirmation and 4h trend alignment
+            if ema_9[i] > ema_21[i] and ema_9[i-1] <= ema_21[i-1]:  # bullish crossover
+                if ema_rising_4h[i] and volume_confirm:
+                    signals[i] = 0.20
                     position = 1
-                # Short: price breaks below lower band in downtrend
-                elif price < lower[i] and ema_falling:
-                    signals[i] = -0.25
+            elif ema_9[i] < ema_21[i] and ema_9[i-1] >= ema_21[i-1]:  # bearish crossover
+                if ema_falling_4h[i] and volume_confirm:
+                    signals[i] = -0.20
                     position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: EMA crossover in opposite direction
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price breaks below lower band (trend reversal)
-                if price < lower[i]:
+                # Exit on bearish EMA crossover
+                if ema_9[i] < ema_21[i] and ema_9[i-1] >= ema_21[i-1]:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price breaks above upper band (trend reversal)
-                if price > upper[i]:
+                # Exit on bullish EMA crossover
+                if ema_9[i] > ema_21[i] and ema_9[i-1] <= ema_21[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -96,10 +85,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1h_EMA9_21_Crossover_4hEMA50_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
