@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Pivot_R1S1_Breakout_With_Volume
-Hypothesis: Use 4h and 1d timeframe Pivot R1/S1 levels for trend direction, with 1h breakout entries.
-In uptrend (price > 4h pivot AND price > 1d pivot), buy when price breaks above 4h R1 with volume confirmation.
-In downtrend (price < 4h pivot AND price < 1d pivot), sell when price breaks below 4h S1 with volume confirmation.
-Uses 4h ATR for volatility filter to avoid choppy markets.
-Session filter (08-20 UTC) to avoid low-volume sessions.
-Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years).
+6h_Supertrend_Trend_Follow
+Hypothesis: Use Supertrend (ATR=10, mult=3) on daily timeframe as trend filter.
+On 6h timeframe, enter long when price crosses above Supertrend line in uptrend,
+and short when price crosses below Supertrend line in downtrend.
+Exit when price crosses back over the Supertrend line.
+Designed to capture trends in both bull and bear markets while avoiding whipsaws
+through ATR-based dynamic support/resistance. Targets 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_pivots(high, low, close):
-    """Calculate Pivot Points: P, R1, R2, S1, S2"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    return pivot, r1, s1
-
-def calculate_atr(high, low, close, period=14):
+def calculate_atr(high, low, close, period=10):
     """Calculate Average True Range"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -37,58 +30,67 @@ def calculate_atr(high, low, close, period=14):
     
     return atr
 
+def calculate_supertrend(high, low, close, atr_period=10, multiplier=3):
+    """Calculate Supertrend indicator"""
+    atr = calculate_atr(high, low, close, atr_period)
+    
+    # Basic upper and lower bands
+    basic_ub = (high + low) / 2 + multiplier * atr
+    basic_lb = (high + low) / 2 - multiplier * atr
+    
+    # Final upper and lower bands
+    final_ub = np.zeros_like(close)
+    final_lb = np.zeros_like(close)
+    supertrend = np.zeros_like(close)
+    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close)):
+        if close[i-1] > final_ub[i-1]:
+            direction[i] = 1
+        elif close[i-1] < final_lb[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            final_ub[i] = min(basic_ub[i], final_ub[i-1])
+            final_lb[i] = basic_lb[i]
+        else:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = max(basic_lb[i], final_lb[i-1])
+        
+        if direction[i] == 1:
+            supertrend[i] = final_lb[i]
+        else:
+            supertrend[i] = final_ub[i]
+    
+    return supertrend, direction
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data once for pivots and ATR
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily data once for Supertrend
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h pivots and ATR
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    pivot_4h, r1_4h, s1_4h = calculate_pivots(high_4h, low_4h, close_4h)
-    atr_4h = calculate_atr(high_4h, low_4h, close_4h, 14)
-    
-    # Calculate 1d pivots
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot_1d, _, _ = calculate_pivots(high_1d, low_1d, close_1d)
-    
-    # Align to 1h timeframe
-    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Calculate Supertrend on daily (ATR=10, multiplier=3)
+    supertrend_1d, direction_1d = calculate_supertrend(high_1d, low_1d, close_1d, 10, 3)
+    supertrend_1d_aligned = align_htf_to_ltf(prices, df_1d, supertrend_1d)
+    direction_1d_aligned = align_htf_to_ltf(prices, df_1d, direction_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(pivot_4h_aligned[i]) or np.isnan(r1_4h_aligned[i]) or 
-            np.isnan(s1_4h_aligned[i]) or np.isnan(atr_4h_aligned[i]) or 
-            np.isnan(pivot_1d_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: 08-20 UTC only (avoid low-volume Asian session)
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
+        if (np.isnan(supertrend_1d_aligned[i]) or np.isnan(direction_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,53 +99,45 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
+        # Volume filter: current volume > 1.3 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
+            volume_ok = volume > 1.3 * vol_ma
         else:
             volume_ok = False
         
-        # Volatility filter: avoid extremely low volatility (choppy markets)
-        if i >= 20:
-            vol_filter = atr_4h_aligned[i] > np.percentile(atr_4h_aligned[:i+1], 30)
-        else:
-            vol_filter = True
-        
         if position == 0:
-            # Uptrend: price > 4h pivot AND price > 1d pivot
-            if price > pivot_4h_aligned[i] and price > pivot_1d_aligned[i]:
-                # Long: price breaks above 4h R1 with volume confirmation
-                if (price > r1_4h_aligned[i] and 
-                    volume_ok and vol_filter):
-                    signals[i] = 0.20
+            # Uptrend: direction = 1
+            if direction_1d_aligned[i] == 1:
+                # Long: price crosses above Supertrend
+                if price > supertrend_1d_aligned[i]:
+                    signals[i] = 0.25
                     position = 1
-            # Downtrend: price < 4h pivot AND price < 1d pivot
-            elif price < pivot_4h_aligned[i] and price < pivot_1d_aligned[i]:
-                # Short: price breaks below 4h S1 with volume confirmation
-                if (price < s1_4h_aligned[i] and 
-                    volume_ok and vol_filter):
-                    signals[i] = -0.20
+            # Downtrend: direction = -1
+            elif direction_1d_aligned[i] == -1:
+                # Short: price crosses below Supertrend
+                if price < supertrend_1d_aligned[i]:
+                    signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: trend reversal (price below either pivot) or volatility drops
-            if price < pivot_4h_aligned[i] or price < pivot_1d_aligned[i] or not vol_filter:
+            # Long exit: price crosses below Supertrend or trend changes
+            if price < supertrend_1d_aligned[i] or direction_1d_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal (price above either pivot) or volatility drops
-            if price > pivot_4h_aligned[i] or price > pivot_1d_aligned[i] or not vol_filter:
+            # Short exit: price crosses above Supertrend or trend changes
+            if price > supertrend_1d_aligned[i] or direction_1d_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_1d_Pivot_R1S1_Breakout_With_Volume"
-timeframe = "1h"
+name = "6h_Supertrend_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
