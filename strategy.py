@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_VolumeSpike_v1
-Hypothesis: On daily timeframe, price breaking above Camarilla R1 or below S1 levels from prior daily session captures institutional breakouts. Combined with 1-week EMA34 trend filter, volume spike confirmation, and ATR-based stoploss. Designed for low trade frequency (~15-25/year) to minimize fee drag and work in both bull (breakout continuation) and bear (breakdown continuation) regimes by following the weekly trend.
+6h_Donchian20_WeeklyPivot_Confluence_v1
+Hypothesis: On 6h timeframe, price breaking above Donchian(20) high or below Donchian(20) low captures medium-term momentum. Combined with weekly Camarilla pivot (R4/S4) for institutional level confirmation and volume spike filter (>1.8x 20-period average) to avoid false breakouts. Works in both bull (breakout continuation) and bear (breakdown continuation) regimes by following price structure. Designed for low trade frequency (~15-25/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -10,50 +10,47 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1-week for EMA trend)
+    # Load HTF data ONCE before loop (1d for Donchian, 1w for weekly pivot)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # === Donchian(20) from 1d timeframe ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Donchian high: 20-period rolling maximum of high
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Donchian low: 20-period rolling minimum of low
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # === Weekly Camarilla pivot levels (R4/S4) from 1w timeframe ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # === 1-week EMA34 for trend filter ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === Daily Camarilla levels from prior daily session (HLC of previous day) ===
-    # Note: For daily timeframe, we use the previous day's OHLC to calculate today's Camarilla levels
-    high_1d = df_1w['high'].values  # This is actually weekly high, need to get daily data differently
-    # Correction: For 1d timeframe, we need to load daily data for Camarilla calculation
-    # But since we're on 1d timeframe, prices already contain daily data
-    # So we need to calculate Camarilla from previous day's values within the prices dataframe
+    # Weekly Camarilla R4 and S4 levels
+    weekly_range = high_1w - low_1w
+    camarilla_r4 = close_1w + weekly_range * 1.1 / 2  # R4 = Close + 1.1*(Range)/2
+    camarilla_s4 = close_1w - weekly_range * 1.1 / 2  # S4 = Close - 1.1*(Range)/2
     
-    # For 1d timeframe, calculate Camarilla levels using prior day's OHLC from prices
-    high_prices = prices['high'].values
-    low_prices = prices['low'].values
-    close_prices = prices['close'].values
-    
-    # Shift by 1 to get previous day's values
-    prev_high = np.roll(high_prices, 1)
-    prev_low = np.roll(low_prices, 1)
-    prev_close = np.roll(close_prices, 1)
-    # First bar has no previous day
-    prev_high[0] = high_prices[0]
-    prev_low[0] = low_prices[0]
-    prev_close[0] = close_prices[0]
-    
-    # Camarilla R1, S1, R2, S2 from previous day
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    camarilla_r2 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    camarilla_s2 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
     # === Volume spike filter (20-period) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
     # === ATR for stoploss (14-period) ===
     high = prices['high'].values
@@ -72,11 +69,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,36 +82,35 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         price_high = prices['high'].iloc[i]
         price_low = prices['low'].iloc[i]
-        ema_34 = ema_34_1w_aligned[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        r4 = camarilla_r4_aligned[i]
+        s4 = camarilla_s4_aligned[i]
         vol_spike = vol_ratio[i]
-        r1 = camarilla_r1[i]
-        s1 = camarilla_s1[i]
-        r2 = camarilla_r2[i]
-        s2 = camarilla_s2[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above R1 (bullish breakout) + above weekly EMA34 + volume spike > 1.5
-            if price_close > r1 and price_close > ema_34 and vol_spike > 1.5:
+            # Long: price breaks above Donchian high AND above weekly R4 + volume spike > 1.8
+            if price_close > donchian_high_val and price_close > r4 and vol_spike > 1.8:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price_close
-            # Short: price breaks below S1 (bearish breakdown) + below weekly EMA34 + volume spike > 1.5
-            elif price_close < s1 and price_close < ema_34 and vol_spike > 1.5:
+            # Short: price breaks below Donchian low AND below weekly S4 + volume spike > 1.8
+            elif price_close < donchian_low_val and price_close < s4 and vol_spike > 1.8:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price_close
         
         elif position != 0:
-            # Stoploss: 2 * ATR from entry
+            # Stoploss: 2.5 * ATR from entry
             if position == 1:
-                if price_close < entry_price - 2.0 * atr_val:
+                if price_close < entry_price - 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price_close > entry_price + 2.0 * atr_val:
+                if price_close > entry_price + 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -122,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivot_Confluence_v1"
+timeframe = "6h"
 leverage = 1.0
