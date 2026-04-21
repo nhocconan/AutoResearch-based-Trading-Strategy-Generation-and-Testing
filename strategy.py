@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h CRSI (3-period RSI) with 1d ADX trend filter and volume spike confirmation.
-# CRSI combines RSI(3), RSI streak (2-period), and percentile rank for extreme readings.
-# Long when CRSI < 15 in uptrend (1d ADX > 25) with volume > 1.8x 20-period average.
-# Short when CRSI > 85 in downtrend (1d ADX > 25) with volume confirmation.
-# Exit when CRSI crosses back to neutral (40-60) or trend weakens (ADX < 20).
-# Targets 20-40 trades/year by requiring extreme CRSI + strong trend + volume.
-# Works in bull/bear: CRSI captures mean reversion in trends; ADX filter avoids chop.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day ADX(14) trend filter and volume confirmation.
+# Long when price breaks above upper Donchian in strong uptrend (1d ADX > 25), short when breaks below lower Donchian in strong downtrend.
+# Volume > 1.5x 20-period average confirms breakout strength. Uses ADX to filter weak trends and avoid whipsaws.
+# Target: 25-50 trades/year by requiring strong trend + volume + breakout alignment.
+# Works in bull/bear: ADX filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -52,63 +50,14 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilder_smooth(dx, 14)
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate RSI(3) for CRSI
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder smoothing for RSI
-    def rsi_wilder(series, period):
-        avg_gain = np.full_like(series, np.nan, dtype=float)
-        avg_loss = np.full_like(series, np.nan, dtype=float)
-        if len(series) >= period:
-            avg_gain[period-1] = np.mean(series[:period])
-            avg_loss[period-1] = np.mean(series[:period])
-            for i in range(period, len(series)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + series[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + series[i]) / period
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi_3 = rsi_wilder(gain, 3)
-    
-    # Calculate RSI streak (2-period consecutive up/down)
-    up_streak = np.zeros(n)
-    down_streak = np.zeros(n)
-    for i in range(1, n):
-        if delta[i] > 0:  # up day
-            up_streak[i] = up_streak[i-1] + 1
-            down_streak[i] = 0
-        elif delta[i] < 0:  # down day
-            down_streak[i] = down_streak[i-1] + 1
-            up_streak[i] = 0
-        else:  # unchanged
-            up_streak[i] = 0
-            down_streak[i] = 0
-    
-    # RSI of streak (using 2-period RSI on up/down streaks)
-    rsi_up_streak = rsi_wilder(up_streak, 2)
-    rsi_down_streak = rsi_wilder(down_streak, 2)
-    # CRSI uses the streak RSI based on direction
-    rsi_streak = np.where(delta >= 0, rsi_up_streak, rsi_down_streak)
-    
-    # Percentile rank of RSI(3) over 100 periods
-    def percentile_rank(series, window):
-        rank = np.full_like(series, np.nan, dtype=float)
-        for i in range(window-1, len(series)):
-            window_data = series[i-window+1:i+1]
-            rank[i] = np.sum(window_data <= series[i]) / window * 100
-        return rank
-    
-    rsi_3_percentile = percentile_rank(rsi_3, 100)
-    
-    # CRSI = average of three components
-    crsi = (rsi_3 + rsi_streak + rsi_3_percentile) / 3
+    # Calculate 20-period Donchian channels on 4h data
+    high_roll = prices['high'].rolling(window=20, min_periods=20).max()
+    low_roll = prices['low'].rolling(window=20, min_periods=20).min()
+    upper = high_roll.values
+    lower = low_roll.values
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -118,7 +67,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(crsi[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -128,20 +77,20 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_confirm = volume > 1.8 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume > 1.5 * vol_ma[i]
         
         # Trend filter: strong trend (ADX > 25)
         strong_trend = adx_aligned[i] > 25
         
         if position == 0:
             if volume_confirm and strong_trend:
-                # Long: CRSI extremely oversold (<15) in uptrend
-                if crsi[i] < 15:
+                # Long: price breaks above upper Donchian
+                if price > upper[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: CRSI extremely overbought (>85) in downtrend
-                elif crsi[i] > 85:
+                # Short: price breaks below lower Donchian
+                elif price < lower[i]:
                     signals[i] = -0.25
                     position = -1
         
@@ -150,13 +99,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if CRSI returns to neutral (40-60) or trend weakens
-                if crsi[i] > 40 or adx_aligned[i] < 20:
+                # Exit if price breaks below lower Donchian (failed breakout) or weak trend
+                if price < lower[i] or adx_aligned[i] < 20:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if CRSI returns to neutral (40-60) or trend weakens
-                if crsi[i] < 60 or adx_aligned[i] < 20:
+                # Exit if price breaks above upper Donchian (failed breakdown) or weak trend
+                if price > upper[i] or adx_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -168,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_CRSI3_1dADX14_Trend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dADX14_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
