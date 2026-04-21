@@ -1,13 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_Volume_v2
-Hypothesis: Use Camarilla pivot levels (R1, S1) from 1d timeframe with volume confirmation and volatility filter.
-Long when price breaks above R1 with volume > 1.5x average and price > 20-period SMA.
-Short when price breaks below S1 with volume > 1.5x average and price < 20-period SMA.
+4h_12h_Camarilla_R1S1_Breakout_Volume
+Hypothesis: Use Camarilla pivot levels (R1, S1) from 12h timeframe with volume confirmation on 4h.
+Long when price breaks above R1 with volume > 1.5x average volume.
+Short when price breaks below S1 with volume > 1.5x average volume.
 Exit when price crosses back through the pivot point (PP).
-The SMA filter ensures trades are taken in the direction of short-term momentum.
-Designed for 12h timeframe to capture multi-day moves with ~15-30 trades/year.
+Designed for 4h timeframe to capture multi-day moves with ~20-50 trades/year.
 Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
 Volume confirmation filters false breakouts.
 """
@@ -21,29 +19,29 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data once for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Camarilla pivot levels (based on previous day)
+    # Camarilla pivot levels (based on previous 12h bar)
     # PP = (H + L + C) / 3
     # R1 = C + (H - L) * 1.1 / 12
     # S1 = C - (H - L) * 1.1 / 12
-    pp = np.full_like(close_1d, np.nan)
-    r1 = np.full_like(close_1d, np.nan)
-    s1 = np.full_like(close_1d, np.nan)
+    pp = np.full_like(close_12h, np.nan)
+    r1 = np.full_like(close_12h, np.nan)
+    s1 = np.full_like(close_12h, np.nan)
     
-    for i in range(1, len(high_1d)):
-        pp[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
-        r1[i] = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
-        s1[i] = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
+    for i in range(1, len(high_12h)):
+        pp[i] = (high_12h[i-1] + low_12h[i-1] + close_12h[i-1]) / 3.0
+        r1[i] = close_12h[i-1] + (high_12h[i-1] - low_12h[i-1]) * 1.1 / 12.0
+        s1[i] = close_12h[i-1] - (high_12h[i-1] - low_12h[i-1]) * 1.1 / 12.0
     
-    # Shift to align with current day (levels are based on previous day)
+    # Shift to align with current 12h bar (levels are based on previous 12h bar)
     pp = np.roll(pp, 1)
     r1 = np.roll(r1, 1)
     s1 = np.roll(s1, 1)
@@ -51,20 +49,16 @@ def generate_signals(prices):
     r1[0] = np.nan
     s1[0] = np.nan
     
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 20-period SMA for momentum filter
-    close_series = prices['close']
-    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
+    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(sma20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,17 +74,13 @@ def generate_signals(prices):
         else:
             volume_ok = False
         
-        # Momentum filter: price relative to 20-period SMA
-        price_above_sma = price > sma20[i]
-        price_below_sma = price < sma20[i]
-        
         if position == 0:
-            # Long conditions: break above R1 + volume confirmation + price above SMA
-            if price > r1_aligned[i] and volume_ok and price_above_sma:
+            # Long conditions: break above R1 + volume confirmation
+            if price > r1_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S1 + volume confirmation + price below SMA
-            elif price < s1_aligned[i] and volume_ok and price_below_sma:
+            # Short conditions: break below S1 + volume confirmation
+            elif price < s1_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
@@ -112,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_v2"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1S1_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
