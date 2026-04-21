@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v2
-Hypothesis: Refined version of Camarilla breakout with stricter volume filter (2.0x avg volume) 
-and ADX > 30 to reduce trade frequency. Targets 20-40 trades/year per symbol. 
-Long on R1 breakout with volume spike and strong trend; short on S1 breakdown. 
-Exit at pivot point. Works in bull/bear by capturing breakouts in trending regimes.
+4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v3
+Hypothesis: Further refined Camarilla breakout with 2.5x volume filter and ADX > 35 to reduce trades to 20-30/year.
+Uses only R1/S1 breakouts with strict volume and trend confirmation. Exits at pivot point.
+Designed to work in both bull and bear by capturing strong breakouts in trending regimes only.
 """
 
 import numpy as np
@@ -112,15 +111,15 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average (stricter)
+        # Volume filter: current volume > 2.5 * 20-period average (stricter)
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 2.5 * vol_ma
         else:
             volume_ok = False
         
-        # Regime filter: ADX > 30 indicates strong trending market
-        trending = adx[i] > 30
+        # Regime filter: ADX > 35 indicates strong trending market
+        trending = adx[i] > 35
         
         if position == 0:
             # Long conditions: break above R1 + volume + strong trend
@@ -150,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v2"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v3"
 timeframe = "4h"
 leverage = 1.0
