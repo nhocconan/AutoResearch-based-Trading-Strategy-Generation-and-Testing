@@ -1,63 +1,78 @@
 #!/usr/bin/env python3
 """
-1d_1w_Turtle_Soup_Reversal
-Hypothesis: Use 1-week Donchian breakout reversal with volume confirmation on 1d.
-When price breaks above 1-week high but closes below previous 1d close, short reversal.
-When price breaks below 1-week low but closes above previous 1d close, long reversal.
-This traps breakout traders and captures mean reversion in ranging markets.
-Works in bull markets by selling false breakouts and in bear markets by buying false breakdowns.
-Volume confirmation ensures genuine participation.
+12h_1d_Engulfing_Pattern_Reversal
+Hypothesis: Use 12h timeframe with daily bullish/bearish engulfing patterns for reversal signals.
+Long when bullish engulfing forms at support (below 200 EMA) with volume confirmation.
+Short when bearish engulfing forms at resistance (above 200 EMA) with volume confirmation.
+Exit on opposite engulfing signal or when price crosses 200 EMA.
+Works in bull markets by buying dips and in bear markets by selling rallies.
+Engulfing patterns signal strong reversals, reducing false signals.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data once for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Calculate 200 EMA on close prices
+    close = prices['close'].values
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Load 1d data for engulfing patterns
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate bullish and bearish engulfing patterns on daily data
+    open_1d = df_1d['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-period Donchian channels on weekly
-    high_20 = np.full_like(high_1w, np.nan)
-    low_20 = np.full_like(low_1w, np.nan)
+    bullish_engulfing = np.zeros(len(close_1d), dtype=bool)
+    bearish_engulfing = np.zeros(len(close_1d), dtype=bool)
     
-    for i in range(len(high_1w)):
-        if i >= 19:
-            high_20[i] = np.max(high_1w[i-19:i+1])
-            low_20[i] = np.min(low_1w[i-19:i+1])
+    for i in range(1, len(close_1d)):
+        # Bullish engulfing: current green candle engulfs previous red candle
+        if (close_1d[i] > open_1d[i] and  # current candle is green
+            open_1d[i-1] > close_1d[i-1] and  # previous candle is red
+            close_1d[i] >= open_1d[i-1] and  # current close >= previous open
+            open_1d[i] <= close_1d[i-1]):   # current open <= previous close
+            bullish_engulfing[i] = True
+        
+        # Bearish engulfing: current red candle engulfs previous green candle
+        if (close_1d[i] < open_1d[i] and  # current candle is red
+            open_1d[i-1] < close_1d[i-1] and  # previous candle is green
+            close_1d[i] <= open_1d[i-1] and  # current close <= previous open
+            open_1d[i] >= close_1d[i-1]):   # current open >= previous close
+            bearish_engulfing[i] = True
     
-    # Shift to align with current week (breakout based on prior week)
-    high_20 = np.roll(high_20, 1)
-    low_20 = np.roll(low_20, 1)
-    high_20[0] = np.nan
-    low_20[0] = np.nan
+    # Shift patterns to align with next day (patterns known after candle close)
+    bullish_engulfing = np.roll(bullish_engulfing, 1)
+    bearish_engulfing = np.roll(bearish_engulfing, 1)
+    bullish_engulfing[0] = False
+    bearish_engulfing[0] = False
     
-    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    # Align to 12h timeframe
+    bullish_engulfing_aligned = align_htf_to_ltf(prices, df_1d, bullish_engulfing.astype(float))
+    bearish_engulfing_aligned = align_htf_to_ltf(prices, df_1d, bearish_engulfing.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if indicators not ready
-        if np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]):
+        # Skip if EMA not ready
+        if np.isnan(ema_200[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        prev_close = prices['close'].iloc[i-1]
         volume = prices['volume'].iloc[i]
         
         # Volume filter: current volume > 1.3 * 20-period average
@@ -68,26 +83,26 @@ def generate_signals(prices):
             volume_ok = False
         
         if position == 0:
-            # Long reversal: price breaks below weekly low but closes above prev close (bullish engulfing)
-            if price < low_20_aligned[i] and prev_close > low_20_aligned[i] and volume_ok:
+            # Long conditions: bullish engulfing + price below 200 EMA + volume
+            if bullish_engulfing_aligned[i] > 0.5 and price < ema_200[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short reversal: price breaks above weekly high but closes below prev close (bearish engulfing)
-            elif price > high_20_aligned[i] and prev_close < high_20_aligned[i] and volume_ok:
+            # Short conditions: bearish engulfing + price above 200 EMA + volume
+            elif bearish_engulfing_aligned[i] > 0.5 and price > ema_200[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below weekly low or reversal signal
-            if price < low_20_aligned[i]:
+            # Long exit: bearish engulfing or price crosses above 200 EMA
+            if bearish_engulfing_aligned[i] > 0.5 or price > ema_200[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above weekly high or reversal signal
-            if price > high_20_aligned[i]:
+            # Short exit: bullish engulfing or price crosses below 200 EMA
+            if bullish_engulfing_aligned[i] > 0.5 or price < ema_200[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Turtle_Soup_Reversal"
-timeframe = "1d"
+name = "12h_1d_Engulfing_Pattern_Reversal"
+timeframe = "12h"
 leverage = 1.0
