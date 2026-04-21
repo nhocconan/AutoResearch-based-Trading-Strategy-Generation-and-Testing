@@ -1,136 +1,120 @@
 #!/usr/bin/env python3
 """
-6h_Supertrend_Trend_Follow
-Hypothesis: Use Supertrend (ATR=10, mult=3) on daily timeframe as trend filter.
-On 6h timeframe, enter long when price crosses above Supertrend line in uptrend,
-and short when price crosses below Supertrend line in downtrend.
-Exit when price crosses back over the Supertrend line.
-Designed to capture trends in both bull and bear markets while avoiding whipsaws
-through ATR-based dynamic support/resistance. Targets 50-150 trades over 4 years.
+1d_1w_Weekly_Camarilla_R1S1_Breakout_Volume_Trend_Filter_v1
+Hypothesis: On daily timeframe, use weekly Camarilla pivot levels (R1/S1) as breakout triggers.
+Enter long when price breaks above weekly R1 with volume confirmation and price > weekly EMA20 (uptrend filter).
+Enter short when price breaks below weekly S1 with volume confirmation and price < weekly EMA20 (downtrend filter).
+Exit on opposite breakout or trend reversal.
+Designed for 1d timeframe to target 20-40 trades/year with high-conviction entries.
+Works in bull markets by capturing continuation breaks and in bear markets by capturing breakdowns.
+Weekly timeframe provides stable structure; daily execution improves timing.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_atr(high, low, close, period=10):
-    """Calculate Average True Range"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = np.zeros_like(tr)
-    if len(tr) >= period:
-        atr[period-1] = np.mean(tr[:period])
-    
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    return atr
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average"""
+    ema = np.zeros_like(close)
+    if len(close) >= period:
+        ema[period-1] = np.mean(close[:period])
+        multiplier = 2 / (period + 1)
+        for i in range(period, len(close)):
+            ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
+    return ema
 
-def calculate_supertrend(high, low, close, atr_period=10, multiplier=3):
-    """Calculate Supertrend indicator"""
-    atr = calculate_atr(high, low, close, atr_period)
-    
-    # Basic upper and lower bands
-    basic_ub = (high + low) / 2 + multiplier * atr
-    basic_lb = (high + low) / 2 - multiplier * atr
-    
-    # Final upper and lower bands
-    final_ub = np.zeros_like(close)
-    final_lb = np.zeros_like(close)
-    supertrend = np.zeros_like(close)
-    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close)):
-        if close[i-1] > final_ub[i-1]:
-            direction[i] = 1
-        elif close[i-1] < final_lb[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        if direction[i] == 1:
-            final_ub[i] = min(basic_ub[i], final_ub[i-1])
-            final_lb[i] = basic_lb[i]
-        else:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = max(basic_lb[i], final_lb[i-1])
-        
-        if direction[i] == 1:
-            supertrend[i] = final_lb[i]
-        else:
-            supertrend[i] = final_ub[i]
-    
-    return supertrend, direction
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    # Typical price
+    tp = (high + low + close) / 3.0
+    # Range
+    r = high - low
+    # Camarilla levels
+    S1 = tp - (1.1 * r / 12)
+    S2 = tp - (1.1 * r / 6)
+    S3 = tp - (1.1 * r / 4)
+    R1 = tp + (1.1 * r / 12)
+    R2 = tp + (1.1 * r / 6)
+    R3 = tp + (1.1 * r / 4)
+    return R1, R2, R3, S1, S2, S3
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for Supertrend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data once for Camarilla, EMA trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Supertrend on daily (ATR=10, multiplier=3)
-    supertrend_1d, direction_1d = calculate_supertrend(high_1d, low_1d, close_1d, 10, 3)
-    supertrend_1d_aligned = align_htf_to_ltf(prices, df_1d, supertrend_1d)
-    direction_1d_aligned = align_htf_to_ltf(prices, df_1d, direction_1d)
+    # Weekly EMA20 for trend filter
+    ema20_1w = calculate_ema(close_1w, 20)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    
+    # Weekly Camarilla levels (recalculate each week)
+    R1_1w = np.full_like(close_1w, np.nan)
+    S1_1w = np.full_like(close_1w, np.nan)
+    
+    for i in range(len(df_1w)):
+        R1, _, _, S1, _, _ = calculate_camarilla(high_1w[i], low_1w[i], close_1w[i])
+        R1_1w[i] = R1
+        S1_1w[i] = S1
+    
+    R1_1w_aligned = align_htf_to_ltf(prices, df_1w, R1_1w)
+    S1_1w_aligned = align_htf_to_ltf(prices, df_1w, S1_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if indicators not ready
-        if (np.isnan(supertrend_1d_aligned[i]) or np.isnan(direction_1d_aligned[i])):
+        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(R1_1w_aligned[i]) or 
+            np.isnan(S1_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
         
         # Volume filter: current volume > 1.3 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.3 * vol_ma
+            volume_ok = prices['volume'].iloc[i] > 1.3 * vol_ma
         else:
             volume_ok = False
         
         if position == 0:
-            # Uptrend: direction = 1
-            if direction_1d_aligned[i] == 1:
-                # Long: price crosses above Supertrend
-                if price > supertrend_1d_aligned[i]:
+            # Uptrend: price > weekly EMA20
+            if price > ema20_1w_aligned[i]:
+                # Long: price breaks above weekly R1 with volume confirmation
+                if price > R1_1w_aligned[i] and volume_ok:
                     signals[i] = 0.25
                     position = 1
-            # Downtrend: direction = -1
-            elif direction_1d_aligned[i] == -1:
-                # Short: price crosses below Supertrend
-                if price < supertrend_1d_aligned[i]:
+            # Downtrend: price < weekly EMA20
+            elif price < ema20_1w_aligned[i]:
+                # Short: price breaks below weekly S1 with volume confirmation
+                if price < S1_1w_aligned[i] and volume_ok:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: price crosses below Supertrend or trend changes
-            if price < supertrend_1d_aligned[i] or direction_1d_aligned[i] == -1:
+            # Long exit: trend reversal or opposite breakout
+            if price < ema20_1w_aligned[i] or price < S1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Supertrend or trend changes
-            if price > supertrend_1d_aligned[i] or direction_1d_aligned[i] == 1:
+            # Short exit: trend reversal or opposite breakout
+            if price > ema20_1w_aligned[i] or price > R1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -138,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Supertrend_Trend_Follow"
-timeframe = "6h"
+name = "1d_1w_Weekly_Camarilla_R1S1_Breakout_Volume_Trend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
