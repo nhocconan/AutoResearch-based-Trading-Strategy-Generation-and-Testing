@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_HTF_Donchian20_Breakout_VolumeSpike_ATRStop_V1
-Hypothesis: Use 1d Donchian(20) breakout with volume spike (>2x 20-bar MA) and ATR(14) stoploss (2.0x) on 12h timeframe. Donchian channels provide robust trend-following structure, volume confirms breakout strength, ATR stop manages risk. Designed to work in both bull (catch momentum) and bear (fade false breaks via tight stops) markets. Target 12-30 trades/year per symbol.
+4h_HTF_Donchian20_Breakout_VolumeSpike_ATRStop_V1
+Hypothesis: Use 4h Donchian channel (20) breakouts confirmed by volume spike (>2x 20-bar MA) with ATR(14) stoploss (2.0x). 
+Donchian provides objective trend structure, volume filters weak breakouts, ATR stop manages risk in volatile markets. 
+Works in bull (catch breakouts) and bear (fade false breaks via tight stops) by relying on price structure and volume confirmation.
+Target: 20-40 trades/year per symbol (<160 total 4h trades over 4 years).
 """
 
 import numpy as np
@@ -13,29 +16,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')  # for daily Donchian channels
-    
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # === 1d Donchian Channels (20-period) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Donchian high/low (20-period)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    
-    # === 12h Indicators ===
+    # === 4h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Donchian channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,7 +42,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) 
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,26 +54,26 @@ def generate_signals(prices):
         vol_ok = vol > 2.0 * vol_ma[i]  # volume spike confirmation
         
         if position == 0:
-            # Long: break above 1d Donchian high with volume spike
-            if price > donch_high_aligned[i-1] and vol_ok:
+            # Long: break above Donchian upper with volume spike
+            if price > highest_high[i-1] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 1d Donchian low with volume spike
-            elif price < donch_low_aligned[i-1] and vol_ok:
+            # Short: break below Donchian lower with volume spike
+            elif price < lowest_low[i-1] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: ATR stoploss or opposite breakout
-            if price < donch_high_aligned[i-1] - 2.0 * atr[i] or price < donch_low_aligned[i-1]:
+            # Exit: ATR stoploss or opposite signal
+            if price < highest_high[i-1] - 2.0 * atr[i] or (price < lowest_low[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: ATR stoploss or opposite breakout
-            if price > donch_low_aligned[i-1] + 2.0 * atr[i] or price > donch_high_aligned[i-1]:
+            # Exit: ATR stoploss or opposite signal
+            if price > lowest_low[i-1] + 2.0 * atr[i] or (price > highest_high[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_HTF_Donchian20_Breakout_VolumeSpike_ATRStop_V1"
-timeframe = "12h"
+name = "4h_HTF_Donchian20_Breakout_VolumeSpike_ATRStop_V1"
+timeframe = "4h"
 leverage = 1.0
