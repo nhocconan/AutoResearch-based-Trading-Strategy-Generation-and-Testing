@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1w_MovingAverage_Crossover_Trend_Filter
-Hypothesis: Price crossing above/below the 50-period EMA on 12h timeframe, 
-filtered by weekly EMA200 trend, with volume confirmation, captures strong 
-trends while avoiding whipsaws. Weekly trend filter ensures we only trade 
-in the direction of higher timeframe momentum, working in both bull and 
-bear markets. Target 15-25 trades/year to minimize fee drag.
+1d_1w_Donchian20_Breakout_VolumeTrend
+Hypothesis: Daily Donchian channel breakouts with volume confirmation and weekly trend filter capture institutional moves. Works in bull/bear by aligning with weekly EMA34 trend. Uses ATR-based stoploss to manage risk. Target 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -17,82 +13,112 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for EMA200 trend filter
+    # Load weekly data once for EMA34 trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate weekly EMA200 for trend filter
+    # Calculate weekly EMA34 for trend filter
     close_1w = df_1w['close'].values
-    ema200_1w = np.zeros_like(close_1w)
-    ema200_1w[0] = close_1w[0]
-    alpha = 2.0 / (200 + 1)
+    ema34_1w = np.zeros_like(close_1w)
+    ema34_1w[0] = close_1w[0]
+    alpha = 2.0 / (34 + 1)
     for i in range(1, len(close_1w)):
-        ema200_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema200_1w[i-1]
+        ema34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema34_1w[i-1]
     
-    # Align weekly EMA200 to 12h timeframe
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Align weekly EMA34 to daily timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # 12h data for EMA50 calculation
+    # Daily data for Donchian calculation
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA50
-    ema50 = np.zeros(n)
-    ema50[0] = close[0]
-    alpha_50 = 2.0 / (50 + 1)
-    for i in range(1, n):
-        ema50[i] = alpha_50 * close[i] + (1 - alpha_50) * ema50[i-1]
+    # Calculate Donchian channels (20-period)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # Volume filter: volume > 1.3x 20-period average
-    volume_avg = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            upper[i] = np.max(high[0:i+1]) if i >= 0 else high[i]
+            lower[i] = np.min(low[0:i+1]) if i >= 0 else low[i]
+        else:
+            upper[i] = np.max(high[i-20:i+1])
+            lower[i] = np.min(low[i-20:i+1])
+    
+    # Volume filter: volume > 1.5x 20-day average
+    volume_avg = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
             volume_avg[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             volume_avg[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (1.3 * volume_avg)
+    volume_filter = volume > (1.5 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(ema200_1w_aligned[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema34_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema50_val = ema50[i]
-        ema200 = ema200_1w_aligned[i]
+        up = upper[i]
+        low = lower[i]
+        ema34 = ema34_1w_aligned[i]
         vol_confirm = volume_filter[i]
         
+        # Calculate ATR for stoploss (20-period)
+        if i >= 20:
+            tr_values = []
+            for j in range(1, 21):
+                idx = i - j
+                if idx >= 0:
+                    tr = max(high[idx] - low[idx], abs(high[idx] - close[idx-1]), abs(low[idx] - close[idx-1]))
+                    tr_values.append(tr)
+            atr = np.mean(tr_values) if tr_values else 0
+        else:
+            atr = 0
+        
+        # Stoploss: 2.5 * ATR from entry
+        if position == 1 and price < entry_price - 2.5 * atr:
+            signals[i] = 0.0
+            position = 0
+            continue
+        elif position == -1 and price > entry_price + 2.5 * atr:
+            signals[i] = 0.0
+            position = 0
+            continue
+        
         if position == 0:
-            # Long: price crosses above EMA50 with volume confirmation in uptrend (price > weekly EMA200)
-            if price > ema50_val and vol_confirm and price > ema200:
+            # Long: price breaks above upper Donchian with volume confirmation in uptrend
+            if price > up and vol_confirm and price > ema34:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price crosses below EMA50 with volume confirmation in downtrend (price < weekly EMA200)
-            elif price < ema50_val and vol_confirm and price < ema200:
+            # Short: price breaks below lower Donchian with volume confirmation in downtrend
+            elif price < low and vol_confirm and price < ema34:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price crosses below EMA50 or trend breaks
-            if price < ema50_val or price < ema200:
+            # Long exit: price returns to lower Donchian or trend breaks
+            if price < low or price < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above EMA50 or trend breaks
-            if price > ema50_val or price > ema200:
+            # Short exit: price returns to upper Donchian or trend breaks
+            if price > up or price > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_MovingAverage_Crossover_Trend_Filter"
-timeframe = "12h"
+name = "1d_1w_Donchian20_Breakout_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
