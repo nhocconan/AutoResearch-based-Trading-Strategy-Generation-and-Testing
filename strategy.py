@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h breakout of 1-day Bollinger Bands with volume confirmation and ADX trend filter.
+# Hypothesis: 4h breakout of 1-day Donchian channels with volume confirmation and trend filter.
+# Uses tight entry conditions (price > 20-day high or < 20-day low, volume > 1.5x average) to limit trades.
 # Works in bull markets (breakouts capture momentum) and bear markets (breakdowns capture downtrends).
-# Uses tight entry conditions (volume > 1.5x average, ADX > 20) to limit trades to ~25-40/year.
 # Position size: 0.25 to balance risk and return.
 
 def generate_signals(prices):
@@ -18,18 +18,14 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day Bollinger Bands (20-period, 2 std dev)
-    close_1d = df_1d['close'].values
+    # Calculate 1-day Donchian Channels (20-period high/low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     vol_1d = df_1d['volume'].values
     
-    # Middle band = 20-day SMA
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    # Standard deviation
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Upper band = 20-day high, Lower band = 20-day low
+    upper_donchian = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_donchian = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Calculate 1-day ADX (14-period) for trend strength
     # True Range
@@ -68,8 +64,8 @@ def generate_signals(prices):
         adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
     # Align 1D indicators to 4H timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    upper_donchian_aligned = align_htf_to_ltf(prices, df_1d, upper_donchian)
+    lower_donchian_aligned = align_htf_to_ltf(prices, df_1d, lower_donchian)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d,
                                          pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values)
@@ -79,7 +75,7 @@ def generate_signals(prices):
     
     for i in range(30, n):  # Start after warmup for indicators
         # Skip if data not ready
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+        if (np.isnan(upper_donchian_aligned[i]) or np.isnan(lower_donchian_aligned[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -91,30 +87,28 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, vol_1d)[i]
         
         if position == 0:
-            # Enter long: price breaks above upper BB + volume surge + ADX > 20 (trending)
-            if (price_close > upper_bb_aligned[i] and
-                vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
-                adx_aligned[i] > 20):
+            # Enter long: price breaks above upper Donchian + volume surge
+            if (price_close > upper_donchian_aligned[i] and
+                vol_1d_current > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower BB + volume surge + ADX > 20
-            elif (price_close < lower_bb_aligned[i] and
-                  vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
-                  adx_aligned[i] > 20):
+            # Enter short: price breaks below lower Donchian + volume surge
+            elif (price_close < lower_donchian_aligned[i] and
+                  vol_1d_current > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price returns to middle Bollinger Band or volatility drops
+            # Exit: price returns to opposite Donchian band or volatility drops
             exit_signal = False
             
             if position == 1:
-                # Exit long: price < middle band or ADX weakens
-                if (price_close < sma_20[-1] if len(sma_20) > 0 else 0) or adx_aligned[i] < 15:
+                # Exit long: price < lower Donchian band
+                if price_close < lower_donchian_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short: price > middle band or ADX weakens
-                if (price_close > sma_20[-1] if len(sma_20) > 0 else 0) or adx_aligned[i] < 15:
+                # Exit short: price > upper Donchian band
+                if price_close > upper_donchian_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -126,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BollingerBreakout_Volume_ADX"
+name = "4h_DonchianBreakout_Volume"
 timeframe = "4h"
 leverage = 1.0
