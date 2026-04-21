@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
-Hypothesis: Use Camarilla pivot levels (R1/S1) from daily timeframe as entry triggers on 4h, with daily EMA34 trend filter and volume confirmation. 
-Daily EMA34 provides robust trend filtering across bull/bear cycles, while volume > 1.5x average confirms breakout strength. 
-Targets 20-30 trades/year by requiring price break of R1/S1 + volume > 1.5x avg + price on correct side of daily EMA34.
-Exit when price returns to daily pivot point (PP).
+12h_Camarilla_R1_S1_Breakout_1dTrend_Confirmation
+Hypothesis: Use Camarilla pivot levels (R1/S1) from daily timeframe as entry triggers on 12h, with daily EMA34 trend filter and volume confirmation. 
+Designed to capture breakouts from key daily pivot levels in trending markets, with volume surge confirming institutional interest. 
+The daily EMA34 provides a smooth trend filter suitable for both bull and bear markets, while volume > 2x average confirms genuine breakouts.
+Target ~10-30 trades/year on 12h by requiring strong conditions (price break of R1/S1 + volume > 2x average + price on correct side of daily EMA34).
 """
 
 import numpy as np
@@ -16,17 +16,17 @@ def generate_signals(prices):
     if n < 40:
         return np.zeros(n)
     
-    # Load daily HTF data ONCE before loop
+    # Load 1d HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
     
-    # === Daily trend filter: 34-period EMA ===
+    # === 1d trend filter: 34-period EMA ===
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Calculate Camarilla pivot levels (R1, S1) from daily OHLC ===
+    # === Calculate Camarilla pivot levels (R1, S1) from 1d OHLC ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -36,12 +36,12 @@ def generate_signals(prices):
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === Volume confirmation: 20-period volume average on 4h ===
+    # === Volume confirmation: 20-period volume average on 12h ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.where(vol_ma_20 != 0, volume / vol_ma_20, 1.0)
@@ -67,15 +67,15 @@ def generate_signals(prices):
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: Price breaks above R1 + volume spike > 1.5 + price above daily EMA34
+            # Long: Price breaks above R1 + volume spike > 2.0 + price above 1d EMA34
             if (price_close > r1_level and 
-                vol_spike > 1.5 and 
+                vol_spike > 2.0 and 
                 price_close > trend_1d):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike > 1.5 + price below daily EMA34
+            # Short: Price breaks below S1 + volume spike > 2.0 + price below 1d EMA34
             elif (price_close < s1_level and 
-                  vol_spike > 1.5 and 
+                  vol_spike > 2.0 and 
                   price_close < trend_1d):
                 signals[i] = -0.25
                 position = -1
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Confirmation"
+timeframe = "12h"
 leverage = 1.0
