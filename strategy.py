@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-1h EMA Cross with 4h Trend and Volume Filter
-Hypothesis: Use 4h EMA8/EMA21 trend direction for bias, enter on 1h EMA8/EMA21 cross with volume confirmation. This reduces whipsaws in ranging markets while capturing trends. Works in bull/bear by following 4h trend, and volume filter ensures momentum. Target 15-30 trades/year on 1h.
+12h/1d Daily Pivot R1/S1 Breakout with Volume Confirmation and ATR Stop
+Hypothesis: Daily pivot points R1/S1 provide reliable support/resistance levels.
+Breakouts with volume confirmation capture institutional moves, while ATR-based stops limit losses.
+Works in both bull and bear markets by using daily levels and avoiding overtrading.
 """
 
 import numpy as np
@@ -10,82 +12,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 4h data once for trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Load daily data once for pivot points and ATR
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # Calculate EMA8 and EMA21 on 4h
-    ema8_4h = pd.Series(close_4h).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    # Align to 1h
-    ema8_4h_aligned = align_htf_to_ltf(prices, df_4h, ema8_4h)
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # 1h data
+    # Calculate daily True Range for ATR
+    tr1 = np.abs(high_daily - low_daily)
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    tr1[0] = high_daily[0] - low_daily[0]
+    tr2[0] = np.abs(high_daily[0] - close_daily[0])
+    tr3[0] = np.abs(low_daily[0] - close_daily[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate daily pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    pivot_daily = (high_daily + low_daily + close_daily) / 3.0
+    r1_daily = 2 * pivot_daily - low_daily
+    s1_daily = 2 * pivot_daily - high_daily
+    
+    # Align daily indicators to 12h timeframe
+    atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
+    r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
+    s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
+    
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1h EMA8/EMA21 for entry timing
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Volume filter: 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema8_4h_aligned[i]) or np.isnan(ema21_4h_aligned[i]) or 
-            np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(atr_daily_aligned[i]) or np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 4h trend: bullish if EMA8 > EMA21, bearish if EMA8 < EMA21
-        trend_bullish = ema8_4h_aligned[i] > ema21_4h_aligned[i]
-        trend_bearish = ema8_4h_aligned[i] < ema21_4h_aligned[i]
+        price = close[i]
+        atr = atr_daily_aligned[i]
+        r1 = r1_daily_aligned[i]
+        s1 = s1_daily_aligned[i]
+        vol_current = volume[i]
         
-        # Volume condition
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        # Volume filter: current volume > 1.8x 30-period average (balanced)
+        vol_ma = np.mean(volume[max(0, i-30):i]) if i >= 30 else volume[i]
+        vol_ok = vol_current > 1.8 * vol_ma
         
         if position == 0:
-            # Enter long only in bullish 4h trend
-            if trend_bullish and ema8[i] > ema21[i] and vol_ok:
-                signals[i] = 0.20
+            # Long breakout: price breaks above R1 with volume confirmation
+            if price > r1 and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # Enter short only in bearish 4h trend
-            elif trend_bearish and ema8[i] < ema21[i] and vol_ok:
-                signals[i] = -0.20
+            # Short breakdown: price breaks below S1 with volume confirmation
+            elif price < s1 and vol_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: EMA cross down OR trend change
-            if ema8[i] < ema21[i] or not trend_bullish:
+            # Long exit: price breaks below S1 (failed breakout) or ATR-based stop
+            if price < s1 or (i > 0 and close[i-1] > s1 and price < close[i-1] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: EMA cross up OR trend change
-            if ema8[i] > ema21[i] or not trend_bearish:
+            # Short exit: price breaks above R1 (failed breakdown) or ATR-based stop
+            if price > r1 or (i > 0 and close[i-1] < r1 and price > close[i-1] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA8_EMA21_4hTrend_VolumeFilter"
-timeframe = "1h"
+name = "12h_1d_PivotR1S1_Breakout_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
