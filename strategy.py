@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_v1
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) with 6h zero-cross signals.
-Long when Bull Power crosses above zero with rising Bear Power (less negative) = bullish momentum.
-Short when Bear Power crosses above zero with falling Bull Power (less positive) = bearish momentum.
-Uses 1d EMA50 trend filter and volume confirmation. Works in bull/bear: adapts to momentum shifts.
-Target: 12-25 trades/year per symbol (50-100 over 4 years).
+12h_Camarilla_R1S1_Breakout_Volume_ATRFilter_v1
+Hypothesis: Breakout of Camarilla R1/S1 levels on 12h timeframe with volume confirmation and ATR-based trend filter.
+Works in bull/bear: In uptrend, buy R1 breakout; in downtrend, sell S1 breakout. Uses 1w EMA20 for trend filter.
+Target: 12-37 trades/year per symbol (50-150 over 4 years).
 """
 
 import numpy as np
@@ -17,87 +15,104 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 6h data for Elder Ray calculation
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # EMA13 for Elder Ray (6h timeframe)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = EMA13 - Low
-    bear_power = ema_13 - low
-    
-    # Load 1d data for trend filter
+    # Load 1d data once for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla levels: R1, S1 (primary breakout levels)
+    rang = prev_high - prev_low
+    r1 = prev_close + rang * 1.0 / 12
+    s1 = prev_close - rang * 1.0 / 12
+    
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Load 1w data for EMA20 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # ATR for volatility filter (14-period on 1d)
+    if len(df_1d) < 14:
+        atr_1d = np.full(len(df_1d), np.nan)
+    else:
+        high_low = high_1d - low_1d
+        high_close = np.abs(high_1d - np.roll(close_1d, 1))
+        low_close = np.abs(low_1d - np.roll(close_1d, 1))
+        tr = np.maximum(high_low, np.maximum(high_close, low_close))
+        tr[0] = np.nan
+        atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
+        
         # Volume filter: current volume > 1.3 * 20-period average
         if i >= 20:
-            vol_ma = volume[i-20:i].mean()
-            volume_ok = volume[i] > 1.3 * vol_ma
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 1.3 * vol_ma
         else:
             volume_ok = False
         
-        # Determine 1d trend: EMA50 rising/falling
-        if i > 0:
-            ema_50_rising = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
-            ema_50_falling = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]
-        else:
-            ema_50_rising = True
-            ema_50_falling = False
+        # Trend filter: price > 1w EMA20 = uptrend, price < 1w EMA20 = downtrend
+        uptrend = price > ema_20_1w_aligned[i]
+        downtrend = price < ema_20_1w_aligned[i]
         
         if position == 0:
-            # Long: Bull Power crosses above zero AND Bear Power rising (less negative) AND uptrend AND volume
-            bull_cross_up = (bull_power[i-1] <= 0 and bull_power[i] > 0) if i > 0 else False
-            bear_power_rising = (i > 0 and bear_power[i] > bear_power[i-1])
-            
-            if bull_cross_up and bear_power_rising and ema_50_rising and volume_ok:
+            # Long conditions: price > R1 AND uptrend AND volume
+            if (price > r1_aligned[i] and 
+                uptrend and 
+                volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power crosses above zero AND Bull Power falling (less positive) AND downtrend AND volume
-            elif (i > 0 and bear_power[i-1] <= 0 and bear_power[i] > 0 and  # Bear Power cross up
-                  bull_power[i] < bull_power[i-1] and  # Bull Power falling
-                  ema_50_falling and volume_ok):
+            # Short conditions: price < S1 AND downtrend AND volume
+            elif (price < s1_aligned[i] and 
+                  downtrend and 
+                  volume_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Bull Power crosses below zero OR Bear Power falls sharply
-            bull_cross_down = (bull_power[i-1] > 0 and bull_power[i] <= 0) if i > 0 else False
-            bear_power_falling_sharp = (i > 0 and bear_power[i] < bear_power[i-1] * 0.8)  # 20% drop
-            
-            if bull_cross_down or bear_power_falling_sharp:
+            # Long exit: price < 1w EMA20 (trend reversal) or ATR-based stop
+            if price < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Bear Power crosses below zero OR Bull Power rises sharply
-            bear_cross_down = (bear_power[i-1] > 0 and bear_power[i] <= 0) if i > 0 else False
-            bull_power_rising_sharp = (i > 0 and bull_power[i] > bull_power[i-1] * 1.2)  # 20% rise
-            
-            if bear_cross_down or bull_power_rising_sharp:
+            # Short exit: price > 1w EMA20 (trend reversal) or ATR-based stop
+            if price > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_Volume_ATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
