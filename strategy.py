@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_EMA34_VolumeSpike_ATRStop_v5
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v5
 Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20-period MA).
 Uses ATR-based stop (2.0x) and minimum holding period of 2 bars to reduce churn.
 Designed for 4h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
-Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drift.
+Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_EMA34_VolumeSpike_ATRStop_v5"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v5"
 timeframe = "4h"
 leverage = 1.0
