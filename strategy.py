@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeRegime_ATRStop_v4
-Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume regime (above/below average).
+12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v1
+Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1w EMA50 trend and volume spike (>2.5x 20-period average).
 Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to minimize fee churn.
-Volume regime filter reduces false breakouts in low-volume environments.
-Target: 20-50 trades/year per symbol for low fee drag and strong test generalization.
+1w trend filter provides robust directional bias across bull/bear markets while reducing whipsaws.
+Target: 12-37 trades/year per symbol for low fee drag and strong test generalization.
 """
 
 import numpy as np
@@ -13,18 +13,24 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA50 trend filter)
+    # Load HTF data ONCE before loop (1w for EMA50 trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Load 1d data for Camarilla pivot calculation (based on previous day)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 4h OHLC for Camarilla pivot calculation (based on previous day) ===
+    # === 12h OHLC ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Calculate Camarilla pivots using previous 1d OHLC
     df_1d_open = df_1d['open'].values
@@ -39,15 +45,15 @@ def generate_signals(prices):
     r4_1d = df_1d_close + 1.5 * range_1d
     s4_1d = df_1d_close - 1.5 * range_1d
     
-    # Align 1d Camarilla levels to 4h timeframe
+    # Align 1d Camarilla levels to 12h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # === 1d EMA50 for trend filter ===
-    ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 1w EMA50 for trend filter ===
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # === ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
@@ -56,19 +62,17 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume regime: above/below 20-period average ===
-    volume = prices['volume'].values
+    # === Volume filter: 20-period average ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_regime = volume > vol_ma  # True when volume is above average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+            or np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,22 +81,25 @@ def generate_signals(prices):
         price = close[i]
         vol_current = volume[i]
         vol_average = vol_ma[i]
-        in_vol_regime = vol_regime[i]
         
         if position == 0:
-            # Entry conditions: breakout + trend alignment + volume regime
+            # Volume filter: current volume > 2.5x 20-period average
+            vol_filter = vol_current > 2.5 * vol_average
+            
+            # Long conditions: price > R1 (breakout), 1w uptrend, volume filter
             long_breakout = price > r1_1d_aligned[i]
-            long_trend = price > ema_50_1d_aligned[i]
+            long_trend = price > ema_50_1w_aligned[i]
             
+            # Short conditions: price < S1 (breakdown), 1w downtrend, volume filter
             short_breakout = price < s1_1d_aligned[i]
-            short_trend = price < ema_50_1d_aligned[i]
+            short_trend = price < ema_50_1w_aligned[i]
             
-            # Only enter when volume is above average (regime filter)
-            if long_breakout and long_trend and in_vol_regime:
+            # Entry logic - ONLY enter on volume filter + trend alignment
+            if long_breakout and long_trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and in_vol_regime:
+            elif short_breakout and short_trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -123,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeRegime_ATRStop_v4"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
