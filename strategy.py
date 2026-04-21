@@ -1,12 +1,14 @@
-# 1. Hypothesis
-# This strategy uses 4-hour price action with daily pivot points and weekly trend filtering.
-# It aims to capture breakouts from key daily support/resistance levels (R1/S1) only when
-# aligned with the weekly trend, confirmed by volume spikes. The weekly trend filter
-# helps avoid counter-trend trades in choppy markets, while the volume confirmation
-# ensures breakouts have institutional participation. This approach should work in
-# both bull and bear markets by following the higher-timeframe trend.
-
 #!/usr/bin/env python3
+"""
+12h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1
+Hypothesis: Breakout of daily Camarilla R1/S1 levels with weekly trend filter (EMA34) and volume confirmation (1.5x 20-bar avg).
+Long when price > daily R1 + weekly EMA34 up + volume spike.
+Short when price < daily S1 + weekly EMA34 down + volume spike.
+Exit when price crosses daily pivot point (PP).
+Uses 12h as primary timeframe for signal generation, with 1d for levels and 1w for trend.
+Target: 15-30 trades/year per symbol. Works in bull/bear by following weekly trend.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -16,7 +18,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for pivot points
+    # Load 1d data once for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -25,7 +27,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for standard pivot points
+    # Previous day's OHLC for Camarilla calculation
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
@@ -33,15 +35,16 @@ def generate_signals(prices):
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Standard pivot point calculation
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    # Camarilla levels: R1, S1, and pivot point (PP)
+    rang = prev_high - prev_low
+    r1 = prev_close + 1.1 * rang / 12
+    s1 = prev_close - 1.1 * rang / 12
+    pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
     # Load weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -51,7 +54,7 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     # Calculate EMA34 on weekly
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
@@ -59,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,7 +101,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Long exit: price crosses back below pivot point
-            if price < pivot_aligned[i]:
+            if price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,7 +109,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Short exit: price crosses back above pivot point
-            if price > pivot_aligned[i]:
+            if price > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_Pivot_R1S1_Breakout_Volume_TrendFilter_v1"
-timeframe = "4h"
+name = "12h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1"
+timeframe = "12h"
 leverage = 1.0
