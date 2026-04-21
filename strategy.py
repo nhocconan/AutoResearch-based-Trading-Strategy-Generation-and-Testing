@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Confirmation
-Hypothesis: Camarilla pivot levels (R1/S1) breakout with 1d trend filter (EMA34) and volume confirmation on 4h timeframe. Designed to capture breakouts in both bull and bear markets by following daily trend while using Camarilla levels for entry. Targets 20-40 trades/year to minimize fee drag.
+4h_RSI20_Stochastic_1dTrend_Volume
+Hypothesis: Combine RSI(2) oversold/overbought with Stochastic(14,3,3) cross and 1d EMA50 trend filter. Designed to capture mean-reversion bounces in strong trends with volume confirmation. Works in bull/bear markets by following higher timeframe trend while using RSI2/Stoch for entry timing. Target 20-40 trades/year on 4h.
 """
 
 import numpy as np
@@ -13,75 +13,88 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
+    # Load 1d HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d trend filter: 34-period EMA ===
+    # === 1d trend filter: 50-period EMA ===
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Camarilla pivot levels from 1d data ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === RSI(2) on 4h ===
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # === Stochastic(14,3,3) on 4h ===
+    high = prices['high'].values
+    low = prices['low'].values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    stoch_k = np.where(highest_high - lowest_low != 0, 
+                       100 * (close - lowest_low) / (highest_high - lowest_low), 50)
+    stoch_k_series = pd.Series(stoch_k)
+    stoch_k_smooth = stoch_k_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    stoch_d = pd.Series(stoch_k_smooth).ewm(span=3, adjust=False, min_periods=3).mean().values
     
-    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Volume confirmation: 20-period volume average on 4h ===
+    # === Volume confirmation: 20-period volume average ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20
-    vol_ratio[np.isnan(vol_ratio)] = 1.0
+    vol_ratio = np.where(vol_ma_20 != 0, volume / vol_ma_20, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(20, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(stoch_k_smooth[i]) or
+            np.isnan(stoch_d[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = prices['close'].iloc[i]
-        trend_1d = ema_34_1d_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
+        price_close = close[i]
+        trend_1d = ema_50_1d_aligned[i]
+        rsi_val = rsi[i]
+        stoch_k_val = stoch_k_smooth[i]
+        stoch_d_val = stoch_d[i]
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: Break above R1 + volume spike > 1.5 + price above 1d EMA34
-            if price_close > r1_level and vol_spike > 1.5 and price_close > trend_1d:
+            # Long: RSI2 < 10 + Stoch K crosses above D + volume spike > 1.3 + price above 1d EMA50
+            if (rsi_val < 10 and 
+                stoch_k_val > stoch_d_val and 
+                stoch_k_smooth[i-1] <= stoch_d[i-1] and
+                vol_spike > 1.3 and 
+                price_close > trend_1d):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 + volume spike > 1.5 + price below 1d EMA34
-            elif price_close < s1_level and vol_spike > 1.5 and price_close < trend_1d:
+            # Short: RSI2 > 90 + Stoch K crosses below D + volume spike > 1.3 + price below 1d EMA50
+            elif (rsi_val > 90 and 
+                  stoch_k_val < stoch_d_val and 
+                  stoch_k_smooth[i-1] >= stoch_d[i-1] and
+                  vol_spike > 1.3 and 
+                  price_close < trend_1d):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price returns to pivot level
-            pivot_level = (high_1d[i//16] + low_1d[i//16] + close_1d[i//16]) / 3 if i >= 16 else trend_1d
-            if position == 1 and price_close < pivot_level:
+            # Exit when RSI2 crosses 50 in opposite direction
+            if position == 1 and rsi_val < 50 and rsi[i-1] >= 50:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > pivot_level:
+            elif position == -1 and rsi_val > 50 and rsi[i-1] <= 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Confirmation"
+name = "4h_RSI20_Stochastic_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
