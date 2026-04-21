@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1w EMA50 trend and volume spike.
-In trending markets (price > EMA50_1w): breakout continuation (long above R1, short below S1).
-In ranging markets: no entries to avoid whipsaw. Uses volume confirmation (2.0x average) to filter false breakouts.
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v3
+Hypothesis: 1d Camarilla pivot (R1/S1) breakout filtered by 1w EMA34 trend and volume spike.
+In trending markets (price > EMA34_1w for long, < for short): breakout continuation.
+In ranging markets: no entries. Uses volume confirmation (2.0x average) to filter false breakouts.
 ATR(14) stoploss (1.5x) and discrete position sizing (0.25) to limit fee drag and drawdown.
-Designed to work in both bull and bear markets by requiring strong trend alignment.
-Timeframe: 12h, uses 1w HTF for trend filter.
-Target: 50-150 total trades over 4 years = 12-37/year.
+Designed to work in both bull and bear markets by requiring strong 1w trend alignment.
+Timeframe: 1d, uses 1w HTF for trend filter.
+Target: 30-100 total trades over 4 years = 7-25/year.
 """
 
 import numpy as np
@@ -19,15 +19,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA50 trend)
+    # Load HTF data ONCE before loop (1w for EMA34 trend and Camarilla)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 60:
         return np.zeros(n)
     
-    # === 1w OHLC for EMA50 trend ===
+    # === 1w OHLC for EMA34 trend ===
     df_1w_close = df_1w['close'].values
-    ema_50_1w = pd.Series(df_1w_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_34_1w = pd.Series(df_1w_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # === 1w OHLC for Camarilla pivot calculation (based on previous 1w bar) ===
     df_1w_open = df_1w['open'].values
@@ -44,7 +44,7 @@ def generate_signals(prices):
     h4_1w = df_1w_close + 1.382 * range_1w
     l4_1w = df_1w_close - 1.382 * range_1w
     
-    # Align 1w Camarilla levels to 12h timeframe
+    # Align 1w Camarilla levels to 1d timeframe
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     h3_1w_aligned = align_htf_to_ltf(prices, df_1w, h3_1w)
@@ -74,7 +74,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) 
-            or np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+            or np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,14 +88,14 @@ def generate_signals(prices):
         l3 = l3_1w_aligned[i]
         h4 = h4_1w_aligned[i]
         l4 = l4_1w_aligned[i]
-        ema_trend = ema_50_1w_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
         vol_avg = vol_ma[i]
         
         # Volume confirmation: current volume > 2.0x average (strict filter)
         volume_confirmed = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Only enter in trending markets (price > EMA50_1w for long, < for short)
+            # Only enter in trending markets (price > EMA34_1w for long, < for short)
             # Volume confirmation required to avoid false breakouts
             long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
             short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
@@ -143,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v3"
+timeframe = "1d"
 leverage = 1.0
