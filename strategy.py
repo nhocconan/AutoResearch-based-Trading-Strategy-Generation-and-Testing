@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_1dTrendRegime_VolumeSpike_v1
-Hypothesis: 4h KAMA direction (trend) aligned with 1d EMA34 trend regime and volume confirmation (>2x 20-bar MA). 
-In bull regime (price > 1d EMA34), take longs when KAMA turns up; in bear regime (price < 1d EMA34), take shorts when KAMA turns down. 
-ATR-based stoploss (2.0x) and discrete sizing (0.25) reduce churn. Target: 75-200 total trades over 4 years by requiring confluence of KAMA turn, trend regime, and volume. 
-Designed to work in bull (trend following with KAMA) and bear (counter-trend KAMA turns vs higher timeframe) markets.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_ATRStop_v3
+Hypothesis: 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation (>2x 20-bar MA). 
+In bull regime (price > 1d EMA34), take longs on R1 breakouts; in bear regime (price < 1d EMA34), take shorts on S1 breakdowns. 
+ATR-based stoploss (2.0x) and discrete sizing (0.25) reduce churn. Target: 75-200 total trades over 4 years by requiring confluence of breakout, trend, and volume. 
+Designed to work in bull (breakouts with trend) and bear (faded breakdowns vs trend) markets.
 """
 
 import numpy as np
@@ -42,23 +42,15 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 4h KAMA (ER=10, fast=2, slow=30) for trend direction ===
-    close_s = pd.Series(close)
-    change = np.abs(close_s.diff(10).values)  # 10-period net change
-    vol = np.abs(close_s.diff(1).values)      # 1-period volatility
-    sum_vol = pd.Series(vol).rolling(window=10, min_periods=10).sum().values
-    er = np.where(sum_vol > 0, change / sum_vol, 0)  # efficiency ratio
-    sc = (er * (2.0/2 - 2.0/30) + 2.0/30) ** 2     # smoothing constant
-    kama = np.full_like(close, np.nan)
-    kama[9] = close_s.iloc[9]  # seed value at index 9
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
     
-    # KAMA turning points: up when current > previous, down when current < previous
-    kama_up = kama > np.roll(kama, 1)
-    kama_down = kama < np.roll(kama, 1)
-    kama_up[0] = False
-    kama_down[0] = False
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,7 +60,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(kama[i]) or np.isnan(volume_confirmed[i])):
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,9 +69,9 @@ def generate_signals(prices):
         
         price = close[i]
         ema_34_1d_val = ema_34_1d_aligned[i]
+        r1_val = r1[i]
+        s1_val = s1[i]
         vol_conf = volume_confirmed[i]
-        kama_up_val = kama_up[i]
-        kama_down_val = kama_down[i]
         
         # Trend regime
         is_bull = price > ema_34_1d_val
@@ -87,13 +79,13 @@ def generate_signals(prices):
         
         if position == 0:
             if is_bull:
-                # Bull regime: long when KAMA turns up
-                long_condition = kama_up_val and vol_conf
-                short_condition = False  # avoid shorts in bull regime
+                # Bull regime: long breakouts favored
+                long_condition = (price > r1_val) and vol_conf
+                short_condition = (price < s1_val) and vol_conf and (price < ema_34_1d_val * 0.995)  # stricter for shorts
             else:  # bear regime
-                # Bear regime: short when KAMA turns down
-                short_condition = kama_down_val and vol_conf
-                long_condition = False   # avoid longs in bear regime
+                # Bear regime: short breakdowns favored
+                short_condition = (price < s1_val) and vol_conf
+                long_condition = (price > r1_val) and vol_conf and (price > ema_34_1d_val * 1.005)  # stricter for longs
             
             if long_condition:
                 signals[i] = 0.25
@@ -115,8 +107,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if KAMA turns down (trend change)
-                elif kama_down[i]:
+                # Exit if price breaks below S1 (failed breakout)
+                elif price < s1_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -127,8 +119,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if KAMA turns up (trend change)
-                elif kama_up[i]:
+                # Exit if price breaks above R1 (failed breakdown)
+                elif price > r1_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -137,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Direction_1dTrendRegime_VolumeSpike_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_ATRStop_v3"
 timeframe = "4h"
 leverage = 1.0
