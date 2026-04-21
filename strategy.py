@@ -1,89 +1,100 @@
 #!/usr/bin/env python3
 """
-4h_Volume_Weighted_CCI_Trend_Filter_V1
-Hypothesis: Volume-weighted CCI (VW-CCI) identifies overbought/oversold conditions with institutional participation. 
-Trend filter (4h EMA34) ensures trades align with medium-term momentum. 
-Volume confirmation filters out low-conviction moves. Works in bull/bear by taking both long and short signals.
+6h_RangeReversal_FibPivots_1dTrendFilter_V1
+Hypothesis: In ranging markets, price reverses at Fibonacci-based pivot levels (R1/S1) from the prior 1d session. Trades are filtered by 1d trend (price above/below 50 EMA) to avoid counter-trend entries. Works in bull/bear by only taking reversal trades aligned with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_fib_pivots(high, low, close):
+    """Calculate Fibonacci pivot points: R1, S1, pivot"""
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    r1 = pivot + 0.382 * range_val
+    s1 = pivot - 0.382 * range_val
+    return pivot, r1, s1
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # Load 1d data once for pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # VW-CCI: Typical Price * Volume, then standard CCI calculation
-    tp = (high + low + close) / 3.0
-    vw_tp = tp * volume
+    # Calculate Fibonacci pivots on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate VW-CCI(20)
-    period = 20
-    sma_vw_tp = np.full(n, np.nan)
-    mad_vw_tp = np.full(n, np.nan)
+    pivot_1d = np.full_like(close_1d, np.nan)
+    r1_1d = np.full_like(close_1d, np.nan)
+    s1_1d = np.full_like(close_1d, np.nan)
     
-    for i in range(period-1, n):
-        sma_vw_tp[i] = np.mean(vw_tp[i-period+1:i+1])
-        mad_vw_tp[i] = np.mean(np.abs(vw_tp[i-period+1:i+1] - sma_vw_tp[i]))
+    for i in range(len(close_1d)):
+        pivot_1d[i], r1_1d[i], s1_1d[i] = calculate_fib_pivots(high_1d[i], low_1d[i], close_1d[i])
     
-    vw_cci = np.full(n, np.nan)
-    for i in range(period-1, n):
-        if mad_vw_tp[i] != 0:
-            vw_cci[i] = (vw_tp[i] - sma_vw_tp[i]) / (0.015 * mad_vw_tp[i])
+    # Calculate 50 EMA for trend filter on daily data
+    close_series = pd.Series(close_1d)
+    ema_50_1d = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Trend filter: EMA34 on 4h close
-    ema34 = np.full(n, np.nan)
-    alpha = 2.0 / (34 + 1)
-    for i in range(n):
-        if i == 0:
-            ema34[i] = close[i]
-        else:
-            ema34[i] = alpha * close[i] + (1 - alpha) * ema34[i-1]
+    # Align all 1d indicators to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 6h price data
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Wait for EMA34 warmup
-        if np.isnan(vw_cci[i]) or np.isnan(ema34[i]):
+    for i in range(50, n):
+        # Skip if NaN in critical values
+        if np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        cci_value = vw_cci[i]
-        price = close[i]
-        ema = ema34[i]
+        price = close_6h[i]
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        ema_50 = ema_50_1d_aligned[i]
         
-        # Entry conditions
-        long_entry = cci_value < -100 and price > ema
-        short_entry = cci_value > 100 and price < ema
-        
-        # Exit conditions
-        long_exit = cci_value > 0
-        short_exit = cci_value < 0
+        # Determine 1d trend: bullish if price > EMA50, bearish if price < EMA50
+        bullish_trend = price > ema_50
+        bearish_trend = price < ema_50
         
         if position == 0:
-            if long_entry:
+            # Long: price at or below S1 in bullish 1d trend
+            if bullish_trend and price <= s1:
                 signals[i] = 0.25
                 position = 1
-            elif short_entry:
+            # Short: price at or above R1 in bearish 1d trend
+            elif bearish_trend and price >= r1:
                 signals[i] = -0.25
                 position = -1
+        
         elif position == 1:
-            if long_exit:
+            # Long exit: price reaches pivot or trend turns bearish
+            if price >= pivot or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            if short_exit:
+            # Short exit: price reaches pivot or trend turns bullish
+            if price <= pivot or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Volume_Weighted_CCI_Trend_Filter_V1"
-timeframe = "4h"
+name = "6h_RangeReversal_FibPivots_1dTrendFilter_V1"
+timeframe = "6h"
 leverage = 1.0
