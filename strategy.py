@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_9_VolumeSpike_ChopRegime_ATRStop
-Hypothesis: 4h TRIX(9) zero-cross with volume confirmation (>1.5x 20-period MA) and choppiness regime filter (CHOP > 61.8 = ranging). 
-Long when TRIX crosses above zero, volume confirms, and market is ranging (mean reversion edge in bear markets). 
-Short when TRIX crosses below zero, volume confirms, and market is ranging. 
-Uses ATR-based stop (2.0x) to manage risk. 
-Designed for low trade frequency (~20-40/year) to work in both bull and bear markets via regime adaptation.
-In ranging markets (high CHOP), mean reversion at momentum extremes works; in trending markets, we avoid false signals.
+6h_Donchian20_Breakout_WeeklyTrend_VolumeSpike_ATRStop
+Hypothesis: 6h Donchian(20) breakout aligned with 1w trend (price > weekly SMA50) and volume confirmation (>2.0x 20-period MA).
+Long when price breaks above 20-period high, above weekly SMA50, and volume > 2.0x average.
+Short when price breaks below 20-period low, below weekly SMA50, and volume > 2.0x average.
+Uses ATR-based stop (2.5x) and minimum holding period of 4 bars to reduce churn.
+Designed for low trade frequency (~15-30/year) to work in both bull and bear markets via weekly trend alignment.
+Weekly trend provides stronger filter than daily, reducing whipsaw in sideways markets while capturing major trends.
 """
 
 import numpy as np
@@ -18,51 +18,34 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # === 1d HTF for choppiness regime (completed 1d bar only) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load HTF data ONCE before loop (1w for weekly trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w SMA50 for trend regime ===
+    close_1w = df_1w['close'].values
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # True Range for 1d
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
-    
-    # Choppiness Index: CHOP = 100 * log10(sum(ATR(14)) / (max(high) - min(low))) / log10(14)
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(sum_atr_14 / (max_high_14 - min_low_14 + 1e-10)) / np.log10(14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # === 4h indicators ===
-    close = prices['close'].values
+    # === 6h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # TRIX(9): triple EMA of close, then ROC
-    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = np.nan  # first value invalid
-    
-    # 4h ATR (14-period) for stoploss
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation (1.5x 20-period MA)
+    # === Volume confirmation (2.0x 20-period MA) ===
+    volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === 6h Donchian channel (20-period) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(trix[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,22 +64,19 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        trix_now = trix[i]
-        trix_prev = trix[i-1]
+        sma_50_1w_val = sma_50_1w_aligned[i]
         vol_avg = vol_ma[i]
-        chop_value = chop_1d_aligned[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirm = volume_now > 1.5 * vol_avg
-        
-        # Choppiness regime: CHOP > 61.8 = ranging (mean reversion zone)
-        is_ranging = chop_value > 61.8
+        # Volume confirmation: current volume > 2.0x average
+        volume_confirm = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: TRIX crosses above zero, volume confirm, ranging market
-            long_condition = (trix_prev <= 0) and (trix_now > 0) and volume_confirm and is_ranging
-            # Short: TRIX crosses below zero, volume confirm, ranging market
-            short_condition = (trix_prev >= 0) and (trix_now < 0) and volume_confirm and is_ranging
+            # Long: price breaks above upper channel, above weekly SMA50, volume confirm
+            long_condition = (price > upper_channel) and (price > sma_50_1w_val) and volume_confirm
+            # Short: price breaks below lower channel, below weekly SMA50, volume confirm
+            short_condition = (price < lower_channel) and (price < sma_50_1w_val) and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -112,31 +92,31 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 2 bars to reduce churn
-            if bars_since_entry < 2:
+            # Minimum holding period of 4 bars to reduce churn
+            if bars_since_entry < 4:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                if price < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if TRIX crosses below zero (momentum reversal)
-                elif trix_now < 0:
+                # Trend reversal exit (price below weekly SMA50)
+                elif price < sma_50_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                if price > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if TRIX crosses above zero (momentum reversal)
-                elif trix_now > 0:
+                # Trend reversal exit (price above weekly SMA50)
+                elif price > sma_50_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -145,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_9_VolumeSpike_ChopRegime_ATRStop"
-timeframe = "4h"
+name = "6h_Donchian20_Breakout_WeeklyTrend_VolumeSpike_ATRStop"
+timeframe = "6h"
 leverage = 1.0
