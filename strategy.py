@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_RVOL_Reversal_LongOnly
-Hypothesis: Long-only strategy using 4-hour volume spike + price pullback to EMA21.
-Enter long when: (1) volume > 2x 20-period average (RVOL > 2.0), (2) price pulls back to EMA21 within 0.5%,
-(3) price > EMA50 (uptrend filter). Exit when price closes below EMA21 or RVOL drops below 1.2.
-Designed for 4h timeframe to capture mean-reversion bounces in both bull and bear markets.
-Volume spike indicates exhaustion; pullback to EMA21 offers favorable risk-reward.
-EMA50 filter ensures we only trade in the direction of intermediate trend.
+4h_1d_1w_Donchian_Breakout_Volume_Trend
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1w trend filter.
+Long when price breaks above Donchian upper band with volume > 1.5x average and 1w close > 1w EMA50.
+Short when price breaks below Donchian lower band with volume > 1.5x average and 1w close < 1w EMA50.
+Exit when price crosses back through Donchian middle band (20-period average).
+Designed for 4h timeframe to capture medium-term trends with ~20-40 trades/year.
+Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
+Volume confirmation filters false breakouts.
+Weekly trend filter ensures alignment with higher timeframe momentum.
 """
 
 import numpy as np
@@ -15,52 +17,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Load 1w data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # EMA21 and EMA50
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1w = df_1w['close'].values
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume spike detection
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    rvol = np.where(vol_ma20 > 0, volume / vol_ma20, 0)
+    # Donchian channels on 4h data (using close prices)
+    lookback = 20
+    high_roll = prices['high'].rolling(window=lookback, min_periods=lookback).max().values
+    low_roll = prices['low'].rolling(window=lookback, min_periods=lookback).min().values
+    upper_band = high_roll
+    lower_band = low_roll
+    middle_band = (high_roll + low_roll) / 2.0
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if indicators not ready
-        if np.isnan(ema21[i]) or np.isnan(ema50[i]) or np.isnan(rvol[i]):
+        # Skip if trend filter not ready
+        if np.isnan(ema_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
+        
+        # Volume filter: current volume > 1.5 * 20-period average
+        if i >= 20:
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 1.5 * vol_ma
+        else:
+            volume_ok = False
         
         if position == 0:
-            # Long conditions: volume spike + pullback to EMA21 + above EMA50
-            pullback_to_ema21 = abs(price - ema21[i]) / ema21[i] < 0.005  # within 0.5%
-            if rvol[i] > 2.0 and pullback_to_ema21 and price > ema50[i]:
+            # Long conditions: break above upper band + volume + uptrend
+            if price > upper_band[i] and volume_ok and price > ema_50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
+            # Short conditions: break below lower band + volume + downtrend
+            elif price < lower_band[i] and volume_ok and price < ema_50_1w_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit conditions: close below EMA21 or RVOL drops
-            if price < ema21[i] or rvol[i] < 1.2:
+            # Long exit: price crosses back below middle band
+            if price < middle_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price crosses back above middle band
+            if price > middle_band[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_1d_RVOL_Reversal_LongOnly"
+name = "4h_1d_1w_Donchian_Breakout_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
