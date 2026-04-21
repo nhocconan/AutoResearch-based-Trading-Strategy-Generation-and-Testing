@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_TrendAlign_v5
-Hypothesis: Further tighten entry conditions to reduce trade count and fee drag while preserving edge. Requires volume > 3.0x 20-period average (stricter than v4's 2.5x), adds 4h ADX > 30 for stronger trend filter, and includes a minimum holding period of 6 bars. Uses discrete position sizing (0.30). Target: 40-80 trades over 4 years (10-20/year) to minimize fee drag. Works in bull/bear via trend-filtered Camarilla breakouts with volume confirmation and strong ADX regime filter.
+1d_Camarilla_R1_S1_Breakout_1wEMA50_VolumeSpike_TrendAlign_v1
+Hypothesis: Daily timeframe with weekly EMA50 trend filter, Camarilla R1/S1 breakouts, volume confirmation (>2x 20-day average volume), and ATR-based stoploss (2.0x). Designed for BTC/ETH to work in both bull and bear markets via trend-filtered breakouts with volume confirmation. Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag. Uses discrete position sizing (0.25) and 3-day minimum holding.
 """
 
 import numpy as np
@@ -13,21 +13,21 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA34 trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load HTF data ONCE before loop (1w for EMA50 trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 1d EMA34 for HTF trend regime ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 1w EMA50 for HTF trend regime ===
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === 4h close, EMA20 for trend alignment ===
+    # === Daily close, EMA20 for trend alignment ===
     close = prices['close'].values
-    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === Daily ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     
@@ -37,27 +37,16 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 4h volume confirmation (volume > 3.0x 20-period average - STRICTER THRESHOLD) ===
+    # === Daily volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (3.0 * vol_ma_20)
+    volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 4h ADX (14-period) for trend strength filter ===
-    plus_dm = pd.Series(np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0.0))
-    minus_dm = pd.Series(np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0.0))
-    tr_adx = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_adx = tr_adx.rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / atr_adx)
-    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / atr_adx)
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.rolling(window=14, min_periods=14).mean().values
-    strong_trend = adx > 30  # Stronger trend filter than v4's 25
-    
-    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    # === Daily Camarilla pivot levels (R1, S1) based on PREVIOUS day's OHLC ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first day invalid
     
     pivot = (prev_high + prev_low + prev_close) / 3.0
     r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
@@ -66,83 +55,82 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
+    days_since_entry = 0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_20_4h[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i]) or np.isnan(strong_trend[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(atr[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                days_since_entry = 0
             continue
         
         price = close[i]
-        ema_34_1d_val = ema_34_1d_aligned[i]
-        ema_20_4h_val = ema_20_4h[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
+        ema_20_val = ema_20[i]
         r1_val = r1[i]
         s1_val = s1[i]
         vol_conf = volume_confirmed[i]
-        trend_ok = strong_trend[i]
         
         # Trend alignment: price above both indicators for long, below both for short
-        uptrend = price > ema_34_1d_val and price > ema_20_4h_val
-        downtrend = price < ema_34_1d_val and price < ema_20_4h_val
+        uptrend = price > ema_50_1w_val and price > ema_20_val
+        downtrend = price < ema_50_1w_val and price < ema_20_val
         
         if position == 0:
-            # Long: price closes above R1, uptrend alignment, volume confirmed, strong trend
-            long_condition = (price > r1_val) and uptrend and vol_conf and trend_ok
-            # Short: price closes below S1, downtrend alignment, volume confirmed, strong trend
-            short_condition = (price < s1_val) and downtrend and vol_conf and trend_ok
+            # Long: price closes above R1, uptrend alignment, volume confirmed
+            long_condition = (price > r1_val) and uptrend and vol_conf
+            # Short: price closes below S1, downtrend alignment, volume confirmed
+            short_condition = (price < s1_val) and downtrend and vol_conf
             
             if long_condition:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-                bars_since_entry = 0
+                days_since_entry = 0
             elif short_condition:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
-                bars_since_entry = 0
+                days_since_entry = 0
         
         elif position != 0:
-            bars_since_entry += 1
+            days_since_entry += 1
             
-            # Minimum holding period of 6 bars to reduce churn (increased from v4's 4)
-            if bars_since_entry < 6:
-                signals[i] = 0.30 if position == 1 else -0.30
+            # Minimum holding period of 3 days to reduce churn
+            if days_since_entry < 3:
+                signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.5x ATR)
+            # Check stoploss (2.0x ATR)
             if position == 1:
-                if price < entry_price - 2.5 * atr[i]:
+                if price < entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
+                    days_since_entry = 0
                 # Trend reversal exit (price below either indicator)
-                elif price < ema_34_1d_val or price < ema_20_4h_val:
+                elif price < ema_50_1w_val or price < ema_20_val:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
+                    days_since_entry = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.5 * atr[i]:
+                if price > entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
+                    days_since_entry = 0
                 # Trend reversal exit (price above either indicator)
-                elif price > ema_34_1d_val or price > ema_20_4h_val:
+                elif price > ema_50_1w_val or price > ema_20_val:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
+                    days_since_entry = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_TrendAlign_v5"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wEMA50_VolumeSpike_TrendAlign_v1"
+timeframe = "1d"
 leverage = 1.0
