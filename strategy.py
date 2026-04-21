@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1
-Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and ADX(14)<25 regime (range).
-Only enters on breakouts in ranging markets (ADX<25) to catch mean-reversion bounces off H3/L3 levels.
-Uses volume confirmation (1.5x average) to filter false breakouts. ATR(14) stoploss (2.0x) and discrete sizing (0.25).
-Designed to work in both bull and bear markets by avoiding strong trends where Camarilla levels fail.
-Timeframe: 4h, uses 1d HTF for trend and regime filters.
-Target: 75-200 total trades over 4 years = 19-50/year.
+1d_KAMA_Regime_Filter_Volume_ATRStop_v1
+Hypothesis: 1d KAMA (adaptive trend) with choppiness regime filter and volume confirmation.
+In trending markets (CHOP < 38.2): follow KAMA direction (long above, short below).
+In ranging markets (CHOP > 61.8): no entries to avoid whipsaw.
+Volume confirmation (1.5x average) filters false signals.
+ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to limit fee drag and drawdown.
+Designed to work in both bull and bear markets by avoiding range-bound whipsaw.
+Timeframe: 1d, uses 1w HTF for trend context (optional enhancement).
+Target: 30-100 total trades over 4 years = 7-25/year.
 """
 
 import numpy as np
@@ -15,98 +17,63 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA50 trend and ADX regime)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
-        return np.zeros(n)
+    # === KAMA (adaptive trend) ===
+    close = prices['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period sum of abs changes
+    # Avoid division by zero
+    er = np.zeros_like(change)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # start at index 9
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # === 1d OHLC for EMA50 trend ===
-    df_1d_close = df_1d['close'].values
-    ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === 1d OHLC for ADX(14) regime filter ===
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    
+    # === Choppiness Index (CHOP) ===
+    high = prices['high'].values
+    low = prices['low'].values
     # True Range
-    tr1 = pd.Series(df_1d_high - df_1d_low)
-    tr2 = pd.Series(np.abs(df_1d_high - np.roll(df_1d_close, 1)))
-    tr3 = pd.Series(np.abs(df_1d_low - np.roll(df_1d_close, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    # Sum of TR over 14 periods
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    max_hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero and log(0)
+    chop = np.full_like(close, np.nan)
+    mask = (max_hh - min_ll) > 0
+    chop[mask] = 100 * np.log10(sum_tr[mask] / (max_hh[mask] - min_ll[mask])) / np.log10(14)
     
-    # Directional Movement
-    dm_plus = pd.Series(np.where((df_1d_high - np.roll(df_1d_high, 1)) > (np.roll(df_1d_low, 1) - df_1d_low),
-                                 np.maximum(df_1d_high - np.roll(df_1d_high, 1), 0), 0))
-    dm_minus = pd.Series(np.where((np.roll(df_1d_low, 1) - df_1d_low) > (df_1d_high - np.roll(df_1d_high, 1)),
-                                  np.maximum(np.roll(df_1d_low, 1) - df_1d_low, 0), 0))
-    
-    # Smoothed DM and ATR
-    dm_plus_smooth = dm_plus.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = dm_minus.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = tr_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr_smooth
-    di_minus = 100 * dm_minus_smooth / atr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
-    df_1d_open = df_1d['open'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    range_1d = df_1d_high - df_1d_low
-    r1_1d = df_1d_close + 0.275 * range_1d
-    s1_1d = df_1d_close - 0.275 * range_1d
-    h3_1d = df_1d_close + 1.1 * range_1d
-    l3_1d = df_1d_close - 1.1 * range_1d
-    h4_1d = df_1d_close + 1.382 * range_1d
-    l4_1d = df_1d_close - 1.382 * range_1d
-    
-    # Align 1d Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    
-    # === Volume confirmation (20-period average) ===
+    # === Volume confirmation ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === ATR (14-period) for stoploss ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) 
-            or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(chop[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,47 +81,30 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        h3 = h3_1d_aligned[i]
-        l3 = l3_1d_aligned[i]
-        h4 = h4_1d_aligned[i]
-        l4 = l4_1d_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
-        adx_val = adx_1d_aligned[i]
         vol_avg = vol_ma[i]
         
-        # Regime filter: only trade in ranging markets (ADX < 25)
-        ranging_market = adx_val < 25
-        
-        # Volume confirmation: current volume > 1.5x average (moderate filter)
+        # Volume confirmation: current volume > 1.5x average
         volume_confirmed = volume_now > 1.5 * vol_avg
         
         if position == 0:
-            # Only enter in ranging markets with volume confirmation
-            long_condition = (price > r1) and ranging_market and volume_confirmed
-            short_condition = (price < s1) and ranging_market and volume_confirmed
-            
-            if long_condition:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            elif short_condition:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+            # Only enter in trending markets (CHOP < 38.2) with volume confirmation
+            if chop[i] < 38.2 and volume_confirmed:
+                if price > kama[i]:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                elif price < kama[i]:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
         
         elif position == 1:
             # Check stoploss (2.0x ATR)
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit (price crosses EMA50)
-            elif price < ema_trend:
-                signals[i] = 0.0
-                position = 0
-            # Mean reversion exit at H3 (overbought)
-            elif price > h3:
+            # Trend reversal exit
+            elif price < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -165,12 +115,8 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit (price crosses EMA50)
-            elif price > ema_trend:
-                signals[i] = 0.0
-                position = 0
-            # Mean reversion exit at L3 (oversold)
-            elif price < l3:
+            # Trend reversal exit
+            elif price > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -178,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1"
-timeframe = "4h"
+name = "1d_KAMA_Regime_Filter_Volume_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
