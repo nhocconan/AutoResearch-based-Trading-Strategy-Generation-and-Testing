@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_WilliamsAlligator_ElderRay_HTFTrend_v1
-Hypothesis: On 4h timeframe, combine Williams Alligator (trend direction) with Elder Ray (bull/bear power) and 1d EMA34 trend filter to capture strong moves while avoiding whipsaw. 
-In bull regime (1d close > EMA34), favor longs when Alligator is bullish (jaw < teeth < lips) and Elder Bull Power > 0. 
-In bear regime (1d close < EMA34), favor shorts when Alligator is bearish (jaw > teeth > lips) and Elder Bear Power < 0.
-Volume confirmation (volume > 1.5x 20-period average) ensures institutional participation. Discrete sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
+1d_KAMA_Regime_ADX_v1
+Hypothesis: On daily timeframe, Kaufman Adaptive Moving Average (KAMA) identifies trend direction, 
+while ADX > 25 filters for trending markets and RSI(14) < 30/ > 70 provides mean-reversion entries 
+in the trend direction. Weekly EMA34 confirms higher-timeframe trend alignment. 
+Discrete sizing (0.25) minimizes fee churn. Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
@@ -16,107 +16,125 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA34 trend regime)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load HTF data ONCE before loop (1w for weekly trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 1d EMA34 for daily trend regime ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 1w EMA34 for weekly trend regime ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 4h Williams Alligator (13,8,5 SMAs smoothed by 8,5,3) ===
+    # === Daily KAMA (ER=10, fast=2, slow=30) ===
     close = prices['close'].values
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close)).cumsum()
+    volatility = np.concatenate([[0], volatility[1:]])
+    
+    er = np.zeros_like(close)
+    for i in range(1, len(close)):
+        if volatility[i] != 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
+    
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # === Daily ADX(14) ===
     high = prices['high'].values
     low = prices['low'].values
     
-    # Jaw (13-period SMA smoothed by 8)
-    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    jaw = pd.Series(jaw_raw).rolling(window=8, min_periods=8).mean().values
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Teeth (8-period SMA smoothed by 5)
-    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    teeth = pd.Series(teeth_raw).rolling(window=5, min_periods=5).mean().values
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Lips (5-period SMA smoothed by 3)
-    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    lips = pd.Series(lips_raw).rolling(window=3, min_periods=3).mean().values
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # === 4h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) ===
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
     
-    # === 4h volume confirmation (volume > 1.5x 20-period average) ===
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma_20)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # === Daily RSI(14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    bars_since_entry = 0
-    max_hold_bars = 6  # max 1 day (6 * 4h = 24h)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_confirmed[i])):
+        if (np.isnan(kama[i]) or np.isnan(adx[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
         price = close[i]
-        daily_ema = ema_34_1d_aligned[i]
+        kama_val = kama[i]
+        adx_val = adx[i]
+        rsi_val = rsi[i]
+        weekly_ema = ema_34_1w_aligned[i]
         
-        # Alligator conditions
-        alligator_bull = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])  # jaw < teeth < lips
-        alligator_bear = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])  # jaw > teeth > lips
-        
-        # Elder Ray conditions
-        elder_bull = bull_power[i] > 0
-        elder_bear = bear_power[i] < 0
-        
-        # Daily trend regime
-        is_bull = price > daily_ema
-        is_bear = price < daily_ema
+        # Trend and regime conditions
+        is_uptrend = price > kama_val
+        is_downtrend = price < kama_val
+        is_trending = adx_val > 25
+        weekly_bull = price > weekly_ema
+        weekly_bear = price < weekly_ema
         
         if position == 0:
-            if is_bull:
-                # Bull regime: long when Alligator bullish and Elder Bull Power > 0
-                long_condition = alligator_bull and elder_bull and volume_confirmed
-            else:  # bear regime
-                # Bear regime: short when Alligator bearish and Elder Bear Power < 0
-                short_condition = alligator_bear and elder_bear and volume_confirmed
-            
-            if is_bull and long_condition:
+            # Long conditions: weekly bull + daily uptrend + trending + RSI oversold
+            if weekly_bull and is_uptrend and is_trending and rsi_val < 30:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                bars_since_entry = 0
-            elif is_bear and short_condition:
+            # Short conditions: weekly bear + daily downtrend + trending + RSI overbought
+            elif weekly_bear and is_downtrend and is_trending and rsi_val > 70:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                bars_since_entry = 0
         
-        elif position != 0:
-            bars_since_entry += 1
-            
-            # Time-based exit
-            if bars_since_entry >= max_hold_bars:
+        elif position == 1:
+            # Exit long: weekly bear OR RSI overbought OR trend weakens
+            if weekly_bear or rsi_val > 70 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short: weekly bull OR RSI oversold OR trend weakens
+            if weekly_bull or rsi_val < 30 or adx_val < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_WilliamsAlligator_ElderRay_HTFTrend_v1"
-timeframe = "4h"
+name = "1d_KAMA_Regime_ADX_v1"
+timeframe = "1d"
 leverage = 1.0
