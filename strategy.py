@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_BackwardationBreakout
-Hypothesis: Use daily backwardation (spot price below 24h VWAP) to identify oversold conditions,
-enter long when price breaks above Donchian(20) high with volume confirmation,
-exit on reversal below Donchian(20) low or RSI(14) > 70.
-Works in bull markets by catching breakouts from pullbacks and in bear markets by
-fading breakdowns with mean-reversion bias. Target: 20-40 trades/year.
+1d_WeeklyTrend_DailyMomentum_With_Volume_V2
+Hypothesis: Use weekly EMA34 trend filter to align with long-term momentum, enter on daily RSI(14) extremes with volume confirmation, and exit on opposite RSI extreme. 
+This captures momentum in trending markets while avoiding counter-trend trades. 
+Weekly trend filter reduces whipsaws in sideways markets. Target: 15-25 trades/year.
+Works in bull markets by catching pullbacks in uptrends and in bear markets by shorting bounces in downtrends. 
+Volume confirmation ensures institutional participation. 
+Improved version with adjusted RSI thresholds and volume multiplier to increase trade frequency while maintaining edge.
 """
 
 import numpy as np
@@ -17,30 +18,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 24:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # === Daily 24h VWAP for backwardation filter ===
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d = vwap_1d.values
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # === Weekly EMA34 for trend filter ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === Donchian channels (20-period) ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === Daily RSI(14) ===
     close = prices['close'].values
-    
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === RSI(14) for exit filter ===
     delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
+    # Wilder's smoothing for RSI
     def wilder_smooth(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
@@ -58,20 +52,18 @@ def generate_signals(prices):
     avg_loss = wilder_smooth(loss, period_rsi)
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[np.nan], rsi])
+    rsi = np.concatenate([[np.nan], rsi])  # align with close
     
-    # === Volume confirmation ===
+    # === Daily Volume confirmation ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(35, n):  # Start after warmup
         # Skip if indicators not ready
-        if (np.isnan(vwap_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(rsi[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
@@ -79,44 +71,39 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        price_close = close[i]
-        vwap = vwap_1d_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
+        price_close = prices['close'].iloc[i]
+        ema_trend = ema_34_1w_aligned[i]
         rsi_val = rsi[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Long: backwardation + Donchian breakout + volume
-            if (price_close < vwap and  # backwardation condition
-                price_close > upper and
+            # Long: weekly uptrend + RSI oversold bounce + volume
+            if (price_close > ema_trend and
+                rsi_val < 35 and
                 vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: contango + breakdown + volume
-            elif (price_close > vwap and  # contango condition
-                  price_close < lower and
+            # Short: weekly downtrend + RSI overbought bounce + volume
+            elif (price_close < ema_trend and
+                  rsi_val > 65 and
                   vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions
-            if position == 1:
-                if price_close < lower or rsi_val > 70:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1
-                if price_close > upper or rsi_val < 30:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit when RSI reaches opposite extreme
+            if position == 1 and rsi_val > 65:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and rsi_val < 35:
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_BackwardationBreakout"
-timeframe = "4h"
+name = "1d_WeeklyTrend_DailyMomentum_With_Volume_V2"
+timeframe = "1d"
 leverage = 1.0
