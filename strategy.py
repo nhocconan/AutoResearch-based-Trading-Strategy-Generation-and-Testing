@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume spike confirmation. Designed for low trade frequency (~15-30/year) to minimize fee drag and work in both bull/bear markets. Uses 12h primary timeframe with 1d HTF for trend and volume context.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation. Designed for low trade frequency (~20-40/year) to minimize fee drag and improve generalization across bull/bear markets. Uses 4h primary timeframe with 1d HTF for trend and volume context.
 """
 
 import numpy as np
@@ -30,17 +30,13 @@ def generate_signals(prices):
     vol_ratio_1d = volume_1d / vol_ma_1d
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # === Calculate Camarilla levels from previous 1d bar ===
-    # Need previous day's high, low, close to calculate today's levels
+    # === Camarilla pivot levels from previous day (using 1d OHLC) ===
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -58,35 +54,33 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        price_high = prices['high'].iloc[i]
-        price_low = prices['low'].iloc[i]
         trend_1d = ema_34_1d_aligned[i]
         vol_spike = vol_ratio_1d_aligned[i]
-        camarilla_r1 = camarilla_r1_aligned[i]
-        camarilla_s1 = camarilla_s1_aligned[i]
+        r1_level = camarilla_r1_aligned[i]
+        s1_level = camarilla_s1_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 + volume spike > 1.5 + price above 1d EMA34
-            if price_close > camarilla_r1 and vol_spike > 1.5 and price_close > trend_1d:
+            # Long: price breaks above R1 + volume spike > 1.5 + price above 1d EMA34
+            if price_close > r1_level and vol_spike > 1.5 and price_close > trend_1d:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1 + volume spike > 1.5 + price below 1d EMA34
-            elif price_close < camarilla_s1 and vol_spike > 1.5 and price_close < trend_1d:
+            # Short: price breaks below S1 + volume spike > 1.5 + price below 1d EMA34
+            elif price_close < s1_level and vol_spike > 1.5 and price_close < trend_1d:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: reverse signal or loss of trend/volume confirmation
+            # Exit: reverse signal or loss of trend/volume confirmation
             if position == 1:
-                # Exit long: price breaks below Camarilla S1 OR loss of trend/volume
-                if price_close < camarilla_s1 or price_close < trend_1d or vol_spike < 1.2:
+                # Exit long: price below S1 or loss of trend
+                if price_close < s1_level or price_close < trend_1d:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: price breaks above Camarilla R1 OR loss of trend/volume
-                if price_close > camarilla_r1 or price_close > trend_1d or vol_spike < 1.2:
+                # Exit short: price above R1 or loss of trend
+                if price_close > r1_level or price_close > trend_1d:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -94,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
