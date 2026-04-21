@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V3
-Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 4h timeframe for BTC and ETH in both bull and bear markets. The strategy uses 12h timeframe for trend filter to reduce false signals and improve risk-adjusted returns. Target: 20-50 trades/year per symbol (80-200 over 4 years).
+1d_Camarilla_R1S1_Breakout_VolumeATRFilter_V1
+Hypothesis: Daily Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 1d timeframe for BTC and ETH in both bull and bear markets. Uses 1w timeframe for trend filter to reduce false signals and improve risk-adjusted returns. Target: 7-25 trades/year per symbol (30-100 over 4 years).
 """
 
 import numpy as np
@@ -13,9 +13,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data once for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     # Load daily data once for Camarilla pivot calculation
@@ -40,17 +40,17 @@ def generate_signals(prices):
     r1 = pivot + (prev_high - prev_low) * 1.1 / 12
     s1 = pivot - (prev_high - prev_low) * 1.1 / 12
     
-    # Align daily levels to 4h timeframe
+    # Align daily levels to daily timeframe (no shift needed as we use previous day's levels)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter: 20-period average (approx 3.33 days on 4h)
+    # Volume filter: 20-period average
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     # ATR for stoploss
@@ -70,7 +70,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,20 +82,20 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume > 1.5 * vol_ma[i]
         
-        # 12h trend filter
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # 1w trend filter
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         if position == 0:
             # Long: price breaks above R1 in uptrend with volume
             if uptrend and volume_ok:
                 if price > r1_aligned[i]:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
                     position = 1
             # Short: price breaks below S1 in downtrend with volume
             elif downtrend and volume_ok:
                 if price < s1_aligned[i]:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
                     position = -1
         
         elif position == 1:
@@ -104,7 +104,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit: price reaches R1 or stoploss
@@ -112,10 +112,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V3"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_VolumeATRFilter_V1"
+timeframe = "1d"
 leverage = 1.0
