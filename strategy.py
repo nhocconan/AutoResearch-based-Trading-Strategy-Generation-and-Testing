@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_WeeklyTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 1d Camarilla R1/S1 breakouts filtered by 1w EMA50 trend and volume spike (>2x average).
-Uses discrete position sizing (0.0, ±0.25) to minimize fee churn and overtrading.
-ATR-based trailing stop with 2.0x ATR distance. Designed for 15-25 trades/year per symbol.
-Works in bull/bear via 1w trend alignment and volume confirmation to avoid false breakouts.
+6h_Donchian20_Breakout_1dTrend_WeeklyPivotDirection_VolumeSpike_ATRStop_v1
+Hypothesis: 6h Donchian(20) breakouts filtered by 1d EMA50 trend and weekly pivot direction (from 1w HTF).
+Only take longs when price > weekly pivot (bullish bias) and shorts when price < weekly pivot (bearish bias).
+Volume confirmation (>2x 20-period average) avoids false breakouts. ATR-based trailing stop with 2.0x ATR.
+Designed for 12-37 trades/year per symbol (~50-150 total over 4 years) to minimize fee drag.
+Works in bull/bear via 1d trend alignment and weekly pivot directional filter.
 """
 
 import numpy as np
@@ -16,32 +17,42 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for Camarilla, 1w for trend)
+    # Load HTF data ONCE before loop (1d for Donchian calculation and EMA, 1w for pivot)
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 5 or len(df_1w) < 50:
+    if len(df_1d) < 20 or len(df_1w) < 5:
         return np.zeros(n)
     
-    # === 1d OHLC for Camarilla calculation ===
+    # === 1d OHLC for Donchian(20) calculation ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels using previous completed 1d bar
-    # R1 = Close + (High - Low) * 1.1 / 12
-    # S1 = Close - (High - Low) * 1.1 / 12
-    camarilla_range = (high_1d - low_1d) * 1.1 / 12
-    r1 = close_1d + camarilla_range
-    s1 = close_1d - camarilla_range
+    # Calculate Donchian channels using previous completed 1d bar
+    # Upper = max(high_1d over last 20 periods)
+    # Lower = min(low_1d over last 20 periods)
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Align to 1d timeframe (use previous completed 1d bar)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # === 1w EMA50 for HTF trend filter ===
+    # === 1d EMA50 for trend filter ===
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === 1w pivot point (standard calculation) for directional bias ===
+    # Pivot = (H + L + C) / 3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    
+    # Align to 1w timeframe (use previous completed 1w bar)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
     # === ATR (14-period) for stoploss ===
     high = prices['high'].values
@@ -60,8 +71,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
-            or np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) 
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(pivot_1w_aligned[i]) 
+            or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,20 +87,22 @@ def generate_signals(prices):
             vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
             vol_spike = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
             
-            # Long conditions: price > 1d R1, 1w uptrend, volume spike
-            long_breakout = price > r1_aligned[i]
-            long_trend = price > ema_50_1w_aligned[i]
+            # Long conditions: price > 1d Donchian upper, 1d uptrend, price > weekly pivot (bullish bias), volume spike
+            long_breakout = price > donchian_upper_aligned[i]
+            long_trend = price > ema_50_1d_aligned[i]
+            long_bias = price > pivot_1w_aligned[i]
             
-            # Short conditions: price < 1d S1, 1w downtrend, volume spike
-            short_breakout = price < s1_aligned[i]
-            short_trend = price < ema_50_1w_aligned[i]
+            # Short conditions: price < 1d Donchian lower, 1d downtrend, price < weekly pivot (bearish bias), volume spike
+            short_breakout = price < donchian_lower_aligned[i]
+            short_trend = price < ema_50_1d_aligned[i]
+            short_bias = price < pivot_1w_aligned[i]
             
-            # Entry logic - ONLY enter on volume spike + trend alignment
-            if long_breakout and long_trend and vol_spike:
+            # Entry logic - ONLY enter on volume spike + trend alignment + pivot bias
+            if long_breakout and long_trend and long_bias and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and vol_spike:
+            elif short_breakout and short_trend and short_bias and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -98,8 +112,8 @@ def generate_signals(prices):
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below 1d S1 (support broken)
-            elif price < s1_aligned[i]:
+            # Trailing exit: price closes below 1d Donchian lower (support broken)
+            elif price < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,8 +124,8 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above 1d R1 (resistance broken)
-            elif price > r1_aligned[i]:
+            # Trailing exit: price closes above 1d Donchian upper (resistance broken)
+            elif price > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_1dTrend_WeeklyPivotDirection_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
