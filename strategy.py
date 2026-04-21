@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_ImpulseMACD_WeeklyTrend_VolumeFilter
-Hypothesis: 6h MACD histogram impulse (rising/falling) aligned with weekly EMA50 trend and volume confirmation.
-Long when MACD histogram > 0 and rising (bullish impulse), weekly uptrend, volume > 1.5x average.
-Short when MACD histogram < 0 and falling (bearish impulse), weekly downtrend, volume > 1.5x average.
-Exit when MACD histogram crosses zero or price violates weekly trend.
-Designed for moderate trade frequency (target: 20-40 trades/year) to balance signal quality and fees.
-Works in bull/bear via weekly trend alignment and MACD impulse as momentum filter.
+12h_Camarilla_Pivot_Breakout_DailyTrend_VolumeFilter
+Hypothesis: 12h Camarilla pivot (R1/S1) breakouts filtered by daily EMA50 trend and volume spike.
+Enter long when price breaks above 12h R1 with daily uptrend and above-average volume.
+Enter short when price breaks below 12h S1 with daily downtrend and above-average volume.
+Exit on opposite level break or ATR(14) trailing stop (2.0*ATR).
+Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
+Works in bull/bear via daily trend alignment and volume confirmation as regime filter.
 """
 
 import numpy as np
@@ -18,36 +18,54 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly for trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop (daily for trend, 12h is primary)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Weekly EMA50 for HTF trend filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === 12h Camarilla Pivot Levels (R1, S1) ===
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
-    # === 6h MACD Histogram (12,26,9) ===
-    close = prices['close'].values
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd = ema12 - ema26
-    signal_line = pd.Series(macd).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd - signal_line
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_range = (high_12h - low_12h) * 1.1 / 12.0
+    r1_12h = close_12h + camarilla_range
+    s1_12h = close_12h - camarilla_range
     
-    # === Volume confirmation (20-period average) ===
+    # Align to 12h timeframe (use previous completed 12h bar)
+    r1_12h_aligned = align_htf_to_ltf(prices, prices, r1_12h)  # self-align for same timeframe
+    s1_12h_aligned = align_htf_to_ltf(prices, prices, s1_12h)
+    
+    # === Daily EMA50 for HTF trend filter ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === Volume spike filter (20-period average) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === ATR (14-period) for stoploss ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(macd_hist[i]) 
-            or np.isnan(signal_line[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) 
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) 
+            or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,44 +74,46 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirm = volume[i] > 1.5 * vol_ma[i]
+            # Volume confirmation: current volume > 20-period average
+            vol_confirm = volume[i] > vol_ma[i]
             
-            # Long conditions: MACD hist > 0 and rising (bullish impulse), weekly uptrend, volume spike
-            macd_bullish = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1]
-            weekly_uptrend = price > ema_50_1w_aligned[i]
+            # Long conditions: price > 12h R1, daily uptrend, volume spike
+            long_breakout = price > r1_12h_aligned[i]
+            long_trend = price > ema_50_1d_aligned[i]
             
-            # Short conditions: MACD hist < 0 and falling (bearish impulse), weekly downtrend, volume spike
-            macd_bearish = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1]
-            weekly_downtrend = price < ema_50_1w_aligned[i]
+            # Short conditions: price < 12h S1, daily downtrend, volume spike
+            short_breakout = price < s1_12h_aligned[i]
+            short_trend = price < ema_50_1d_aligned[i]
             
             # Entry logic
-            if macd_bullish and weekly_uptrend and vol_confirm:
+            if long_breakout and long_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif macd_bearish and weekly_downtrend and vol_confirm:
+            elif short_breakout and short_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Exit conditions: MACD hist crosses zero OR price breaks weekly trend
-            macd_exit = macd_hist[i] <= 0
-            trend_exit = price < ema_50_1w_aligned[i]
-            
-            if macd_exit or trend_exit:
+            # Check stoploss
+            if price < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trailing exit: price closes below 12h S1 (support broken)
+            elif price < s1_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions: MACD hist crosses zero OR price breaks weekly trend
-            macd_exit = macd_hist[i] >= 0
-            trend_exit = price > ema_50_1w_aligned[i]
-            
-            if macd_exit or trend_exit:
+            # Check stoploss
+            if price > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trailing exit: price closes above 12h R1 (resistance broken)
+            elif price > r1_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ImpulseMACD_WeeklyTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Breakout_DailyTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
