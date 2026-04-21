@@ -8,58 +8,37 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Load 1d data for trend and volatility context
+    # Load 1d data for pivot levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Load 1w data for weekly volatility filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate daily pivot levels (using prior day's OHLC)
+    high_d = df_1d['high'].values
+    low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    pivot_d = (high_d + low_d + close_d) / 3
+    r1_d = 2 * pivot_d - low_d
+    s1_d = 2 * pivot_d - high_d
+    r2_d = pivot_d + (high_d - low_d)
+    s2_d = pivot_d - (high_d - low_d)
     
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar: no previous close
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align daily pivots to 4h (wait for daily close)
+    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
+    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
+    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
+    r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
+    s2_d_aligned = align_htf_to_ltf(prices, df_1d, s2_d)
     
-    # Calculate 1d ATR percentile (20-period) for volatility regime
-    atr_percentile = pd.Series(atr_14).rolling(window=20, min_periods=20).apply(
-        lambda x: np.percentile(x, 50) if len(x) == 20 else np.nan, raw=True
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 1w ATR(14) for weekly volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    tr1_w = np.abs(high_1w - low_1w)
-    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    tr_w[0] = tr1_w[0]
-    atr_14_w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1w ATR percentile (20-period) for weekly volatility regime
-    atr_percentile_w = pd.Series(atr_14_w).rolling(window=20, min_periods=20).apply(
-        lambda x: np.percentile(x, 50) if len(x) == 20 else np.nan, raw=True
-    ).values
-    
-    # Align weekly ATR percentile to 12h
-    atr_percentile_w_aligned = align_htf_to_ltf(prices, df_1w, atr_percentile_w)
-    
-    # Calculate 12h price change for momentum
-    price_change = (prices['close'].values / np.roll(prices['close'].values, 12) - 1)  # 12-period (1 day) return
-    price_change[0:12] = 0  # First 12 bars: no data
+    # Volume confirmation using 4h volume
+    vol_4h = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     # Pre-compute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -69,8 +48,9 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(atr_percentile_aligned[i]) or
-            np.isnan(atr_percentile_w_aligned[i])):
+        if (np.isnan(pivot_d_aligned[i]) or np.isnan(r1_d_aligned[i]) or np.isnan(s1_d_aligned[i]) or
+            np.isnan(r2_d_aligned[i]) or np.isnan(s2_d_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,38 +68,56 @@ def generate_signals(prices):
         
         # Current values
         price_close = prices['close'].iloc[i]
-        atr_val = atr_14_aligned[i]
-        atr_pct = atr_percentile_aligned[i]
-        atr_pct_w = atr_percentile_w_aligned[i]
-        mom = price_change[i]
+        vol_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)[i]
         
-        # Volatility filter: only trade when volatility is above median (expanding)
-        vol_filter = atr_pct > atr_pct_w  # Daily volatility > weekly median volatility
+        # Daily pivot levels
+        r1_val = r1_d_aligned[i]
+        s1_val = s1_d_aligned[i]
+        r2_val = r2_d_aligned[i]
+        s2_val = s2_d_aligned[i]
         
-        # Momentum filter: require significant price movement
-        mom_filter = np.abs(mom) > 0.02  # 2% minimum daily move
+        # Trend filter: price above/below 1d EMA50
+        uptrend = price_close > ema50_1d_aligned[i]
+        downtrend = price_close < ema50_1d_aligned[i]
+        
+        # Volume confirmation
+        volume_confirm = vol_current > 1.3 * vol_ma_20_1d_aligned[i]
         
         if position == 0:
-            # Enter long: bullish momentum + volatility expansion
-            if (mom > 0 and vol_filter and mom_filter):
+            # Enter long: price breaks above R2 with volume in uptrend
+            if (uptrend and 
+                price_close > r2_val and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish momentum + volatility expansion
-            elif (mom < 0 and vol_filter and mom_filter):
+            # Enter short: price breaks below S2 with volume in downtrend
+            elif (downtrend and 
+                  price_close < s2_val and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
+            # Fade at R1/S1 in ranging markets (price near extremes with rejection)
+            elif (not uptrend and not downtrend and volume_confirm):
+                # Fade at R1: price touches R1 and shows rejection (close < open)
+                if abs(price_close - r1_val) < 0.005 * r1_val and price_close < prices['open'].iloc[i]:
+                    signals[i] = -0.20
+                    position = -1
+                # Fade at S1: price touches S1 and shows rejection (close > open)
+                elif abs(price_close - s1_val) < 0.005 * s1_val and price_close > prices['open'].iloc[i]:
+                    signals[i] = 0.20
+                    position = 1
         
         elif position != 0:
-            # Exit conditions: momentum reversal or volatility contraction
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: bearish momentum OR volatility contraction
-                if (mom < -0.01) or (atr_pct < atr_pct_w * 0.8):  # Strong reversal or vol contraction
+                # Exit long: price breaks below R1 OR stop loss at S1
+                if (price_close < r1_val) or (price_close < s1_val):
                     exit_signal = True
             elif position == -1:
-                # Exit short: bullish momentum OR volatility contraction
-                if (mom > 0.01) or (atr_pct < atr_pct_w * 0.8):  # Strong reversal or vol contraction
+                # Exit short: price breaks above S1 OR stop loss at R1
+                if (price_close > s1_val) or (price_close > r1_val):
                     exit_signal = True
             
             if exit_signal:
@@ -131,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolMom_Expansion"
-timeframe = "12h"
+name = "4h_DailyPivot_R1S1_R2S2_BreakoutFade"
+timeframe = "4h"
 leverage = 1.0
