@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop
-Hypothesis: Camarilla pivot R1/S1 levels act as intraday support/resistance on 4h timeframe.
-Breakout above R1 with volume confirmation and chop regime filter indicates bullish momentum.
-Breakdown below S1 with volume confirmation and chop regime filter indicates bearish momentum.
-ATR-based stoploss limits downside. Works in both bull/bear markets: regime filter adapts to conditions,
-volume confirmation reduces false breakouts, and pivot levels provide structure in ranging markets.
-Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+1h_HTFTrend_VolumeSpike_Entry
+Hypothesis: Use 4h EMA50 for trend direction and 1d ATR ratio for volatility regime filter.
+Enter on 1h bullish/bearish engulfing candles with volume spike (>1.5x 20-bar average).
+Only trade during 08-20 UTC session to avoid low-liquidity hours.
+Fixed size 0.20 to limit drawdown. Target 15-35 trades/year.
+Works in bull/bear: trend filter avoids counter-trend trades, volume spike ensures conviction.
 """
 
 import numpy as np
@@ -18,124 +17,119 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # === 12h EMA34 for trend filter (HTF bias) ===
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # === 4h Indicators (primary timeframe) ===
+    # Load HTF data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # 4h EMA50 for trend filter
     close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Camarilla pivot levels from previous 4h bar
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
-    # We need previous bar's high/low/close
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
+    # 1d ATR ratio for volatility regime (avoid choppy markets)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Set first value to NaN (no previous bar)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 12
-    s1 = prev_close - 1.1 * camarilla_range / 12
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_10_1d = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
+    atr_30_1d = pd.Series(tr_1d).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr_10_1d / (atr_30_1d + 1e-10)  # Avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Volume confirmation: current volume > 1.5 * average volume (20-period)
-    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_4h > (1.5 * vol_ma)
+    # Precompute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Choppiness regime filter: CHOP(14) < 61.8 = trending (favor breakouts)
-    # CHOP = 100 * log10(sum(TR,14) / (max(high,14) - min(low,14))) / log10(14)
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 1h indicators for entry timing
+    high_1h = prices['high'].values
+    low_1h = prices['low'].values
+    close_1h = prices['close'].values
+    open_1h = prices['open'].values
+    volume_1h = prices['volume'].values
     
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    # Volume spike: >1.5x 20-bar average
+    vol_ma_20 = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1h > (1.5 * vol_ma_20)
     
-    # Avoid division by zero
-    denominator = max_high - min_low
-    chop = np.where(denominator > 0, 
-                    100 * np.log10(atr_sum / denominator) / np.log10(14), 
-                    100)
-    chop_filter = chop < 61.8  # Trending regime
-    
-    # ATR (14-period) for stoploss
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Bullish engulfing: current green candle engulfs previous red candle
+    bull_engulf = (close_1h > open_1h) & (open_1h < close_1h) & \
+                  (close_1h >= open_1h) & (open_1h <= close_1h) & \
+                  (close_1h > open_1h.shift(1)) & (open_1h < close_1h.shift(1)) & \
+                  (close_1h >= open_1h.shift(1)) & (open_1h <= close_1h.shift(1)) & \
+                  (close_1h - open_1h) >= (close_1h.shift(1) - open_1h.shift(1))
+    # Bearish engulfing: current red candle engulfs previous green candle
+    bear_engulf = (close_1h < open_1h) & (open_1h > close_1h) & \
+                  (close_1h <= open_1h) & (open_1h >= close_1h) & \
+                  (close_1h < open_1h.shift(1)) & (open_1h > close_1h.shift(1)) & \
+                  (close_1h <= open_1h.shift(1)) & (open_1h >= close_1h.shift(1)) & \
+                  (open_1h - close_1h) >= (open_1h.shift(1) - close_1h.shift(1))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(ema_34_12h_aligned[i]) 
-            or np.isnan(volume_spike[i]) or np.isnan(chop_filter[i]) 
-            or np.isnan(atr[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) 
+            or np.isnan(volume_spike[i]) or np.isnan(bull_engulf[i]) 
+            or np.isnan(bear_engulf[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
+        # Session filter: only trade 08-20 UTC
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volatility regime filter: avoid extreme volatility (ATR ratio > 1.5) or low volatility (< 0.8)
+        if atr_ratio_aligned[i] > 1.5 or atr_ratio_aligned[i] < 0.8:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        price = close_1h[i]
         
         if position == 0:
-            # Long: Breakout above R1 + volume spike + trending regime + HTF bias long
-            if (price > r1[i] and volume_spike[i] and chop_filter[i] 
-                and close_4h[i] > ema_34_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: Uptrend (price > 4h EMA50) + bullish engulfing + volume spike
+            if price > ema_50_4h_aligned[i] and bull_engulf[i] and volume_spike[i]:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
-            # Short: Breakdown below S1 + volume spike + trending regime + HTF bias short
-            elif (price < s1[i] and volume_spike[i] and chop_filter[i] 
-                  and close_4h[i] < ema_34_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: Downtrend (price < 4h EMA50) + bearish engulfing + volume spike
+            elif price < ema_50_4h_aligned[i] and bear_engulf[i] and volume_spike[i]:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Check stoploss
-            if price < entry_price - 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit: price returns below R1 or regime changes to choppy
-            elif price < r1[i] or not chop_filter[i]:
+            # Exit: price crosses below 4h EMA50 or opposite engulfing candle
+            if price < ema_50_4h_aligned[i] or bear_engulf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Check stoploss
-            if price > entry_price + 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit: price returns above S1 or regime changes to choppy
-            elif price > s1[i] or not chop_filter[i]:
+            # Exit: price crosses above 4h EMA50 or opposite engulfing candle
+            if price > ema_50_4h_aligned[i] or bull_engulf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop"
-timeframe = "4h"
+name = "1h_HTFTrend_VolumeSpike_Entry"
+timeframe = "1h"
 leverage = 1.0
