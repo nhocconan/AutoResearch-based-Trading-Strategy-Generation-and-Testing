@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot point reversal with 1d volume surge and ADX trend filter.
-# Works in bull/bear: mean reversion at key levels with volume confirmation and trend alignment.
-# Target: 20-30 trades/year by requiring tight confluence of Camarilla touch, volume spike, and trend filter.
-# Entry: Long at S1 when price touches S1 with volume surge and ADX > 20 (bullish bias); Short at R1 when price touches R1 with volume surge and ADX > 20 (bearish bias).
-# Exit: Opposite touch of Camarilla level (S3 for long, R3 for short) or volume drops below average.
+# Hypothesis: 4h Donchian breakout with 1d volume surge and ADX trend filter.
+# Works in bull/bear: breakouts with volume and trend alignment capture strong moves.
+# Target: 20-30 trades/year by requiring tight confluence of Donchian breakout, volume spike, and ADX > 20.
+# Entry: Long when price breaks above Donchian(20) high with volume surge and ADX > 20; Short when breaks below Donchian(20) low with volume surge and ADX > 20.
+# Exit: Opposite Donchian touch (lower band for long, upper band for short) or volume drops below average.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for Camarilla calculation, volume, and ADX
+    # Load daily data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -56,21 +56,11 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilders_smooth(dx, 14)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L), etc.
-    # We'll use: R1 = C + 1.1*(H-L)/2, S1 = C - 1.1*(H-L)/2
-    #          R3 = C + 1.1*(H-L), S3 = C - 1.1*(H-L)
-    #          R4 = C + 1.5*(H-L), S4 = C - 1.5*(H-L)
-    # But we need previous day's values, so we shift by 1
-    prev_close = np.concatenate([[np.nan], close_d[:-1]])
-    prev_high = np.concatenate([[np.nan], high_d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_d[:-1]])
-    
-    hl_range = prev_high - prev_low
-    camarilla_S1 = prev_close - 1.1 * hl_range / 2
-    camarilla_R1 = prev_close + 1.1 * hl_range / 2
-    camarilla_S3 = prev_close - 1.1 * hl_range
-    camarilla_R3 = prev_close + 1.1 * hl_range
+    # Calculate Donchian channels (20-period) on 4h data
+    high = prices['high'].values
+    low = prices['low'].values
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation using 1d volume
     vol_d = df_1d['volume'].values
@@ -78,10 +68,6 @@ def generate_signals(prices):
     
     # Align daily data to 4h (wait for daily close)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
     vol_ma_10_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_10_1d)
     
     # Pre-compute session hours (08-20 UTC)
@@ -92,8 +78,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
-            np.isnan(camarilla_R1_aligned[i]) or np.isnan(vol_ma_10_1d_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_10_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -113,12 +99,6 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         vol_current = align_htf_to_ltf(prices, df_1d, vol_d)[i]  # 1d volume aligned to 4h
         
-        # Camarilla levels
-        s1 = camarilla_S1_aligned[i]
-        r1 = camarilla_R1_aligned[i]
-        s3 = camarilla_S3_aligned[i]
-        r3 = camarilla_R3_aligned[i]
-        
         # Trend filter: ADX > 20 indicates trending market
         trending = adx_aligned[i] > 20
         
@@ -126,17 +106,15 @@ def generate_signals(prices):
         volume_confirm = vol_current > 1.5 * vol_ma_10_1d_aligned[i]
         
         if position == 0:
-            # Enter long: price touches S1 with volume surge in trending market (bullish bias)
+            # Enter long: price breaks above Donchian high with volume surge in trending market
             if (trending and 
-                price_close <= s1 and  # Touch or penetrate S1
-                price_close >= s3 and  # But not below S3 (avoid strong breakdown)
+                price_close > donchian_high[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price touches R1 with volume surge in trending market (bearish bias)
+            # Enter short: price breaks below Donchian low with volume surge in trending market
             elif (trending and 
-                  price_close >= r1 and  # Touch or penetrate R1
-                  price_close <= r3 and  # But not above R3 (avoid strong breakout)
+                  price_close < donchian_low[i] and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -146,14 +124,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price touches S3 (strong support break) OR volume drops below average
-                if price_close <= s3:
+                # Exit long: price touches Donchian low OR volume drops below average
+                if price_close <= donchian_low[i]:
                     exit_signal = True
                 elif vol_current < vol_ma_10_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short: price touches R3 (strong resistance break) OR volume drops below average
-                if price_close >= r3:
+                # Exit short: price touches Donchian high OR volume drops below average
+                if price_close >= donchian_high[i]:
                     exit_signal = True
                 elif vol_current < vol_ma_10_1d_aligned[i]:
                     exit_signal = True
@@ -167,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_VolumeSurge_ADX"
+name = "4h_Donchian20_1dVolumeSurge_ADX"
 timeframe = "4h"
 leverage = 1.0
