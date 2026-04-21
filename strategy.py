@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_PivotPoint_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 6h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.0x 20-period average).
+4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeSpike_ATRStop_v2
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.0x 20-period average).
 Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to minimize fee churn.
 1d trend filter provides robust directional bias across bull/bear markets while reducing whipsaws.
 Target: 20-50 trades/year per symbol for low fee drag and strong test generalization.
@@ -21,13 +21,13 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 6h OHLC for Camarilla pivot calculation (based on previous day) ===
+    # === 4h OHLC for Camarilla pivot calculation (based on previous day) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
     # Calculate Camarilla pivots using previous 1d OHLC
-    # We need to align 1d data to calculate pivots for each 6h bar
+    # We need to align 1d data to calculate pivots for each 4h bar
     df_1d_open = df_1d['open'].values
     df_1d_high = df_1d['high'].values
     df_1d_low = df_1d['low'].values
@@ -44,7 +44,7 @@ def generate_signals(prices):
     r4_1d = df_1d_close + 1.5 * range_1d
     s4_1d = df_1d_close - 1.5 * range_1d
     
-    # Align 1d Camarilla levels to 6h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_PivotPoint_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
