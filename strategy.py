@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.0x 20-period average).
-Designed for fewer trades (target: 50-150 total over 4 years) to minimize fee drag while capturing strong breakouts.
-Uses ATR-based stoploss (2.0x) and discrete position sizing (0.25) to balance returns and risk.
-Works in both bull and bear markets via 1d trend filter and volatility-adjusted exits.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.5x 30-period average).
+Uses ATR(14) stoploss (2.5x) and discrete position sizing (0.30) to balance returns and fee drag.
+Stricter volume and trend filters reduce trade frequency for better test generalization while maintaining edge.
+Designed to work in both bull and bear markets via 1d trend filter and volatility-adjusted exits.
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA50 trend filter and Camarilla levels)
+    # Load HTF data ONCE before loop (1d for EMA50 trend filter)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r1_1d = df_1d_close + 0.275 * range_1d
     s1_1d = df_1d_close - 0.275 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -50,9 +50,9 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume filter: 20-period average (stricter for 12h) ===
+    # === Volume filter: 30-period average (stricter) ===
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,8 +72,8 @@ def generate_signals(prices):
         vol_average = vol_ma[i]
         
         if position == 0:
-            # Volume filter: current volume > 2.0x 20-period average (stricter for fewer trades)
-            vol_filter = vol_current > 2.0 * vol_average
+            # Stricter volume filter: current volume > 2.5x 30-period average
+            vol_filter = vol_current > 2.5 * vol_average
             
             # Long conditions: price > R1 (breakout), 1d uptrend, volume filter
             long_breakout = price > r1_1d_aligned[i]
@@ -85,17 +85,17 @@ def generate_signals(prices):
             
             # Entry logic - stricter filters for fewer, higher-quality trades
             if long_breakout and long_trend and vol_filter:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
             elif short_breakout and short_trend and vol_filter:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.0x ATR for timely exits)
-            if price < entry_price - 2.0 * atr[i]:
+            # Check stoploss (wider 2.5x ATR to reduce premature exits)
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trailing exit: price closes below S1 (breakdown)
@@ -103,11 +103,11 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Check stoploss (2.0x ATR)
-            if price > entry_price + 2.0 * atr[i]:
+            # Check stoploss (wider 2.5x ATR)
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trailing exit: price closes above R1 (breakout)
@@ -115,10 +115,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
