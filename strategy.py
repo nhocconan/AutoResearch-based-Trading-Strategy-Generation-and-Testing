@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_Regime_ATRStop_v2
-Hypothesis: 4h Camarilla pivot R1/S1 breakout with volume confirmation (>1.5x 20-period volume MA) and 12h chop regime filter (CHOP > 61.8 = range → mean revert at S1/R1). 
+1d_Camarilla_R1S1_Breakout_Volume_WeeklyTrend_ATRStop
+Hypothesis: Daily Camarilla pivot R1/S1 breakout with volume confirmation (>1.5x 20-day volume MA) and 1-week chop regime filter (CHOP > 61.8 = range → mean revert at S1/R1). 
 In ranging markets (CHOP > 61.8): fade extremes → short R1 breakdown, long S1 bounce. 
 In trending markets (CHOP ≤ 61.8): follow breakout → long R1 break, short S1 breakdown.
 ATR trailing stop (2.5x ATR) manages risk. Position size 0.25 balances risk/return.
-Target ~25-50 trades/year per symbol (100-200 total over 4 years).
-Uses 4h primary timeframe with 12h HTF for regime filter.
-Enhanced with stricter volume filter (2.0x) and wider chop thresholds to reduce trades and improve BTC/ETH edge.
+Target ~10-25 trades/year per symbol (40-100 total over 4 years).
+Uses 1d primary timeframe with 1w HTF for regime filter.
 """
 
 import numpy as np
@@ -19,45 +18,45 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for chop regime)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load HTF data ONCE before loop (1w for chop regime)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # === 12h Chop regime (trend/range filter) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1w Chop regime (trend/range filter) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range for Chop calculation
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Chop = 100 * log10(sum(ATR14) / (max(high)-min(low))) / log10(14)
-    sum_atr = pd.Series(atr_12h).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    sum_atr = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
     chop = 100 * (np.log10(sum_atr / (max_high - min_low + 1e-10)) / np.log10(14))
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
-    # === 4h Indicators (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # === 1d Indicators (primary timeframe) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate Camarilla pivot points (R1, S1) from previous day
-    # Using previous 4h bar's high, low, close (shifted by 1)
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
+    # Using previous day's high, low, close (shifted by 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
@@ -68,12 +67,12 @@ def generate_signals(prices):
     s1 = pivot - (range_ * 1.1 / 12)
     
     # Volume MA (20-period) for spike detection
-    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # ATR (14-period) for stoploss
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
@@ -92,13 +91,12 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        price = close_4h[i]
-        vol = volume_4h[i]
-        vol_ok = vol > 2.0 * vol_ma[i]  # Stricter volume confirmation: 2.0x MA
+        price = close_1d[i]
+        vol = volume_1d[i]
+        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
         chop_val = chop_aligned[i]
         is_ranging = chop_val > 61.8  # CHOP > 61.8 = ranging market
-        is_trending = chop_val <= 38.2  # CHOP <= 38.2 = trending market
         
         if position == 0:
             if is_ranging:
@@ -115,7 +113,7 @@ def generate_signals(prices):
                     position = -1
                     entry_price = price
                     lowest_since_entry = price
-            elif is_trending:
+            else:
                 # In trending market: follow breakout
                 # Long: price breaks above R1 + volume confirmation
                 if price > r1[i] and vol_ok:
@@ -152,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_Regime_ATRStop_v2"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_Volume_WeeklyTrend_ATRStop"
+timeframe = "1d"
 leverage = 1.0
