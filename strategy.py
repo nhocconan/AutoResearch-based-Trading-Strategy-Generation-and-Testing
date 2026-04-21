@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Pivot Point R2/S2 Breakout with Volume Confirmation and ATR Stop
-Hypothesis: Daily pivot points R2/S2 provide stronger support/resistance than R1/S1. Breakouts with volume confirmation capture institutional moves, while ATR-based stops limit losses. Works in both bull and bear markets by using adaptive daily levels and avoiding overtrading.
+1d Weekly Keltner Channel Breakout with Volume Confirmation and ATR Stop
+Hypothesis: Weekly Keltner Channels (based on ATR) provide dynamic support/resistance that adapts to volatility. Breakouts above upper channel or below lower channel with volume confirmation capture institutional moves, while ATR-based stops limit losses. Works in both bull and bear markets by using adaptive volatility-based channels and avoiding overtrading through strict weekly confirmation.
 """
 
 import numpy as np
@@ -13,36 +13,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for pivot points and ATR
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Load weekly data once for Keltner Channel calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate daily True Range for ATR
-    tr1 = np.abs(high_daily - low_daily)
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr1[0] = high_daily[0] - low_daily[0]
-    tr2[0] = np.abs(high_daily[0] - close_daily[0])
-    tr3[0] = np.abs(low_daily[0] - close_daily[0])
+    # Calculate weekly True Range for ATR
+    tr1 = np.abs(high_weekly - low_weekly)
+    tr2 = np.abs(high_weekly - np.roll(close_weekly, 1))
+    tr3 = np.abs(low_weekly - np.roll(close_weekly, 1))
+    tr1[0] = high_weekly[0] - low_weekly[0]
+    tr2[0] = np.abs(high_weekly[0] - close_weekly[0])
+    tr3[0] = np.abs(low_weekly[0] - close_weekly[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_weekly = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily pivot points: P = (H+L+C)/3, R2 = P + (H-L), S2 = P - (H-L)
-    pivot_daily = (high_daily + low_daily + close_daily) / 3.0
-    r2_daily = pivot_daily + (high_daily - low_daily)
-    s2_daily = pivot_daily - (high_daily - low_daily)
+    # Calculate weekly EMA (20-period) as middle line
+    ema_weekly = pd.Series(close_weekly).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Align daily indicators to 4h timeframe
-    atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
-    r2_daily_aligned = align_htf_to_ltf(prices, df_daily, r2_daily)
-    s2_daily_aligned = align_htf_to_ltf(prices, df_daily, s2_daily)
+    # Calculate Keltner Channels: Upper = EMA + 2*ATR, Lower = EMA - 2*ATR
+    upper_keltner = ema_weekly + 2.0 * atr_weekly
+    lower_keltner = ema_weekly - 2.0 * atr_weekly
     
-    # Main timeframe data (4h)
+    # Align weekly indicators to daily timeframe
+    atr_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr_weekly)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_weekly, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_weekly, lower_keltner)
+    
+    # Main timeframe data (daily)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -53,43 +55,43 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(atr_daily_aligned[i]) or np.isnan(r2_daily_aligned[i]) or np.isnan(s2_daily_aligned[i])):
+        if (np.isnan(atr_weekly_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        atr = atr_daily_aligned[i]
-        r2 = r2_daily_aligned[i]
-        s2 = s2_daily_aligned[i]
+        atr = atr_weekly_aligned[i]
+        upper = upper_keltner_aligned[i]
+        lower = lower_keltner_aligned[i]
         vol_current = volume[i]
         
-        # Volume filter: current volume > 2.0x 30-period average (more selective)
-        vol_ma = np.mean(volume[max(0, i-30):i]) if i >= 30 else volume[i]
-        vol_ok = vol_current > 2.0 * vol_ma
+        # Volume filter: current volume > 1.5x 20-period average (selective but not too strict)
+        vol_ma = np.mean(volume[max(0, i-20):i]) if i >= 20 else volume[i]
+        vol_ok = vol_current > 1.5 * vol_ma
         
         if position == 0:
-            # Long breakout: price breaks above R2 with volume confirmation
-            if price > r2 and vol_ok:
+            # Long breakout: price breaks above upper Keltner channel with volume confirmation
+            if price > upper and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S2 with volume confirmation
-            elif price < s2 and vol_ok:
+            # Short breakdown: price breaks below lower Keltner channel with volume confirmation
+            elif price < lower and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S2 (failed breakout) or ATR-based stop
-            if price < s2 or (i > 0 and close[i-1] > s2 and price < close[i-1] - 1.5 * atr):
+            # Long exit: price breaks below lower Keltner channel (failed breakout) or ATR-based stop
+            if price < lower or (i > 0 and close[i-1] > lower and price < close[i-1] - 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R2 (failed breakdown) or ATR-based stop
-            if price > r2 or (i > 0 and close[i-1] < r2 and price > close[i-1] + 1.5 * atr):
+            # Short exit: price breaks above upper Keltner channel (failed breakdown) or ATR-based stop
+            if price > upper or (i > 0 and close[i-1] < upper and price > close[i-1] + 1.5 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PivotPoint_R2S2_Breakout_Volume_ATRFilter"
-timeframe = "4h"
+name = "1d_WeeklyKeltnerBreakout_Volume_ATRFilter"
+timeframe = "1d"
 leverage = 1.0
