@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_20_Breakout_Volume_Trend_1dEMA50
-Hypothesis: Donchian(20) breakouts in the direction of the 1d EMA50 trend with volume confirmation capture medium-term trends in both bull and bear markets. The 1d EMA50 provides a robust trend filter, while volume confirmation ensures breakouts are genuine. This strategy targets 20-40 trades per year on 4h, minimizing fee drag. Uses ATR-based stop loss via signal=0.
+1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter
+Hypothesis: Camarilla pivot levels on daily timeframe act as strong support/resistance. Price breaking above R1 or below S1 with volume confirmation and aligned weekly trend (EMA34) captures institutional breakouts. Works in bull/bear by filtering with weekly EMA trend. Uses ATR-based stoploss to manage risk. Target 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,114 +13,120 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data once for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = np.zeros_like(close_1d)
-    ema50_1d[0] = close_1d[0]
-    alpha = 2.0 / (50 + 1)
-    for i in range(1, len(close_1d)):
-        ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    # Calculate weekly EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema34_1w = np.zeros_like(close_1w)
+    ema34_1w[0] = close_1w[0]
+    alpha = 2.0 / (34 + 1)
+    for i in range(1, len(close_1w)):
+        ema34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema34_1w[i-1]
     
-    # Align 1d EMA50 to 4h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align weekly EMA34 to daily timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Main timeframe data (4h)
+    # Daily data for Camarilla calculation
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Calculate Camarilla levels for each day using previous day's OHLC
+    R1 = np.full(n, np.nan)
+    S1 = np.full(n, np.nan)
+    PP = np.full(n, np.nan)
     
-    for i in range(n):
-        if i < 20:
-            highest_high[i] = np.max(high[max(0, i-19):i+1]) if i >= 0 else high[i]
-            lowest_low[i] = np.min(low[max(0, i-19):i+1]) if i >= 0 else low[i]
-        else:
-            highest_high[i] = np.max(high[i-20:i+1])
-            lowest_low[i] = np.min(low[i-20:i+1])
+    for i in range(1, n):  # Start from 1 to use previous day
+        # Previous day's OHLC
+        phigh = high[i-1]
+        plow = low[i-1]
+        pclose = close[i-1]
+        
+        # Pivot point
+        PP[i] = (phigh + plow + pclose) / 3.0
+        
+        # Camarilla levels
+        range_val = phigh - plow
+        R1[i] = pclose + (range_val * 1.1 / 12)
+        S1[i] = pclose - (range_val * 1.1 / 12)
     
-    # Volume filter: current volume > 1.5x 20-period average (volume confirmation)
+    # Volume filter: volume > 1.5x 20-day average (institutional participation)
     volume_avg = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
-            volume_avg[i] = np.mean(volume[:i+1]) if i >= 0 else volume[i]
+            volume_avg[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             volume_avg[i] = np.mean(volume[i-20:i])
-    volume_confirm = volume > (1.5 * volume_avg)
+    volume_filter = volume > (1.5 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(25, n):  # Start after Donchian warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(PP[i]) or np.isnan(ema34_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        highest = highest_high[i]
-        lowest = lowest_low[i]
-        ema50 = ema50_1d_aligned[i]
-        vol_confirm = volume_confirm[i]
+        r1 = R1[i]
+        s1 = S1[i]
+        pp = PP[i]
+        ema34 = ema34_1w_aligned[i]
+        vol_confirm = volume_filter[i]
         
-        # Stoploss: 2.5 * ATR from entry (using 14-period ATR approximation)
-        # Calculate ATR on the fly for simplicity in stop condition
-        if i >= 14:
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-            # Simplified ATR: use recent true range average
-            tr_sum = 0
-            for j in range(1, 15):
-                if i - j >= 0:
-                    tr_sum += max(high[i-j] - low[i-j], abs(high[i-j] - close[i-j-1]), abs(low[i-j] - close[i-j-1]))
-            atr_est = tr_sum / 14
+        # Calculate ATR for stoploss (20-period)
+        if i >= 20:
+            tr_values = []
+            for j in range(1, 21):
+                idx = i - j
+                if idx >= 0:
+                    tr = max(high[idx] - low[idx], abs(high[idx] - close[idx-1]), abs(low[idx] - close[idx-1]))
+                    tr_values.append(tr)
+            atr = np.mean(tr_values) if tr_values else 0
         else:
-            atr_est = 0
+            atr = 0
         
-        if position == 1 and price < entry_price - 2.5 * atr_est:
+        # Stoploss: 2.5 * ATR from entry
+        if position == 1 and price < entry_price - 2.5 * atr:
             signals[i] = 0.0
             position = 0
             continue
-        elif position == -1 and price > entry_price + 2.5 * atr_est:
+        elif position == -1 and price > entry_price + 2.5 * atr:
             signals[i] = 0.0
             position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high in uptrend with volume confirmation
-            if price > highest and price > ema50 and vol_confirm:
+            # Long: price breaks above R1 with volume confirmation in uptrend (price > weekly EMA34)
+            if price > r1 and vol_confirm and price > ema34:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below Donchian low in downtrend with volume confirmation
-            elif price < lowest and price < ema50 and vol_confirm:
+            # Short: price breaks below S1 with volume confirmation in downtrend (price < weekly EMA34)
+            elif price < s1 and vol_confirm and price < ema34:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price returns to Donchian mid or trend breaks
-            mid = (highest + lowest) / 2.0
-            if price < mid or price < ema50:  # Return to mid or trend breakdown
+            # Long exit: price returns to pivot point or trend breaks
+            if price < pp or price < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to Donchian mid or trend breaks
-            mid = (highest + lowest) / 2.0
-            if price > mid or price > ema50:  # Return to mid or trend breakdown
+            # Short exit: price returns to pivot point or trend breaks
+            if price > pp or price > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_Breakout_Volume_Trend_1dEMA50"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter"
+timeframe = "1d"
 leverage = 1.0
