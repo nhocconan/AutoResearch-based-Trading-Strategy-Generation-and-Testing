@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Bollinger Band breakout with 12h EMA50 trend filter and volume spike.
-Volatility contraction (low Bollinger Band width) precedes explosive moves. Breakout above/below
-Bollinger Bands with volume confirmation and aligned trend captures momentum. Uses 12h EMA50 for
-trend filter to avoid counter-trend trades. Designed for fewer trades (~20-40/year) to minimize
-fee drag, works in bull/bear via trend filter.
+Hypothesis: 1h session-based momentum with 4h trend and volume confirmation.
+In strong trends (4h EMA20), price pulls back to 1h EMA21 during 8-20 UTC session.
+Long on bounce from EMA21 with volume confirmation; short on rejection.
+Uses 4h for direction, 1h for timing, session filter to reduce noise.
+Targets 15-30 trades/year by requiring trend alignment + session + volume.
 """
 
 import numpy as np
@@ -16,87 +16,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Session filter: 8-20 UTC (precomputed)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA20 for trend direction
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Load 1d data ONCE before loop for Bollinger Bands (20,2)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # 1h EMA21 for pullback entry
+    close = prices['close'].values
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Bollinger Bands: 20-period SMA ± 2*std
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-    
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    
-    # Volume confirmation: volume / 20-period average volume (1d)
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = df_1d['volume'].values / vol_ma_20
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = prices['volume'].values / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if indicators not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
+        # Skip if not in session or indicators not ready
+        if not in_session[i] or np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_21[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = prices['close'].iloc[i]
-        ema_trend = ema_50_12h_aligned[i]
-        bb_upper = bb_upper_aligned[i]
-        bb_lower = bb_lower_aligned[i]
-        vol_ratio = vol_ratio_aligned[i]
-        vol_threshold = 1.5  # Volume must be 1.5x average
+        price_close = close[i]
+        ema_trend = ema_20_4h_aligned[i]
+        ema_price = ema_21[i]
+        vol = vol_ratio[i]
         
         if position == 0:
-            # Enter long: price breaks above BB upper, volume spike, uptrend
-            if (price_close > bb_upper and 
-                vol_ratio > vol_threshold and 
-                price_close > ema_trend):
-                signals[i] = 0.25
+            # Enter long: uptrend + pullback to EMA21 + volume
+            if (price_close > ema_trend and  # uptrend
+                abs(price_close - ema_price) / ema_price < 0.005 and  # near EMA21 (0.5%)
+                vol > 1.5):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below BB lower, volume spike, downtrend
-            elif (price_close < bb_lower and 
-                  vol_ratio > vol_threshold and 
-                  price_close < ema_trend):
-                signals[i] = -0.25
+            # Enter short: downtrend + rejection of EMA21 + volume
+            elif (price_close < ema_trend and  # downtrend
+                  abs(price_close - ema_price) / ema_price < 0.005 and  # near EMA21
+                  vol > 1.5):
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
-            # Exit: price returns to SMA20 or trend reversal
-            sma_20_val = sma_20_aligned[i] if 'sma_20_aligned' in locals() else None
-            if sma_20_val is None:
-                sma_20_val = align_htf_to_ltf(prices, df_1d, sma_20)[i]
-            
-            if position == 1 and (price_close < sma_20_val or price_close < ema_trend):
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and (price_close > sma_20_val or price_close > ema_trend):
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Exit: trend reversal or excessive move from EMA21
+            if position == 1:
+                if (price_close < ema_trend or  # trend broken
+                    price_close > ema_price * 1.015):  # 1.5% adverse move
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
+            else:  # position == -1
+                if (price_close > ema_trend or  # trend broken
+                    price_close < ema_price * 0.985):  # 1.5% adverse move
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_VolatilityContraction_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1h_Session_Pullback_EMA21_4hEMA20_Volume"
+timeframe = "1h"
 leverage = 1.0
