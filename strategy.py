@@ -3,33 +3,37 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d EMA trend filter and volume confirmation.
-# Long when Williams %R crosses above -80 (oversold) in uptrend (price > 1d EMA34), short when crosses below -20 (overbought) in downtrend.
-# Volume > 1.3x 20-period average confirms momentum. EMA filter avoids counter-trend trades.
-# Target: 20-40 trades/year by requiring oversold/overbought extremes + trend alignment.
-# Works in bull/bear: EMA filter ensures trades with trend, Williams %R captures mean reversion within trend.
+# Hypothesis: 4h Donchian(20) breakout with 12h trend filter (EMA50 slope) and volume confirmation.
+# Long when price breaks above upper Donchian in uptrend (12h EMA50 rising), short when breaks below lower Donchian in downtrend.
+# Volume > 1.5x 20-period average confirms breakout strength. EMA slope filters weak trends and avoids chop.
+# Target: 20-50 trades/year by requiring strong trend + volume + breakout alignment.
+# Works in bull/bear: EMA slope ensures only trending markets are traded, avoiding whipsaws in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     
-    # Calculate Williams %R(14) on 12h data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Align EMA50 to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate EMA50 slope (rising/falling) - trend direction
+    ema_slope = np.diff(ema_50_aligned, prepend=ema_50_aligned[0])
+    ema_rising = ema_slope > 0
+    ema_falling = ema_slope < 0
+    
+    # Calculate 20-period Donchian channels on 4h data
+    high_roll = prices['high'].rolling(window=20, min_periods=20).max()
+    low_roll = prices['low'].rolling(window=20, min_periods=20).min()
+    upper = high_roll.values
+    lower = low_roll.values
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -37,9 +41,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(ema_34_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -49,21 +53,21 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirm = volume > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend = price > ema_34_aligned[i]
-        downtrend = price < ema_34_aligned[i]
+        # Trend filter: EMA50 rising/falling
+        trend_up = ema_rising[i]
+        trend_down = ema_falling[i]
         
         if position == 0:
             if volume_confirm:
-                # Long: Williams %R crosses above -80 from oversold in uptrend
-                if williams_r[i] > -80 and williams_r[i-1] <= -80 and uptrend:
+                # Long: price breaks above upper Donchian + EMA50 rising
+                if price > upper[i] and trend_up:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R crosses below -20 from overbought in downtrend
-                elif williams_r[i] < -20 and williams_r[i-1] >= -20 and downtrend:
+                # Short: price breaks below lower Donchian + EMA50 falling
+                elif price < lower[i] and trend_down:
                     signals[i] = -0.25
                     position = -1
         
@@ -72,13 +76,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if Williams %R crosses below -50 (momentum fading) or trend reversal
-                if williams_r[i] < -50 or (price < ema_34_aligned[i] and williams_r[i] < -30):
+                # Exit if price breaks below lower Donchian (failed breakout) or EMA50 turns down
+                if price < lower[i] or not trend_up:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if Williams %R crosses above -50 (momentum fading) or trend reversal
-                if williams_r[i] > -50 or (price > ema_34_aligned[i] and williams_r[i] > -70):
+                # Exit if price breaks above upper Donchian (failed breakdown) or EMA50 turns up
+                if price > upper[i] or not trend_down:
                     exit_signal = True
             
             if exit_signal:
@@ -90,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR14_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hEMA50Slope_Volume"
+timeframe = "4h"
 leverage = 1.0
