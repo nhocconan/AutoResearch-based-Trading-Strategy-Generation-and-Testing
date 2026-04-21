@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_1d_Pivot_R2S2_MomentumBreakout
-Hypothesis: 6h timeframe with 1d pivot point levels - buy breakouts above R2 with momentum (price > 20 EMA) and volume confirmation, sell breakdowns below S2 with momentum (price < 20 EMA) and volume confirmation. Uses pivot points from daily data for key support/resistance levels. Designed to capture strong momentum moves in both bull and bear markets by trading breakouts of significant daily levels with momentum and volume confirmation.
+12h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v1
+Hypothesis: 12h timeframe with 1d Camarilla R1/S1 breakouts, volume > 1.5x 24-period average, and ADX > 25 for trend confirmation.
+Designed to capture strong breakouts in trending markets while avoiding chop. Target: 12-30 trades/year (48-120 total over 4 years).
+Works in bull/bear by only trading strong trending breaks, avoiding false signals in ranging markets.
 """
 
 import numpy as np
@@ -13,7 +15,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for pivot points
+    # Load 1d data once for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -22,7 +24,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for pivot calculation
+    # Previous day's OHLC for Camarilla calculation
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
@@ -30,35 +32,77 @@ def generate_signals(prices):
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Pivot point and support/resistance levels
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    # R2 = PP + (High - Low)
-    # S2 = PP - (High - Low)
+    # Camarilla levels: R1, S1, and pivot point (PP)
+    # R1 = Close + 1.1*(High-Low)/12
+    # S1 = Close - 1.1*(High-Low)/12
+    # PP = (High + Low + Close)/3
+    rang = prev_high - prev_low
+    r1 = prev_close + 1.1 * rang / 12
+    s1 = prev_close - 1.1 * rang / 12
     pp = (prev_high + prev_low + prev_close) / 3
-    r2 = pp + (prev_high - prev_low)
-    s2 = pp - (prev_high - prev_low)
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # EMA20 for momentum filter
-    close_series = prices['close']
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ADX for regime filter (trending vs ranging)
+    if len(prices) < 14:
+        return np.zeros(n)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    volume_series = prices['volume']
-    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = result[i-1] - (result[i-1]/period) + data[i]
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,16 +111,23 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter
-        volume_ok = volume > 1.5 * vol_ma_20[i]
+        # Volume filter: current volume > 1.5 * 24-period average (12h timeframe = 24 bars = 12 days)
+        if i >= 24:
+            vol_ma = prices['volume'].iloc[i-24:i].mean()
+            volume_ok = volume > 1.5 * vol_ma
+        else:
+            volume_ok = False
+        
+        # Regime filter: ADX > 25 indicates trending market
+        trending = adx[i] > 25
         
         if position == 0:
-            # Long conditions: break above R2 + price > EMA20 (bullish momentum) + volume
-            if price > r2_aligned[i] and price > ema_20[i] and volume_ok:
+            # Long conditions: break above R1 + volume + trending
+            if price > r1_aligned[i] and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S2 + price < EMA20 (bearish momentum) + volume
-            elif price < s2_aligned[i] and price < ema_20[i] and volume_ok:
+            # Short conditions: break below S1 + volume + trending
+            elif price < s1_aligned[i] and volume_ok and trending:
                 signals[i] = -0.25
                 position = -1
         
@@ -98,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_R2S2_MomentumBreakout"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v1"
+timeframe = "12h"
 leverage = 1.0
