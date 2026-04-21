@@ -1,11 +1,11 @@
-#3e
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Williams Alligator crossover with 1w EMA50 trend filter and volume confirmation.
-Long when Alligator Lips (3) crosses above Jaw (13) with price > EMA50 and volume > 1.5x average.
-Short when Lips crosses below Jaw with price < EMA50 and volume > 1.5x average.
-Exit on opposite crossover or 2x ATR stop.
-Designed for 10-25 trades/year to minimize fee decay while capturing trend changes.
+Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation.
+Longs when green line (lips) > red line (jaws) > blue line (teeth) with ADX>25 and volume>1.5x average.
+Shorts when green line < red line < blue line with ADX>25 and volume>1.5x average.
+Exit when Alligator lines re-interlace (lips crosses teeth) or 2x ATR stop.
+Williams Alligator identifies trend phases; avoids whipsaws in ranging markets.
+Designed for 15-30 trades/year to minimize fee dust while capturing strong trends.
 """
 
 import numpy as np
@@ -14,34 +14,61 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load daily data ONCE before loop for Alligator and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator components (SMMA = smoothed moving average)
-    close = prices['close'].values
-    # SMMA formula: today = (yesterday * (period-1) + today) / period
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # Initialize with SMA
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Williams Alligator: 3 SMAs shifted forward
+    # Jaw (blue): 13-period SMA, shifted 8 bars
+    # Teeth (red): 8-period SMA, shifted 5 bars
+    # Lips (green): 5-period SMA, shifted 3 bars
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
     
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
+    # Shift forward (Alligator lines are shifted into the future)
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    # Fill shifted values with NaN for invalid periods
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
+    
+    # Calculate 14-period ADX for trend filter
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    plus_dm[1:] = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                           np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm[1:] = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                            np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align Alligator lines and ADX to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: volume spike > 1.5x 20-period average
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -59,11 +86,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,46 +99,47 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         price_high = prices['high'].iloc[i]
         price_low = prices['low'].iloc[i]
-        lips_val = lips[i]
-        jaw_val = jaw[i]
-        ema_50_val = ema_50_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        adx_val = adx_aligned[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Enter long: Lips crosses above Jaw with price > EMA50 and volume
-            if (lips_val > jaw_val and 
-                lips[i-1] <= jaw[i-1] and  # crossover confirmation
-                price_close > ema_50_val and 
+            # Enter long: Alligator aligned bullish (lips > teeth > jaw) with volume and trend
+            if (lips_val > teeth_val and 
+                teeth_val > jaw_val and 
+                adx_val > 25 and 
                 vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Lips crosses below Jaw with price < EMA50 and volume
-            elif (lips_val < jaw_val and 
-                  lips[i-1] >= jaw[i-1] and  # crossover confirmation
-                  price_close < ema_50_val and 
+            # Enter short: Alligator aligned bearish (lips < teeth < jaw) with volume and trend
+            elif (lips_val < teeth_val and 
+                  teeth_val < jaw_val and 
+                  adx_val > 25 and 
                   vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: opposite crossover or ATR-based stoploss
+            # Exit: Alligator re-interlaces (lips crosses teeth) OR ATR-based stoploss
             exit_signal = False
             
-            # Opposite crossover exit
-            if position == 1 and lips_val < jaw_val and lips[i-1] >= jaw[i-1]:
+            # Alligator re-interlaces exit
+            if position == 1 and lips_val <= teeth_val:
                 exit_signal = True
-            elif position == -1 and lips_val > jaw_val and lips[i-1] <= jaw[i-1]:
+            elif position == -1 and lips_val >= teeth_val:
                 exit_signal = True
             
-            # ATR-based stoploss (2x ATR from recent extreme)
+            # ATR-based stoploss (2x ATR from entry level)
             if position == 1:
-                # For longs, stop below recent low minus 2*ATR
-                if price_low < np.min(prices['low'].iloc[max(0, i-5):i+1]) - 2.0 * atr_val:
+                # For longs, stop below jaw (as proxy for entry area)
+                if price_close < jaw_val - 2.0 * atr_val:
                     exit_signal = True
             elif position == -1:
-                # For shorts, stop above recent high plus 2*ATR
-                if price_high > np.max(prices['high'].iloc[max(0, i-5):i+1]) + 2.0 * atr_val:
+                # For shorts, stop above jaw (as proxy for entry area)
+                if price_close > jaw_val + 2.0 * atr_val:
                     exit_signal = True
             
             if exit_signal:
@@ -123,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsAlligator_LipsJawCross_1wEMA50_Trend_Volume1.5x_ATR2x"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_1dADX25_Volume1.5x_ATR2x"
+timeframe = "6h"
 leverage = 1.0
