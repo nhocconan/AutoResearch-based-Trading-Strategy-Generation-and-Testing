@@ -1,11 +1,13 @@
-# 12h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1
-# Hypothesis: Breakout of daily Camarilla R1/S1 levels on 12h timeframe with weekly trend filter (EMA34) and volume confirmation (1.5x 20-bar avg).
-# Long when price > daily R1 + weekly EMA34 up + volume spike.
-# Short when price < daily S1 + weekly EMA34 down + volume spike.
-# Exit when price crosses daily pivot point (PP).
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
-# Works in bull/bear by following weekly trend.
-# Uses 12h as primary timeframe for signal generation, with 1d for levels and 1w for trend.
+#!/usr/bin/env python3
+"""
+4h_1d_1w_Donchian20_Breakout_Volume_Regime_Filtered_v1
+Hypothesis: Donchian(20) breakout on 4h with volume confirmation and weekly trend filter.
+Long when price > 20-bar high + volume > 1.5x 20-bar average + weekly EMA34 rising.
+Short when price < 20-bar low + volume > 1.5x 20-bar average + weekly EMA34 falling.
+Exit when price crosses 20-bar mid-point (mean of high/low).
+Uses 4h as primary timeframe for signal generation, with 1w for trend filter.
+Target: 20-40 trades/year per symbol. Works in bull/bear by following weekly trend.
+"""
 
 import numpy as np
 import pandas as pd
@@ -13,61 +15,44 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Camarilla levels: R1, S1, and pivot point (PP)
-    rang = prev_high - prev_low
-    r1 = prev_close + 1.1 * rang / 12
-    s1 = prev_close - 1.1 * rang / 12
-    pp = (prev_high + prev_low + prev_close) / 3
-    
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    
-    # Load weekly data for trend filter
+    # Load weekly data once for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 35:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     # Calculate EMA34 on weekly
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Calculate Donchian channels on 4h data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # 20-period high and low
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Mid-point for exit
+    mid_20 = (high_20 + low_20) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(mid_20[i]) or np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
         volume = prices['volume'].iloc[i]
         
         # Volume filter: current volume > 1.5 * 20-period average
@@ -78,7 +63,7 @@ def generate_signals(prices):
             volume_ok = False
         
         # Weekly trend filter: EMA34 slope
-        if i >= 51:
+        if i >= 61:
             ema34_prev = ema34_1w_aligned[i-1]
             ema34_curr = ema34_1w_aligned[i]
             weekly_uptrend = ema34_curr > ema34_prev
@@ -88,26 +73,26 @@ def generate_signals(prices):
             weekly_downtrend = False
         
         if position == 0:
-            # Long conditions: break above R1 + volume + weekly uptrend
-            if price > r1_aligned[i] and volume_ok and weekly_uptrend:
+            # Long conditions: break above 20-bar high + volume + weekly uptrend
+            if price > high_20[i] and volume_ok and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S1 + volume + weekly downtrend
-            elif price < s1_aligned[i] and volume_ok and weekly_downtrend:
+            # Short conditions: break below 20-bar low + volume + weekly downtrend
+            elif price < low_20[i] and volume_ok and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below pivot point
-            if price < pp_aligned[i]:
+            # Long exit: price crosses back below 20-bar mid-point
+            if price < mid_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above pivot point
-            if price > pp_aligned[i]:
+            # Short exit: price crosses back above 20-bar mid-point
+            if price > mid_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1"
-timeframe = "12h"
+name = "4h_1d_1w_Donchian20_Breakout_Volume_Regime_Filtered_v1"
+timeframe = "4h"
 leverage = 1.0
