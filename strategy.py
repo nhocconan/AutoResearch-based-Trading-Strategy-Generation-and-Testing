@@ -3,40 +3,55 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA trend filter and volume confirmation.
-# In 1d uptrend (price > EMA34): look for Williams %R oversold (< -80) for long entries.
-# In 1d downtrend (price < EMA34): look for Williams %R overbought (> -20) for short entries.
-# Uses volume > 1.2x 20-period average for confirmation. Exit when Williams %R crosses -50.
-# Target: 25-40 trades/year by requiring trend alignment + extreme readings + volume confirmation.
+# Hypothesis: 4h 1D CCI Trend + Volume + 1D ATR Volatility Filter
+# Uses daily CCI (20) for trend direction (long when CCI > 0, short when CCI < 0),
+# confirmed by 4h price closing above/below 20-period EMA and volume > 1.5x 20-period average.
+# Filters out low-volatility environments using 1D ATR ratio (current ATR / 20-period ATR < 0.5).
+# Designed for 15-25 trades/year to minimize fee drag while capturing sustained trends.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
+    # Get 1D data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Calculate 1d EMA34
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1D CCI (20-period)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    sma_tp = typical_price.rolling(window=20, min_periods=20).mean()
+    mad = typical_price.rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    )
+    cci_1d = (typical_price - sma_tp) / (0.015 * mad)
+    cci_1d = cci_1d.fillna(0).values
     
-    # Calculate Williams %R (14-period)
-    highest_high = prices['high'].rolling(window=14, min_periods=14).max()
-    lowest_low = prices['low'].rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - prices['close']) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(-50).values
+    # Calculate 1D ATR (14-period) and its 20-period average for volatility filter
+    high_low = df_1d['high'] - df_1d['low']
+    high_close = np.abs(df_1d['high'] - df_1d['close'].shift())
+    low_close = np.abs(df_1d['low'] - df_1d['close'].shift())
+    tr_1d = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean()
+    atr_ma_1d = atr_1d.rolling(window=20, min_periods=20).mean()
+    atr_ratio_1d = (atr_1d / atr_ma_1d).fillna(1.0).values  # Avoid division by zero
     
-    # Pre-compute volume moving average (20-period)
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    # Align 1D indicators to 4H timeframe
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # Pre-compute 4H indicators
+    ema_20 = prices['close'].ewm(span=20, min_periods=20, adjust=False).mean().values
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_34_1d_aligned[i]):
+        if (np.isnan(cci_1d_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
+            np.isnan(ema_20[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -46,31 +61,43 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.2x 20-period average
-        volume_confirm = volume > 1.2 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # 1d trend filter
-        price_above_ema = price > ema_34_1d_aligned[i]
-        price_below_ema = price < ema_34_1d_aligned[i]
+        # Volatility filter: only trade when volatility is elevated (ATR ratio > 0.5)
+        volatility_filter = atr_ratio_1d_aligned[i] > 0.5
+        
+        # Trend direction from 1D CCI
+        trend_long = cci_1d_aligned[i] > 0
+        trend_short = cci_1d_aligned[i] < 0
+        
+        # Price position relative to 4H EMA
+        price_above_ema = price > ema_20[i]
+        price_below_ema = price < ema_20[i]
         
         if position == 0:
-            if volume_confirm:
-                # In uptrend: look for oversold conditions to go long
-                if price_above_ema and williams_r[i] < -80:
-                    signals[i] = 0.25
-                    position = 1
-                # In downtrend: look for overbought conditions to go short
-                elif price_below_ema and williams_r[i] > -20:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: daily uptrend + price above 4H EMA + volume + volatility
+            if trend_long and price_above_ema and volume_confirm and volatility_filter:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: daily downtrend + price below 4H EMA + volume + volatility
+            elif trend_short and price_below_ema and volume_confirm and volatility_filter:
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit when Williams %R crosses -50 (mean reversion complete)
+            # Exit conditions
             exit_signal = False
-            if position == 1 and williams_r[i] > -50:
-                exit_signal = True
-            elif position == -1 and williams_r[i] < -50:
-                exit_signal = True
+            
+            if position == 1:  # long position
+                # Exit when daily trend turns down OR price breaks below 4H EMA
+                if not trend_long or price_below_ema:
+                    exit_signal = True
+            
+            elif position == -1:  # short position
+                # Exit when daily trend turns up OR price breaks above 4H EMA
+                if not trend_short or price_above_ema:
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -81,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_MeanReversion_1dEMA34Trend_Volume"
+name = "4h_1D_CCI_Trend_Volume_VolatilityFilter"
 timeframe = "4h"
 leverage = 1.0
