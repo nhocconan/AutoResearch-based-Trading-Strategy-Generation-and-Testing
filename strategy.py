@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_PivotPoint_R3S3_Fade_V1
-Hypothesis: Fade extreme Camarilla pivot levels (R3/S3) on 6b with 1d trend filter (EMA50) and volume confirmation. In ranging markets, price reverts from R3/S3; in trending markets, 1d EMA50 filter prevents counter-trend fades. Works in both bull (fades at R3 in uptrend blocked) and bear (fades at S3 in downtrend blocked) by requiring 1d trend alignment. Target 12-30 trades/year.
+4h_KAMA_Direction_VolumeConfirm_ATRStop_V2
+Hypothesis: 4h KAMA(10,2,30) trend direction + volume spike (>1.8x 20-bar MA) + ATR(14) stoploss (2.0x). 
+KAMA adapts to market noise, reducing whipsaw in sideways/choppy markets (common in 2025 BTC/ETH bear/range). 
+Volume confirmation ensures breakout legitimacy. ATR stop manages risk. Designed for fewer, higher-quality trades 
+(~20-30/year) to overcome fee drag in bear markets. Works in bull (catches trends) and bear (avoids false breaks via 
+KAMA's efficiency ratio filtering noise).
 """
 
 import numpy as np
@@ -13,70 +17,49 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')  # for EMA50 trend filter
-    
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # === 1d EMA50 for Trend Filter ===
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # === 6h Indicators ===
+    # === 4h Indicators ===
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # We need the previous completed 1d bar's OHLC
-    # Since we're on 6h timeframe, we can approximate using rolling window
-    # But better: use get_htf_data for 1d and calculate pivots there
+    # KAMA(10,2,30) - Efficiency Ratio based adaptive moving average
+    def kama(close, er_fast=2, er_slow=30):
+        change = np.abs(np.diff(close, n=10))  # 10-period net change
+        vol = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period volatility
+        # Handle first 10 values
+        change = np.concatenate([np.full(10, np.nan), change])
+        vol = np.concatenate([np.full(10, np.nan), vol])
+        er = np.where(vol != 0, change / vol, 0)  # Efficiency Ratio
+        sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2  # Smoothing Constant
+        kama = np.full_like(close, np.nan)
+        kama[9] = close[9]  # Start after first 10 bars
+        for i in range(10, len(close)):
+            if np.isnan(kama[i-1]):
+                kama[i] = close[i]
+            else:
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Recalculate: get 1d OHLC for pivot calculation
-    # We already have df_1d from get_htf_data
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    kama_vals = kama(close)
     
-    # Calculate Camarilla levels for each 1d bar
-    # Camarilla: 
-    # H4 = close + 1.5*(high-low)
-    # H3 = close + 1.1*(high-low)
-    # L3 = close - 1.1*(high-low)
-    # L4 = close - 1.5*(high-low)
-    # We'll use H3/L3 as R3/S3 for fade
-    
-    # But we need to align these to 6h bars
-    # So calculate on 1d then align
-    
-    # Actually, let's simplify: use the 1d bar's high/low to calculate R3/S3
-    # and align to 6h timeframe
-    
-    # We'll calculate the pivot levels from the 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla R3 and S3 levels
-    r3_1d = close_1d + 1.1 * (high_1d - low_1d)
-    s3_1d = close_1d - 1.1 * (high_1d - low_1d)
-    
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Volume MA for confirmation
+    # Volume MA (20-period) for spike confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) 
-            or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_vals[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,29 +67,30 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
+        vol_ok = vol > 1.8 * vol_ma[i]  # volume spike confirmation
+        kama_dir = 1 if kama_vals[i] > kama_vals[i-1] else -1  # KAMA slope direction
         
         if position == 0:
-            # Long fade at S3: price < S3 and 1d uptrend (price > EMA50)
-            if price < s3_aligned[i] and ema_1d_aligned[i] < price and vol_ok:
+            # Long: KAMA turning up + volume spike
+            if kama_dir == 1 and kama_vals[i] > kama_vals[i-1] and vol_ok and price > kama_vals[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short fade at R3: price > R3 and 1d downtrend (price < EMA50)
-            elif price > r3_aligned[i] and ema_1d_aligned[i] > price and vol_ok:
+            # Short: KAMA turning down + volume spike
+            elif kama_dir == -1 and kama_vals[i] < kama_vals[i-1] and vol_ok and price < kama_vals[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses EMA50 or reaches opposite level (R3)
-            if price > ema_1d_aligned[i] or price > r3_aligned[i]:
+            # Exit: ATR stoploss or KAMA reverses down with volume
+            if price < kama_vals[i] - 2.0 * atr[i] or (kama_dir == -1 and kama_vals[i] < kama_vals[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses EMA50 or reaches opposite level (S3)
-            if price < ema_1d_aligned[i] or price < s3_aligned[i]:
+            # Exit: ATR stoploss or KAMA reverses up with volume
+            if price > kama_vals[i] + 2.0 * atr[i] or (kama_dir == 1 and kama_vals[i] > kama_vals[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_PivotPoint_R3S3_Fade_V1"
-timeframe = "6h"
+name = "4h_KAMA_Direction_VolumeConfirm_ATRStop_V2"
+timeframe = "4h"
 leverage = 1.0
