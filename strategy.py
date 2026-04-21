@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: On 12h timeframe, Camarilla R3/S3 breakouts aligned with daily EMA34 trend regime and volume confirmation (>2x 20-period average) capture institutional moves with reduced whipsaw. 
-In bull regime (daily close > daily EMA34), favor longs on R3 breakout; in bear regime (daily close < daily EMA34), favor shorts on S3 breakout. 
-Volume confirmation filters low-participation false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years.
+4h_Donchian20_VolumeSpike_Regime_v1
+Hypothesis: On 4h timeframe, Donchian channel (20) breakouts combined with volume confirmation (>2.0x 20-bar average) and regime filter (ADX>25) capture strong directional moves while minimizing whipsaw. In trending regimes (ADX>25), breakouts are more likely to sustain. Volume confirmation ensures institutional participation. Discrete sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -15,30 +13,44 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for daily trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # === 1d EMA34 for daily trend regime ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # === 12h Camarilla pivot levels (R3, S3) ===
+    # === 4h indicators (primary timeframe) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # Calculate pivot point (PP)
-    pp = (high + low + close) / 3.0
-    
-    # Calculate R3 and S3 levels
-    r3 = pp + 1.1 * (high - low) * 1.1 / 2.0
-    s3 = pp - 1.1 * (high - low) * 1.1 / 2.0
-    
-    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
+    
+    # Donchian channel (20)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # ADX for regime filter (14)
+    # True Range
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Volume confirmation (>2.0x 20-bar average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
@@ -46,12 +58,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
-    max_hold_bars = 8  # max 4 days (8 * 12h = 96h)
+    max_hold_bars = 8  # max 2 days (8 * 4h = 32h)
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(volume_confirmed[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,27 +71,21 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        daily_ema = ema_34_1d_aligned[i]
+        regime_filter = adx[i] > 25  # trending regime
         vol_conf = volume_confirmed[i]
         
-        # Daily trend regime
-        is_bull = price > daily_ema
-        is_bear = price < daily_ema
-        
         if position == 0:
-            if is_bull:
-                # Bull regime: long when price breaks above R3
-                long_condition = (price > r3[i]) and vol_conf
-            else:  # bear regime
-                # Bear regime: short when price breaks below S3
-                short_condition = (price < s3[i]) and vol_conf
+            # Long breakout: price > highest_high of previous 20 bars
+            long_condition = (price > highest_high[i-1]) and regime_filter and vol_conf
+            # Short breakout: price < lowest_low of previous 20 bars
+            short_condition = (price < lowest_low[i-1]) and regime_filter and vol_conf
             
-            if is_bull and long_condition:
+            if long_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 bars_since_entry = 0
-            elif is_bear and short_condition:
+            elif short_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -88,13 +94,9 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Check stoploss (2.5x ATR approximation using daily range)
-            daily_range = df_1d['high'].values - df_1d['low'].values
-            atr_approx = pd.Series(daily_range).rolling(window=14, min_periods=14).mean().values
-            atr_approx_aligned = align_htf_to_ltf(prices, df_1d, atr_approx)
-            
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.5 * atr_approx_aligned[i]:
+                if price < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -106,7 +108,7 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.5 * atr_approx_aligned[i]:
+                if price > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -120,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
