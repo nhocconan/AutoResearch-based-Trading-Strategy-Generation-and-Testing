@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter
-Hypothesis: 12h price breaking above/below daily R1/S1 with volume confirmation and aligned weekly trend (EMA34) captures institutional breakouts. Works in bull/bear by filtering with weekly EMA trend. Uses ATR-based stoploss. Target 15-25 trades/year to minimize fee drag.
+12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v2
+Hypothesis: 12h price breaking above/below daily R1/S1 with volume confirmation and aligned weekly trend (EMA34) captures institutional breakouts. Works in bull/bear by filtering with weekly EMA trend. Uses ATR-based stoploss. Target 15-25 trades/year to minimize fee drift.
 """
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily 12h-aligned arrays for OHLC (each 12h bar gets the day's value)
+    # Align daily OHLC to 12h timeframe (each 12h bar gets the day's value)
     high_12h = align_htf_to_ltf(prices, df_1d, high_1d)
     low_12h = align_htf_to_ltf(prices, df_1d, low_1d)
     close_12h = align_htf_to_ltf(prices, df_1d, close_1d)
@@ -164,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter"
+name = "12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v2"
 timeframe = "12h"
 leverage = 1.0
