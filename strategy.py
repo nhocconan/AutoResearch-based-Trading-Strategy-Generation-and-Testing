@@ -1,98 +1,96 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for trend and structure
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA21 for trend filter
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # 12h Donchian(20) channels for breakout signals
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    # 1d RSI(14) for overbought/oversold
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # 12h ATR(14) for volatility filter
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_14 / atr_ma_50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
+    # 1h volume confirmation: volume / 20-period average volume
+    vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = prices['volume'].values / vol_ma_20
     
-    # Volume confirmation: volume / 30-period average volume (12h)
-    vol_ma_30 = pd.Series(df_12h['volume'].values).rolling(window=30, min_periods=30).mean().values
-    vol_ratio_12h = df_12h['volume'].values / vol_ma_30
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # Session filter: 8-20 UTC (pre-compute)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if indicators not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_50_12h_aligned[i]
-        upper_band = donch_high_aligned[i]
-        lower_band = donch_low_aligned[i]
-        vol_ratio = vol_ratio_aligned[i]
-        vol_threshold = 1.3  # Volume must be above average
-        atr_ratio_val = atr_ratio_aligned[i]
+        ema_trend = ema_21_4h_aligned[i]
+        rsi = rsi_14_1d_aligned[i]
+        vol_ratio_val = vol_ratio[i]
+        vol_threshold = 1.5  # Volume must be above average
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, uptrend, volume spike, moderate volatility
-            if (price_close > upper_band and 
-                price_close > ema_trend and 
-                vol_ratio > vol_threshold and 
-                atr_ratio_val > 0.7 and atr_ratio_val < 2.2):
-                signals[i] = 0.25
+            # Enter long: price above EMA21, RSI oversold, volume spike
+            if (price_close > ema_trend and 
+                rsi < 30 and 
+                vol_ratio_val > vol_threshold):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below Donchian low, downtrend, volume spike, moderate volatility
-            elif (price_close < lower_band and 
-                  price_close < ema_trend and 
-                  vol_ratio > vol_threshold and 
-                  atr_ratio_val > 0.7 and atr_ratio_val < 2.2):
-                signals[i] = -0.25
+            # Enter short: price below EMA21, RSI overbought, volume spike
+            elif (price_close < ema_trend and 
+                  rsi > 70 and 
+                  vol_ratio_val > vol_threshold):
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
-            # Exit: reverse breakout or volatility extremes
-            if position == 1 and (price_close < lower_band or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
+            # Exit: reverse condition or RSI mean reversion
+            if position == 1 and (price_close < ema_trend or rsi > 50):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > upper_band or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
+            elif position == -1 and (price_close > ema_trend or rsi < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_DonchianBreakout_12hTrend_VolumeATR"
-timeframe = "4h"
+name = "1h_EMA21_RSI_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
