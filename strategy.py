@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_VolumeChopFilter_V1
-Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and choppiness regime filter work on 12h timeframe for BTC and ETH in both bull and bear markets. Uses 1d for Camarilla levels, 12h EMA50 for trend, and 12h choppiness index to avoid whipsaws in ranging markets. Target: 12-37 trades/year per symbol (50-150 over 4 years).
+4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1
+Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 4h timeframe for BTC and ETH in both bull and bear markets. The strategy uses 1d timeframe for Camarilla pivot calculation and 4h EMA34 for trend filter. Target: 19-50 trades/year per symbol (75-200 over 4 years).
 """
 
 import numpy as np
@@ -11,6 +11,11 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
+        return np.zeros(n)
+    
+    # Load 4h data once for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
     # Load daily data once for Camarilla pivot calculation
@@ -35,23 +40,20 @@ def generate_signals(prices):
     r1 = pivot + (prev_high - prev_low) * 1.1 / 12
     s1 = pivot - (prev_high - prev_low) * 1.1 / 12
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA34 for trend filter
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Volume filter: 20-period average
+    # Volume filter: 20-period average (approx 3.3 days on 4h)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index (14-period) for regime filter
+    # ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -61,10 +63,6 @@ def generate_signals(prices):
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_tr / (hh - ll)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,8 +70,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i]) or np.isnan(chop[i])):
+            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,22 +82,18 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume > 1.5 * vol_ma[i]
         
-        # 12h trend filter
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
-        
-        # Choppiness regime: only trade when trending (CHOP < 38.2) or extreme range (CHOP > 61.8)
-        chopping_market = (chop[i] >= 38.2) & (chop[i] <= 61.8)
-        regime_ok = not chopping_market
+        # 4h trend filter
+        uptrend = close[i] > ema_34_4h_aligned[i]
+        downtrend = close[i] < ema_34_4h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 in uptrend with volume and regime
-            if uptrend and volume_ok and regime_ok:
+            # Long: price breaks above R1 in uptrend with volume
+            if uptrend and volume_ok:
                 if price > r1_aligned[i]:
                     signals[i] = 0.30
                     position = 1
-            # Short: price breaks below S1 in downtrend with volume and regime
-            elif downtrend and volume_ok and regime_ok:
+            # Short: price breaks below S1 in downtrend with volume
+            elif downtrend and volume_ok:
                 if price < s1_aligned[i]:
                     signals[i] = -0.30
                     position = -1
@@ -123,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_VolumeChopFilter_V1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1"
+timeframe = "4h"
 leverage = 1.0
