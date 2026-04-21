@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_V1
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-period MA).
-Uses ATR-based stop (2.0x) and minimum holding period of 3 bars to reduce churn.
-Designed for 4h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
-Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-period MA).
+Uses ATR-based stop (2.0x) and minimum holding period of 2 bars to reduce churn.
+Designed for 12h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
+Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -26,7 +26,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -41,7 +41,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 4h Camarilla pivot levels (R1, S1) ===
+    # === 12h Camarilla pivot levels (R1, S1) ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -96,8 +96,8 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 2 bars to reduce churn
+            if bars_since_entry < 2:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_B"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
