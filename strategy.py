@@ -8,47 +8,46 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Load 1d data for weekly pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Load 1d data for trend context
+    # Load 1d data for 12h pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate weekly pivot levels (using prior week's OHLC)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    # Load 1h data for trend filter (12h EMA)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 50:
+        return np.zeros(n)
     
-    pivot = (high_w + low_w + close_w) / 3
-    r1 = 2 * pivot - low_w
-    s1 = 2 * pivot - high_w
-    r2 = pivot + (high_w - low_w)
-    s2 = pivot - (high_w - low_w)
-    r3 = high_w + 2 * (pivot - low_w)
-    s3 = low_w - 2 * (high_w - pivot)
-    r4 = r3 + (high_w - low_w)
-    s4 = s3 - (high_w - low_w)
+    # Calculate 12h pivot levels (using prior 12h bar's OHLC)
+    high_12h = df_1d['high'].values
+    low_12d = df_1d['low'].values
+    close_12h = df_1d['close'].values
     
-    # Align weekly pivots to 1d (wait for weekly close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    pivot_12h = (high_12h + low_12d + close_12h) / 3
+    r1_12h = 2 * pivot_12h - low_12d
+    s1_12h = 2 * pivot_12h - high_12h
+    r2_12h = pivot_12h + (high_12h - low_12d)
+    s2_12h = pivot_12h - (high_12h - low_12d)
+    r3_12h = high_12h + 2 * (pivot_12h - low_12d)
+    s3_12h = low_12d - 2 * (high_12h - pivot_12h)
+    r4_12h = r3_12h + (high_12h - low_12d)
+    s4_12h = s3_12h - (high_12h - low_12d)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 12h pivots to 6h (wait for 12h close)
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_1d, pivot_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_1d, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_1d, s3_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_1d, r4_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_1d, s4_12h)
     
-    # Volume confirmation using 1d volume
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate 1h EMA50 for trend filter
+    close_1h = df_1h['close'].values
+    ema50_1h = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1h_aligned = align_htf_to_ltf(prices, df_1h, ema50_1h)
+    
+    # Volume confirmation using 6h volume
+    vol_6h = prices['volume'].values
+    vol_ma_20_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -58,9 +57,9 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or
+            np.isnan(r4_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
+            np.isnan(ema50_1h_aligned[i]) or np.isnan(vol_ma_20_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,20 +77,20 @@ def generate_signals(prices):
         
         # Current values
         price_close = prices['close'].iloc[i]
-        vol_current = vol_1d[i]  # Already aligned with 1d data
+        vol_current = vol_6h[i]
         
-        # Weekly pivot levels
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
+        # 12h pivot levels
+        r3_val = r3_12h_aligned[i]
+        s3_val = s3_12h_aligned[i]
+        r4_val = r4_12h_aligned[i]
+        s4_val = s4_12h_aligned[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = price_close > ema50_1d_aligned[i]
-        downtrend = price_close < ema50_1d_aligned[i]
+        # Trend filter: price above/below 1h EMA50
+        uptrend = price_close > ema50_1h_aligned[i]
+        downtrend = price_close < ema50_1h_aligned[i]
         
         # Volume confirmation
-        volume_confirm = vol_current > 1.3 * vol_ma_20_1d_aligned[i]
+        volume_confirm = vol_current > 1.5 * vol_ma_20_6h[i]
         
         if position == 0:
             # Enter long: price breaks above R4 with volume in uptrend
@@ -139,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R3S3_R4S4_BreakoutFade"
-timeframe = "1d"
+name = "6h_12hPivot_R3S3_R4S4_BreakoutFade"
+timeframe = "6h"
 leverage = 1.0
