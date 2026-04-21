@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
-Hypothesis: Use 1d Camarilla R1/S1 levels + 4h volume spike (>2x 20-bar MA) for breakout entry + ATR(14) stoploss (2.0x). 
-Add regime filter: only trade when 4h ADX(14) > 25 (strong trend filter) to reduce whipsaw in ranging markets. 
-Uses discrete position sizing (0.30) to balance return and drawdown. Target 20-40 trades/year per symbol. 
+12h_HTF_1w_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
+Hypothesis: Use 1w Camarilla R1/S1 levels + 12h volume spike (>2x 20-bar MA) for breakout entry + ATR(14) stoploss (2.0x). 
+Add regime filter: only trade when 12h ADX(14) > 25 (strong trend filter) to reduce whipsaw in ranging markets. 
+Uses discrete position sizing (0.30) to balance return and drawdown. Target 15-30 trades/year per symbol. 
 Works in bull (breakouts capture momentum) and bear (tight stops limit losses during reversals).
 """
 
@@ -17,27 +17,27 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')  # for 1d Camarilla levels
+    df_1w = get_htf_data(prices, '1w')  # for 1w Camarilla levels
     
-    if len(df_1d) < 2:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w Camarilla Pivot Levels (R1, S1) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
+    pivot = (high_1w + low_1w + close_1w) / 3.0
     # Camarilla levels
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    r1 = close_1w + (high_1w - low_1w) * 1.1 / 12.0
+    s1 = close_1w - (high_1w - low_1w) * 1.1 / 12.0
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # === 4h Indicators ===
+    # === 12h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -82,11 +82,11 @@ def generate_signals(prices):
         adx_ok = adx[i] > 25.0  # strong trend filter: only trade when sufficient trend
         
         if position == 0:
-            # Long: break above 1d Camarilla R1 with volume spike and ADX > 25
+            # Long: break above 1w Camarilla R1 with volume spike and ADX > 25
             if price > r1_aligned[i-1] and vol_ok and adx_ok:
                 signals[i] = 0.30
                 position = 1
-            # Short: break below 1d Camarilla S1 with volume spike and ADX > 25
+            # Short: break below 1w Camarilla S1 with volume spike and ADX > 25
             elif price < s1_aligned[i-1] and vol_ok and adx_ok:
                 signals[i] = -0.30
                 position = -1
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
-timeframe = "4h"
+name = "12h_HTF_1w_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
+timeframe = "12h"
 leverage = 1.0
