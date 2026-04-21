@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (volume > 1.6x 20-period MA).
-In trending markets (price > EMA50_1d): breakout continuation (long above R1, short below S1).
+4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 12h EMA34 trend and volume spike.
+In trending markets (price > EMA34_12h): breakout continuation (long above R1, short below S1).
 In ranging/weak trend markets: no entries to avoid whipsaw.
 Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to balance returns and fee drag.
-Designed to work in both bull and bear markets by only taking trades aligned with 1d trend.
-Timeframe: 12h, uses 1d HTF for trend and Camarilla pivots.
-Target: 50-150 total trades over 4 years = 12-37/year.
+Designed to work in both bull and bear markets by only taking trades aligned with 12h trend.
+Timeframe: 4h, uses 12h HTF for trend and 1d for Camarilla pivots.
+Target: 75-200 total trades over 4 years = 19-50/year.
 """
 
 import numpy as np
@@ -19,7 +19,11 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA50 trend and Camarilla)
+    # Load HTF data ONCE before loop (12h for EMA34 trend, 1d for Camarilla)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
+        return np.zeros(n)
+    
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
@@ -35,18 +39,18 @@ def generate_signals(prices):
     r1_1d = df_1d_close + 0.275 * range_1d
     s1_1d = df_1d_close - 0.275 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # === 1d EMA50 for trend filter ===
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 12h EMA34 for trend filter ===
+    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # === Volume spike filter (volume > 1.6x 20-period MA) ===
+    # === Volume spike filter (volume > 1.5x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.6 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     # === ATR (14-period) for stoploss ===
     high = prices['high'].values
@@ -65,7 +69,7 @@ def generate_signals(prices):
     for i in range(60, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
+            or np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,10 +79,10 @@ def generate_signals(prices):
         vol_spike = volume_spike[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_trend = ema_34_12h_aligned[i]
         
         if position == 0:
-            # Only enter in direction of 1d trend with volume spike
+            # Only enter in direction of 12h trend with volume spike
             long_condition = (price > r1) and (price > ema_trend) and vol_spike
             short_condition = (price < s1) and (price < ema_trend) and vol_spike
             
@@ -117,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
