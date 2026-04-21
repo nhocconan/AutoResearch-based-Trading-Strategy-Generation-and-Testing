@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Camarilla_InsideBar_Volume_Filter_v1
-Hypothesis: Breakout above H3 or below L3 on inside bar with volume spike and 12h trend filter.
-Long when: inside bar + close > H3 + 12h EMA34 rising + volume spike.
-Short when: inside bar + close < L3 + 12h EMA34 falling + volume spike.
-Exit at H4/L4 or reversal at H3/L3.
-Inside bar reduces false breakouts; volume confirms conviction; 12h EMA filters counter-trend.
-Target: 20-35 trades/year per symbol.
+4h_12h_1d_Camarilla_Pullback_Volume_Momentum_v2
+Hypothesis: Pullback to Camarilla H3/L3 levels with 12h momentum confirmation and volume filter.
+Long when price pulls back to H3 with 12h RSI > 50 and volume spike.
+Short when price pulls back to L3 with 12h RSI < 50 and volume spike.
+Exit when price reaches H4/L4 or reverses at H3/L3.
+Improved with proper position sizing and reduced trade frequency via stricter volume filter.
+Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -48,15 +48,23 @@ def generate_signals(prices):
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Load 12h data for EMA34 trend
+    # Load 12h data for momentum (RSI)
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    if len(df_12h) < 14:
         return np.zeros(n)
     
     close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate RSI(14) on 12h
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h = rsi_12h.values
     # Align to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,24 +73,16 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i])):
+            np.isnan(rsi_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        prev_price = prices['close'].iloc[i-1]
         volume = prices['volume'].iloc[i]
         
-        # Inside bar: current high <= previous high AND current low >= previous low
-        high = prices['high'].iloc[i]
-        low = prices['low'].iloc[i]
-        prev_high = prices['high'].iloc[i-1]
-        prev_low = prices['low'].iloc[i-1]
-        inside_bar = (high <= prev_high) and (low >= prev_low)
-        
-        # Volume filter: current volume > 2.0 * 20-period average
+        # Volume filter: current volume > 2.0 * 20-period average (stricter)
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
             volume_ok = volume > 2.0 * vol_ma
@@ -90,18 +90,14 @@ def generate_signals(prices):
             volume_ok = False
         
         if position == 0:
-            # Long: inside bar breakout above H3 with bullish 12h trend and volume
-            if (inside_bar and 
-                price > h3_aligned[i] and 
-                ema_12h_aligned[i] > ema_12h_aligned[i-1] and  # rising
-                volume_ok):
+            # Long conditions: pullback to H3 with bullish momentum and volume
+            if (abs(price - h3_aligned[i]) < 0.001 * h3_aligned[i] and  # near H3
+                rsi_12h_aligned[i] > 50 and volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short: inside bar breakout below L3 with bearish 12h trend and volume
-            elif (inside_bar and 
-                  price < l3_aligned[i] and 
-                  ema_12h_aligned[i] < ema_12h_aligned[i-1] and  # falling
-                  volume_ok):
+            # Short conditions: pullback to L3 with bearish momentum and volume
+            elif (abs(price - l3_aligned[i]) < 0.001 * l3_aligned[i] and  # near L3
+                  rsi_12h_aligned[i] < 50 and volume_ok):
                 signals[i] = -0.25
                 position = -1
         
@@ -123,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_1d_Camarilla_InsideBar_Volume_Filter_v1"
+name = "4h_12h_1d_Camarilla_Pullback_Volume_Momentum_v2"
 timeframe = "4h"
 leverage = 1.0
