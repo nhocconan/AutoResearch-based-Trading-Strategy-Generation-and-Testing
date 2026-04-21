@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeSpike_ATRStop_v2
+4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeSpike_ATRStop_v3
 Hypothesis: 4h Camarilla R1/S1 breakouts filtered by 1d EMA50 trend and volume spike (>2x average).
 Uses discrete position sizing (0.0, ±0.25) to minimize fee churn and overtrading.
 ATR-based trailing stop with 2.0x ATR distance. Designed for <50 trades/year per symbol.
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeSpike_ATRStop_v2"
+name = "4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeSpike_ATRStop_v3"
 timeframe = "4h"
 leverage = 1.0
