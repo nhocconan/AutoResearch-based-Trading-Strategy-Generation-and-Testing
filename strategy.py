@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mktf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for regime and trend filters
+    # Load daily data for volatility and trend filters
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily ATR for regime filter
+    # ATR for volatility filtering
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -38,7 +38,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h ATR for volatility filter
+    # 4h ATR for entry/exit
     tr_4h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr_4h[0] = high[0] - low[0]
     atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
@@ -52,7 +52,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if data not ready
         if (np.isnan(atr_14_aligned[i]) or 
             np.isnan(ema50_1d_aligned[i]) or 
@@ -72,16 +72,16 @@ def generate_signals(prices):
         vol = volume[i]
         price = close[i]
         
-        # Volatility filter: daily ATR > 70% of 20-period average (avoid low volatility chop)
+        # Volatility filter: daily ATR > 60% of 20-period average (avoid low volatility chop)
         atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
-        vol_filter = atr_daily > 0.7 * atr_ma_20
+        vol_filter = atr_daily > 0.6 * atr_ma_20
         
         # Trend filter: price above/below daily EMA50
         uptrend = price > ema50_daily
         downtrend = price < ema50_daily
         
         # Entry conditions with volume confirmation
-        vol_spike = vol > 1.5 * vol_ma
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
             # Long: price breaks above 4h EMA20 + daily uptrend + volatility + volume spike
@@ -116,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolTrend_EMA20_DailyEMA50_ATRFilter_v2"
+name = "4h_VolTrend_EMA20_DailyEMA50_ATRFilter"
 timeframe = "4h"
 leverage = 1.0
