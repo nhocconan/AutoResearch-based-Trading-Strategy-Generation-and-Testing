@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v1
-Hypothesis: Camarilla R1/S1 breakout on 12h timeframe with 1d EMA trend filter, volume confirmation, and chop regime filter. Designed for low trade frequency (~12-37/year) to minimize fee drag while capturing institutional moves in both bull and bear markets. ATR-based trailing stop manages risk.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_Regime_v1
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA trend filter, volume spike confirmation, chop regime filter, and ATR-based trailing stop captures institutional breakouts in trending markets while avoiding false signals in ranging markets. Designed for low trade frequency (~30-60/year) to minimize fee drag and improve generalization across bull/bear cycles.
 """
 
 import numpy as np
@@ -14,35 +14,19 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # === Camarilla levels from prior 12-hour session (HLC of previous 12h bar) ===
-    # Since we don't have direct 12h data, we'll approximate using 4h data and resample conceptually
-    # But per rules, we must use actual Binance data. Let's use 1d for HTF and calculate levels from 12h price action
-    # Alternative: use 4h data to calculate 12h levels (3x 4h bars = 12h)
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 20 or len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get the last 3 4h bars to approximate 12h session (since 3*4h = 12h)
-    # We'll calculate Camarilla levels based on the high/low/close of the prior 12h period
+    # === Camarilla levels from prior 4-hour session (HLC of previous 4h bar) ===
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # For each point, we need the HLC of the prior 12h period (3 bars back)
-    # We'll shift by 3*4 = 12 bars of 4h data to get the completed 12h session
-    # But align_htf_to_ltf will handle the timing, so we calculate on 4h and align
-    # Calculate rolling 3-bar (12h) HLC for Camarilla
-    high_12h = pd.Series(high_4h).rolling(window=3, min_periods=3).max().values
-    low_12h = pd.Series(low_4h).rolling(window=3, min_periods=3).min().values
-    close_12h = pd.Series(close_4h).rolling(window=3, min_periods=3).last().values
-    
-    # Camarilla R1, S1 levels
-    camarilla_r1 = close_12h + (high_12h - low_12h) * 1.1 / 12
-    camarilla_s1 = close_12h - (high_12h - low_12h) * 1.1 / 12
+    # Camarilla R1, S1 levels (breakout signals)
+    camarilla_r1 = close_4h + (high_4h - low_4h) * 1.1 / 12
+    camarilla_s1 = close_4h - (high_4h - low_4h) * 1.1 / 12
     
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
@@ -55,7 +39,7 @@ def generate_signals(prices):
     # === Volume spike filter (20-period on 4h) ===
     volume_4h = df_4h['volume'].values
     vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_4h = np.where(vol_ma_4h > 0, volume_4h / vol_ma_4h, 0)
+    vol_ratio_4h = volume_4h / vol_ma_4h
     vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     
     # === Choppiness regime filter (14-period on 1d) ===
@@ -79,6 +63,7 @@ def generate_signals(prices):
     ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
     # Choppiness Index: CHOP = 100 * log10(sumTR14 / (HH14 - LL14)) / log10(14)
+    # Avoid division by zero
     range_14 = hh_14 - ll_14
     chop = np.where(range_14 > 0, 100 * np.log10(sum_tr_14 / range_14) / np.log10(14), 50)
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
@@ -154,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
