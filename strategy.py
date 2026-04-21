@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_1d_Camarilla_R1S1_Breakout_Volume_ADX
-Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout signals on 6h timeframe.
-Long when price breaks above R1 with volume > 1.5x 20-period average and ADX > 25.
-Short when price breaks below S1 with volume > 1.5x 20-period average and ADX > 25.
-Exit when price crosses back through the daily pivot point (PP).
-ADX regime filter avoids whipsaws in ranging markets. Designed for 6h to limit trade
-frequency (target: 12-37/year) and reduce fee drift. Works in bull markets by buying
-breakouts and in bear markets by selling breakdowns.
+12h_1d_Camarilla_R1S1_Breakout_Volume_Regime_v1
+Hypothesis: Daily Camarilla R1/S1 breakout on 12h timeframe with volume confirmation and ADX regime filter.
+Designed for 12h to limit trade frequency (target: 12-37/year) and reduce fee drag.
+Long when price breaks above R1 with volume > 1.5x average and ADX > 25.
+Short when price breaks below S1 with volume > 1.5x average and ADX > 25.
+Exit when price crosses back through daily pivot point.
+Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
 """
 
 import numpy as np
@@ -37,15 +36,12 @@ def generate_signals(prices):
     prev_close[0] = np.nan
     
     # Camarilla levels: R1, S1, and pivot point (PP)
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    # PP = (High + Low + Close)/3
     rang = prev_high - prev_low
     r1 = prev_close + 1.1 * rang / 12
     s1 = prev_close - 1.1 * rang / 12
     pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
@@ -151,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_R1S1_Breakout_Volume_ADX"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
