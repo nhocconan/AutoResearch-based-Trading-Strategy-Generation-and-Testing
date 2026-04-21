@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_KeltnerBreakout_1dTrend_Volume
-Hypothesis: Keltner Channel breakout (ATR-based) with 1d EMA50 trend filter and volume confirmation. 
-Designed to catch breakouts in trending markets while avoiding false signals in ranging markets. 
-Works in bull/bear by following higher timeframe trend. Target 20-40 trades/year on 4h.
+6h_WeeklyDonchianBreakout_1dTrend_Volume
+Hypothesis: Use weekly Donchian(20) breakout for directional bias, filtered by 1d EMA50 trend and volume spike.
+Targets breakouts in strong trends with institutional volume confirmation. Works in bull/bear by following
+weekly trend while using daily EMA for noise filtering. Target 15-30 trades/year on 6h.
 """
 
 import numpy as np
@@ -12,10 +12,23 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d HTF data ONCE before loop
+    # Load weekly HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # === Weekly Donchian(20) breakout levels ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    highest_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high_20 = align_htf_to_ltf(prices, df_1w, highest_high_20)
+    donchian_low_20 = align_htf_to_ltf(prices, df_1w, lowest_low_20)
+    
+    # Load daily HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -25,25 +38,6 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Keltner Channel (ATR-based) on 4h ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    # EMA(20) of close
-    ema_mid = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # ATR(10)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    # Upper and Lower Bands
-    keltner_upper = ema_mid + 2.0 * atr
-    keltner_lower = ema_mid - 2.0 * atr
-    
     # === Volume confirmation: 20-period volume average ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,44 +46,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(ema_mid[i]) or
-            np.isnan(keltner_upper[i]) or
-            np.isnan(keltner_lower[i]) or
+        if (np.isnan(donchian_high_20[i]) or
+            np.isnan(donchian_low_20[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = close[i]
+        price_close = prices['close'].iloc[i]
+        donchian_high = donchian_high_20[i]
+        donchian_low = donchian_low_20[i]
         trend_1d = ema_50_1d_aligned[i]
-        upper = keltner_upper[i]
-        lower = keltner_lower[i]
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: Close breaks above upper band + volume spike > 1.5 + price above 1d EMA50
-            if (price_close > upper and 
-                vol_spike > 1.5 and 
-                price_close > trend_1d):
+            # Long: Close breaks above weekly Donchian high + price above 1d EMA50 + volume spike
+            if (price_close > donchian_high and
+                price_close > trend_1d and
+                vol_spike > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below lower band + volume spike > 1.5 + price below 1d EMA50
-            elif (price_close < lower and 
-                  vol_spike > 1.5 and 
-                  price_close < trend_1d):
+            # Short: Close breaks below weekly Donchian low + price below 1d EMA50 + volume spike
+            elif (price_close < donchian_low and
+                  price_close < trend_1d and
+                  vol_spike > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price returns to middle band
-            if position == 1 and price_close < ema_mid[i]:
+            # Exit when price crosses back below/above 1d EMA50
+            if position == 1 and price_close < trend_1d:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > ema_mid[i]:
+            elif position == -1 and price_close > trend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KeltnerBreakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_WeeklyDonchianBreakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
