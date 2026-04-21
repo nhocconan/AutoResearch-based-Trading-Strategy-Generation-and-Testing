@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_HTFTrend_VolumeSpike_ATRStop_v4
-Hypothesis: Donchian(20) breakouts on 4h filtered by 12h EMA34 trend and volume spike (>2.0x 20-period average).
+1d_Donchian20_Breakout_WeeklyTrend_VolumeSpike_ATRStop_v2
+Hypothesis: Daily Donchian(20) breakouts filtered by weekly EMA20 trend and volume spike (>2.0x 20-period average).
 Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to minimize fee churn.
-Designed for 15-30 trades/year per symbol, targeting BTC/ETH robustness in bull/bear regimes.
-12h trend filter reduces whipsaws during sideways markets while capturing strong directional moves.
+Designed for 10-20 trades/year per symbol, targeting BTC/ETH robustness in bull/bear regimes.
+Weekly trend filter reduces whipsaws during sideways markets while capturing strong directional moves.
 """
 
 import numpy as np
@@ -16,12 +16,12 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for EMA34 trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load HTF data ONCE before loop (weekly for EMA20 trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 4h OHLC for Donchian calculation ===
+    # === Daily OHLC for Donchian calculation ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -32,10 +32,10 @@ def generate_signals(prices):
     upper_channel = high_roll.values
     lower_channel = low_roll.values
     
-    # === 12h EMA34 for trend filter ===
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === Weekly EMA20 for trend filter ===
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     # === ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) 
-            or np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr[i])):
+            or np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,13 +65,13 @@ def generate_signals(prices):
             vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
             vol_filter = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
             
-            # Long conditions: price > Upper Donchian, 12h uptrend, volume filter
+            # Long conditions: price > Upper Donchian, weekly uptrend, volume filter
             long_breakout = price > upper_channel[i]
-            long_trend = price > ema_34_12h_aligned[i]
+            long_trend = price > ema_20_1w_aligned[i]
             
-            # Short conditions: price < Lower Donchian, 12h downtrend, volume filter
+            # Short conditions: price < Lower Donchian, weekly downtrend, volume filter
             short_breakout = price < lower_channel[i]
-            short_trend = price < ema_34_12h_aligned[i]
+            short_trend = price < ema_20_1w_aligned[i]
             
             # Entry logic - ONLY enter on volume filter + trend alignment
             if long_breakout and long_trend and vol_filter:
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_HTFTrend_VolumeSpike_ATRStop_v4"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_WeeklyTrend_VolumeSpike_ATRStop_v2"
+timeframe = "1d"
 leverage = 1.0
