@@ -1,12 +1,11 @@
-# 12h_IchimokuKumo_TenkanKijun_Cross_1dTrend_Volume
-# Hypothesis: 12h strategy using Ichimoku cloud (Kumo) breakout with 1d EMA trend filter and volume confirmation.
-# In uptrend (price > 1d EMA50), buy when Tenkan-sen crosses above Kijun-sen AND price is above Kumo.
-# In downtrend (price < 1d EMA50), sell when Tenkan-sen crosses below Kijun-sen AND price is below Kumo.
-# Volume must exceed 1.8x 20-period average to confirm signal strength.
-# Exit on Tenkan/Kijun cross reversal or when price re-enters the Kumo.
-# Designed for 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while capturing major trend moves.
-# Ichimoku provides multi-component trend/momentum signal proven effective in crypto trends.
-# Works in bull markets via bullish crosses above cloud and in bear markets via bearish crosses below cloud.
+#!/usr/bin/env python3
+"""
+Hypothesis: 4h strategy using 1d Camarilla pivot levels (R1/S1) with 1d EMA34 trend filter and volume confirmation.
+In uptrend (price > 1d EMA34), buy touches of 1d Camarilla S1 level with rejection; in downtrend (price < 1d EMA34), sell touches of 1d Camarilla R1 level with rejection.
+Volume must exceed 1.5x 20-period average to confirm rejection strength. Exit on trend reversal or 2x ATR stop.
+Designed for 20-50 trades/year (80-200 total over 4 years) to minimize fee fade while capturing mean-reversion bounces at institutional levels.
+Works in bull markets via S1 bounces and in bear markets via R1 rejections with trend filter.
+"""
 
 import numpy as np
 import pandas as pd
@@ -17,120 +16,106 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for Ichimoku components
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 52:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Kumo (Cloud) boundaries: Senkou Span A and B shifted forward 26 periods
-    # For look-ahead avoidance, we use the cloud values from 26 periods ago (already formed)
-    senkou_span_a_lagged = np.roll(senkou_span_a, 26)
-    senkou_span_b_lagged = np.roll(senkou_span_b, 26)
-    # Set first 26 values to NaN since they depend on future data
-    senkou_span_a_lagged[:26] = np.nan
-    senkou_span_b_lagged[:26] = np.nan
-    
-    # Kumo top and bottom (for price vs cloud checks)
-    kumo_top = np.maximum(senkou_span_a_lagged, senkou_span_b_lagged)
-    kumo_bottom = np.minimum(senkou_span_a_lagged, senkou_span_b_lagged)
-    
-    # Align 12h Ichimoku components to 12h timeframe (no further alignment needed as we're using 12h data)
-    # But we need to align to the close of each 12h bar
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_12h, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_12h, kijun_sen)
-    kumo_top_aligned = align_htf_to_ltf(prices, df_12h, kumo_top)
-    kumo_bottom_aligned = align_htf_to_ltf(prices, df_12h, kumo_bottom)
-    
-    # Load 1d data for EMA50 trend filter
+    # Load 1d data ONCE before loop for Camarilla and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation (volume spike > 1.8x 20-period average)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d Camarilla levels (based on previous day)
+    # Camarilla: H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # First day: use same values
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    cam_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    cam_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d indicators to 4h timeframe (wait for 1d bar to close)
+    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
+    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume confirmation (volume spike > 1.5x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
+    
+    # ATR for stoploss (20-period)
+    tr1 = prices['high'].values - prices['low'].values
+    tr2 = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
+    tr3 = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(kumo_top_aligned[i]) or np.isnan(kumo_bottom_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(cam_r1_aligned[i]) or np.isnan(cam_s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        tenkan = tenkan_sen_aligned[i]
-        kijun = kijun_sen_aligned[i]
-        kumo_top_val = kumo_top_aligned[i]
-        kumo_bottom_val = kumo_bottom_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        price_low = prices['low'].iloc[i]
+        price_high = prices['high'].iloc[i]
+        r1_level = cam_r1_aligned[i]
+        s1_level = cam_s1_aligned[i]
+        ema_trend = ema_34_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        
-        # Kumo twist detection (Senkou A vs B)
-        kumo_twist = tenkan > kijun  # Simplified: bullish when Tenkan > Kijun
+        atr_val = atr[i]
         
         if position == 0:
-            # Enter long: bullish TK cross AND price above Kumo AND uptrend (price > 1d EMA50) AND volume spike
-            if (tenkan > kijun and  # Bullish TK cross
-                price_close > kumo_top_val and  # Price above Kumo
-                price_close > ema_trend and     # Uptrend filter
-                vol_ratio_val > 1.8):           # Volume confirmation
+            # Enter long: price touches S1 and shows rejection (close > open) in uptrend
+            if (price_low <= s1_level * 1.002 and  # Allow 0.2% tolerance for touch
+                price_close > prices['open'].iloc[i] and  # Bullish candle
+                price_close > ema_trend and 
+                vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish TK cross AND price below Kumo AND downtrend (price < 1d EMA50) AND volume spike
-            elif (tenkan < kijun and    # Bearish TK cross
-                  price_close < kumo_bottom_val and  # Price below Kumo
-                  price_close < ema_trend and        # Downtrend filter
-                  vol_ratio_val > 1.8):              # Volume confirmation
+            # Enter short: price touches R1 and shows rejection (close < open) in downtrend
+            elif (price_high >= r1_level * 0.998 and  # Allow 0.2% tolerance for touch
+                  price_close < prices['open'].iloc[i] and  # Bearish candle
+                  price_close < ema_trend and 
+                  vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: TK cross reversal OR price re-enters Kumo
+            # Exit: trend reversal OR ATR-based stoploss
             exit_signal = False
             
-            # TK cross reversal exit
-            if position == 1 and tenkan < kijun:  # Bullish to bearish cross
+            # Trend reversal exit
+            if position == 1 and price_close < ema_trend:
                 exit_signal = True
-            elif position == -1 and tenkan > kijun:  # Bearish to bullish cross
+            elif position == -1 and price_close > ema_trend:
                 exit_signal = True
             
-            # Price re-enters Kumo exit
-            if position == 1 and price_close < kumo_top_val:  # Long exits if price drops below cloud top
-                exit_signal = True
-            elif position == -1 and price_close > kumo_bottom_val:  # Short exits if price rises above cloud bottom
-                exit_signal = True
+            # ATR-based stoploss (2x ATR from entry level)
+            if position == 1:
+                entry_approx = s1_level  # Entered near S1
+                if price_close < entry_approx - 2.0 * atr_val:
+                    exit_signal = True
+            elif position == -1:
+                entry_approx = r1_level  # Entered near R1
+                if price_close > entry_approx + 2.0 * atr_val:
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -141,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_IchimokuKumo_TenkanKijun_Cross_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Rejection_1dEMA34_Volume_ATR"
+timeframe = "4h"
 leverage = 1.0
