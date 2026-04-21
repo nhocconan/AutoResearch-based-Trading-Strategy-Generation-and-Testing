@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_1d_Camarilla_R4S4_Breakout_Volume_EMA34Filter_v1
-Hypothesis: Breakout at extreme Camarilla levels (R4/S4) on 6h with 1d EMA34 trend filter and volume confirmation.
-Works in bull/bear: In uptrend, buy R4 breakout; in downtrend, sell S4 breakdown. Uses 1d EMA34 for trend, volume for confirmation.
-Target: 12-25 trades/year per symbol (50-100 over 4 years).
+12h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_V1
+Hypothesis: Breakout of Camarilla R1/S1 levels on 12h timeframe with 1d trend filter (EMA34) and volume confirmation.
+Works in bull/bear: In uptrend (price > 1d EMA34), buy R1 breakout; in downtrend (price < 1d EMA34), sell S1 breakout.
+Uses 1d EMA for trend, 1w close for bias filter. Target: 12-37 trades/year per symbol (50-150 over 4 years).
 """
 
 import numpy as np
@@ -32,26 +32,36 @@ def generate_signals(prices):
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Camarilla levels: R4, S4 (extreme breakout levels)
+    # Camarilla levels: R1, S1 (primary breakout levels)
     rang = prev_high - prev_low
-    r4 = prev_close + rang * 6.0 / 12
-    s4 = prev_close - rang * 6.0 / 12
+    r1 = prev_close + rang * 1.0 / 12
+    s1 = prev_close - rang * 1.0 / 12
     
-    # Align to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Load 1w data for weekly bias filter (long-term direction)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_close_1w[0] = np.nan
+    weekly_bias = align_htf_to_ltf(prices, df_1w, prev_close_1w)  # weekly close as trend bias
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(weekly_bias[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,61 +77,47 @@ def generate_signals(prices):
         else:
             volume_ok = False
         
+        # Determine bias: weekly close > previous weekly close = bullish bias
+        weekly_bullish = weekly_bias[i] > weekly_bias[i-1] if i > 0 and not np.isnan(weekly_bias[i-1]) else True
+        
+        # Trend determination: price vs 1d EMA34
+        uptrend = price > ema_34_1d_aligned[i]
+        downtrend = price < ema_34_1d_aligned[i]
+        
         if position == 0:
-            # Long conditions: price > R4 (breakout) AND 1d uptrend AND volume
-            if (price > r4_aligned[i] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and  # 1d EMA rising
+            # Long conditions: price > R1 (breakout) AND uptrend AND weekly bullish bias AND volume
+            if (price > r1_aligned[i] and 
+                uptrend and 
+                weekly_bullish and 
                 volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < S4 (breakdown) AND 1d downtrend AND volume
-            elif (price < s4_aligned[i] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and  # 1d EMA falling
+            # Short conditions: price < S1 (breakdown) AND downtrend AND weekly bearish bias AND volume
+            elif (price < s1_aligned[i] and 
+                  downtrend and 
+                  not weekly_bullish and 
                   volume_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < 1d EMA34 (trend reversal) or price < R3 (mean reversion)
-            # Calculate R3 for exit
-            prev_high_i = high_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
-            prev_low_i = low_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
-            prev_close_i = close_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
-            if not (np.isnan(prev_high_i) or np.isnan(prev_low_i) or np.isnan(prev_close_i)):
-                rang_i = prev_high_i - prev_low_i
-                r3_exit = prev_close_i + rang_i * 3.0 / 12
-                # Align R3 exit level (simplified: use current day's R3)
-                r3_exit_aligned = align_htf_to_ltf(prices, df_1d, 
-                                                  pd.Series([prev_close_i + rang_i * 3.0 / 12] * len(df_1d)).values)
-                if price < ema_34_1d_aligned[i] or (not np.isnan(r3_exit_aligned[i]) and price < r3_exit_aligned[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: price < 1d EMA34 (trend reversal) or price < S1 (mean reversion)
+            if price < ema_34_1d_aligned[i] or price < s1_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > 1d EMA34 (trend reversal) or price > S3 (mean reversion)
-            prev_high_i = high_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
-            prev_low_i = low_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
-            prev_close_i = close_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
-            if not (np.isnan(prev_high_i) or np.isnan(prev_low_i) or np.isnan(prev_close_i)):
-                rang_i = prev_high_i - prev_low_i
-                s3_exit = prev_close_i - rang_i * 3.0 / 12
-                # Align S3 exit level (simplified: use current day's S3)
-                s3_exit_aligned = align_htf_to_ltf(prices, df_1d, 
-                                                  pd.Series([prev_close_i - rang_i * 3.0 / 12] * len(df_1d)).values)
-                if price > ema_34_1d_aligned[i] or (not np.isnan(s3_exit_aligned[i]) and price > s3_exit_aligned[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: price > 1d EMA34 (trend reversal) or price > R1 (mean reversion)
+            if price > ema_34_1d_aligned[i] or price > r1_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_1d_Camarilla_R4S4_Breakout_Volume_EMA34Filter_v1"
-timeframe = "6h"
+name = "12h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_V1"
+timeframe = "12h"
 leverage = 1.0
