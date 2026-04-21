@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_1dTrend_Volume
-Hypothesis: Use Donchian channel breakout (20-period) on 4h with 1d EMA50 trend filter and volume confirmation. Designed to capture strong directional moves in both bull and bear markets by combining price breakouts with higher timeframe trend alignment and volume validation. Target 20-50 trades/year on 4h.
+12h_RSI_Pullback_1dTrend_Volume
+Hypothesis: Use RSI(14) pullbacks to 40-60 range on 12h with 1d EMA50 trend filter and volume confirmation. Captures mean reversion within strong trends, works in bull/bear by following higher timeframe trend. Target 15-35 trades/year on 12h.
 """
 
 import numpy as np
@@ -23,13 +23,17 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Donchian channel on 4h (20-period) ===
-    high = prices['high'].values
-    low = prices['low'].values
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === RSI(14) on 12h ===
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === Volume confirmation: 20-period volume average on 4h ===
+    # === Volume confirmation: 20-period volume average ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.where(vol_ma_20 != 0, volume / vol_ma_20, 1.0)
@@ -37,11 +41,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after warmup
+    for i in range(60, n):
         # Skip if indicators not ready
         if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
+            np.isnan(rsi[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -49,33 +52,30 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        price_high = prices['high'].iloc[i]
-        price_low = prices['low'].iloc[i]
         trend_1d = ema_50_1d_aligned[i]
-        upper_channel = donchian_high[i]
-        lower_channel = donchian_low[i]
+        rsi_val = rsi[i]
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian upper + volume spike + price above 1d EMA50
-            if (price_high > upper_channel and 
-                vol_spike > 1.8 and 
-                price_close > trend_1d):
+            # Long: RSI pullback to 40-50 in uptrend + volume spike
+            if (40 <= rsi_val <= 50 and 
+                price_close > trend_1d and 
+                vol_spike > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower + volume spike + price below 1d EMA50
-            elif (price_low < lower_channel and 
-                  vol_spike > 1.8 and 
-                  price_close < trend_1d):
+            # Short: RSI pullback to 50-60 in downtrend + volume spike
+            elif (50 <= rsi_val <= 60 and 
+                  price_close < trend_1d and 
+                  vol_spike > 1.8):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price returns to opposite Donchian band
-            if position == 1 and price_low < lower_channel:
+            # Exit when RSI reaches opposite extreme (60 for long, 40 for short)
+            if position == 1 and rsi_val >= 60:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_high > upper_channel:
+            elif position == -1 and rsi_val <= 40:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -84,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_RSI_Pullback_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
