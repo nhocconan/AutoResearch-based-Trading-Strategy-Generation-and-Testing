@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_VolumeSpike_Pullback_4hTrend_v1
-Hypothesis: On 1h timeframe, enter pullbacks to the 4h EMA20 during 4h trend (EMA20 > EMA50 for long, EMA20 < EMA50 for short) with volume spike confirmation (>2x 20-bar average) and session filter (08-20 UTC). Uses discrete position sizing (0.20) to limit fee drag and ATR-based stoploss (2x ATR). Designed for moderate trade frequency (15-35/year) to work in both bull (buy pullbacks in uptrend) and bear (sell rallies in downtrend) regimes.
+6h_Camarilla_R3_S3_Breakout_WeeklyTrend_Filter_v1
+Hypothesis: On 6h timeframe, price breaking above Camarilla R3 or below S3 levels from prior 1d session captures institutional breakouts. Combined with weekly EMA50 trend filter (1w EMA > 1w EMA200 for bullish, < for bearish) and volume spike confirmation (>2.0). Designed for low trade frequency (~15-30/year) to minimize fee drag and work in both bull (breakout continuation) and bear (breakdown continuation) regimes by aligning with higher timeframe trend.
 """
 
 import numpy as np
@@ -13,17 +13,34 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (4h for trend filter)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load HTF data ONCE before loop (1d for Camarilla levels, 1w for trend filter)
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 2 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 4h EMA20 and EMA50 for trend filter ===
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # === 1-week EMA50 and EMA200 for trend filter ===
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # === Camarilla levels from prior 1-day session (HLC of previous day) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla R3, S3, R4, S4
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # === Volume spike filter (20-period) ===
     volume = prices['volume'].values
@@ -43,52 +60,45 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        if not in_session:
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        price_low = prices['low'].iloc[i]
         price_high = prices['high'].iloc[i]
-        ema_20_4h_val = ema_20_4h_aligned[i]
-        ema_50_4h_val = ema_50_4h_aligned[i]
+        price_low = prices['low'].iloc[i]
+        ema_50 = ema_50_1w_aligned[i]
+        ema_200 = ema_200_1w_aligned[i]
         vol_spike = vol_ratio[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        r4 = camarilla_r4_aligned[i]
+        s4 = camarilla_s4_aligned[i]
         atr_val = atr[i]
         
+        # Determine weekly trend: bullish if EMA50 > EMA200, bearish if EMA50 < EMA200
+        weekly_bullish = ema_50 > ema_200
+        weekly_bearish = ema_50 < ema_200
+        
         if position == 0:
-            # Long: 4h uptrend (EMA20 > EMA50) + pullback to EMA20 + volume spike
-            if (ema_20_4h_val > ema_50_4h_val and 
-                price_low <= ema_20_4h_val and 
-                vol_spike > 2.0):
-                signals[i] = 0.20
+            # Long: price breaks above R3 (bullish breakout) + weekly bullish trend + volume spike > 2.0
+            if price_close > r3 and weekly_bullish and vol_spike > 2.0:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price_close
-            # Short: 4h downtrend (EMA20 < EMA50) + rally to EMA20 + volume spike
-            elif (ema_20_4h_val < ema_50_4h_val and 
-                  price_high >= ema_20_4h_val and 
-                  vol_spike > 2.0):
-                signals[i] = -0.20
+            # Short: price breaks below S3 (bearish breakdown) + weekly bearish trend + volume spike > 2.0
+            elif price_close < s3 and weekly_bearish and vol_spike > 2.0:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price_close
         
@@ -99,16 +109,16 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
                 if price_close > entry_price + 2.0 * atr_val:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_VolumeSpike_Pullback_4hTrend_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_Breakout_WeeklyTrend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
