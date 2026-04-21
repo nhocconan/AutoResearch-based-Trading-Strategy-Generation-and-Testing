@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1
-Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 1h timeframe for BTC and ETH in both bull and bear markets. Uses 4h for trend direction and 1d for Camarilla pivot calculation. Target: 60-150 total trades over 4 years = 15-37/year. Session filter (08-20 UTC) reduces noise.
+6h_1w_1d_Camarilla_R3S3_Fade_V1
+Hypothesis: Fade extreme weekly Camarilla R3/S3 levels on 6h timeframe with 1d trend filter.
+In ranging markets, price reverts from extreme levels (R3/S3). In trending markets,
+only trade with the 1d trend to avoid counter-trend fading. Uses 1w for Camarilla calculation
+to capture major weekly extremes, reducing false signals. Target: 12-37 trades/year per symbol.
+Works in both bull and bear markets via trend filter and mean reversion logic.
 """
 
 import numpy as np
@@ -13,45 +17,44 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 4h data once for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load weekly data once for Camarilla pivot calculation (primary HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Load daily data once for Camarilla pivot calculation
+    # Load daily data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla pivot calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Previous week's OHLC for Camarilla pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Camarilla pivot point and R1/S1 levels
+    # Camarilla pivot point and R3/S3 levels (extreme levels for fading)
     pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
+    r3 = pivot + (prev_high - prev_low) * 1.1 / 4
+    s3 = pivot - (prev_high - prev_low) * 1.1 / 4
     
-    # Align daily levels to 1h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1d EMA50 for trend filter (avoid fading against strong trend)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: 20-period average (approx 6.6h on 1h)
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    # Volume filter: 24-period average (approx 6 days on 6h)
+    vol_ma = prices['volume'].rolling(window=24, min_periods=24).mean().values
     
     # ATR for stoploss
     high = prices['high'].values
@@ -64,24 +67,13 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,42 +83,44 @@ def generate_signals(prices):
         volume = prices['volume'].iloc[i]
         
         # Volume confirmation
-        volume_ok = volume > 1.5 * vol_ma[i]
+        volume_ok = volume > 1.3 * vol_ma[i]
         
-        # 4h trend filter
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # 1d trend filter
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 in uptrend with volume
-            if uptrend and volume_ok:
-                if price > r1_aligned[i]:
-                    signals[i] = 0.20
+            # Long fade: price reaches S3 extreme in uptrend (mean reversion up)
+            # or price reaches S3 extreme in ranging market (no strong trend)
+            if volume_ok and price <= s3_aligned[i]:
+                if uptrend or (not uptrend and not downtrend):  # uptrend or ranging
+                    signals[i] = 0.25
                     position = 1
-            # Short: price breaks below S1 in downtrend with volume
-            elif downtrend and volume_ok:
-                if price < s1_aligned[i]:
-                    signals[i] = -0.20
+            # Short fade: price reaches R3 extreme in downtrend (mean reversion down)
+            # or price reaches R3 extreme in ranging market (no strong trend)
+            elif volume_ok and price >= r3_aligned[i]:
+                if downtrend or (not uptrend and not downtrend):  # downtrend or ranging
+                    signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: price reaches S1 or stoploss
-            if price <= s1_aligned[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
+            # Exit: price reaches pivot (mean reversion target) or stoploss
+            if price >= pivot_aligned[i] * 0.998 or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches R1 or stoploss
-            if price >= r1_aligned[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
+            # Exit: price reaches pivot (mean reversion target) or stoploss
+            if price <= pivot_aligned[i] * 1.002 or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1"
-timeframe = "1h"
+name = "6h_1w_1d_Camarilla_R3S3_Fade_V1"
+timeframe = "6h"
 leverage = 1.0
