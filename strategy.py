@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_With_Volume
-Hypothesis: KAMA trend on daily timeframe with volume confirmation.
-Long when KAMA rising and volume > 1.5x average; short when KAMA falling and volume > 1.5x average.
-Use weekly timeframe for trend filter: only trade long when price > weekly EMA50, short when price < weekly EMA50.
-Exit when KAMA changes direction or volume drops.
-Designed for 1d timeframe to capture medium-term trends with low trade frequency.
-Target: 20-50 trades over 4 years (5-12/year).
+12h_KAMA_Trend_With_RSI_and_Chop_Filter
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction. 
+Combine with RSI for momentum and Choppiness Index to filter ranging markets.
+Enter long when KAMA upward, RSI>55, and trending market (CHOP<40). 
+Enter short when KAMA downward, RSI<45, and trending market.
+Exit on opposite signal. Uses 1D trend filter for higher timeframe bias.
+Works in bull markets by riding uptrends and in bear markets by catching bounces.
+Target: 15-25 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -23,95 +24,112 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # === KAMA calculation on daily close ===
+    # === 1D EMA34 for trend filter ===
     close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)  # 10-period volatility
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+2) - 2/(30+2)) + 2/(30+2)) ** 2  # fast=2, slow=30
-    # KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Weekly EMA50 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === KAMA (12h) ===
+    close = prices['close'].values
+    direction = np.abs(np.diff(close, k=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period sum of abs changes
+    # Handle first 10 values
+    direction = np.concatenate([np.full(10, np.nan), direction])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    er = np.where(volatility != 0, direction / volatility, 0)
+    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # === Volume confirmation (20-period average) ===
-    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = prices['volume'].values / vol_ma
+    # === RSI (12h, 14-period) ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    avg_gain[14] = np.nanmean(gain[1:15])
+    avg_loss[14] = np.nanmean(loss[1:15])
+    for i in range(15, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === Choppiness Index (12h, 14-period) ===
+    atr = np.full_like(close, np.nan)
+    tr1 = np.abs(prices['high'].values - prices['low'].values)
+    tr2 = np.abs(prices['high'].values - np.roll(close, 1))
+    tr3 = np.abs(prices['low'].values - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR is just high-low
+    atr_period = 14
+    atr[atr_period-1] = np.nanmean(tr[1:atr_period])
+    for i in range(atr_period, n):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    max_high = np.full_like(close, np.nan)
+    min_low = np.full_like(close, np.nan)
+    for i in range(atr_period-1, n):
+        max_high[i] = np.max(prices['high'].values[i-atr_period+1:i+1])
+        min_low[i] = np.min(prices['low'].values[i-atr_period+1:i+1])
+    chop = np.where((max_high - min_low) != 0, 
+                    100 * np.log10(np.sum(tr[i-atr_period+1:i+1]) / (max_high - min_low)) / np.log10(atr_period),
+                    50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(35, n):  # Start after warmup
         # Skip if indicators not ready
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(chop[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        kama_val = kama_aligned[i]
-        ema_trend = ema_50_1w_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        
-        # KAMA direction: rising if current > previous, falling if current < previous
-        if i > 0:
-            kama_prev = kama_aligned[i-1]
-            kama_rising = kama_val > kama_prev
-            kama_falling = kama_val < kama_prev
-        else:
-            kama_rising = False
-            kama_falling = False
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        chop_val = chop[i]
+        ema_trend = ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long: KAMA rising + price above weekly EMA50 + volume confirmation
-            if (kama_rising and
-                price_close > ema_trend and
-                vol_ratio_val > 1.5):
+            # Long: KAMA up, RSI>55, trending market (CHOP<40), above 1D EMA
+            if (kama_val > kama[i-1] and
+                rsi_val > 55 and
+                chop_val < 40 and
+                price_close > ema_trend):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling + price below weekly EMA50 + volume confirmation
-            elif (kama_falling and
-                  price_close < ema_trend and
-                  vol_ratio_val > 1.5):
+            # Short: KAMA down, RSI<45, trending market (CHOP<40), below 1D EMA
+            elif (kama_val < kama[i-1] and
+                  rsi_val < 45 and
+                  chop_val < 40 and
+                  price_close < ema_trend):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when KAMA changes direction or volume drops
-            if position == 1:
-                if not kama_rising or vol_ratio_val < 1.0:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1
-                if not kama_falling or vol_ratio_val < 1.0:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit on opposite signal
+            if position == 1 and (kama_val < kama[i-1] or rsi_val < 45):
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and (kama_val > kama[i-1] or rsi_val > 55):
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1d_1w_KAMA_Trend_With_Volume"
-timeframe = "1d"
+name = "12h_KAMA_Trend_With_RSI_and_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
