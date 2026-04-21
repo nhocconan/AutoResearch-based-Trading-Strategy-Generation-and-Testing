@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_12h_RSI_MeanReversion_VolumeFilter_v1
-Hypothesis: In 4h timeframe, use 12h RSI extremes (>70/<30) for mean reversion entries.
-Go long when 12h RSI < 30 and price near 4h Donchian lower band with volume confirmation.
-Go short when 12h RSI > 70 and price near 4h Donchian upper band with volume confirmation.
-Exit on opposite Donchian band touch or RSI normalization.
-Works in bull/bear by fading extremes with volume confirmation and ATR-based stop.
-Target: 20-35 trades/year per symbol.
+1h_4h_1d_Camarilla_R1S1_Breakout_VolumeFilter_v1
+Hypothesis: Breakout of Camarilla R1/S1 levels on 1h with 4h trend alignment (EMA34) and volume confirmation.
+Works in both bull/bear by using 4h EMA for trend direction and Camarilla for precise entry/exit.
+Target: 15-35 trades/year per symbol.
 """
 
 import numpy as np
@@ -15,85 +12,113 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data once for RSI
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Load 1d data once for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # Calculate RSI(14) on 12h
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h = rsi_12h.values
-    # Align to 4h timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    high = prices['high'].values
-    low = prices['low'].values
-    donchian_len = 20
-    upper = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
-    lower = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    volume_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean()
-    volume_ok = prices['volume'].values > 1.5 * volume_ma
+    # Camarilla levels: R1, S1, R2, S2, R3, S3, R4, S4
+    rang = prev_high - prev_low
+    r1 = prev_close + rang * 1.0 / 12
+    s1 = prev_close - rang * 1.0 / 12
+    r2 = prev_close + rang * 2.0 / 12
+    s2 = prev_close - rang * 2.0 / 12
+    r3 = prev_close + rang * 3.0 / 12
+    s3 = prev_close - rang * 3.0 / 12
+    r4 = prev_close + rang * 6.0 / 12
+    s4 = prev_close - rang * 6.0 / 12
+    
+    # Align to 1h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Load 4h data for trend (EMA34)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if np.isnan(rsi_12h_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_34_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        vol_ok = volume_ok[i]
+        volume = prices['volume'].iloc[i]
         
-        # Entry conditions with hysteresis
+        # Volume filter: current volume > 2.0 * 20-period average
+        if i >= 20:
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 2.0 * vol_ma
+        else:
+            volume_ok = False
+        
         if position == 0:
-            # Long: RSI oversold + price near lower Donchian + volume
-            if (rsi_12h_aligned[i] < 30 and 
-                price <= lower[i] * 1.001 and  # near or below lower band
-                vol_ok):
-                signals[i] = 0.25
+            # Long conditions: break above R1 with 4h uptrend and volume
+            if (price > r1_aligned[i] and 
+                ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1] and  # 4h EMA rising
+                volume_ok):
+                signals[i] = 0.20
                 position = 1
-            # Short: RSI overbought + price near upper Donchian + volume
-            elif (rsi_12h_aligned[i] > 70 and 
-                  price >= upper[i] * 0.999 and  # near or above upper band
-                  vol_ok):
-                signals[i] = -0.25
+            # Short conditions: break below S1 with 4h downtrend and volume
+            elif (price < s1_aligned[i] and 
+                  ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1] and  # 4h EMA falling
+                  volume_ok):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: RSI normalizes (>50) or price reaches upper band
-            if rsi_12h_aligned[i] > 50 or price >= upper[i]:
+            # Long exit: break below S1 or reach R2
+            if price < s1_aligned[i] or price > r2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: RSI normalizes (<50) or price reaches lower band
-            if rsi_12h_aligned[i] < 50 or price <= lower[i]:
+            # Short exit: break above R1 or reach S2
+            if price > r1_aligned[i] or price < s2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_12h_RSI_MeanReversion_VolumeFilter_v1"
-timeframe = "4h"
+name = "1h_4h_1d_Camarilla_R1S1_Breakout_VolumeFilter_v1"
+timeframe = "1h"
 leverage = 1.0
