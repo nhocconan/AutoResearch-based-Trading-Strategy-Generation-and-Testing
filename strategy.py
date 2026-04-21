@@ -3,42 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d EMA34 trend filter and volume spike confirmation.
-# Long when Williams %R crosses above -80 in uptrend (1d EMA34 rising), short when crosses below -20 in downtrend.
-# Volume > 1.5x 20-period average confirms reversal strength. Uses EMA slope to filter weak trends.
-# Target: 20-40 trades/year by requiring strong momentum + volume + trend alignment.
-# Works in bull/bear: EMA filter ensures only established trends are traded, avoiding whipsaws in ranging markets.
+# Hypothesis: 1d 50-period EMA crossover with 1w EMA200 trend filter and volume confirmation.
+# Long when EMA(50) crosses above EMA(200) on daily and weekly EMA200 confirms uptrend.
+# Short when EMA(50) crosses below EMA(200) on daily and weekly EMA200 confirms downtrend.
+# Volume > 1.3x 20-period average confirms momentum. Designed for low turnover (10-25 trades/year).
+# Works in bull/bear: weekly trend filter prevents counter-trend trades in strong regimes.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA(50) and EMA(200)
     close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate EMA slope for trend strength
-    ema_slope = np.diff(ema_34, prepend=ema_34[0])
-    
-    # Align EMA and slope to 12h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    ema_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_slope)
-    
-    # Calculate Williams %R on 12h data (14-period)
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    # Calculate 1w EMA(200) for trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -46,10 +34,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(ema_slope_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema_50[i]) or np.isnan(ema_200[i]) or np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,36 +46,43 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirm = volume > 1.3 * vol_ma[i]
         
-        # Trend filter: EMA slope positive for uptrend, negative for downtrend
-        uptrend = ema_slope_aligned[i] > 0
-        downtrend = ema_slope_aligned[i] < 0
+        # Daily EMA crossover signals
+        ema50_above_ema200 = ema_50[i] > ema_200[i]
+        ema50_above_ema200_prev = ema_50[i-1] > ema_200[i-1]
+        
+        bullish_cross = ema50_above_ema200 and not ema50_above_ema200_prev
+        bearish_cross = not ema50_above_ema200 and ema50_above_ema200_prev
+        
+        # Weekly trend filter
+        weekly_uptrend = ema_200_1w_aligned[i] > ema_200_1w_aligned[i-1]  # rising weekly EMA200
+        weekly_downtrend = ema_200_1w_aligned[i] < ema_200_1w_aligned[i-1]  # falling weekly EMA200
         
         if position == 0:
             if volume_confirm:
-                # Long: Williams %R crosses above -80 in uptrend
-                if williams_r[i] > -80 and williams_r[i-1] <= -80 and uptrend:
+                # Long: bullish crossover + weekly uptrend
+                if bullish_cross and weekly_uptrend:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R crosses below -20 in downtrend
-                elif williams_r[i] < -20 and williams_r[i-1] >= -20 and downtrend:
+                # Short: bearish crossover + weekly downtrend
+                elif bearish_cross and weekly_downtrend:
                     signals[i] = -0.25
                     position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: opposite crossover OR weekly trend reversal
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if Williams %R rises above -20 (overbought) or trend changes
-                if williams_r[i] > -20 or ema_slope_aligned[i] < 0:
+                # Exit on bearish crossover or weekly trend turns down
+                if bearish_cross or not weekly_uptrend:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if Williams %R falls below -80 (oversold) or trend changes
-                if williams_r[i] < -80 or ema_slope_aligned[i] > 0:
+                # Exit on bullish crossover or weekly trend turns up
+                if bullish_cross or not weekly_downtrend:
                     exit_signal = True
             
             if exit_signal:
@@ -100,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR14_1dEMA34_Volume"
-timeframe = "12h"
+name = "1d_EMA50_200_Crossover_1wEMA200_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
