@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_RSI2_Contrast_Stochastic_VolumeFilter
-Hypothesis: Contrarian mean reversion on 6h using 2-period RSI (RSI2) combined with Stochastic(14,3,3) for oversold/overbought confirmation, filtered by volume spike and 12h EMA50 trend. 
-Enters long when RSI2 < 10, Stochastic %K < 20, volume > 1.5x average, and price > 12h EMA50 (uptrend filter). 
-Enters short when RSI2 > 90, Stochastic %K > 80, volume > 1.5x average, and price < 12h EMA50 (downtrend filter). 
-Exits on RSI2 > 50 (long) or RSI2 < 50 (short) or opposite Stochastic extreme. 
-Designed for low trade frequency (target: 12-25 trades/year) to minimize fee drift. 
-Works in bull/bear via 12h EMA50 trend filter and volume confirmation as regime filter.
+4h_KeltnerChannel_Breakout_HTFTrend_ATRStop
+Hypothesis: 4h price breakout beyond Keltner Channel (EMA20 ± 2*ATR(10)) filtered by 1d EMA50 trend.
+Enter long when price closes above upper KC with 1d uptrend. Enter short when price closes below lower KC with 1d downtrend.
+Exit on opposite KC touch or ATR(10) trailing stop (1.5*ATR). Uses volume confirmation to avoid false breakouts.
+Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag in ranging/bear markets.
 """
 
 import numpy as np
@@ -18,39 +16,38 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for EMA50 trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load HTF data ONCE before loop (1d for trend filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 12h EMA50 for HTF trend filter ===
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === 4h Keltner Channel: EMA20 ± 2*ATR(10) ===
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # === Volume spike filter (20-period average) ===
+    # EMA20 for KC middle
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # ATR(10) for KC width
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_10 = tr.rolling(window=10, min_periods=10).mean().values
+    
+    # KC bands
+    kc_upper = ema_20 + 2.0 * atr_10
+    kc_lower = ema_20 - 2.0 * atr_10
+    
+    # === 1d EMA50 for HTF trend filter ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === Volume confirmation: 20-period average ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === RSI(2) on 6h close ===
-    close = prices['close'].values
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_2 = 100 - (100 / (1 + rs))
-    
-    # === Stochastic(14,3,3) on 6h high/low/close ===
-    lookback = 14
-    highest_high = pd.Series(prices['high'].values).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(prices['low'].values).rolling(window=lookback, min_periods=lookback).min().values
-    stoch_k_raw = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
-    # Smooth %K with 3-period SMA
-    stoch_k = pd.Series(stoch_k_raw).rolling(window=3, min_periods=3).mean().values
-    # Smooth %D with 3-period SMA (not used directly but for completeness)
-    stoch_d = pd.Series(stoch_k).rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,8 +55,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) 
-            or np.isnan(rsi_2[i]) or np.isnan(stoch_k[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) 
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) 
+            or np.isnan(atr_10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,40 +66,46 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirm = volume[i] > 1.5 * vol_ma[i]
+            # Volume confirmation: current volume > 20-period average
+            vol_confirm = volume[i] > vol_ma[i]
             
-            # Long conditions: RSI2 < 10 (extreme oversold), Stoch %K < 20, volume spike, 12h uptrend
-            long_rsi2 = rsi_2[i] < 10
-            long_stoch = stoch_k[i] < 20
-            long_trend = price > ema_50_12h_aligned[i]
+            # Long conditions: price > upper KC, 1d uptrend, volume spike
+            long_breakout = price > kc_upper[i]
+            long_trend = price > ema_50_1d_aligned[i]
             
-            # Short conditions: RSI2 > 90 (extreme overbought), Stoch %K > 80, volume spike, 12h downtrend
-            short_rsi2 = rsi_2[i] > 90
-            short_stoch = stoch_k[i] > 80
-            short_trend = price < ema_50_12h_aligned[i]
+            # Short conditions: price < lower KC, 1d downtrend, volume spike
+            short_breakout = price < kc_lower[i]
+            short_trend = price < ema_50_1d_aligned[i]
             
             # Entry logic
-            if long_rsi2 and long_stoch and vol_confirm and long_trend:
+            if long_breakout and long_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_rsi2 and short_stoch and vol_confirm and short_trend:
+            elif short_breakout and short_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Exit conditions: RSI2 > 50 (recovered from oversold) or Stoch %K > 80 (overbought)
-            if rsi_2[i] > 50 or stoch_k[i] > 80:
+            # Check stoploss
+            if price < entry_price - 1.5 * atr_10[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trailing exit: price touches or crosses lower KC
+            elif price <= kc_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions: RSI2 < 50 (recovered from overbought) or Stoch %K < 20 (oversold)
-            if rsi_2[i] < 50 or stoch_k[i] < 20:
+            # Check stoploss
+            if price > entry_price + 1.5 * atr_10[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trailing exit: price touches or crosses upper KC
+            elif price >= kc_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI2_Contrast_Stochastic_VolumeFilter"
-timeframe = "6h"
+name = "4h_KeltnerChannel_Breakout_HTFTrend_ATRStop"
+timeframe = "4h"
 leverage = 1.0
