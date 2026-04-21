@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime_ATRStop
-Hypothesis: 4h Camarilla pivot (R1/S1) breakouts filtered by 1d EMA50 trend and volume regime (choppiness index).
-Enter long when price breaks above 4h R1 with 1d uptrend and low choppiness (trending market).
-Enter short when price breaks below 4h S1 with 1d downtrend and low choppiness.
-Exit on ATR(14) trailing stop (2.0*ATR) or opposite level break.
-Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag.
-Works in bull/bear via 1d trend alignment and choppiness regime filter.
+12h_Camarilla_R1_S1_Breakout_1wTrend_ATRStop_V1
+Hypothesis: 12h Camarilla pivot (R1/S1) breakouts filtered by 1w EMA50 trend and ATR-based stoploss.
+Enter long when price breaks above 12h R1 with 1w uptrend.
+Enter short when price breaks below 12h S1 with 1w downtrend.
+Exit on ATR(14) trailing stop (2.5*ATR) or opposite level break.
+Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
+Works in bull/bear via 1w trend alignment and ATR stoploss.
 """
 
 import numpy as np
@@ -18,58 +18,30 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (4h for pivots, 1d for trend/chop)
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    # Load HTF data ONCE before loop (12h for pivots, 1w for trend)
+    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_12h) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 4h Camarilla Pivot Levels (R1, S1) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === 12h Camarilla Pivot Levels (R1, S1) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_range = (high_4h - low_4h) * 1.1 / 12.0
-    r1_4h = close_4h + camarilla_range
-    s1_4h = close_4h - camarilla_range
+    camarilla_range = (high_12h - low_12h) * 1.1 / 12.0
+    r1_12h = close_12h + camarilla_range
+    s1_12h = close_12h - camarilla_range
     
-    # Align to 4h timeframe (use previous completed 4h bar)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    # Align to 12h timeframe (use previous completed 12h bar)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
-    # === 1d EMA50 for HTF trend filter ===
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === 1d Choppiness Index (CHOP) for regime filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Sum of TR over 14 periods
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum_tr_14 / (hh_14 - ll_14)) / log10(14)
-    # Avoid division by zero
-    range_14 = hh_14 - ll_14
-    chop_1d = np.zeros_like(range_14, dtype=float)
-    mask = range_14 > 0
-    chop_1d[mask] = 100 * np.log10(sum_tr_14[mask] / range_14[mask]) / np.log10(14)
-    chop_1d[~mask] = 50  # neutral when range is zero
-    
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # === 1w EMA50 for HTF trend filter ===
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # === ATR (14-period) for stoploss ===
     high = prices['high'].values
@@ -88,9 +60,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) 
-            or np.isnan(atr[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) 
+            or np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,39 +70,31 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume confirmation: current volume > 20-period average
-            volume = prices['volume'].values
-            vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-            vol_confirm = volume[i] > vol_ma[i] if not np.isnan(vol_ma[i]) else False
+            # Long conditions: price > 12h R1, 1w uptrend
+            long_breakout = price > r1_12h_aligned[i]
+            long_trend = price > ema_50_1w_aligned[i]
             
-            # Regime filter: low choppiness = trending market (CHOP < 38.2)
-            chop_regime = chop_1d_aligned[i] < 38.2
-            
-            # Long conditions: price > 4h R1, 1d uptrend, low chop, volume spike
-            long_breakout = price > r1_4h_aligned[i]
-            long_trend = price > ema_50_1d_aligned[i]
-            
-            # Short conditions: price < 4h S1, 1d downtrend, low chop, volume spike
-            short_breakout = price < s1_4h_aligned[i]
-            short_trend = price < ema_50_1d_aligned[i]
+            # Short conditions: price < 12h S1, 1w downtrend
+            short_breakout = price < s1_12h_aligned[i]
+            short_trend = price < ema_50_1w_aligned[i]
             
             # Entry logic
-            if long_breakout and long_trend and chop_regime and vol_confirm:
+            if long_breakout and long_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and chop_regime and vol_confirm:
+            elif short_breakout and short_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below 4h S1 (support broken)
-            elif price < s1_4h_aligned[i]:
+            # Trailing exit: price closes below 12h S1 (support broken)
+            elif price < s1_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,11 +102,11 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above 4h R1 (resistance broken)
-            elif price > r1_4h_aligned[i]:
+            # Trailing exit: price closes above 12h R1 (resistance broken)
+            elif price > r1_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -151,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeRegime_ATRStop"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_ATRStop_V1"
+timeframe = "12h"
 leverage = 1.0
