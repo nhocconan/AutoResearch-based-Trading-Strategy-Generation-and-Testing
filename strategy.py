@@ -1,117 +1,107 @@
 #!/usr/bin/env python3
 """
-6h_1d_Pivot_SR_Fade_Zone
-Hypothesis: Price shows mean-reversion behavior near daily pivot support/resistance zones (R1/S1, R2/S2) on 6b timeframe. Fades occur when price reaches these levels with momentum exhaustion (RSI divergence). Works in both bull/bear markets as pivots adapt to price levels, capturing reversals at key institutional levels.
+12h_1d_Camarilla_R1S1_Breakout_VolumeFilter
+Hypothesis: Camarilla R1/S1 levels from 1-day timeframe act as strong intraday support/resistance.
+Price breaking above R1 or below S1 with volume confirmation indicates institutional interest.
+Works in bull/bear by taking breakouts in direction of 1-day trend (EMA34 filter).
+Target: 12-37 trades/year on 12h timeframe. Uses discrete position sizing to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(close, period=14):
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < period:
-            avg_gain[i] = np.mean(gain[max(0, i-period+1):i+1]) if i > 0 else 0
-            avg_loss[i] = np.mean(loss[max(0, i-period+1):i+1]) if i > 0 else 0
-        else:
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_pivot_points(high, low, close):
-    """Calculate daily pivot points and support/resistance levels"""
-    pivot = (high + low + close) / 3
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    return pivot, r1, s1, r2, s2
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given OHLC data"""
+    typical = (high + low + close) / 3
+    range_val = high - low
+    # Camarilla levels
+    R4 = close + range_val * 1.500
+    R3 = close + range_val * 1.250
+    R2 = close + range_val * 1.166
+    R1 = close + range_val * 1.083
+    S1 = close - range_val * 1.083
+    S2 = close - range_val * 1.166
+    S3 = close - range_val * 1.250
+    S4 = close - range_val * 1.500
+    return R1, R2, R3, R4, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
-    # Load daily data once for pivot points and RSI
+    # Load 1d data once for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily pivot points
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot_1d, r1_1d, s1_1d, r2_1d, s2_1d = calculate_pivot_points(high_1d, low_1d, close_1d)
+    # Calculate Camarilla levels on daily data
+    R1_1d = np.full_like(close_1d, np.nan)
+    S1_1d = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        R1, R2, R3, R4, S1, S2, S3, S4 = calculate_camarilla(
+            high_1d[i], low_1d[i], close_1d[i]
+        )
+        R1_1d[i] = R1
+        S1_1d[i] = S1
     
-    # Calculate RSI on daily data for momentum exhaustion
-    rsi_1d = calculate_rsi(close_1d, 14)
+    # 1-day EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all daily levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align 1D indicators to 12h timeframe
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6s price data
-    close_6h = prices['close'].values
+    # Volume confirmation: volume > 1.5x 20-period average
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(34, n):  # Start after EMA warmup
         # Skip if NaN in critical values
-        if np.isnan(rsi_aligned[i]) or np.isnan(pivot_aligned[i]):
+        if np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
-        rsi = rsi_aligned[i]
-        
-        # Define proximity to S/R levels (within 0.5% of level)
-        proximity = 0.005
-        
-        near_s1 = abs(price - s1_aligned[i]) / s1_aligned[i] < proximity
-        near_s2 = abs(price - s2_aligned[i]) / s2_aligned[i] < proximity
-        near_r1 = abs(price - r1_aligned[i]) / r1_aligned[i] < proximity
-        near_r2 = abs(price - r2_aligned[i]) / r2_aligned[i] < proximity
-        
-        # Momentum exhaustion conditions
-        rsi_overbought = rsi > 65
-        rsi_oversold = rsi < 35
+        price = prices['close'].values[i]
+        r1 = R1_1d_aligned[i]
+        s1 = S1_1d_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
+        vol_conf = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long setup: near support with RSI oversold
-            if (near_s1 or near_s2) and rsi_oversold:
+            # Long: price breaks above R1 + volume + price above 1D EMA (uptrend)
+            if price > r1 and vol_conf and price > ema_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short setup: near resistance with RSI overbought
-            elif (near_r1 or near_r2) and rsi_overbought:
+            # Short: price breaks below S1 + volume + price below 1D EMA (downtrend)
+            elif price < s1 and vol_conf and price < ema_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches pivot or RSI becomes overbought
-            if price >= pivot_aligned[i] or rsi > 70:
+            # Long exit: price drops below S1 or loses volume confirmation
+            if price < s1 or vol_ratio[i] < 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches pivot or RSI becomes oversold
-            if price <= pivot_aligned[i] or rsi < 30:
+            # Short exit: price rises above R1 or loses volume confirmation
+            if price > r1 or vol_ratio[i] < 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_SR_Fade_Zone"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1S1_Breakout_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
