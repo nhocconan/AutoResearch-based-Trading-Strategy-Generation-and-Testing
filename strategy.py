@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike.
-In trending markets (price > EMA50_1d for long, < for short): breakout continuation (long above R1, short below S1).
-In ranging markets: no entries to avoid whipsaw. Uses volume confirmation (2.0x average) to filter false breakouts.
-ATR(14) stoploss (1.5x) and discrete position sizing (0.25) to limit fee drag and drawdown.
-Designed to work in both bull and bear markets by requiring strong trend alignment.
-Timeframe: 12h, uses 1d HTF for trend filter.
-Target: 50-150 total trades over 4 years = 12-37/year.
+4h_Camarilla_R1_S1_Breakout_1dTrend_ATRVolFilter_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (2.0x 20-bar MA).
+Only trade in direction of 1d trend to avoid whipsaw in choppy markets. Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25).
+Designed to work in both bull and bear markets by requiring strong 1d trend alignment.
+Timeframe: 4h, uses 1d HTF for trend filter.
+Target: 75-200 total trades over 4 years = 19-50/year.
 """
 
 import numpy as np
@@ -19,7 +17,7 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA50 trend)
+    # Load HTF data ONCE before loop (1d for EMA50 trend and Camarilla pivots)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
@@ -44,7 +42,7 @@ def generate_signals(prices):
     h4_1d = df_1d_close + 1.382 * range_1d
     l4_1d = df_1d_close - 1.382 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
@@ -110,8 +108,8 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (1.5x ATR)
-            if price < entry_price - 1.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trend reversal exit
@@ -126,8 +124,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (1.5x ATR)
-            if price > entry_price + 1.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trend reversal exit
@@ -143,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_ATRVolFilter_v1"
+timeframe = "4h"
 leverage = 1.0
