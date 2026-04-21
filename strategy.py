@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_HTFTrend_ChopFilter
-Hypothesis: 4h Camarilla pivot (R1/S1) breakouts filtered by 1d EMA34 trend and choppiness regime.
-Enter long when price breaks above daily R1 with daily uptrend and low chop (trending market).
-Enter short when price breaks below daily S1 with daily downtrend and low chop.
-Exit on ATR(14) trailing stop (2.0*ATR) or opposite level break.
-Designed for moderate trade frequency (target: 25-40 trades/year) to balance edge and fees.
-Works in bull/bear via daily trend alignment and chop filter as regime detector.
+1d_Camarilla_R1_S1_Breakout_WeeklyEMA_VolumeSpike_ATRStop
+Hypothesis: Daily Camarilla pivot (R1/S1) breakouts filtered by weekly EMA50 trend and volume spike (>1.5x 20-bar average).
+Enter long when price breaks above daily R1 with weekly uptrend (price > weekly EMA50) and volume confirmation.
+Enter short when price breaks below daily S1 with weekly downtrend (price < weekly EMA50) and volume confirmation.
+Exit on ATR(14) trailing stop (2.5*ATR) or opposite level break.
+Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drift.
+Uses discrete position sizing (0.25) and weekly trend alignment to work in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,9 +18,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (daily for pivots and trend, 1d for chop)
+    # Load HTF data ONCE before loop (daily for pivots, weekly for trend)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
     # === Daily Camarilla Pivot Levels (R1, S1) ===
@@ -33,33 +34,20 @@ def generate_signals(prices):
     r1_1d = close_1d + camarilla_range
     s1_1d = close_1d - camarilla_range
     
-    # Align to daily timeframe (use previous completed daily bar)
+    # Align to 1d timeframe (use previous completed daily bar)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # === Daily EMA34 for HTF trend filter ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === Weekly EMA50 for HTF trend filter ===
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === Choppiness Index (14-period) for regime filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Volume spike filter (1.5x 20-period average) ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Choppiness Index = 100 * log10(sum(ATR)/log10(N)) / log10(N)
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    n_periods = 14
-    chop = 100 * np.log10(sum_atr_14 / np.log10(n_periods)) / np.log10(n_periods)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # === ATR (14-period) for 4h stoploss ===
+    # === ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -77,7 +65,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_aligned[i]) 
+            or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) 
             or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -87,30 +75,30 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Regime filter: low chop (< 38.2) indicates trending market
-            trending_regime = chop_aligned[i] < 38.2
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirm = volume[i] > (1.5 * vol_ma[i])
             
-            # Long conditions: price > daily R1, daily uptrend, trending regime
+            # Long conditions: price > daily R1, weekly uptrend, volume spike
             long_breakout = price > r1_1d_aligned[i]
-            long_trend = price > ema_34_1d_aligned[i]
+            long_trend = price > ema_50_1w_aligned[i]
             
-            # Short conditions: price < daily S1, daily downtrend, trending regime
+            # Short conditions: price < daily S1, weekly downtrend, volume spike
             short_breakout = price < s1_1d_aligned[i]
-            short_trend = price < ema_34_1d_aligned[i]
+            short_trend = price < ema_50_1w_aligned[i]
             
             # Entry logic
-            if long_breakout and long_trend and trending_regime:
+            if long_breakout and long_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and trending_regime:
+            elif short_breakout and short_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trailing exit: price closes below daily S1 (support broken)
@@ -122,7 +110,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trailing exit: price closes above daily R1 (resistance broken)
@@ -134,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_HTFTrend_ChopFilter"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_WeeklyEMA_VolumeSpike_ATRStop"
+timeframe = "1d"
 leverage = 1.0
