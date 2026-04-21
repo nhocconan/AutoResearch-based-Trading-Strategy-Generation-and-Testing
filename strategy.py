@@ -1,11 +1,4 @@
-# 48  #!/usr/bin/env python3
-# Hypothesis: 4-hour Williams %R with 1-day ADX trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 (from oversold) with ADX > 25 and volume > 1.5x average.
-# Short when Williams %R crosses below -80 (from overbought) with ADX > 25 and volume > 1.5x average.
-# Exit when Williams %R returns to the opposite extreme or volume drops below average.
-# Williams %R captures momentum reversals, ADX filters for trending markets to avoid chop,
-# and volume confirms strength. Target: 20-50 trades/year for low fee drag.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -15,7 +8,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for ADX and volume average
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -30,7 +23,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
     # Directional Movement
     dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
@@ -71,15 +64,10 @@ def generate_signals(prices):
     vol_1d = df_1d['volume'].values
     vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h Williams %R (14-period)
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
+    # Calculate 4h close price momentum (5-period ROC)
     close_4h = prices['close'].values
-    
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          -100 * (highest_high - close_4h) / (highest_high - lowest_low), -50)
+    roc = np.zeros_like(close_4h)
+    roc[5:] = (close_4h[5:] - close_4h[:-5]) / close_4h[:-5] * 100
     
     # Align 1d indicators to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
@@ -91,7 +79,7 @@ def generate_signals(prices):
     for i in range(28, n):  # Start after ADX warmup
         # Skip if data not ready
         if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(williams_r[i])):
+            np.isnan(roc[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -102,31 +90,31 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)[i]
         
         if position == 0:
-            # Enter long: Williams %R crosses above -20 (from oversold), ADX > 25, volume surge
-            if (williams_r[i] > -20 and williams_r[i-1] <= -20 and
+            # Enter long: Positive momentum + strong trend + volume surge
+            if (roc[i] > 0.5 and roc[i-1] <= 0.5 and
                 adx_aligned[i] > 25 and
                 vol_1d_current > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R crosses below -80 (from overbought), ADX > 25, volume surge
-            elif (williams_r[i] < -80 and williams_r[i-1] >= -80 and
+            # Enter short: Negative momentum + strong trend + volume surge
+            elif (roc[i] < -0.5 and roc[i-1] >= -0.5 and
                   adx_aligned[i] > 25 and
                   vol_1d_current > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: Williams %R returns to opposite extreme or volume drops below average
+            # Exit: Momentum reverses or volume drops below average
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R < -80 or volume < average
-                if (williams_r[i] < -80 or
+                # Exit long: Momentum turns negative or volume < average
+                if (roc[i] < 0 or
                     vol_1d_current < vol_ma_20_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: Williams %R > -20 or volume < average
-                if (williams_r[i] > -20 or
+                # Exit short: Momentum turns positive or volume < average
+                if (roc[i] > 0 or
                     vol_1d_current < vol_ma_20_aligned[i]):
                     exit_signal = True
             
@@ -139,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_ADX25_Volume1.5x"
+name = "4h_ROC_ADX25_Volume1.5x"
 timeframe = "4h"
 leverage = 1.0
