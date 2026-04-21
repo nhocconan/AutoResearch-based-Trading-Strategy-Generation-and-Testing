@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_RegimeFilter_V1
-Hypothesis: 6h Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) combined with regime filter (ADX > 25 for trending, < 20 for ranging). 
-In trending regimes (ADX > 25): go long when Bull Power > 0 and rising, short when Bear Power > 0 and rising. 
-In ranging regimes (ADX < 20): fade extremes - long when Bear Power < -0.5*ATR and turning up, short when Bull Power < -0.5*ATR and turning down.
-Uses 1w HTF for major trend filter (only take longs above 1w EMA50, shorts below).
-Volume confirmation (1.5x average) required for all entries to avoid false signals.
+12h_KAMA_Direction_RegimeFilter_VolumeSpike
+Hypothesis: 12h KAMA trend direction filtered by 1d choppiness regime and volume spike (2.0x average).
+Long when KAMA trending up, CHOP > 61.8 (range), and volume confirmed. Short when KAMA trending down, CHOP > 61.8, and volume confirmed.
+Uses 1d HTF for chop regime to avoid whipsaw in trending markets and capture mean reversion in ranging markets.
 Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
-Works in both bull and bear markets via regime adaptation and 1w trend filter.
+Works in both bull and bear markets by adapting to regime: mean revert in range, follow trend in strong trends (though chop filter favors range).
 """
 
 import numpy as np
@@ -19,69 +17,64 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for major trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
-        return np.zeros(n)
-    
-    # Load 1d data for ADX regime calculation
+    # Load HTF data ONCE before loop (1d for chop regime)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1w EMA50 for major trend filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === 12h KAMA for trend direction ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 40:
+        return np.zeros(n)
     
-    # === 1d ADX for regime filter (14-period) ===
+    close_12h = df_12h['close'].values
+    # Calculate Efficiency Ratio (ER) over 10 periods
+    change_12h = np.abs(np.diff(close_12h, n=10))
+    volatility_12h = np.sum(np.abs(np.diff(close_12h, n=1)), axis=0)
+    er_12h = np.divide(change_12h, volatility_12h, out=np.zeros_like(change_12h), where=volatility_12h!=0)
+    # Smooth ER with smoothing constants
+    sc_12h = (er_12h * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # Initialize KAMA
+    kama_12h = np.full_like(close_12h, np.nan)
+    kama_12h[30] = close_12h[30]  # start after 30 periods
+    for i in range(31, len(close_12h)):
+        kama_12h[i] = kama_12h[i-1] + sc_12h[i] * (close_12h[i] - kama_12h[i-1])
+    # Align 12h KAMA to 4h timeframe
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    # KAMA direction: 1 if rising, -1 if falling, 0 if flat
+    kama_dir = np.diff(kama_12h_aligned, prepend=kama_12h_aligned[0])
+    kama_dir = np.where(kama_dir > 0, 1, np.where(kama_dir < 0, -1, 0))
+    
+    # === 1d OHLC for Choppiness Index calculation ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
+    # Calculate True Range and ATR(14) for chop
     tr1 = pd.Series(high_1d - low_1d)
     tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
     tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
     tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    # Calculate max/min close over 14 periods
+    max_close_1d = pd.Series(close_1d).rolling(window=14, min_periods=14).max().values
+    min_close_1d = pd.Series(close_1d).rolling(window=14, min_periods=14).min().values
     
-    # Smooth DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Choppiness Index: CHOP = 100 * log10(sum(atr14) / (max_close - min_close)) / log10(14)
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    denominator = max_close_1d - min_close_1d
+    chop_1d = 100 * np.log10(sum_atr_14 / denominator) / np.log10(14)
+    # Handle division by zero or invalid values
+    chop_1d = np.where((denominator > 0) & (sum_atr_14 > 0), chop_1d, 50.0)
+    # Align 1d chop to 4h timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # DI and DX
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 6h Elder Ray calculations ===
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = EMA13 - Low
-    bear_power = ema_13 - low
-    
-    # Rate of change for power signals (3-period)
-    bull_power_roc = pd.Series(bull_power).diff(3).values
-    bear_power_roc = pd.Series(bear_power).diff(3).values
-    
-    # === 6h ATR for volatility normalization and stops ===
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -98,10 +91,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(bull_power_roc[i]) or np.isnan(bear_power_roc[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_dir[i]) or np.isnan(chop_1d_aligned[i]) 
+            or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -109,36 +100,20 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        ema_trend_1w = ema_50_1w_aligned[i]
-        adx_val = adx_aligned[i]
-        bp = bull_power[i]
-        br = bear_power[i]
-        bp_roc = bull_power_roc[i]
-        br_roc = bear_power_roc[i]
+        kama_direction = kama_dir[i]
+        chop = chop_1d_aligned[i]
         vol_avg = vol_ma[i]
-        atr_val = atr[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirmed = volume_now > 1.5 * vol_avg
-        
-        # Regime classification
-        is_trending = adx_val > 25
-        is_ranging = adx_val < 20
+        # Volume confirmation: current volume > 2.0x average
+        volume_confirmed = volume_now > 2.0 * vol_avg
+        # Regime filter: chop > 61.8 indicates ranging market (mean reversion favorable)
+        ranging_market = chop > 61.8
         
         if position == 0:
-            # Entry logic based on regime
-            if is_trending:
-                # Trending regime: follow Elder Ray momentum with 1w trend filter
-                long_condition = (bp > 0) and (bp_roc > 0) and (price > ema_trend_1w) and volume_confirmed
-                short_condition = (br > 0) and (br_roc > 0) and (price < ema_trend_1w) and volume_confirmed
-            elif is_ranging:
-                # Ranging regime: fade Elder Ray extremes
-                long_condition = (bp < -0.5 * atr_val) and (bp_roc > 0) and volume_confirmed
-                short_condition = (br < -0.5 * atr_val) and (br_roc > 0) and volume_confirmed
-            else:
-                # Transition regime (ADX 20-25): require stronger signals
-                long_condition = (bp > 0) and (bp_roc > 0) and (price > ema_trend_1w) and volume_confirmed
-                short_condition = (br > 0) and (br_roc > 0) and (price < ema_trend_1w) and volume_confirmed
+            # Only enter in ranging markets with volume confirmation
+            # Long when KAMA trending up, short when KAMA trending down
+            long_condition = ranging_market and (kama_direction == 1) and volume_confirmed
+            short_condition = ranging_market and (kama_direction == -1) and volume_confirmed
             
             if long_condition:
                 signals[i] = 0.25
@@ -150,34 +125,24 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Exit conditions for long
-            # Stoploss: 2.5x ATR
-            if price < entry_price - 2.5 * atr_val:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal: Elder Ray turns negative
-            elif bp < 0:
-                signals[i] = 0.0
-                position = 0
-            # 1w trend filter failure
-            elif price < ema_trend_1w:
+            # Exit if market becomes trending (chop < 38.2) or KAMA reverses
+            elif (chop < 38.2) or (kama_direction == -1):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions for short
-            # Stoploss: 2.5x ATR
-            if price > entry_price + 2.5 * atr_val:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal: Elder Ray turns negative
-            elif br < 0:
-                signals[i] = 0.0
-                position = 0
-            # 1w trend filter failure
-            elif price > ema_trend_1w:
+            # Exit if market becomes trending (chop < 38.2) or KAMA reverses
+            elif (chop < 38.2) or (kama_direction == 1):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -185,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_RegimeFilter_V1"
-timeframe = "6h"
+name = "12h_KAMA_Direction_RegimeFilter_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
