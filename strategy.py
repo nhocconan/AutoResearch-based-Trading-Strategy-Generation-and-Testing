@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_4HR_Momentum_Breakout_1dTrend_Volume
-Hypothesis: Use 4-hour momentum breakout above 20-period high + 1d EMA50 trend filter + volume confirmation. Designed to capture momentum bursts in trending markets with volume surge confirming institutional interest. Works in bull/bear markets by following higher timeframe trend (1d EMA) while using 4h momentum for precise entry. Target 20-50 trades/year on 4h.
+4h_Momentum_Oscillator_1dTrend_Confirmation
+Hypothesis: Use 4h momentum oscillator (Williams %R) to identify overbought/oversold conditions, confirmed by 1d EMA50 trend direction. Enter when momentum reverses from extreme levels in direction of higher timeframe trend. Exit on opposite extreme or trend change. Designed to capture mean-reversion within trend, working in both bull and bear markets by following 1d trend while using 4h momentum for timing. Target 20-50 trades/year on 4h.
 """
 
 import numpy as np
@@ -23,23 +23,27 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h momentum: 20-period high breakout ===
-    high_4h = prices['high'].values
-    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # === Williams %R on 4h (14-period) ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # === Volume confirmation: 20-period volume average on 4h ===
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma_20 != 0, volume / vol_ma_20, 1.0)
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = np.where((highest_high - lowest_low) != 0, 
+                          ((highest_high - close) / (highest_high - lowest_low)) * -100, 
+                          -50)  # neutral when range is zero
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if indicators not ready
         if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(high_20[i]) or
-            np.isnan(vol_ratio[i])):
+            np.isnan(williams_r[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -47,32 +51,28 @@ def generate_signals(prices):
         
         price_close = prices['close'].iloc[i]
         trend_1d = ema_50_1d_aligned[i]
-        high_breakout = high_20[i]
-        vol_spike = vol_ratio[i]
+        wr = williams_r[i]
         
         if position == 0:
-            # Long: Price breaks above 20-period high + volume spike > 1.5 + price above 1d EMA50
-            if (price_close > high_breakout and 
-                vol_spike > 1.5 and 
+            # Long: Williams %R crosses above -80 from oversold + price above 1d EMA50
+            if (wr > -80 and 
+                williams_r[i-1] <= -80 and 
                 price_close > trend_1d):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 20-period low + volume spike > 1.5 + price below 1d EMA50
-            else:
-                low_20 = pd.Series(prices['low'].values).rolling(window=20, min_periods=20).min().values[i]
-                if (price_close < low_20 and 
-                    vol_spike > 1.5 and 
-                    price_close < trend_1d):
-                    signals[i] = -0.25
-                    position = -1
+            # Short: Williams %R crosses below -20 from overbought + price below 1d EMA50
+            elif (wr < -20 and 
+                  williams_r[i-1] >= -20 and 
+                  price_close < trend_1d):
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit when price returns to 10-period moving average
-            ma_10 = pd.Series(prices['close'].values).rolling(window=10, min_periods=10).mean().values[i]
-            if position == 1 and price_close < ma_10:
+            # Exit when Williams %R reaches opposite extreme
+            if position == 1 and wr >= -20:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > ma_10:
+            elif position == -1 and wr <= -80:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_4HR_Momentum_Breakout_1dTrend_Volume"
+name = "4h_Momentum_Oscillator_1dTrend_Confirmation"
 timeframe = "4h"
 leverage = 1.0
