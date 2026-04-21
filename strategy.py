@@ -1,8 +1,7 @@
-#2025-06-09T18:00:00.000Z
 #!/usr/bin/env python3
 """
-6h_PortfolioDiversifier_Trend_Volume
-Hypothesis: Portfolio diversification logic applied to single asset. Uses 1d RSI(30) as market state filter and 6h ATR-based breakout with volume confirmation. In bull markets (RSI>50), buy breakouts above ATR channel; in bear markets (RSI<50), sell breakdowns below ATR channel. Volatility-adjusted position sizing prevents blowups in 2022 crash. Target 20-35 trades/year on 6h.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe on 12h chart with 1d EMA34 trend filter and volume spike confirmation. Designed to capture intraday reversions within the daily trend while avoiding false breakouts. Works in bull/bear markets by following higher timeframe trend and using Camarilla levels as dynamic support/resistance. Target 15-25 trades/year on 12h.
 """
 
 import numpy as np
@@ -16,33 +15,22 @@ def generate_signals(prices):
     
     # Load 1d HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d market state: RSI(30) ===
+    # === 1d Camarilla pivot levels (R1, S1) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/30, adjust=False, min_periods=30).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/30, adjust=False, min_periods=30).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    range_1d = high_1d - low_1d
+    R1 = close_1d + (range_1d * 1.0 / 12)
+    S1 = close_1d - (range_1d * 1.0 / 12)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # === 6h ATR(20) for volatility normalization ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
-    
-    # === Donchian channel (20-period) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 1d trend filter: 34-period EMA ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === Volume confirmation: 20-period volume average ===
     volume = prices['volume'].values
@@ -52,58 +40,53 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(34, n):
         # Skip if indicators not ready
-        if (np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
+        if (np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
-        rsi_state = rsi_1d_aligned[i]
-        atr_val = atr[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
+        price_close = prices['close'].iloc[i]
+        r1_level = R1_aligned[i]
+        s1_level = S1_aligned[i]
+        trend_1d = ema_34_1d_aligned[i]
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long in bull market (RSI>50): breakout above upper channel with volume
-            if (rsi_state > 50 and 
-                price_high > upper_channel and
-                vol_spike > 1.5):
+            # Long: Price breaks above S1 with volume spike and above 1d EMA34
+            if (price_close > s1_level and 
+                prices['close'].iloc[i-1] <= s1_level and
+                vol_spike > 1.5 and 
+                price_close > trend_1d):
                 signals[i] = 0.25
                 position = 1
-            # Short in bear market (RSI<50): breakdown below lower channel with volume
-            elif (rsi_state < 50 and 
-                  price_low < lower_channel and
-                  vol_spike > 1.5):
+            # Short: Price breaks below R1 with volume spike and below 1d EMA34
+            elif (price_close < r1_level and 
+                  prices['close'].iloc[i-1] >= r1_level and
+                  vol_spike > 1.5 and 
+                  price_close < trend_1d):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when price crosses opposite channel or RSI flips
-            if position == 1:
-                if (price_low < lower_channel or rsi_state < 50):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1
-                if (price_high > upper_channel or rsi_state > 50):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit when price returns to the opposite Camarilla level
+            if position == 1 and price_close < r1_level:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and price_close > s1_level:
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "6h_PortfolioDiversifier_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
