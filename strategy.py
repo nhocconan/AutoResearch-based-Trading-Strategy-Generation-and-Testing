@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h momentum strategy using 4h RSI divergence and volume confirmation.
-In both bull and bear markets, momentum shifts often precede price reversals.
-RSI divergence on 4h (price makes new high/low but RSI does not) signals weakening momentum.
-Combined with 1h volume spike and price action confirmation for precise entry.
+Hypothesis: 1h strategy using 4h RSI divergence for momentum shift detection and volume confirmation.
+In both bull and bear markets, RSI divergence on higher timeframe (4h) signals weakening momentum
+before price reversals. Combines with 1h volume spike and price action for precise entry.
 Uses 4h for signal direction (lower frequency) and 1h for entry timing to reduce overtrading.
 Target: 15-35 trades/year to minimize fee drag.
 """
@@ -101,8 +100,7 @@ def generate_signals(prices):
             # Exit: RSI returns to neutral zone (40-60) or divergence fails
             # Approximate 1h RSI for exit signal
             if i >= 14:
-                rsi_1h = 100 - (100 / (1 + (np.where(avg_loss != 0, avg_gain / avg_loss, 100))))  # Simplified
-                # Actually compute properly for 1h
+                # Calculate 1h RSI properly
                 delta_1h = np.diff(prices['close'].values[:i+1], prepend=prices['close'].values[0])
                 gain_1h = np.where(delta_1h > 0, delta_1h, 0)
                 loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
