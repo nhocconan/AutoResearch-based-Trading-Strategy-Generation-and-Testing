@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian channel breakout (20) with 1d EMA34 trend filter and volume spike.
-Breakouts above/below 20-period Donchian channels capture momentum. EMA34 on 1d filters for
-trend alignment to avoid counter-trend trades. Volume confirmation ensures breakout validity.
-Designed for 12h timeframe to target 12-37 trades/year, minimizing fee drag while working
-in bull/bear markets via trend filter.
+Hypothesis: 1d Weekly Donchian Breakout with 13-week EMA Trend Filter and Volume Spike.
+Long-term trend filter reduces whipsaw in sideways markets. Breakout above/below weekly Donchian
+channels (20-week) with daily volume confirmation captures momentum while minimizing trades.
+Designed for ~10-20 trades/year to avoid fee drag, works in bull/bear via trend filter.
 """
 
 import numpy as np
@@ -13,29 +12,34 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for EMA34 trend filter and Donchian channels
+    # Load weekly data ONCE before loop for trend filter and Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
+        return np.zeros(n)
+    
+    # Weekly EMA13 for trend filter
+    close_1w = df_1w['close'].values
+    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
+    
+    # Weekly Donchian Channels (20-period high/low)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    
+    # Load daily data ONCE before loop for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # 1d Donchian channels (20-period high/low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Volume confirmation: volume / 20-period average volume (1d)
+    # Volume confirmation: volume / 20-day average volume
     vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio_1d = df_1d['volume'].values / vol_ma_20
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
@@ -43,9 +47,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+        if (np.isnan(ema_13_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
             np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -53,32 +57,34 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_34_1d_aligned[i]
-        upper_channel = donchian_high_aligned[i]
-        lower_channel = donchian_low_aligned[i]
+        ema_trend = ema_13_1w_aligned[i]
+        donchian_high = donchian_high_aligned[i]
+        donchian_low = donchian_low_aligned[i]
         vol_ratio = vol_ratio_aligned[i]
         vol_threshold = 1.5  # Volume must be 1.5x average
         
         if position == 0:
-            # Enter long: price breaks above Donchian upper, volume spike, uptrend
-            if (price_close > upper_channel and 
+            # Enter long: price breaks above weekly Donchian high, volume spike, uptrend
+            if (price_close > donchian_high and 
                 vol_ratio > vol_threshold and 
                 price_close > ema_trend):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian lower, volume spike, downtrend
-            elif (price_close < lower_channel and 
+            # Enter short: price breaks below weekly Donchian low, volume spike, downtrend
+            elif (price_close < donchian_low and 
                   vol_ratio > vol_threshold and 
                   price_close < ema_trend):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price returns to opposite Donchian band or trend reversal
-            if position == 1 and (price_close < lower_channel or price_close < ema_trend):
+            # Exit: price returns to weekly Donchian midpoint or trend reversal
+            donchian_mid = (donchian_high + donchian_low) / 2
+            
+            if position == 1 and (price_close < donchian_mid or price_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > upper_channel or price_close > ema_trend):
+            elif position == -1 and (price_close > donchian_mid or price_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "1d_WeeklyDonchianBreakout_13wEMA_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
