@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for pivot levels, trend, and volume
+    # Load daily data for pivot levels, trend, and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -97,28 +97,18 @@ def generate_signals(prices):
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
-            # Fade at R1/S1 in ranging markets (price near extremes with rejection)
-            elif (not uptrend and not downtrend and volume_confirm):
-                # Fade at R1: price touches R1 and shows rejection (close < open)
-                if abs(price_close - r1_val) < 0.005 * r1_val and price_close < price_open:
-                    signals[i] = -0.20
-                    position = -1
-                # Fade at S1: price touches S1 and shows rejection (close > open)
-                elif abs(price_close - s1_val) < 0.005 * s1_val and price_close > price_open:
-                    signals[i] = 0.20
-                    position = 1
         
         elif position != 0:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below R1 OR stop loss at S1
-                if (price_close < r1_val) or (price_close < s1_val):
+                # Exit long: price breaks below R1
+                if price_close < r1_val:
                     exit_signal = True
             elif position == -1:
-                # Exit short: price breaks above S1 OR stop loss at R1
-                if (price_close > s1_val) or (price_close > r1_val):
+                # Exit short: price breaks above S1
+                if price_close > s1_val:
                     exit_signal = True
             
             if exit_signal:
@@ -130,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_R1S1_R2S2_BreakoutFade"
+name = "4h_DailyPivot_R1S1_R2S2_Breakout"
 timeframe = "4h"
 leverage = 1.0
