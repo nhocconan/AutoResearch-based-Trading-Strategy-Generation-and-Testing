@@ -3,111 +3,90 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Daily KAMA trend filter with weekly Bollinger Band squeeze and volume confirmation.
-# Uses weekly Bollinger Band width percentile to detect low volatility squeeze (breakout imminent).
-# KAMA (10-period) determines trend direction on daily timeframe.
-# Long when: KAMA rising, BB width < 20th percentile (squeeze), volume > 1.5x 20-day average.
-# Short when: KAMA falling, BB width < 20th percentile (squeeze), volume > 1.5x 20-day average.
-# Exit when KAMA reverses direction or volatility expands (BB width > 80th percentile).
-# Target: 15-25 trades/year by requiring squeeze + trend alignment + volume confirmation.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
+# Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Long when Bull Power > 0 and rising, price > 1d EMA34, volume > 1.5x average.
+# Short when Bear Power < 0 and falling, price < 1d EMA34, volume > 1.5x average.
+# Uses EMA13 for power calculation (standard) and EMA34 on 1d for trend filter.
+# Target: 15-35 trades/year by requiring EMA13 crossover, trend alignment, and volume spike.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) - 10 period
-    close = prices['close'].values
-    direction = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close))
-    er = np.where(volatility != 0, direction / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate EMA13 for Elder Ray power (13-period)
+    close = prices['close']
+    ema13 = close.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate weekly Bollinger Band width (20, 2)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return np.zeros(n)
+    # Calculate Bull Power and Bear Power
+    bull_power = (prices['high'] - ema13).values
+    bear_power = (prices['low'] - ema13).values
     
-    weekly_close = df_1w['close'].values
-    bb_middle = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(weekly_close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle
+    # Calculate EMA of Bull/Bear Power to detect rising/falling (13-period)
+    bull_power_ema = pd.Series(bull_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bear_power_ema = pd.Series(bear_power).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align BB width to daily timeframe
-    bb_width_aligned = align_htf_to_ltf(prices, df_1w, bb_width)
+    # Load 1d EMA34 trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 20th and 80th percentiles of BB width (using expanding window for realism)
-    bb_width_percentile_20 = np.full_like(bb_width_aligned, np.nan)
-    bb_width_percentile_80 = np.full_like(bb_width_aligned, np.nan)
-    
-    for i in range(20, len(bb_width_aligned)):
-        if not np.isnan(bb_width_aligned[i]):
-            hist_width = bb_width_aligned[max(0, i-252):i+1]  # ~1 year lookback
-            if len(hist_width) >= 20:
-                bb_width_percentile_20[i] = np.percentile(hist_width, 20)
-                bb_width_percentile_80[i] = np.percentile(hist_width, 80)
-    
-    # Daily volume moving average (20-period)
+    # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(13, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(bb_width_aligned[i]) or 
-            np.isnan(bb_width_percentile_20[i]) or np.isnan(bb_width_percentile_80[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(bull_power_ema[i]) or np.isnan(bear_power_ema[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Current price and volume
-        price = prices['close'].iloc[i]
+        price = close.iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.5x 20-day average
+        # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Bollinger Band squeeze condition: width < 20th percentile
-        is_squeeze = bb_width_aligned[i] < bb_width_percentile_20[i]
+        # Elder Ray conditions
+        bull_power_rising = bull_power[i] > bull_power_ema[i]
+        bear_power_falling = bear_power[i] < bear_power_ema[i]
+        bull_power_positive = bull_power[i] > 0
+        bear_power_negative = bear_power[i] < 0
         
-        # Volatility expansion exit: width > 80th percentile
-        is_expansion = bb_width_aligned[i] > bb_width_percentile_80[i]
-        
-        # KAMA trend direction
-        kama_rising = kama[i] > kama[i-1]
-        kama_falling = kama[i] < kama[i-1]
+        # Trend filter from 1d EMA34
+        uptrend = price > ema34_1d_aligned[i]
+        downtrend = price < ema34_1d_aligned[i]
         
         if position == 0:
-            # Look for squeeze breakout in direction of KAMA trend
-            if is_squeeze and volume_confirm:
-                if kama_rising:
-                    signals[i] = 0.25
-                    position = 1
-                elif kama_falling:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Bull Power positive and rising, uptrend, volume confirmation
+            if bull_power_positive and bull_power_rising and uptrend and volume_confirm:
+                signals[i] = 0.25
+                position = 1
+            # Short: Bear Power negative and falling, downtrend, volume confirmation
+            elif bear_power_negative and bear_power_falling and downtrend and volume_confirm:
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
             # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if KAMA turns down or volatility expands
-                if kama_falling or is_expansion:
+                # Exit when Bull Power becomes negative or turns down
+                if bull_power[i] <= 0 or not bull_power_rising:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if KAMA turns up or volatility expands
-                if kama_rising or is_expansion:
+                # Exit when Bear Power becomes positive or turns up
+                if bear_power[i] >= 0 or not bear_power_falling:
                     exit_signal = True
             
             if exit_signal:
@@ -119,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_WeeklyBB_Squeeze_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_Power_1dEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
