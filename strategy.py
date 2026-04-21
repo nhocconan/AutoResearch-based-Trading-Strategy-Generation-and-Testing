@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Regime_Volume_ATRStop
-Hypothesis: 4h KAMA (adaptive trend) with volume confirmation (>1.3x 20-period volume MA) and choppiness regime filter (CHOP between 38.2 and 61.8 for adaptive regime). Uses 1d HTF for trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR. Designed for moderate trade frequency (target: 30-60 trades/year) to work in both bull/bear markets via regime adaptation and volume confirmation. Focus on BTC/ETH with SOL as secondary.
+4h_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop_V2
+Hypothesis: 4h Camarilla pivot R1/S1 breakout with volume confirmation (>1.5x 20-period volume MA) and choppiness regime filter (CHOP > 61.8 for mean reversion, CHOP < 38.2 for trend following). Uses 1d HTF for trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR. Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag and work in both bull/bear markets via regime adaptation. Focus on BTC/ETH with SOL as secondary.
 """
 
 import numpy as np
@@ -25,7 +25,7 @@ def generate_signals(prices):
     
     # === 4h Indicators (primary timeframe) ===
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
     high_4h = df_4h['high'].values
@@ -33,16 +33,18 @@ def generate_signals(prices):
     close_4h = df_4h['close'].values
     volume_4h = df_4h['volume'].values
     
-    # KAMA (adaptive trend) - ER=10, fastest=2, slowest=30
-    close_series = pd.Series(close_4h)
-    change = np.abs(close_series.diff(10))
-    volatility = close_series.diff().abs().rolling(window=10, min_periods=10).sum()
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close_4h)
-    kama[0] = close_4h[0]
-    for i in range(1, len(close_4h)):
-        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
+    # Calculate Camarilla pivot levels from previous day using 1d OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)
+    s1 = pivot - (range_1d * 1.1 / 12)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
@@ -66,8 +68,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(kama[i]) or np.isnan(vol_ma[i]) 
-            or np.isnan(atr[i]) or np.isnan(chop[i])
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(chop[i])
             or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,19 +78,20 @@ def generate_signals(prices):
         
         price = close_4h[i]
         vol = volume_4h[i]
-        vol_ok = vol > 1.3 * vol_ma[i]  # volume confirmation
+        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
-        # Regime detection - adaptive regime (not too choppy, not too trending)
-        is_adaptive = (chop[i] >= 38.2) and (chop[i] <= 61.8)
+        # Regime detection
+        is_choppy = chop[i] > 61.8  # mean reversion regime
+        is_trending = chop[i] < 38.2  # trend following regime
         
         if position == 0:
-            # Long: price > KAMA + volume + trend filter (in uptrend or adaptive regime)
-            if price > kama[i] and vol_ok and (price > ema_50_1d_aligned[i] or is_adaptive):
+            # Long: Camarilla S1 breakout + volume + trend filter (in uptrend or choppy market)
+            if price > s1_aligned[i] and vol_ok and (price > ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price < KAMA + volume + trend filter (in downtrend or adaptive regime)
-            elif price < kama[i] and vol_ok and (price < ema_50_1d_aligned[i] or is_adaptive):
+            # Short: Camarilla R1 breakdown + volume + trend filter (in downtrend or choppy market)
+            elif price < r1_aligned[i] and vol_ok and (price < ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -98,8 +101,8 @@ def generate_signals(prices):
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: price back below KAMA or loss of volume/momentum
-            elif price < kama[i] or not vol_ok:
+            # Exit conditions: price back below S1 or loss of volume/momentum
+            elif price < s1_aligned[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,8 +113,8 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: price back above KAMA or loss of volume/momentum
-            elif price > kama[i] or not vol_ok:
+            # Exit conditions: price back above R1 or loss of volume/momentum
+            elif price > r1_aligned[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_Regime_Volume_ATRStop"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop_V2"
 timeframe = "4h"
 leverage = 1.0
