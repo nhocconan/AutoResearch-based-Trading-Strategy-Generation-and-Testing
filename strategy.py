@@ -3,83 +3,85 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In strong 1d trends (price > EMA50),
-# we fade extremes only when aligned with trend (pullbacks in uptrend, bounces in downtrend).
-# Volume > 1.5x 20-period average confirms conviction. Target: 20-40 trades/year.
-# Williams %R formula: (Highest High - Close) / (Highest High - Lowest Low) * -100
-# Oversold: < -80, Overbought: > -20
+# Hypothesis: 1d Williams Alligator + Elder Ray + 1week Trend
+# Uses Williams Alligator (13,8,5 SMAs) for trend direction, Elder Ray (13-period) for bull/bear power,
+# and 1-week EMA (34-period) for higher timeframe trend confirmation.
+# Trades only when all three align: price above/below Alligator jaws, corresponding Elder Ray power positive,
+# and price above/below weekly EMA34. Filters out weak signals and reduces whipsaw.
+# Target: 20-40 trades/year by requiring triple confirmation.
+# Works in both bull and bear markets as it follows the higher timeframe trend.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # 1. Williams %R (14-period)
-    highest_high = prices['high'].rolling(window=14, min_periods=14).max()
-    lowest_low = prices['low'].rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - prices['close']) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(-50).values
+    # Williams Alligator: 13,8,5 period SMAs of median price
+    median_price = (prices['high'] + prices['low']) / 2
+    jaw = median_price.rolling(window=13, min_periods=13).mean()  # 13-period
+    teeth = median_price.rolling(window=8, min_periods=8).mean()   # 8-period
+    lips = median_price.rolling(window=5, min_periods=5).mean()    # 5-period
     
-    # 2. 1d EMA50 trend filter (using mtf_data)
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Elder Ray: 13-period EMA of high and low
+    ema13 = median_price.ewm(span=13, adjust=False, min_periods=13).mean()
+    bull_power = prices['high'] - ema13
+    bear_power = ema13 - prices['low']
     
-    # 3. Volume confirmation (20-period average)
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    # Get 1-week data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    # Weekly EMA34 on close
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(13, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw.iloc[i]) or np.isnan(teeth.iloc[i]) or np.isnan(lips.iloc[i]) or
+            np.isnan(bull_power.iloc[i]) or np.isnan(bear_power.iloc[i]) or
+            np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Current values
-        wr = williams_r[i]
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        ema_50 = ema_50_1d_aligned[i]
+        jaw_val = jaw.iloc[i]
+        teeth_val = teeth.iloc[i]
+        lips_val = lips.iloc[i]
+        bull_val = bull_power.iloc[i]
+        bear_val = bear_power.iloc[i]
+        weekly_ema = ema34_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume > 1.5 * vol_ma[i]
-        
-        # Trend determination from 1d EMA50
-        uptrend = price > ema_50
-        downtrend = price < ema_50
+        # Alligator alignment: check if jaws, teeth, lips are properly ordered
+        # For uptrend: lips > teeth > jaw
+        # For downtrend: lips < teeth < jaw
+        is_uptrend_aligned = lips_val > teeth_val and teeth_val > jaw_val
+        is_downtrend_aligned = lips_val < teeth_val and teeth_val < jaw_val
         
         if position == 0:
-            if volume_confirm:
-                # In uptrend: look for oversold pullbacks to go long
-                if uptrend and wr < -80:
-                    signals[i] = 0.25
-                    position = 1
-                # In downtrend: look for overbought bounces to go short
-                elif downtrend and wr > -20:
-                    signals[i] = -0.25
-                    position = -1
+            # Long conditions: price above lips, bull power positive, above weekly EMA, uptrend aligned
+            if (price > lips_val and bull_val > 0 and price > weekly_ema and is_uptrend_aligned):
+                signals[i] = 0.25
+                position = 1
+            # Short conditions: price below lips, bear power positive, below weekly EMA, downtrend aligned
+            elif (price < lips_val and bear_val > 0 and price < weekly_ema and is_downtrend_aligned):
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
             # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Williams %R returns to overbought (profit target) 
-                # or breaks below -80 (failed bounce)
-                if wr > -20 or wr < -85:
+                # Exit if price crosses below lips OR bull power turns negative
+                if price < lips_val or bull_val <= 0:
                     exit_signal = True
-            
             elif position == -1:  # short position
-                # Exit when Williams %R returns to oversold (profit target)
-                # or breaks above -20 (failed breakdown)
-                if wr < -80 or wr > -15:
+                # Exit if price crosses above lips OR bear power turns negative
+                if price > lips_val or bear_val <= 0:
                     exit_signal = True
             
             if exit_signal:
@@ -91,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_MeanReversion_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_ElderRay_1weekTrend"
+timeframe = "1d"
 leverage = 1.0
