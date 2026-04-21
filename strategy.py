@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v1
-Hypothesis: 12h timeframe with 1d Camarilla R1/S1 breakouts, volume > 1.5x 24-period average, and ADX > 25 for trend confirmation.
-Designed to capture strong breakouts in trending markets while avoiding chop. Target: 12-30 trades/year (48-120 total over 4 years).
+4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v1
+Hypothesis: 4h timeframe with 1d Camarilla R1/S1 breakouts, volume > 1.5x 6-period average, and ADX > 25 for trend confirmation.
+Designed to capture strong breakouts in trending markets while avoiding chop. Target: 15-35 trades/year (60-140 total over 4 years).
 Works in bull/bear by only trading strong trending breaks, avoiding false signals in ranging markets.
 """
 
@@ -41,7 +41,7 @@ def generate_signals(prices):
     s1 = prev_close - 1.1 * rang / 12
     pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
@@ -111,9 +111,9 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.5 * 24-period average (12h timeframe = 24 bars = 12 days)
-        if i >= 24:
-            vol_ma = prices['volume'].iloc[i-24:i].mean()
+        # Volume filter: current volume > 1.5 * 6-period average (4h timeframe: 6 bars = 1 day)
+        if i >= 6:
+            vol_ma = prices['volume'].iloc[i-6:i].mean()
             volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
@@ -149,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v1"
+timeframe = "4h"
 leverage = 1.0
