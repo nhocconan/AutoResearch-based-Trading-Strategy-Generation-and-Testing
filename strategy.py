@@ -1,17 +1,38 @@
 #!/usr/bin/env python3
 """
-12h_Daily_Volume_Weighted_RSI_Momentum
-Hypothesis: Combine daily trend with 12h volume-weighted RSI momentum for high-conviction entries.
-In uptrend (price > daily EMA50), go long when VW-RSI < 30 and volume spikes.
-In downtrend (price < daily EMA50), go short when VW-RSI > 70 and volume spikes.
-Uses volume confirmation and volatility filter to avoid false signals.
-Designed for 12h timeframe to target 20-30 trades/year with disciplined risk management.
+12h_RSI2_Contrarian_With_Volume_Filter
+Hypothesis: Use contrarian RSI(2) signals on 12h timeframe with volume confirmation.
+Buy when RSI(2) < 10 and price > EMA200 (uptrend dip buy).
+Sell when RSI(2) > 90 and price < EMA200 (downtrend rally sell).
+Add volume filter to avoid false signals in low-volume periods.
+Designed for low trade frequency (15-25/year) to minimize fee drag.
 Works in bull markets by buying dips and in bear markets by selling rallies.
 """
 
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_rsi(close, period=2):
+    """Calculate Relative Strength Index"""
+    delta = np.diff(close)
+    delta = np.concatenate([[0], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    if len(close) >= period:
+        avg_gain[period-1] = np.mean(gain[:period])
+        avg_loss[period-1] = np.mean(loss[:period])
+        for i in range(period, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
@@ -23,73 +44,31 @@ def calculate_ema(close, period):
             ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
     return ema
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    if len(close) >= period:
-        avg_gain[period-1] = np.nanmean(gain[:period])
-        avg_loss[period-1] = np.nanmean(loss[:period])
-        
-        for i in range(period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = np.zeros_like(tr)
-    if len(tr) >= period:
-        atr[period-1] = np.mean(tr[:period])
-    
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    return atr
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for trend and ATR
+    # Load daily data once for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA50 for trend filter
-    ema50_1d = calculate_ema(close_1d, 50)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Daily EMA200 for trend filter
+    ema200_1d = calculate_ema(close_1d, 200)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Daily ATR for volatility filter
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # RSI(2) on 12h closes
+    rsi2 = calculate_rsi(prices['close'].values, 2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+        if np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi2[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -108,60 +87,38 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Calculate 12h VW-RSI
-        if i >= 14:
-            # Typical price for VW calculation
-            typical_price = (prices['high'].iloc[i-14:i+1] + 
-                           prices['low'].iloc[i-14:i+1] + 
-                           prices['close'].iloc[i-14:i+1]) / 3
-            volume_slice = prices['volume'].iloc[i-14:i+1]
-            vw_typical = np.average(typical_price, weights=volume_slice)
-            
-            # For simplicity, use price approximation for RSI calculation
-            # In practice, would need full VW-RSI calculation
-            close_slice = prices['close'].iloc[i-14:i+1].values
-            rsi_val = calculate_rsi(close_slice)[-1]
-        else:
-            rsi_val = 50  # Neutral
-        
-        # Volume filter: current volume > 2.0 * 20-period average
+        # Volume filter: current volume > 1.3 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.3 * vol_ma
         else:
             volume_ok = False
         
-        # Volatility filter: avoid extremely low volatility
-        if i >= 20:
-            vol_filter = atr_1d_aligned[i] > np.percentile(atr_1d_aligned[max(0,i-50):i+1], 30)
-        else:
-            vol_filter = True
-        
         if position == 0:
-            # Uptrend: price > daily EMA50
-            if price > ema50_1d_aligned[i]:
-                # Long: VW-RSI oversold (<30) with volume spike
-                if (rsi_val < 30 and volume_ok and vol_filter):
+            # Uptrend: price > daily EMA200
+            if price > ema200_1d_aligned[i]:
+                # Contrarian long: RSI(2) < 10 (oversold) with volume confirmation
+                if rsi2[i] < 10 and volume_ok:
                     signals[i] = 0.25
                     position = 1
-            # Downtrend: price < daily EMA50
-            elif price < ema50_1d_aligned[i]:
-                # Short: VW-RSI overbought (>70) with volume spike
-                if (rsi_val > 70 and volume_ok and vol_filter):
+            # Downtrend: price < daily EMA200
+            elif price < ema200_1d_aligned[i]:
+                # Contrarian short: RSI(2) > 90 (overbought) with volume confirmation
+                if rsi2[i] > 90 and volume_ok:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or RSI overbought
-            if price < ema50_1d_aligned[i] or rsi_val > 70:
+            # Long exit: RSI(2) > 50 (normal) or trend change
+            if rsi2[i] > 50 or price < ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or RSI oversold
-            if price > ema50_1d_aligned[i] or rsi_val < 30:
+            # Short exit: RSI(2) < 50 (normal) or trend change
+            if rsi2[i] < 50 or price > ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -169,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Daily_Volume_Weighted_RSI_Momentum"
+name = "12h_RSI2_Contrarian_With_Volume_Filter"
 timeframe = "12h"
 leverage = 1.0
