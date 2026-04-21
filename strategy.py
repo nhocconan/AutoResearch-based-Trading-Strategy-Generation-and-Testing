@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_4h_Donchian_Breakout_HTFTrend_VolumeFilter
-Hypothesis: 1h Donchian(20) breakout filtered by 4h EMA50 trend and volume spike.
-Enter long when price breaks above 20-period high with 4h uptrend and above-average volume.
-Enter short when price breaks below 20-period low with 4h downtrend and above-average volume.
-Exit on opposite Donchian level break or ATR(14) trailing stop (2.0*ATR).
-Uses 4h for signal direction, 1h only for entry timing and execution.
-Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-Works in bull/bear via 4h trend alignment and volume confirmation as regime filter.
+6h_ImpulseMACD_WeeklyTrend_VolumeFilter
+Hypothesis: 6h MACD histogram impulse (rising/falling) aligned with weekly EMA50 trend and volume confirmation.
+Long when MACD histogram > 0 and rising (bullish impulse), weekly uptrend, volume > 1.5x average.
+Short when MACD histogram < 0 and falling (bearish impulse), weekly downtrend, volume > 1.5x average.
+Exit when MACD histogram crosses zero or price violates weekly trend.
+Designed for moderate trade frequency (target: 20-40 trades/year) to balance signal quality and fees.
+Works in bull/bear via weekly trend alignment and MACD impulse as momentum filter.
 """
 
 import numpy as np
@@ -19,45 +18,36 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (4h for trend)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load HTF data ONCE before loop (weekly for trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 4h EMA50 for HTF trend filter ===
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # === Weekly EMA50 for HTF trend filter ===
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === 1h Donchian(20) channels ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === 6h MACD Histogram (12,26,9) ===
     close = prices['close'].values
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd = ema12 - ema26
+    signal_line = pd.Series(macd).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd - signal_line
     
-    # Donchian channels: 20-period high/low
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === Volume spike filter (20-period average) ===
+    # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === ATR (14-period) for stoploss ===
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(donchian_high[i]) 
-            or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) 
-            or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(macd_hist[i]) 
+            or np.isnan(signal_line[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,53 +56,51 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume confirmation: current volume > 20-period average
-            vol_confirm = volume[i] > vol_ma[i]
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirm = volume[i] > 1.5 * vol_ma[i]
             
-            # Long conditions: price > Donchian high, 4h uptrend, volume spike
-            long_breakout = price > donchian_high[i]
-            long_trend = price > ema_50_4h_aligned[i]
+            # Long conditions: MACD hist > 0 and rising (bullish impulse), weekly uptrend, volume spike
+            macd_bullish = macd_hist[i] > 0 and macd_hist[i] > macd_hist[i-1]
+            weekly_uptrend = price > ema_50_1w_aligned[i]
             
-            # Short conditions: price < Donchian low, 4h downtrend, volume spike
-            short_breakout = price < donchian_low[i]
-            short_trend = price < ema_50_4h_aligned[i]
+            # Short conditions: MACD hist < 0 and falling (bearish impulse), weekly downtrend, volume spike
+            macd_bearish = macd_hist[i] < 0 and macd_hist[i] < macd_hist[i-1]
+            weekly_downtrend = price < ema_50_1w_aligned[i]
             
             # Entry logic
-            if long_breakout and long_trend and vol_confirm:
-                signals[i] = 0.20
+            if macd_bullish and weekly_uptrend and vol_confirm:
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and vol_confirm:
-                signals[i] = -0.20
+            elif macd_bearish and weekly_downtrend and vol_confirm:
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Trailing exit: price closes below Donchian low (support broken)
-            elif price < donchian_low[i]:
+            # Exit conditions: MACD hist crosses zero OR price breaks weekly trend
+            macd_exit = macd_hist[i] <= 0
+            trend_exit = price < ema_50_1w_aligned[i]
+            
+            if macd_exit or trend_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Trailing exit: price closes above Donchian high (resistance broken)
-            elif price > donchian_high[i]:
+            # Exit conditions: MACD hist crosses zero OR price breaks weekly trend
+            macd_exit = macd_hist[i] >= 0
+            trend_exit = price > ema_50_1w_aligned[i]
+            
+            if macd_exit or trend_exit:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_Donchian_Breakout_HTFTrend_VolumeFilter"
-timeframe = "1h"
+name = "6h_ImpulseMACD_WeeklyTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
