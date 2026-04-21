@@ -1,51 +1,58 @@
 #!/usr/bin/env python3
 """
-1d_WilliamsFractal_Breakout_VolumeRegime_ATRStop_V1
-Hypothesis: Daily Williams Fractal breakouts with volume confirmation (>1.5x 20-day volume MA) and weekly trend filter (price > weekly EMA34 for longs, < weekly EMA34 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.5*ATR. Designed for low trade frequency (<100 total 1d trades) to minimize fee drag and work in both bull/bear markets via regime adaptation. Uses 1w HTF for trend filter to avoid whipsaws in sideways markets.
+6h_HighLowPivot_Breakout_HTFTrend_V1
+Hypothesis: 6h strategy using 12h HTF pivot levels (weekly high/low from prior 12h bar) as breakout triggers. Entry on break above weekly high (long) or below weekly low (short) with volume confirmation (>1.5x 20-period 6h volume MA) and HTF trend filter (12h EMA34). Uses ATR(14) trailing stop via signal=0 when price moves 2.5*ATR against position. Designed for low trade frequency (target 50-150 total trades over 4 years) to minimize fee drag and capture trending moves in both bull/bear markets via HTF trend alignment.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load HTF data ONCE before loop (12h for pivot levels and EMA trend)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # === 1w EMA34 for trend filter ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 12h HTF indicators ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === Daily indicators (primary timeframe) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly high/low from prior completed 12h bar (using 2-bar lookback for weekly approx)
+    # For 6h chart, weekly high/low approximated by max/min of last 2 12h bars (24h)
+    weekly_high = pd.Series(high_12h).rolling(window=2, min_periods=2).max().shift(1).values
+    weekly_low = pd.Series(low_12h).rolling(window=2, min_periods=2).min().shift(1).values
+    
+    # 12h EMA34 for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align HTF indicators to 6h timeframe (completed-bar timing)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_12h, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_12h, weekly_low)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # === 6h Indicators (primary timeframe) ===
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # Williams Fractals (5-bar: 2 left, 2 right)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
-    # Additional 2-bar delay for fractal confirmation (needs 2 subsequent daily candles to confirm)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # Volume MA (20-period) for spike detection
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Volume MA (20-period) for confirmation
+    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     # ATR (14-period) for stoploss
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr1 = pd.Series(high_6h - low_6h)
+    tr2 = pd.Series(np.abs(high_6h - np.roll(close_6h, 1)))
+    tr3 = pd.Series(np.abs(low_6h - np.roll(close_6h, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
@@ -55,30 +62,29 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) 
-            or np.isnan(vol_ma[i]) or np.isnan(atr[i]) 
-            or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) 
+            or np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1d[i]
-        vol = volume_1d[i]
+        price = close_6h[i]
+        vol = volume_6h[i]
         vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
-        # Fractal breakout conditions
-        bullish_breakout = bullish_fractal_aligned[i] and price > high_1d[i]
-        bearish_breakout = bearish_fractal_aligned[i] and price < low_1d[i]
+        # HTF trend filter
+        uptrend = ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1] if i > 0 else False
+        downtrend = ema_34_12h_aligned[i] < ema_34_12h_aligned[i-1] if i > 0 else False
         
         if position == 0:
-            # Long: Bullish fractal breakout + volume + weekly uptrend filter
-            if bullish_breakout and vol_ok and price > ema_34_1w_aligned[i]:
+            # Long: break above weekly high + volume + uptrend
+            if price > weekly_high_aligned[i] and vol_ok and uptrend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Bearish fractal breakout + volume + weekly downtrend filter
-            elif bearish_breakout and vol_ok and price < ema_34_1w_aligned[i]:
+            # Short: break below weekly low + volume + downtrend
+            elif price < weekly_low_aligned[i] and vol_ok and downtrend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -88,8 +94,8 @@ def generate_signals(prices):
             if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: bearish fractal or loss of volume/momentum
-            elif bearish_fractal_aligned[i] or not vol_ok:
+            # Exit: break below weekly low or loss of volume/momentum
+            elif price < weekly_low_aligned[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,8 +106,8 @@ def generate_signals(prices):
             if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit conditions: bullish fractal or loss of volume/momentum
-            elif bullish_fractal_aligned[i] or not vol_ok:
+            # Exit: break above weekly high or loss of volume/momentum
+            elif price > weekly_high_aligned[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsFractal_Breakout_VolumeRegime_ATRStop_V1"
-timeframe = "1d"
+name = "6h_HighLowPivot_Breakout_HTFTrend_V1"
+timeframe = "6h"
 leverage = 1.0
