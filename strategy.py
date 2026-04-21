@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_HTF_WeeklyDonchian_DailyBreakout_V1
-Hypothesis: Use weekly Donchian(20) for long-term trend direction + daily breakout of 4h session high/low for entry.
-Only trade in direction of weekly trend: long when price > weekly upper band, short when price < weekly lower band.
-Enter on 4h breakout of session high (long) or session low (short) with volume confirmation (>1.5x 20-bar MA).
-Exit on opposite session breakout or when price crosses weekly midpoint (mean reversion within weekly channel).
-Uses discrete sizing (0.25) to limit drawdown in bear markets. Target 12-25 trades/year per symbol.
-Works in bull (catch trends) and bear (fade reversals at weekly extremes) via confluence of weekly structure and 4h momentum.
+12h_HTF_1d_KAMA_RSI_ChopFilter_V1
+Hypothesis: Use 1d KAMA direction (trend filter) + 12h RSI extremes for mean reversion entries, 
+with 12h Choppiness Index regime filter (CHOP > 61.8 = range) to avoid trending markets. 
+Exit on RSI mean reversion (RSI 40-60) or opposite extreme. 
+Works in bull/bear: KAMA filters trend direction, RSI captures reversals in range markets (chop filter ensures ranging conditions). 
+Discrete sizing 0.25 to minimize fee churn. Target 20-40 trades/year.
 """
 
 import numpy as np
@@ -19,78 +18,105 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')  # for weekly Donchian
-    df_1d = get_htf_data(prices, '1d')  # for daily session high/low
+    df_1d = get_htf_data(prices, '1d')  # for daily KAMA and Chop filter
     
-    if len(df_1w) < 20 or len(df_1d) < 1:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Weekly Donchian Channel (20-period) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    weekly_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    weekly_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    weekly_mid = (weekly_upper + weekly_lower) / 2.0
+    # === 1d KAMA (trend filter) ===
+    close_1d = df_1d['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d))
+    change = np.insert(change, 0, np.nan)
+    volatility = np.abs(np.diff(close_1d, 1))
+    volatility = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
+    volatility = np.insert(volatility, 0, np.nan)
+    er = change / volatility
+    er = np.nan_to_num(er, nan=0.0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_dir = kama > np.roll(kama, 1)  # True if rising
+    kama_dir[0] = False
+    kama_dir_aligned = align_htf_to_ltf(prices, df_1d, kama_dir.astype(float))
     
-    # Align weekly levels to 6h timeframe
-    weekly_upper_aligned = align_htf_to_ltf(prices, df_1w, weekly_upper)
-    weekly_lower_aligned = align_htf_to_ltf(prices, df_1w, weekly_lower)
-    weekly_mid_aligned = align_htf_to_ltf(prices, df_1w, weekly_mid)
+    # === 1d Choppiness Index (regime filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    atr_1d = np.maximum(high_1d - low_1d, 
+                        np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                                   np.abs(low_1d - np.roll(close_1d, 1))))
+    atr_1d[0] = np.nan
+    atr_sum = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum()
+    high_low = pd.Series(high_1d).rolling(window=14, min_periods=14).max() - \
+               pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / high_low) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=0)
     
-    # === Daily Session High/Low (from 1d data) ===
-    # Use prior day's high/low as reference for 4h breakout
-    session_high = df_1d['high'].values
-    session_low = df_1d['low'].values
-    session_high_aligned = align_htf_to_ltf(prices, df_1d, session_high)
-    session_low_aligned = align_htf_to_ltf(prices, df_1d, session_low)
-    
-    # === 6h Indicators ===
+    # === 12h Indicators ===
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Volume MA (20-period) for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI (14-period)
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(weekly_upper_aligned[i]) or np.isnan(weekly_lower_aligned[i]) or
-            np.isnan(weekly_mid_aligned[i]) or np.isnan(session_high_aligned[i]) or
-            np.isnan(session_low_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_dir_aligned[i]) or np.isnan(chop_aligned[i]) 
+            or np.isnan(rsi[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Regime filter: only trade in ranging markets (Chop > 61.8)
+        in_range = chop_aligned[i] > 61.8
+        
+        if not in_range:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
+        rsi_val = rsi[i]
+        kama_up = kama_dir_aligned[i] > 0.5  # KAMA trending up
         
         if position == 0:
-            # Long: price > weekly upper AND 4h breaks above prior day's high with volume
-            if price > weekly_upper_aligned[i] and high[i] > session_high_aligned[i] and vol_ok:
+            # Long: RSI oversold (30) in ranging market, KAMA up (bullish bias)
+            if rsi_val < 30 and kama_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < weekly lower AND 4h breaks below prior day's low with volume
-            elif price < weekly_lower_aligned[i] and low[i] < session_low_aligned[i] and vol_ok:
+            # Short: RSI overbought (70) in ranging market, KAMA down (bearish bias)
+            elif rsi_val > 70 and not kama_up:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below prior day's low OR crosses weekly midpoint (mean reversion)
-            if low[i] < session_low_aligned[i] or price < weekly_mid_aligned[i]:
+            # Exit: RSI mean reversion (40-60) or opposite extreme
+            if rsi_val > 40 or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above prior day's high OR crosses weekly midpoint (mean reversion)
-            if high[i] > session_high_aligned[i] or price > weekly_mid_aligned[i]:
+            # Exit: RSI mean reversion (40-60) or opposite extreme
+            if rsi_val < 60 or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_HTF_WeeklyDonchian_DailyBreakout_V1"
-timeframe = "6h"
+name = "12h_HTF_1d_KAMA_RSI_ChopFilter_V1"
+timeframe = "12h"
 leverage = 1.0
