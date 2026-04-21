@@ -33,13 +33,13 @@ def generate_signals(prices):
     highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     bb_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_percentile)
     highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
     lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
     
-    # 12h volume confirmation (20-period average)
-    vol_ma_12h = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # 4h volume confirmation (20-period average)
+    vol_ma_4h = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     
     # Price arrays
     close = prices['close'].values
@@ -53,7 +53,7 @@ def generate_signals(prices):
         if (np.isclose(bb_percentile_aligned[i], 0) or 
             np.isnan(highest_20_aligned[i]) or 
             np.isnan(lowest_20_aligned[i]) or 
-            np.isnan(vol_ma_12h[i])):
+            np.isnan(vol_ma_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,7 +62,7 @@ def generate_signals(prices):
         bb_percentile_val = bb_percentile_aligned[i]
         upper_channel = highest_20_aligned[i]
         lower_channel = lowest_20_aligned[i]
-        vol_ma = vol_ma_12h[i]
+        vol_ma = vol_ma_4h[i]
         vol = volume[i]
         
         # Volume confirmation: current volume > 1.3x 20-period average
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_BBWidthRegime_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_BBWidthRegime_Volume"
+timeframe = "4h"
 leverage = 1.0
