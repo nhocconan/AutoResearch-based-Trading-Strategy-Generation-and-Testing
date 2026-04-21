@@ -8,43 +8,37 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Weekly Williams %R (14-period) for oversold/overbought ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate highest high and lowest low over 14 weeks
-    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    willr = -100 * (highest_high - close_1w) / (highest_high - lowest_low)
-    
-    # Align Williams %R to daily timeframe
-    willr_aligned = align_htf_to_ltf(prices, df_1w, willr)
-    
-    # === Daily RSI (14-period) for momentum confirmation ===
+    # === Daily Close ===
     close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
     
-    # Align RSI to daily timeframe (already daily, but keep for consistency)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # === Daily ATR (14) for volatility regime ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_ma_50  # Current ATR vs 50-day average
     
-    # === Daily volume confirmation (20-period average) ===
+    # Align ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # === Daily EMA50 for trend filter ===
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === 4h Price ===
+    price_close = prices['close'].values
+    price_open = prices['open'].values
+    
+    # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
@@ -53,39 +47,38 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if indicators not ready
-        if (np.isnan(willr_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = prices['close'].iloc[i]
-        willr_val = willr_aligned[i]
-        rsi_val = rsi_aligned[i]
+        atr_ratio_val = atr_ratio_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long when weekly Williams %R shows oversold (< -80) and daily RSI confirms momentum (> 50) with volume
-            if (willr_val < -80 and  # Weekly oversold
-                rsi_val > 50 and     # Daily bullish momentum
-                vol_ratio_val > 1.5): # Volume confirmation
+            # Enter long in low volatility (contraction) + uptrend + volume
+            if (atr_ratio_val < 0.8 and   # Volatility contraction (< 80% of average)
+                price_close[i] > ema_trend and
+                vol_ratio_val > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Enter short when weekly Williams %R shows overbought (> -20) and daily RSI confirms weakness (< 50) with volume
-            elif (willr_val > -20 and   # Weekly overbought
-                  rsi_val < 50 and      # Daily bearish momentum
-                  vol_ratio_val > 1.5): # Volume confirmation
+            # Enter short in low volatility (contraction) + downtrend + volume
+            elif (atr_ratio_val < 0.8 and   # Volatility contraction
+                  price_close[i] < ema_trend and
+                  vol_ratio_val > 1.3):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when weekly Williams %R moves out of extreme zone or RSI reverses
-            if position == 1 and (willr_val > -50 or rsi_val < 40):
+            # Exit when volatility expands or trend reverses
+            if position == 1 and (atr_ratio_val > 1.2 or price_close[i] < ema_trend):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (willr_val < -50 or rsi_val > 60):
+            elif position == -1 and (atr_ratio_val > 1.2 or price_close[i] > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Williams_RSI_Volume_Strategy"
-timeframe = "1d"
+name = "4h_Volatility_Contraction_EMA_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
