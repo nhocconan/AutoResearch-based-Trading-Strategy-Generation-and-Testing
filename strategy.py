@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts aligned with 1d EMA34 trend and confirmed by volume spikes (2.0x 20-period average) capture multi-day momentum with controlled trade frequency. Uses ATR-based stoploss (2.0x) to manage risk. Discrete sizing (0.25) targets 12-37 trades/year to minimize fee drag and improve generalization across bull/bear markets.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts aligned with 1d EMA34 trend and confirmed by volume spikes (2.0x 20-period average) capture multi-day momentum with controlled trade frequency. Uses ATR-based stoploss (2.0x) to manage risk. Discrete sizing (0.25) targets 12-37 trades/year to minimize fee drag and improve generalization across bull/bear markets.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 12h ATR (14-period) for stoploss ===
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -34,12 +34,12 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
+    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 12h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -131,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
