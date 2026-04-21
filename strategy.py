@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot level R1/S1 breakout with volume confirmation and 1d ADX trend filter.
-Long when price breaks above R1 with volume > 1.5x average and ADX > 25.
-Short when price breaks below S1 with volume > 1.5x average and ADX > 25.
+Hypothesis: 4h EUR-style daily pivot (PP, R1, S1) breakout with volume confirmation and 1d ADX trend filter.
+Long when price breaks above R1 with volume > 1.3x average and ADX > 20.
+Short when price breaks below S1 with volume > 1.3x average and ADX > 20.
 Exit when price returns to pivot point (PP) or volume drops below average.
-Camarilla levels provide precise intraday support/resistance, effective in both trending and ranging markets.
-Designed for ~20-30 trades/year to minimize fee drag while capturing strong moves.
+Pivot levels are widely watched, effective in both trending and ranging markets.
+Designed for ~25-35 trades/year to minimize fee drag while capturing strong moves.
 """
 
 import numpy as np
@@ -17,23 +17,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for Camarilla levels and ADX
+    # Load daily data ONCE before loop for pivots and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily high, low, close for Camarilla and ADX
+    # Daily high, low, close for pivots and ADX
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (based on previous day)
+    # Calculate daily pivot points (standard)
     # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
+    # R1 = 2*PP - L
+    # S1 = 2*PP - H
     pp = (high_1d + low_1d + close_1d) / 3
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    r1 = 2 * pp - low_1d
+    s1 = 2 * pp - high_1d
     
     # Calculate ADX(14)
     # True Range
@@ -64,7 +64,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
     
-    # Align Camarilla levels and ADX to 4h
+    # Align pivots and ADX to 4h
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -91,16 +91,16 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)[i]
         
         if position == 0:
-            # Enter long: price breaks above R1, volume surge, ADX > 25
+            # Enter long: price breaks above R1, volume surge, ADX > 20
             if (price_close > r1_aligned[i] and 
-                vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
-                adx_aligned[i] > 25):
+                vol_1d_current > 1.3 * vol_ma_20_aligned[i] and
+                adx_aligned[i] > 20):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1, volume surge, ADX > 25
+            # Enter short: price breaks below S1, volume surge, ADX > 20
             elif (price_close < s1_aligned[i] and 
-                  vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
-                  adx_aligned[i] > 25):
+                  vol_1d_current > 1.3 * vol_ma_20_aligned[i] and
+                  adx_aligned[i] > 20):
                 signals[i] = -0.25
                 position = -1
         
@@ -128,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume1.5x_ADX25"
+name = "4h_Pivot_R1_S1_Breakout_Volume1.3x_ADX20"
 timeframe = "4h"
 leverage = 1.0
