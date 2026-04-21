@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_HTFTrend_VolumeRegime_ATRStop
-Hypothesis: 4h Donchian(20) breakout aligned with 12h EMA34 trend and volume spike filter.
-Enter long on upper band break when 12h EMA34 trending up and volume > 1.5x 20-period MA.
-Enter short on lower band break when 12h EMA34 trending down and volume > 1.5x 20-period MA.
-Exit on opposite band break or ATR(14) trailing stop (2.0*ATR).
-Designed for moderate trade frequency (target: 25-40 trades/year) to balance edge and fees.
-Works in bull/bear via 12h trend alignment and volume confirmation as regime filter.
+1h_4h_Donchian_Breakout_HTFTrend_VolumeFilter
+Hypothesis: 1h Donchian(20) breakout filtered by 4h EMA50 trend and volume spike.
+Enter long when price breaks above 20-period high with 4h uptrend and above-average volume.
+Enter short when price breaks below 20-period low with 4h downtrend and above-average volume.
+Exit on opposite Donchian level break or ATR(14) trailing stop (2.0*ATR).
+Uses 4h for signal direction, 1h only for entry timing and execution.
+Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
+Works in bull/bear via 4h trend alignment and volume confirmation as regime filter.
 """
 
 import numpy as np
@@ -18,24 +19,24 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load HTF data ONCE before loop (4h for trend)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # === 12h EMA34 for HTF trend filter ===
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 4h EMA50 for HTF trend filter ===
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # === 4h Donchian(20) channels ===
+    # === 1h Donchian(20) channels ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Donchian channels: upper = max(high, lookback=20), lower = min(low, lookback=20)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channels: 20-period high/low
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === Volume spike filter (20-period average) ===
     volume = prices['volume'].values
@@ -54,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(donchian_upper[i]) 
-            or np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i]) 
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(donchian_high[i]) 
+            or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) 
             or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,24 +66,24 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirm = volume[i] > 1.5 * vol_ma[i]
+            # Volume confirmation: current volume > 20-period average
+            vol_confirm = volume[i] > vol_ma[i]
             
-            # Long conditions: price > upper Donchian, 12h EMA34 uptrend, volume spike
-            long_breakout = price > donchian_upper[i]
-            long_trend = price > ema_34_12h_aligned[i]
+            # Long conditions: price > Donchian high, 4h uptrend, volume spike
+            long_breakout = price > donchian_high[i]
+            long_trend = price > ema_50_4h_aligned[i]
             
-            # Short conditions: price < lower Donchian, 12h EMA34 downtrend, volume spike
-            short_breakout = price < donchian_lower[i]
-            short_trend = price < ema_34_12h_aligned[i]
+            # Short conditions: price < Donchian low, 4h downtrend, volume spike
+            short_breakout = price < donchian_low[i]
+            short_trend = price < ema_50_4h_aligned[i]
             
             # Entry logic
             if long_breakout and long_trend and vol_confirm:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = price
             elif short_breakout and short_trend and vol_confirm:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = price
         
@@ -91,27 +92,27 @@ def generate_signals(prices):
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below lower Donchian (support broken)
-            elif price < donchian_lower[i]:
+            # Trailing exit: price closes below Donchian low (support broken)
+            elif price < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Check stoploss
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above upper Donchian (resistance broken)
-            elif price > donchian_upper[i]:
+            # Trailing exit: price closes above Donchian high (resistance broken)
+            elif price > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_Breakout_HTFTrend_VolumeRegime_ATRStop"
-timeframe = "4h"
+name = "1h_4h_Donchian_Breakout_HTFTrend_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
