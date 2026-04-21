@@ -21,17 +21,16 @@ def generate_signals(prices):
     # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_14 / atr_ma_50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Volume confirmation: volume / 30-period average volume (1d)
+    # 1d volume ratio: volume / 30-period average volume
     vol_ma_30 = pd.Series(df_1d['volume'].values).rolling(window=30, min_periods=30).mean().values
     vol_ratio_1d = df_1d['volume'].values / vol_ma_30
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
@@ -41,7 +40,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -50,30 +49,34 @@ def generate_signals(prices):
         
         price_close = prices['close'].iloc[i]
         ema_trend = ema_34_1d_aligned[i]
+        atr_val = atr_1d_aligned[i]
         vol_ratio = vol_ratio_aligned[i]
-        vol_threshold = 1.4  # Volume must be above average
-        atr_ratio_val = atr_ratio_aligned[i]
+        
+        # Dynamic thresholds based on volatility
+        upper_band = ema_trend + 1.5 * atr_val
+        lower_band = ema_trend - 1.5 * atr_val
+        vol_threshold = 1.2  # Volume must be above average
         
         if position == 0:
-            # Enter long: price above EMA, volume spike, moderate volatility
-            if (price_close > ema_trend and 
-                vol_ratio > vol_threshold and 
-                atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+            # Enter long: price above EMA + volatility band, uptrend, volume spike
+            if (price_close > upper_band and 
+                price_close > ema_trend and 
+                vol_ratio > vol_threshold):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below EMA, volume spike, moderate volatility
-            elif (price_close < ema_trend and 
-                  vol_ratio > vol_threshold and 
-                  atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+            # Enter short: price below EMA - volatility band, downtrend, volume spike
+            elif (price_close < lower_band and 
+                  price_close < ema_trend and 
+                  vol_ratio > vol_threshold):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: reverse trend or volatility extremes
-            if position == 1 and (price_close < ema_trend or atr_ratio_val > 2.2 or atr_ratio_val < 0.6):
+            # Exit: reverse signal or volatility contraction
+            if position == 1 and (price_close < ema_trend or vol_ratio < 0.8):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > ema_trend or atr_ratio_val > 2.2 or atr_ratio_val < 0.6):
+            elif position == -1 and (price_close > ema_trend or vol_ratio < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dEMA34_Volume_ATR_Filter"
-timeframe = "6h"
+name = "4d_EMA34_Volume_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
