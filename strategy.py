@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_With_Trend_Filter
-Hypothesis: Use daily (1d) Camarilla R1/S1 levels on 12h chart with volume confirmation and 12h EMA50 trend filter.
-Long when price breaks above R1 with volume > 1.5x 20-period average AND price > EMA50.
-Short when price breaks below S1 with volume > 1.5x 20-period average AND price < EMA50.
-Exit when price crosses back through the pivot point (PP).
-Designed for 12h timeframe to capture multi-day moves with ~15-30 trades/year.
+4h_1d_Pivot_R1S1_Breakout_With_ATR_Stop
+Hypothesis: Combine 1d Camarilla R1/S1 breakouts with 4h ATR-based stoploss.
+Long when price breaks above R1 with volume > 1.5x 20-bar avg AND price > 4h EMA50.
+Short when price breaks below S1 with volume > 1.5x 20-bar avg AND price < 4h EMA50.
+Exit via ATR stoploss (2.5x ATR) or price crossing back through pivot point.
+Designed for 4h timeframe to capture multi-day moves with ~20-30 trades/year.
 Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
-Volume and trend filters reduce false breakouts and whipsaws.
+ATR stoploss limits drawdown during adverse moves.
 """
 
 import numpy as np
@@ -53,17 +53,29 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 12h EMA50 for trend filter
+    # 4h EMA50 for trend filter
     close_s = prices['close']
     ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
+    # 4h ATR(14) for stoploss
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50[i])):
+            np.isnan(ema_50[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,22 +96,32 @@ def generate_signals(prices):
             if price > r1_aligned[i] and volume_ok and price > ema_50[i]:
                 signals[i] = 0.25
                 position = 1
+                entry_price = price
             # Short conditions: break below S1 + volume confirmation + price below EMA50
             elif price < s1_aligned[i] and volume_ok and price < ema_50[i]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: price crosses back below pivot point
-            if price < pp_aligned[i]:
+            # Check ATR stoploss: price < entry_price - 2.5 * ATR
+            if price < entry_price - 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit: price crosses back below pivot point
+            elif price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above pivot point
-            if price > pp_aligned[i]:
+            # Check ATR stoploss: price > entry_price + 2.5 * ATR
+            if price > entry_price + 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit: price crosses back above pivot point
+            elif price > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_With_Trend_Filter"
-timeframe = "12h"
+name = "4h_1d_Pivot_R1S1_Breakout_With_ATR_Stop"
+timeframe = "4h"
 leverage = 1.0
