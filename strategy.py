@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Volatility Contraction Breakout with 12h EMA50 trend filter and volume spike.
+Hypothesis: 4h Bollinger Band breakout with 12h EMA50 trend filter and volume spike.
 Volatility contraction (low Bollinger Band width) precedes explosive moves. Breakout above/below
 Bollinger Bands with volume confirmation and aligned trend captures momentum. Uses 12h EMA50 for
 trend filter to avoid counter-trend trades. Designed for fewer trades (~20-40/year) to minimize
