@@ -1,10 +1,3 @@
-# 4h_Camarilla_Pivot_Breakout_Volume_Regime
-# Hypothesis: Camarilla pivot levels act as institutional support/resistance.
-# Breakout above R3 or below S3 with volume surge indicates institutional participation.
-# Combines with 12h EMA trend filter and daily ATR percentile regime filter to avoid whipsaws.
-# Works in bull/bear: breakouts capture momentum, regime filter avoids chop, volume confirms validity.
-# Target: 20-40 trades/year per symbol.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -38,7 +31,7 @@ def generate_signals(prices):
     r3 = close_1d + (range_hl * 1.1 / 2)
     s3 = close_1d - (range_hl * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -113,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_Breakout_Volume_Regime"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_Breakout_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
