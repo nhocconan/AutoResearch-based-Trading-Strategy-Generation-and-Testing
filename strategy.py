@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Pivot_Breakout_Volume_ATR_v1
-Hypothesis: Breakout of Camarilla R4/S4 levels on 1d with 1w trend filter and volume confirmation.
-Works in bull/bear: In uptrend (1w EMA rising), buy R4 breakout; in downtrend (1w EMA falling), sell S4 breakout.
-Uses 1w EMA for trend, volume spike for confirmation, ATR for dynamic position sizing and stoploss.
-Target: 15-25 trades/year per symbol (60-100 over 4 years).
+6h_1d_Camarilla_R4S4_Breakout_Volume_EMA34Filter_v1
+Hypothesis: Breakout at extreme Camarilla levels (R4/S4) on 6h with 1d EMA34 trend filter and volume confirmation.
+Works in bull/bear: In uptrend, buy R4 breakout; in downtrend, sell S4 breakdown. Uses 1d EMA34 for trend, volume for confirmation.
+Target: 12-25 trades/year per symbol (50-100 over 4 years).
 """
 
 import numpy as np
@@ -13,10 +12,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels and ATR
+    # Load 1d data once for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -38,103 +37,91 @@ def generate_signals(prices):
     r4 = prev_close + rang * 6.0 / 12
     s4 = prev_close - rang * 6.0 / 12
     
-    # Align to 1d timeframe (no shift needed as we use previous day's levels)
+    # Align to 6h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # 1d ATR(14) for stoploss and position sizing
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), np.abs(high_1d[1:] - close_1d[:-1]))
-    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Load 1w data for weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # 1w EMA20 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    atr_at_entry = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                atr_at_entry = 0.0
             continue
         
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
+        # Volume filter: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
-        # Determine 1w trend: EMA20 rising/falling
-        if i > 0:
-            ema_rising = ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1]
-            ema_falling = ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1]
-        else:
-            ema_rising = True
-            ema_falling = False
-        
         if position == 0:
-            # Long entry: price breaks above R4 AND 1w uptrend AND volume spike
+            # Long conditions: price > R4 (breakout) AND 1d uptrend AND volume
             if (price > r4_aligned[i] and 
-                ema_rising and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and  # 1d EMA rising
                 volume_ok):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-                entry_price = price
-                atr_at_entry = atr_1d_aligned[i]
-            # Short entry: price breaks below S4 AND 1w downtrend AND volume spike
+            # Short conditions: price < S4 (breakdown) AND 1d downtrend AND volume
             elif (price < s4_aligned[i] and 
-                  ema_falling and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and  # 1d EMA falling
                   volume_ok):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
-                entry_price = price
-                atr_at_entry = atr_1d_aligned[i]
         
         elif position == 1:
-            # Long exit: stoploss hit or trend reversal
-            stoploss = entry_price - 2.5 * atr_at_entry
-            if price < stoploss or not ema_rising:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                atr_at_entry = 0.0
+            # Long exit: price < 1d EMA34 (trend reversal) or price < R3 (mean reversion)
+            # Calculate R3 for exit
+            prev_high_i = high_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_low_i = low_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_close_i = close_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            if not (np.isnan(prev_high_i) or np.isnan(prev_low_i) or np.isnan(prev_close_i)):
+                rang_i = prev_high_i - prev_low_i
+                r3_exit = prev_close_i + rang_i * 3.0 / 12
+                # Align R3 exit level (simplified: use current day's R3)
+                r3_exit_aligned = align_htf_to_ltf(prices, df_1d, 
+                                                  pd.Series([prev_close_i + rang_i * 3.0 / 12] * len(df_1d)).values)
+                if price < ema_34_1d_aligned[i] or (not np.isnan(r3_exit_aligned[i]) and price < r3_exit_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: stoploss hit or trend reversal
-            stoploss = entry_price + 2.5 * atr_at_entry
-            if price > stoploss or not ema_falling:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-                atr_at_entry = 0.0
+            # Short exit: price > 1d EMA34 (trend reversal) or price > S3 (mean reversion)
+            prev_high_i = high_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_low_i = low_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_close_i = close_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            if not (np.isnan(prev_high_i) or np.isnan(prev_low_i) or np.isnan(prev_close_i)):
+                rang_i = prev_high_i - prev_low_i
+                s3_exit = prev_close_i - rang_i * 3.0 / 12
+                # Align S3 exit level (simplified: use current day's S3)
+                s3_exit_aligned = align_htf_to_ltf(prices, df_1d, 
+                                                  pd.Series([prev_close_i - rang_i * 3.0 / 12] * len(df_1d)).values)
+                if price > ema_34_1d_aligned[i] or (not np.isnan(s3_exit_aligned[i]) and price > s3_exit_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "1d_1w_Camarilla_Pivot_Breakout_Volume_ATR_v1"
-timeframe = "1d"
+name = "6h_1d_Camarilla_R4S4_Breakout_Volume_EMA34Filter_v1"
+timeframe = "6h"
 leverage = 1.0
