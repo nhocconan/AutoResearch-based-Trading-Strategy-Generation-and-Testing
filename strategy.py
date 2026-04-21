@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_B
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
 Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (1.8x average).
-Works in bull/bear via 1d trend alignment. Tight entries target 75-200 total trades (19-50/year) to avoid fee drag.
+Long when price > R1 and above 1d EMA50; short when price < S1 and below 1d EMA50.
+Volume confirmation reduces false breakouts. ATR(14) stoploss (2.5x) and discrete sizing (0.25).
+Designed to work in both bull and bear markets via 1d trend alignment and strict entry filters.
+Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -138,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_B"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
