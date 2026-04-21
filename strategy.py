@@ -5,54 +5,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Weekly High-Low Range for volatility regime ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === Daily ATR for volatility regime ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly range (high - low)
-    weekly_range = high_1w - low_1w
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Weekly range percentile (52-week lookback)
-    range_percentile = pd.Series(weekly_range).rolling(window=52, min_periods=20).apply(
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # ATR(14) percentile (100-day lookback for regime)
+    atr_percentile = pd.Series(atr_14).rolling(window=100, min_periods=20).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # Align range percentile to daily timeframe
-    range_percentile_aligned = align_htf_to_ltf(prices, df_1w, range_percentile)
+    # Align ATR percentile to 12h timeframe
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    # === Daily price position within weekly range ===
-    # Use daily close relative to weekly range
-    weekly_low = df_1w['low'].values
-    weekly_high = df_1w['high'].values
+    # === Daily SMA50 for trend filter ===
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
-    # Align weekly high/low to daily
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    
-    # Calculate position: 0 = at weekly low, 1 = at weekly high
-    range_width = weekly_high_aligned - weekly_low_aligned
-    range_width = np.where(range_width == 0, 1, range_width)  # avoid division by zero
-    price_position = (prices['close'].values - weekly_low_aligned) / range_width
-    
-    # === Daily volume confirmation ===
+    # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after warmup
         # Skip if indicators not ready
-        if (np.isnan(range_percentile_aligned[i]) or 
-            np.isnan(price_position[i]) or 
+        if (np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(sma_50_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,30 +58,30 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        range_pct = range_percentile_aligned[i]
-        pos_in_range = price_position[i]
+        atr_percentile_val = atr_percentile_aligned[i]
+        sma_trend = sma_50_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long in low volatility (range) + lower third of weekly range + volume
-            if (range_pct < 30 and  # Low volatility regime
-                pos_in_range < 0.33 and  # Lower third of weekly range
+            # Enter long in low volatility (range) + uptrend + volume
+            if (atr_percentile_val < 30 and  # Low volatility regime
+                price_close > sma_trend and
                 vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short in low volatility (range) + upper third of weekly range + volume
-            elif (range_pct < 30 and   # Low volatility regime
-                  pos_in_range > 0.66 and  # Upper third of weekly range
+            # Enter short in low volatility (range) + downtrend + volume
+            elif (atr_percentile_val < 30 and   # Low volatility regime
+                  price_close < sma_trend and
                   vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when volatility increases (trending regime) or moves to middle third
-            if position == 1 and (range_pct > 70 or pos_in_range > 0.66):
+            # Exit when volatility increases (trending regime) or opposite condition
+            if position == 1 and (atr_percentile_val > 70 or price_close < sma_trend):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (range_pct > 70 or pos_in_range < 0.33):
+            elif position == -1 and (atr_percentile_val > 70 or price_close > sma_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyRange_Volatility_Position_Volume"
-timeframe = "1d"
+name = "12h_ATR_Volatility_Regime_SMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
