@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Camarilla_Pullback_Volume_Momentum_v1
-Hypothesis: Pullback to Camarilla H3/L3 levels with 12h momentum confirmation and volume filter.
-Long when price pulls back to H3 with 12h RSI > 50 and volume spike.
-Short when price pulls back to L3 with 12h RSI < 50 and volume spike.
-Exit when price reaches H4/L4 or reverses at H3/L3.
-Works in both bull/bear by following 12h momentum and using mean-reversion pullbacks.
-Target: 25-40 trades/year per symbol.
+1h_4h_1d_Trend_Follow_With_Pullback_Entry_V1
+Hypothesis: In strong trends (4h EMA20 > EMA50), buy pullbacks to 1h VWAP with volume confirmation; sell short when trend reverses. Uses 1d ADX to filter weak markets. Designed for 15-30 trades/year.
 """
 
 import numpy as np
@@ -15,65 +10,58 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
+    # --- 4h Trend Filter ---
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # --- 1d ADX Filter (trend strength) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
-    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smooth TR, +DM, -DM
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Camarilla levels: H3, L3, H4, L4
-    rang = prev_high - prev_low
-    h3 = prev_close + 1.1 * rang / 4
-    l3 = prev_close - 1.1 * rang / 4
-    h4 = prev_close + 1.1 * rang / 2
-    l4 = prev_close - 1.1 * rang / 2
-    
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Load 12h data for momentum (RSI)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    # Calculate RSI(14) on 12h
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h = rsi_12h.values
-    # Align to 4h timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    # --- 1h VWAP ---
+    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
+    vwap_num = (typical_price * prices['volume']).cumsum()
+    vwap_den = prices['volume'].cumsum()
+    vwap = vwap_num / vwap_den
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(rsi_12h_aligned[i])):
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,44 +69,48 @@ def generate_signals(prices):
         
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
+        vwap_val = vwap.iloc[i]
         
-        # Volume filter: current volume > 1.8 * 20-period average
+        # Volume filter: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.8 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
+        # Trend condition: 4h EMA20 > EMA50 for long, < for short
+        uptrend = ema20_4h_aligned[i] > ema50_4h_aligned[i]
+        downtrend = ema20_4h_aligned[i] < ema50_4h_aligned[i]
+        strong_trend = adx_aligned[i] > 25
+        
         if position == 0:
-            # Long conditions: pullback to H3 with bullish momentum and volume
-            if (abs(price - h3_aligned[i]) < 0.001 * h3_aligned[i] and  # near H3
-                rsi_12h_aligned[i] > 50 and volume_ok):
-                signals[i] = 0.25
+            # Long: uptrend + strong trend + pullback to VWAP + volume
+            if uptrend and strong_trend and (abs(price - vwap_val) < 0.005 * vwap_val) and volume_ok:
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: pullback to L3 with bearish momentum and volume
-            elif (abs(price - l3_aligned[i]) < 0.001 * l3_aligned[i] and  # near L3
-                  rsi_12h_aligned[i] < 50 and volume_ok):
-                signals[i] = -0.25
+            # Short: downtrend + strong trend + pullback to VWAP + volume
+            elif downtrend and strong_trend and (abs(price - vwap_val) < 0.005 * vwap_val) and volume_ok:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: reach H4 or reverse at H3
-            if price >= h4_aligned[i] or price <= h3_aligned[i]:
+            # Long exit: trend reversal or ADX weak
+            if not (uptrend and strong_trend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: reach L4 or reverse at L3
-            if price <= l4_aligned[i] or price >= l3_aligned[i]:
+            # Short exit: trend reversal or ADX weak
+            if not (downtrend and strong_trend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_12h_1d_Camarilla_Pullback_Volume_Momentum_v1"
-timeframe = "4h"
+name = "1h_4h_1d_Trend_Follow_With_Pullback_Entry_V1"
+timeframe = "1h"
 leverage = 1.0
