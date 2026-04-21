@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dHMA_Trend_v2
-Hypothesis: 4h Camarilla R1/S1 breakouts with 1d HMA(21) trend filter, optimized for lower trade count and better Sharpe. Uses discrete sizing (0.30), volume confirmation (2.0x), and ATR stoploss (2.0x). Target: 75-150 total trades over 4 years for BTC/ETH/SOL.
+12h_Camarilla_R1_S1_Breakout_1dTrendRegime_VolumeSpike
+Hypothesis: 12h Camarilla R1/S1 breakouts with 1d trend regime (price > EMA50) and volume confirmation. Discrete sizing 0.30, ATR stoploss 2.0x. Target: 80-120 total trades over 4 years for BTC/ETH/SOL. Uses proven 12h timeframe to reduce fee drag while maintaining edge from Camarilla breakouts with trend/volume filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_hma(series, period):
-    """Calculate Hull Moving Average"""
+def calculate_ema(series, period):
+    """Calculate Exponential Moving Average"""
     if len(series) < period:
         return np.full_like(series, np.nan, dtype=float)
-    half = period // 2
-    sqrt = int(np.sqrt(period))
-    wma2 = pd.Series(series).ewm(span=half, adjust=False).mean()
-    wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
-    raw_hma = 2 * wma2 - wma1
-    hma = pd.Series(raw_hma).ewm(span=sqrt, adjust=False).mean()
-    return hma.values
+    return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,12 +24,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d HMA21 for trend regime ===
+    # === 1d EMA50 for trend regime ===
     close_1d = df_1d['close'].values
-    hma_21_1d = calculate_hma(close_1d, 21)
-    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    ema_50_1d = calculate_ema(close_1d, 50)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -46,12 +40,12 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
+    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    # === 12h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -68,7 +62,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(hma_21_1d_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -77,24 +71,24 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        hma_21_1d_val = hma_21_1d_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
         r1_val = r1[i]
         s1_val = s1[i]
         vol_conf = volume_confirmed[i]
         
         # Trend regime
-        is_bull = price > hma_21_1d_val
-        is_bear = price < hma_21_1d_val
+        is_bull = price > ema_50_1d_val
+        is_bear = price < ema_50_1d_val
         
         if position == 0:
             if is_bull:
                 # Bull regime: long breakouts favored
                 long_condition = (price > r1_val) and vol_conf
-                short_condition = (price < s1_val) and vol_conf and (price < hma_21_1d_val * 0.99)  # stricter for shorts
+                short_condition = (price < s1_val) and vol_conf and (price < ema_50_1d_val * 0.995)  # stricter for shorts
             else:  # bear regime
                 # Bear regime: short breakdowns favored
                 short_condition = (price < s1_val) and vol_conf
-                long_condition = (price > r1_val) and vol_conf and (price > hma_21_1d_val * 1.01)  # stricter for longs
+                long_condition = (price > r1_val) and vol_conf and (price > ema_50_1d_val * 1.005)  # stricter for longs
             
             if long_condition:
                 signals[i] = 0.30
@@ -110,8 +104,8 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 6 bars to reduce churn
-            if bars_since_entry < 6:
+            # Minimum holding period of 8 bars to reduce churn
+            if bars_since_entry < 8:
                 signals[i] = 0.30 if position == 1 else -0.30
                 continue
             
@@ -143,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dHMA_Trend_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrendRegime_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
