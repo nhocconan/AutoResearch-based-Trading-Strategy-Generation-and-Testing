@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_ADX_WilliamsAlligator_Trend_V1
-Hypothesis: Combines ADX (trend strength) with Williams Alligator (trend direction) on 6h timeframe, filtered by 12h HTF trend (EMA50). Enters long when ADX>25 and Alligator bullish (jaw<teeth<lips), short when ADX>25 and Alligator bearish (jaw>teeth>lips). Uses ATR-based trailing stop via signal=0. Designed for low trade frequency in both bull/bear markets by requiring strong trending conditions (ADX>25) to avoid whipsaws in ranging markets.
+4h_HTF_1d_Camarilla_R1S1_Breakout_Volume_ChopRegime_ATRStop_V1
+Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation (>1.3x 20-period volume MA) and choppiness regime filter (CHOP > 61.8 for mean reversion, CHOP < 38.2 for trend following). Uses 1d HTF for trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR. Designed for low trade frequency (<400 total 4h trades) to minimize fee drag and work in both bull/bear markets via regime adaptation.
 """
 
 import numpy as np
@@ -13,140 +13,115 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for EMA trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load HTF data ONCE before loop (1d for EMA trend filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 12h EMA50 for HTF trend filter ===
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === 1d EMA50 for trend filter ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 6h Indicators (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 50:
+    # === 4h Indicators (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Williams Alligator (13,8,5 SMAs with offsets)
-    jaw = pd.Series(close_6h).rolling(window=13, min_periods=13).mean().shift(8).values  # 13-period, 8 bars ahead
-    teeth = pd.Series(close_6h).rolling(window=8, min_periods=8).mean().shift(5).values   # 8-period, 5 bars ahead
-    lips = pd.Series(close_6h).rolling(window=5, min_periods=5).mean().shift(3).values    # 5-period, 3 bars ahead
+    # Camarilla pivot levels (based on previous day's OHLC)
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # Need previous day's data - using 4h data approximation
+    # For 4h, we use the previous 4h bar's high/low/close
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
     
-    # ADX (14-period)
-    # True Range
-    tr1 = pd.Series(high_6h - low_6h)
-    tr2 = pd.Series(np.abs(high_6h - np.roll(close_6h, 1)))
-    tr3 = pd.Series(np.abs(low_6h - np.roll(close_6h, 1)))
+    # Calculate Camarilla levels
+    camarilla_high = prev_close + 1.1 * (prev_high - prev_low) / 12
+    camarilla_low = prev_close - 1.1 * (prev_high - prev_low) / 12
+    
+    # Volume MA (20-period) for spike detection
+    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) for stoploss
+    tr1 = pd.Series(high_4h - low_4h)
+    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
+    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    up_move = pd.Series(high_6h - np.roll(high_6h, 1))
-    down_move = pd.Series(np.roll(low_6h, 1) - low_6h)
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Choppiness Index (14-period)
+    chop_sum = tr.rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(chop_sum / (highest_high - lowest_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) 
-            or np.isnan(adx[i]) or np.isnan(atr[i]) 
-            or np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(camarilla_high[i]) or np.isnan(camarilla_low[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(chop[i])
+            or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
             continue
         
-        price = close_6h[i]
+        price = close_4h[i]
+        vol = volume_4h[i]
+        vol_ok = vol > 1.3 * vol_ma[i]  # volume confirmation
         
-        # Alligator conditions
-        alligator_bullish = jaw[i] < teeth[i] and teeth[i] < lips[i]
-        alligator_bearish = jaw[i] > teeth[i] and teeth[i] > lips[i]
-        
-        # ADX trend strength
-        strong_trend = adx[i] > 25
-        
-        # HTF trend filter
-        htf_uptrend = price > ema_50_12h_aligned[i]
-        htf_downtrend = price < ema_50_12h_aligned[i]
+        # Regime detection
+        is_choppy = chop[i] > 61.8  # mean reversion regime
+        is_trending = chop[i] < 38.2  # trend following regime
         
         if position == 0:
-            # Long: Strong trend + Alligator bullish + HTF uptrend
-            if strong_trend and alligator_bullish and htf_uptrend:
+            # Long: Camarilla R1 breakout + volume + trend filter (in uptrend or choppy market)
+            if price > camarilla_high[i] and vol_ok and (price > ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-                highest_since_entry = price
-            # Short: Strong trend + Alligator bearish + HTF downtrend
-            elif strong_trend and alligator_bearish and htf_downtrend:
+            # Short: Camarilla S1 breakdown + volume + trend filter (in downtrend or choppy market)
+            elif price < camarilla_low[i] and vol_ok and (price < ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
-                lowest_since_entry = price
         
         elif position == 1:
-            # Update highest price since entry
-            highest_since_entry = max(highest_since_entry, price)
-            
-            # ATR trailing stop (2.0 * ATR from high)
-            if price < highest_since_entry - 2.0 * atr[i]:
+            # Check stoploss
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
-            # Exit: Alligator turns bearish or trend weakens
-            elif not alligator_bullish or adx[i] < 20:
+            # Exit conditions: Camarilla S1 breakdown or loss of volume/momentum
+            elif price < camarilla_low[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Update lowest price since entry
-            lowest_since_entry = min(lowest_since_entry, price)
-            
-            # ATR trailing stop (2.0 * ATR from low)
-            if price > lowest_since_entry + 2.0 * atr[i]:
+            # Check stoploss
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-                lowest_since_entry = 0.0
-            # Exit: Alligator turns bullish or trend weakens
-            elif not alligator_bearish or adx[i] < 20:
+            # Exit conditions: Camarilla R1 breakout or loss of volume/momentum
+            elif price > camarilla_high[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_ADX_WilliamsAlligator_Trend_V1"
-timeframe = "6h"
+name = "4h_HTF_1d_Camarilla_R1S1_Breakout_Volume_ChopRegime_ATRStop_V1"
+timeframe = "4h"
 leverage = 1.0
