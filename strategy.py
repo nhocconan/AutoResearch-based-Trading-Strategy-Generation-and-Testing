@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Alt_v2
-Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike (>1.8x 20-period MA).
-Uses tighter volume threshold and EMA34 (more responsive than EMA50) to capture trends earlier.
-ATR(14) stoploss (2.0x) and discrete sizing (0.25). Target: 80-140 total trades (20-35/year) to balance edge and fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakout on 12h timeframe with 1d EMA34 trend filter and volume confirmation (>1.8x 20-period MA).
+Uses 12h primary timeframe to reduce trade frequency (target: 50-150 total trades over 4 years) and minimize fee drag.
+1d EMA34 provides responsive trend filter. Volume spike ensures momentum confirmation.
+ATR(14) stoploss (2.0x) and discrete sizing (0.25) manage risk. Designed to work in both bull and bear markets via trend alignment.
 """
 
 import numpy as np
@@ -31,7 +32,7 @@ def generate_signals(prices):
     r1_1d = df_1d_close + 0.275 * range_1d
     s1_1d = df_1d_close - 0.275 * range_1d
     
-    # Align 1d Camarilla levels to 4h timeframe
+    # Align 1d Camarilla levels to 12h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -39,7 +40,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -117,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Alt_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
