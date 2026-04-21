@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12h_HTFTrend_VolumeRegime
-Hypothesis: Camarilla R1/S1 breakout aligned with 12h EMA34 trend filter and volume regime filter (volume > 1.5x 20-period MA). 
-Long when price > R1 and above 12h EMA34 and volume confirmed. Short when price < S1 and below 12h EMA34 and volume confirmed.
-ATR(14) stoploss (2.5x) and discrete sizing (0.25). Uses 12h HTF for trend alignment to capture major moves and reduce whipsaw.
-Target: 80-180 total trades over 4 years (20-45/year) to balance edge and fee drag.
+1d_Camarilla_R1_S1_Breakout_1w_Trend_VolumeSpike
+Hypothesis: On 1d timeframe, enter long when price breaks above Camarilla R1 with 1w EMA34 uptrend and volume > 2x 20-period MA; enter short when price breaks below S1 with 1w EMA34 downtrend and volume confirmation. Uses discrete sizing (0.30) and ATR(14) stoploss (2.0x). Designed for low trade frequency (<25/year) to minimize fee drag while capturing major trend moves in both bull and bear markets via 1w trend filter.
 """
 
 import numpy as np
@@ -16,9 +13,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for EMA trend)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 40:
+    # Load HTF data ONCE before loop (1w for EMA trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
     # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
@@ -36,15 +33,15 @@ def generate_signals(prices):
     r1_1d = df_1d_close + 0.275 * range_1d
     s1_1d = df_1d_close - 0.275 * range_1d
     
-    # Align 1d Camarilla levels to 4h timeframe
+    # Align 1d Camarilla levels to 1d timeframe (no alignment needed, but using helper for consistency)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # === 12h EMA34 for trend filter ===
-    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # === 1w EMA34 for trend filter ===
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === 1d ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -55,7 +52,7 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume regime filter (1.5x 20-period MA) ===
+    # === Volume regime filter (2.0x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -66,7 +63,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+            or np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,11 +73,11 @@ def generate_signals(prices):
         volume_now = volume[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
-        ema_34 = ema_34_12h_aligned[i]
+        ema_34 = ema_34_1w_aligned[i]
         vol_avg = vol_ma[i]
         
-        # Volume regime: current volume > 1.5x average (avoid low-volume breakouts)
-        volume_confirmed = volume_now > 1.5 * vol_avg
+        # Volume regime: current volume > 2.0x average (strict filter to reduce trades)
+        volume_confirmed = volume_now > 2.0 * vol_avg
         
         if position == 0:
             # Enter only with volume confirmation and trend alignment
@@ -88,17 +85,17 @@ def generate_signals(prices):
             short_condition = (price < s1) and (price < ema_34) and volume_confirmed
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.5x ATR)
-            if price < entry_price - 2.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trend reversal exit (price below EMA)
@@ -106,11 +103,11 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Check stoploss (2.5x ATR)
-            if price > entry_price + 2.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trend reversal exit (price above EMA)
@@ -118,10 +115,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12h_HTFTrend_VolumeRegime"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1w_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
