@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_Momentum_Pivot_Breakout
-Hypothesis: Weekly trend (EMA34) filters daily pivot breakouts (R1/S1). 
-Only trade in direction of weekly trend: long when price > weekly EMA34, short when price < weekly EMA34.
-Enter on break of daily R1/S1 with volume confirmation. Exit when price returns to daily pivot.
-Designed for low frequency (<25 trades/year) to minimize fee drag. Works in bull/bear via trend filter.
+1h Candle Close Above/Below 4h EMA20 with Volume Spike
+Hypothesis: In trending markets, price respects the 4h EMA20 as dynamic support/resistance.
+A break above/below with volume continuation signals institutional participation.
+Works in bull (buy dips to EMA) and bear (sell rallies to EMA) by using dynamic MA.
+Volume spike filters low-conviction moves. 1h timeframe used only for entry timing.
+Target: 15-30 trades/year per symbol via strict EMA/volume confluence.
 """
 
 import numpy as np
@@ -16,36 +17,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 34:
+    # Load 4h data once for EMA20
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend filter
-    close_weekly = df_weekly['close'].values
-    ema34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    close_4h = df_4h['close'].values
+    # EMA20 on 4h close
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Load daily data once for pivot points
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
-        return np.zeros(n)
-    
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
-    
-    # Daily pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    pivot_daily = (high_daily + low_daily + close_daily) / 3.0
-    r1_daily = 2 * pivot_daily - low_daily
-    s1_daily = 2 * pivot_daily - high_daily
-    
-    # Align daily levels to 1d timeframe
-    r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
-    s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
-    pivot_daily_aligned = align_htf_to_ltf(prices, df_daily, pivot_daily)
-    
-    # Main timeframe data (1d)
+    # 1h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -54,57 +36,57 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if NaN in critical values
-        if (np.isnan(ema34_weekly_aligned[i]) or np.isnan(r1_daily_aligned[i]) or 
-            np.isnan(s1_daily_aligned[i]) or np.isnan(pivot_daily_aligned[i])):
+    for i in range(20, n):
+        # Skip if EMA not ready
+        if np.isnan(ema_4h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        weekly_trend = ema34_weekly_aligned[i]
-        r1 = r1_daily_aligned[i]
-        s1 = s1_daily_aligned[i]
-        pivot = pivot_daily_aligned[i]
-        vol_current = volume[i]
+        ema = ema_4h_aligned[i]
+        vol = volume[i]
         
-        # Volume filter: current volume > 1.5x 20-period average
+        # Volume spike: current > 1.5x 20-period average
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            vol_ok = vol_current > 1.5 * vol_ma
+            vol_spike = vol > 1.5 * vol_ma
         else:
-            vol_ok = True  # insufficient data, allow trade
+            vol_spike = False
         
-        if position == 0:
-            # Long: price > weekly EMA34 and breaks above R1 with volume
-            if price > weekly_trend and price > r1 and vol_ok:
-                signals[i] = 0.25
+        # Session filter: 08:00-20:00 UTC
+        hour = prices.index[i].hour
+        in_session = 8 <= hour <= 20
+        
+        if position == 0 and in_session:
+            # Long: close above EMA20 with volume spike
+            if price > ema and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short: price < weekly EMA34 and breaks below S1 with volume
-            elif price < weekly_trend and price < s1 and vol_ok:
-                signals[i] = -0.25
+            # Short: close below EMA20 with volume spike
+            elif price < ema and vol_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to daily pivot or breaks below S1
-            if price <= pivot or price < s1:
+            # Exit long: close below EMA20
+            if price < ema:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price returns to daily pivot or breaks above R1
-            if price >= pivot or price > r1:
+            # Exit short: close above EMA20
+            if price > ema:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "1d_1w_Momentum_Pivot_Breakout"
-timeframe = "1d"
+name = "1h_EMA20_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
