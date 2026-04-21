@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_HTF_12h_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
-Hypothesis: Use 12h Camarilla R1/S1 levels + 6h volume spike (>2x 20-bar MA) for breakout entry + ATR(14) stoploss (2.0x). 
-Adds regime filter: only trade when 6h ADX(14) > 20 (moderate trend filter) to reduce whipsaw. 
-Uses discrete position sizing (0.25) to minimize fee churn. Target 12-25 trades/year per symbol. 
-Works in bull (breakouts) and bear (tight stops limit losses) via volume/ADX confluence.
+4h_HTF_1d_Donchian20_Breakout_VolumeSpike_ATRStop_V1
+Hypothesis: Use 1d Donchian(20) channels + 4h volume spike (>2x 20-bar MA) for breakout entry + ATR(14) stoploss (2.0x). 
+Add regime filter: only trade when 4h ADX(14) > 25 (strong trend filter) to reduce whipsaw in ranging markets. 
+Uses discrete position sizing (0.30) to balance return and drawdown. Target 20-40 trades/year per symbol. 
+Works in bull (breakouts capture momentum) and bear (tight stops limit losses during reversals).
 """
 
 import numpy as np
@@ -17,27 +17,24 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')  # for 12h Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')  # for 1d Donchian channels
     
-    if len(df_12h) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 12h Camarilla Pivot Levels (R1, S1) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1d Donchian Channels (20-period) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Pivot point
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    # Camarilla levels
-    camarilla_r1 = pivot + 1.1 * (high_12h - low_12h) / 4.0
-    camarilla_s1 = pivot - 1.1 * (high_12h - low_12h) / 4.0
+    # Donchian upper/lower (20-period)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align to 6h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
+    # Align to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # === 6h Indicators ===
+    # === 4h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -69,7 +66,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) 
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -79,36 +76,36 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ok = vol > 2.0 * vol_ma[i]  # volume spike confirmation
-        adx_ok = adx[i] > 20.0  # moderate regime filter: only trade when sufficient trend
+        adx_ok = adx[i] > 25.0  # strong trend filter: only trade when sufficient trend
         
         if position == 0:
-            # Long: break above Camarilla R1 with volume spike and ADX > 20
-            if price > camarilla_r1_aligned[i-1] and vol_ok and adx_ok:
-                signals[i] = 0.25
+            # Long: break above 1d Donchian high with volume spike and ADX > 25
+            if price > donch_high_aligned[i-1] and vol_ok and adx_ok:
+                signals[i] = 0.30
                 position = 1
-            # Short: break below Camarilla S1 with volume spike and ADX > 20
-            elif price < camarilla_s1_aligned[i-1] and vol_ok and adx_ok:
-                signals[i] = -0.25
+            # Short: break below 1d Donchian low with volume spike and ADX > 25
+            elif price < donch_low_aligned[i-1] and vol_ok and adx_ok:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
             # Exit: ATR stoploss or opposite signal
-            if price < camarilla_r1_aligned[i-1] - 2.0 * atr[i] or (price < camarilla_s1_aligned[i-1] and vol_ok):
+            if price < donch_high_aligned[i-1] - 2.0 * atr[i] or price < donch_low_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit: ATR stoploss or opposite signal
-            if price > camarilla_s1_aligned[i-1] + 2.0 * atr[i] or (price > camarilla_r1_aligned[i-1] and vol_ok):
+            if price > donch_low_aligned[i-1] + 2.0 * atr[i] or price > donch_high_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_HTF_12h_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
-timeframe = "6h"
+name = "4h_HTF_1d_Donchian20_Breakout_VolumeSpike_ATRStop_V1"
+timeframe = "4h"
 leverage = 1.0
