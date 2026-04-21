@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.0x 24-period average).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.0x 20-period average).
 Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to balance returns and fee drag.
 Designed to work in both bull and bear markets via 1d trend filter and volatility-adjusted exits.
-Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag while maintaining edge.
+Target: 20-40 trades/year to minimize fee drag while maintaining edge.
 """
 
 import numpy as np
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r1_1d = df_1d_close + 0.275 * range_1d
     s1_1d = df_1d_close - 0.275 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -50,9 +50,9 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume filter: 24-period average (2x per day on 12h) ===
+    # === Volume filter: 20-period average ===
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,7 +72,7 @@ def generate_signals(prices):
         vol_average = vol_ma[i]
         
         if position == 0:
-            # Volume filter: current volume > 2.0x 24-period average
+            # Volume filter: current volume > 2.0x 20-period average
             vol_filter = vol_current > 2.0 * vol_average
             
             # Long conditions: price > R1 (breakout), 1d uptrend, volume filter
@@ -83,7 +83,7 @@ def generate_signals(prices):
             short_breakout = price < s1_1d_aligned[i]
             short_trend = price < ema_50_1d_aligned[i]
             
-            # Entry logic - balanced filters for optimal trade frequency
+            # Entry logic
             if long_breakout and long_trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
