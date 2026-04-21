@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_ATRStop_v3
-Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume spike confirmation (>1.5x 20-period average), and ATR trailing stop (2.0x). Designed for low trade frequency (~25-35/year) to minimize fee drag. Uses 4h primary timeframe with 1d HTF for trend and volume context. Works in bull/bear via trend filter + volatility-based stops.
+6h_WeeklyPivot_Breakout_1dTrend_VolumeConfirm_v2
+Hypothesis: Weekly Camarilla pivot breakouts with 1d EMA34 trend filter and volume spike confirmation. 
+Weekly pivots provide strong structural levels; breakouts with volume and 1d trend alignment capture 
+momentum moves. Designed for low frequency (~20-40 trades/year) to minimize fee drag. 
+Uses 6h primary timeframe with 1d and 1w HTF for context. Works in both bull (breakout continuation) 
+and bear (mean reversion at extremes) via volume confirmation and trend filter.
 """
 
 import numpy as np
@@ -15,10 +19,11 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 40 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 1d trend filter: 34-period EMA ===
+    # === 1d EMA34 trend filter ===
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
@@ -30,7 +35,29 @@ def generate_signals(prices):
     vol_ratio_1d = volume_1d / vol_ma_1d
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # === ATR for dynamic stoploss (14-period on 4h) ===
+    # === Weekly Camarilla pivot levels (using prior week OHLC) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
+    # Formula based on prior week's range
+    camarilla_h4 = close_1w + 1.1 * (high_1w - low_1w) / 2
+    camarilla_l4 = close_1w - 1.1 * (high_1w - low_1w) / 2
+    camarilla_h3 = close_1w + 1.1 * (high_1w - low_1w) / 4
+    camarilla_l3 = close_1w - 1.1 * (high_1w - low_1w) / 4
+    camarilla_h2 = close_1w + 1.1 * (high_1w - low_1w) / 6
+    camarilla_l2 = close_1w - 1.1 * (high_1w - low_1w) / 6
+    camarilla_h1 = close_1w + 1.1 * (high_1w - low_1w) / 12
+    camarilla_l1 = close_1w - 1.1 * (high_1w - low_1w) / 12
+    
+    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
+    h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    
+    # === ATR for dynamic stoploss (14-period on 6h) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -41,21 +68,6 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # === Camarilla levels (R1, S1) from previous 1d bar ===
-    # Calculated from prior 1d bar's OHLC, aligned to 4h bars
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla R1 = Close + (High - Low) * 1.1/12
-    # Camarilla S1 = Close - (High - Low) * 1.1/12
-    camarilla_range = (high_1d - low_1d) * 1.1 / 12
-    r1_1d = close_1d + camarilla_range
-    s1_1d = close_1d - camarilla_range
-    
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,7 +80,8 @@ def generate_signals(prices):
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ratio_1d_aligned[i]) or
             np.isnan(atr_14[i]) or
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i])):
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,19 +92,21 @@ def generate_signals(prices):
         price_low = low[i]
         trend_1d = ema_34_1d_aligned[i]
         vol_spike = vol_ratio_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
+        h4 = h4_aligned[i]
+        l4 = l4_aligned[i]
+        h3 = h3_aligned[i]
+        l3 = l3_aligned[i]
         atr_val = atr_14[i]
         
         if position == 0:
-            # Long: price breaks above R1 + volume spike > 1.5 + price above 1d EMA34
-            if price_close > r1 and vol_spike > 1.5 and price_close > trend_1d:
+            # Long: price breaks above weekly H4 + volume spike > 2.0 + price above 1d EMA34
+            if price_close > h4 and vol_spike > 2.0 and price_close > trend_1d:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price_close
                 highest_since_entry = price_close
-            # Short: price breaks below S1 + volume spike > 1.5 + price below 1d EMA34
-            elif price_close < s1 and vol_spike > 1.5 and price_close < trend_1d:
+            # Short: price breaks below weekly L4 + volume spike > 2.0 + price below 1d EMA34
+            elif price_close < l4 and vol_spike > 2.0 and price_close < trend_1d:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price_close
@@ -118,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_ATRStop_v3"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_VolumeConfirm_v2"
+timeframe = "6h"
 leverage = 1.0
