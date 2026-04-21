@@ -1,109 +1,100 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_VolumeATRFilter_StrongTrend_V1
-Hypothesis: Donchian(20) breakout with volume (>1.5x 20-bar MA) and strong trend filter (ADX>25) captures sustained moves in both bull and bear markets. ATR(14) stoploss (2.5x) controls risk. Uses 4h timeframe for primary signals. Target: 25-40 trades/year per symbol (100-160 over 4 years).
+1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
+Hypothesis: Camarilla pivot R1/S1 breakout on daily timeframe with volume confirmation (>1.5x 20-day average) and ATR-based stoploss works for BTC and ETH in both bull and bear markets. Uses weekly timeframe only for HTF alignment (not for signal generation). Target: 7-25 trades/year per symbol (30-100 over 4 years).
 """
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Load daily data once (primary timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot points for 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume filter: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    rng = high_1d - low_1d
+    r1 = close_1d + rng * (1.1 / 12)
+    s1 = close_1d - rng * (1.1 / 12)
     
-    # ADX calculation (14-period)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Align Camarilla levels to 1d timeframe (no shift needed as we use same timeframe)
+    r1_aligned = r1  # already on 1d
+    s1_aligned = s1  # already on 1d
+    
+    # Volume filter: 20-day average
+    vol_ma = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for stoploss (using 1d data)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = dm_minus[0] = np.nan
-    
-    # Smoothed TR, DM+
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # ATR for stoploss
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(30, n):  # start after warmup for indicators
         # Skip if indicators not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx[i]) or np.isnan(atr[i])):
+        if (np.isnan(vol_ma[i]) or np.isnan(atr[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
+        price = df_1d['close'].iloc[i]
+        volume = df_1d['volume'].iloc[i]
         
         # Volume confirmation (>1.5x average)
-        volume_ok = vol > 1.5 * vol_ma[i]
-        
-        # Strong trend filter (ADX > 25)
-        trend_ok = adx[i] > 25
+        volume_ok = volume > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume and trend
-            if price > highest_20[i] and volume_ok and trend_ok:
+            # Long: price breaks above R1 with volume
+            if price > r1_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with volume and trend
-            elif price < lowest_20[i] and volume_ok and trend_ok:
+                entry_price = price
+            # Short: price breaks below S1 with volume
+            elif price < s1_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Exit: price breaks below lower Donchian or stoploss
-            if price < lowest_20[i] or price < close[i-1] - 2.5 * atr[i]:
+            # Exit: price closes below S1 or ATR stoploss
+            if price < s1_aligned[i] or price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above upper Donchian or stoploss
-            if price > highest_20[i] or price > close[i-1] + 2.5 * atr[i]:
+            # Exit: price closes above R1 or ATR stoploss
+            if price > r1_aligned[i] or price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_VolumeATRFilter_StrongTrend_V1"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "1d"
 leverage = 1.0
