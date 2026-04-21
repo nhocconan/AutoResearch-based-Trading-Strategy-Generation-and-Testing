@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_HTF_1w_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
-Hypothesis: Use weekly Camarilla R1/S1 levels from 1w HTF + 1d volume spike (>2x 20-bar MA) for breakout entry + ATR(14) stoploss (2.0x). 
-Add regime filter: only trade when 1d ADX(14) > 20 (trending market filter) to reduce whipsaw. 
-Weekly Camarilla provides stronger structural levels than daily, reducing false breakouts. 
-Discrete position sizing (0.25) balances return and drawdown. Target 15-25 trades/year per symbol. 
-Works in bull (breakouts capture momentum) and bear (tight stops limit losses during reversals, ADX filter avoids ranging markets).
+12h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
+Hypothesis: Use 1d Camarilla pivot levels (R1, S1) + volume spike (>2x 20-bar MA) for breakout entry + ATR(14) stoploss (2.0x). 
+Add regime filter: only trade when 12h ADX(14) > 25 (strong trend filter) to reduce whipsaw in ranging markets. 
+Uses discrete position sizing (0.25) to balance return and drawdown. Target 12-30 trades/year per symbol. 
+Works in bull (breakouts capture momentum) and bear (tight stops limit losses during reversals).
 """
 
 import numpy as np
@@ -18,36 +17,27 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')  # for weekly Camarilla levels
+    df_1d = get_htf_data(prices, '1d')  # for 1d Camarilla levels
     
-    if len(df_1w) < 1:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === Weekly Camarilla Levels (R1, S1) ===
-    # Camarilla formula: based on previous week's range
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Camarilla Pivot Levels (R1, S1) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each week
-    R1 = np.full_like(close_1w, np.nan)
-    S1 = np.full_like(close_1w, np.nan)
+    # Calculate pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla R1 and S1
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    for i in range(1, len(close_1w)):
-        # Previous week's OHLC
-        phigh = high_1w[i-1]
-        plow = low_1w[i-1]
-        pclose = close_1w[i-1]
-        
-        # Camarilla R1 and S1
-        R1[i] = pclose + (1.1/12) * (phigh - plow)
-        S1[i] = pclose - (1.1/12) * (phigh - plow)
+    # Align to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Align weekly levels to daily timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    
-    # === 1d Indicators ===
+    # === 12h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -79,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) 
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -89,21 +79,21 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ok = vol > 2.0 * vol_ma[i]  # volume spike confirmation
-        adx_ok = adx[i] > 20.0  # trending market filter: avoid ranging markets
+        adx_ok = adx[i] > 25.0  # strong trend filter: only trade when sufficient trend
         
         if position == 0:
-            # Long: break above weekly R1 with volume spike and ADX > 20
-            if price > R1_aligned[i-1] and vol_ok and adx_ok:
+            # Long: break above 1d Camarilla R1 with volume spike and ADX > 25
+            if price > camarilla_r1_aligned[i-1] and vol_ok and adx_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S1 with volume spike and ADX > 20
-            elif price < S1_aligned[i-1] and vol_ok and adx_ok:
+            # Short: break below 1d Camarilla S1 with volume spike and ADX > 25
+            elif price < camarilla_s1_aligned[i-1] and vol_ok and adx_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: ATR stoploss or opposite signal
-            if price < R1_aligned[i-1] - 2.0 * atr[i] or price < S1_aligned[i-1]:
+            if price < camarilla_r1_aligned[i-1] - 2.0 * atr[i] or price < camarilla_s1_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,7 +101,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: ATR stoploss or opposite signal
-            if price > S1_aligned[i-1] + 2.0 * atr[i] or price > R1_aligned[i-1]:
+            if price > camarilla_s1_aligned[i-1] + 2.0 * atr[i] or price > camarilla_r1_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_HTF_1w_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
-timeframe = "1d"
+name = "12h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
+timeframe = "12h"
 leverage = 1.0
