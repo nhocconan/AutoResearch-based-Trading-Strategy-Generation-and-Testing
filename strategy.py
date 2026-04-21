@@ -8,102 +8,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Load 1d data ONCE before loop for pivot levels
+    # Load daily data ONCE before loop for trend, volatility, and volume context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily pivot points
+    # Daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Daily ATR for volatility regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Standard pivot point calculation
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Daily volatility ratio: current ATR / 50-period average ATR
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_ma_50
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Volume confirmation: volume / 20-period average volume
-    vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = prices['volume'].values / vol_ma_20
+    # Daily volume ratio: volume / 20-day average volume
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = df_1d['volume'].values / vol_ma_20
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    
+    # 4h Bollinger Bands for entry timing (lower timeframe precision)
+    close_4h = prices['close'].values
+    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        price_open = prices['open'].iloc[i]
-        ema_50_12h_val = ema_50_12h_aligned[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        vol_ratio_val = vol_ratio[i]
+        daily_ema = ema_50_1d_aligned[i]
+        atr_ratio_val = atr_ratio_aligned[i]
+        vol_ratio_val = vol_ratio_1d_aligned[i]
+        upper_bb_val = upper_bb[i]
+        lower_bb_val = lower_bb[i]
         
         if position == 0:
-            # Enter long: price above 12h EMA50, breaking above S1 with volume
-            if (price_close > ema_50_12h_val and 
-                price_open <= s1_val and price_close > s1_val and
-                vol_ratio_val > 1.8):
+            # Enter long: price above daily EMA, low volatility regime, volume confirmation, near BB lower band
+            if (price_close > daily_ema and 
+                atr_ratio_val < 1.2 and 
+                vol_ratio_val > 1.3 and 
+                price_close < lower_bb_val * 1.02):  # slightly below or at lower BB
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below 12h EMA50, breaking below R1 with volume
-            elif (price_close < ema_50_12h_val and 
-                  price_open >= r1_val and price_close < r1_val and
-                  vol_ratio_val > 1.8):
+            # Enter short: price below daily EMA, low volatility regime, volume confirmation, near BB upper band
+            elif (price_close < daily_ema and 
+                  atr_ratio_val < 1.2 and 
+                  vol_ratio_val > 1.3 and 
+                  price_close > upper_bb_val * 0.98):  # slightly above or at upper BB
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions
-            exit_signal = False
-            if position == 1:
-                # Exit long: price below 12h EMA50 or breaking below pivot
-                if (price_close < ema_50_12h_val or 
-                    price_close < pivot_val):
-                    exit_signal = True
-            elif position == -1:
-                # Exit short: price above 12h EMA50 or breaking above pivot
-                if (price_close > ema_50_12h_val or 
-                    price_close > pivot_val):
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit: reverse crossover or volatility expansion
+            if position == 1 and (price_close < daily_ema or atr_ratio_val > 1.8):
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and (price_close > daily_ema or atr_ratio_val > 1.8):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12hEMA50_1dPivot_Breakout_Volume"
-timeframe = "6h"
+name = "4h_DailyEMA50_BB_Pullback_Volume_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
