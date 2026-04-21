@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1
-Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and ADX regime filter.
-In trending markets (ADX > 25): breakout continuation (long above R1, short below S1).
-In ranging markets (ADX <= 25): mean reversion at Camarilla H3/L3 levels.
-Volume confirmation (1.5x average) filters false breakouts. ATR(14) stoploss (1.5x) and discrete sizing (0.25).
-Designed for 4h timeframe to target 75-200 trades over 4 years (19-50/year). Works in bull/bear via trend/regime adaptation.
+1d_Williams_Alligator_Regime_Adaptive_v1
+Hypothesis: Williams Alligator (jaw/teeth/lips) on daily timeframe defines trend regime.
+In bull regime (lips > teeth > jaw): buy pullbacks to teeth with volume confirmation.
+In bear regime (jaw > teeth > lips): sell rallies to teeth with volume confirmation.
+In chop regime (Alligator sleeping): mean revert at Bollinger Bands (20,2) with volume filter.
+Weekly trend filter (EMA34_1w) avoids counter-trend trades in strong weekly trends.
+Designed for 1d timeframe to target 30-100 trades over 4 years (7-25/year).
+Uses discrete sizing (0.25) and ATR-based stoploss (2.0x) for risk control.
 """
 
 import numpy as np
@@ -17,75 +19,46 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA50 trend and ADX)
+    # Load HTF data ONCE before loop (1w for EMA34 trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
+        return np.zeros(n)
+    
+    # === 1w OHLC for EMA34 trend filter ===
+    df_1w_close = df_1w['close'].values
+    ema_34_1w = pd.Series(df_1w_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # === 1d OHLC for Williams Alligator (SMAs) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1d OHLC for EMA50 trend ===
     df_1d_close = df_1d['close'].values
-    ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === 1d OHLC for ADX calculation ===
     df_1d_high = df_1d['high'].values
     df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
+    df_1d_volume = df_1d['volume'].values
     
-    # True Range
-    tr1 = pd.Series(df_1d_high - df_1d_low)
-    tr2 = pd.Series(np.abs(df_1d_high - np.roll(df_1d_close, 1)))
-    tr3 = pd.Series(np.abs(df_1d_low - np.roll(df_1d_close, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs of median price
+    median_price = (df_1d_high + df_1d_low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
     
-    # Directional Movement
-    up_move = pd.Series(df_1d_high - np.roll(df_1d_high, 1))
-    down_move = pd.Series(np.roll(df_1d_low, 1) - df_1d_low)
+    # Align Alligator lines to 1d timeframe (already 1d, but using align for consistency)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # === Bollinger Bands (20,2) for chop regime mean reversion ===
+    close_s = pd.Series(df_1d_close)
+    bb_mid = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
     
-    # Smoothed DM and TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
-    df_1d_open = df_1d['open'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    range_1d = df_1d_high - df_1d_low
-    r1_1d = df_1d_close + 0.275 * range_1d
-    s1_1d = df_1d_close - 0.275 * range_1d
-    h3_1d = df_1d_close + 1.1 * range_1d
-    l3_1d = df_1d_close - 1.1 * range_1d
-    h4_1d = df_1d_close + 1.382 * range_1d
-    l4_1d = df_1d_close - 1.382 * range_1d
-    
-    # Align 1d Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    
-    # === Volume confirmation (20-period average) ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     
     # === ATR (14-period) for stoploss ===
     high = prices['high'].values
@@ -98,15 +71,18 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
+    # === Volume confirmation (20-period average) ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) 
-            or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) 
+            or np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,74 +90,93 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        h3 = h3_1d_aligned[i]
-        l3 = l3_1d_aligned[i]
-        h4 = h4_1d_aligned[i]
-        l4 = l4_1d_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
-        adx_val = adx_1d_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema_1w_trend = ema_34_1w_aligned[i]
         vol_avg = vol_ma[i]
+        bb_upper_val = bb_upper_aligned[i]
+        bb_lower_val = bb_lower_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average
         volume_confirmed = volume_now > 1.5 * vol_avg
         
+        # Determine Alligator regime
+        # Bull: lips > teeth > jaw
+        # Bear: jaw > teeth > lips
+        # Chop: otherwise (Alligator sleeping)
+        is_bull = (lips_val > teeth_val) and (teeth_val > jaw_val)
+        is_bear = (jaw_val > teeth_val) and (teeth_val > lips_val)
+        is_chop = not (is_bull or is_bear)
+        
         if position == 0:
-            # Regime filter: ADX > 25 = trending, ADX <= 25 = ranging
-            if adx_val > 25:
-                # Trending market: breakout continuation
-                long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
-                short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
-            else:
-                # Ranging market: mean reversion at H3/L3
-                long_condition = (price < l3) and volume_confirmed
-                short_condition = (price > h3) and volume_confirmed
-            
-            if long_condition:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            elif short_condition:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+            # No position - look for entries
+            if is_bull:
+                # Bull regime: buy pullbacks to teeth with volume
+                long_condition = (price <= teeth_val * 1.005) and (price >= teeth_val * 0.995) and volume_confirmed
+                # Weekly trend filter: avoid longing in strong weekly downtrend
+                weekly_filter = price > ema_1w_trend
+                if long_condition and weekly_filter:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+            elif is_bear:
+                # Bear regime: sell rallies to teeth with volume
+                short_condition = (price <= teeth_val * 1.005) and (price >= teeth_val * 0.995) and volume_confirmed
+                # Weekly trend filter: avoid shorting in strong weekly uptrend
+                weekly_filter = price < ema_1w_trend
+                if short_condition and weekly_filter:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+            elif is_chop:
+                # Chop regime: mean revert at Bollinger Bands with volume
+                long_condition = (price <= bb_lower_val) and volume_confirmed
+                short_condition = (price >= bb_upper_val) and volume_confirmed
+                if long_condition:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                elif short_condition:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
         
         elif position == 1:
-            # Check stoploss (1.5x ATR)
-            if price < entry_price - 1.5 * atr[i]:
+            # Long position - check exits
+            # Stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit in trending market
-            elif adx_val > 25 and price < ema_trend:
+            # Regime change exit
+            elif is_bear:  # Flip to bear regime
                 signals[i] = 0.0
                 position = 0
-            # Mean reversion exit at H3 in ranging market
-            elif adx_val <= 25 and price > h3:
+            # Take profit at opposite BB or Alligator extreme
+            elif price >= bb_upper_val:
                 signals[i] = 0.0
                 position = 0
-            # Extreme reversal exit at H4/L4
-            elif price > h4 or price < l4:
+            elif is_bull and price >= lips_val * 1.02:  # Extended bull
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (1.5x ATR)
-            if price > entry_price + 1.5 * atr[i]:
+            # Short position - check exits
+            # Stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit in trending market
-            elif adx_val > 25 and price > ema_trend:
+            # Regime change exit
+            elif is_bull:  # Flip to bull regime
                 signals[i] = 0.0
                 position = 0
-            # Mean reversion exit at L3 in ranging market
-            elif adx_val <= 25 and price < l3:
+            # Take profit at opposite BB or Alligator extreme
+            elif price <= bb_lower_val:
                 signals[i] = 0.0
                 position = 0
-            # Extreme reversal exit at H4/L4
-            elif price > h4 or price < l4:
+            elif is_bear and price <= jaw_val * 0.98:  # Extended bear
                 signals[i] = 0.0
                 position = 0
             else:
@@ -189,6 +184,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v1"
-timeframe = "4h"
+name = "1d_Williams_Alligator_Regime_Adaptive_v1"
+timeframe = "1d"
 leverage = 1.0
