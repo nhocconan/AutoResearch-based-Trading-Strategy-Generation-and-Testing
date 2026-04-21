@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (1.8x average).
-Added Bollinger Band squeeze filter (20,2) to avoid choppy markets and reduce false signals.
-Long when price > R1 and above 1d EMA50 and volume confirmed and not in squeeze.
-Short when price < S1 and below 1d EMA50 and volume confirmed and not in squeeze.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (2.0x average).
 Volume confirmation reduces false breakouts. ATR(14) stoploss (2.5x) and discrete sizing (0.25).
 Designed to work in both bull and bear markets via 1d trend alignment and strict entry filters.
-Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -39,7 +36,7 @@ def generate_signals(prices):
     h4_1d = df_1d_close + 1.382 * range_1d
     l4_1d = df_1d_close - 1.382 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
@@ -52,21 +49,10 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 12h Bollinger Bands (20,2) for squeeze filter ===
-    close = prices['close'].values
-    bb_ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_ma + 2 * bb_std
-    bb_lower = bb_ma - 2 * bb_std
-    bb_width = bb_upper - bb_lower
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_width_ratio = bb_width / bb_width_ma
-    # Squeeze when BB width is below 80% of its 20-period average
-    bb_squeeze = bb_width_ratio < 0.8
-    
-    # === 12h ATR (14-period) for stoploss ===
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
@@ -74,9 +60,9 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume confirmation (50-period average) ===
+    # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,8 +71,7 @@ def generate_signals(prices):
     for i in range(200, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]) 
-            or np.isnan(bb_width_ratio[i])):
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -102,17 +87,15 @@ def generate_signals(prices):
         l4 = l4_1d_aligned[i]
         ema_trend = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
-        in_squeeze = bb_squeeze[i]
         
-        # Volume confirmation: current volume > 1.8x average
-        volume_confirmed = volume_now > 1.8 * vol_avg
+        # Volume confirmation: current volume > 2.0x average
+        volume_confirmed = volume_now > 2.0 * vol_avg
         
         if position == 0:
             # Only enter in trending markets (price > 1d EMA50 for long, < for short)
             # Volume confirmation required to avoid false breakouts
-            # Avoid entering during Bollinger Band squeeze (choppy market)
-            long_condition = (price > r1) and (price > ema_trend) and volume_confirmed and (not in_squeeze)
-            short_condition = (price < s1) and (price < ema_trend) and volume_confirmed and (not in_squeeze)
+            long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
+            short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
             
             if long_condition:
                 signals[i] = 0.25
@@ -157,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
