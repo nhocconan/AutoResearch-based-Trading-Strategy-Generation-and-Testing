@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_Volume_Regime_v1
-Hypothesis: Daily Camarilla R1/S1 breakout on 12h timeframe with volume confirmation and ADX regime filter.
-Designed for 12h to limit trade frequency (target: 12-37/year) and reduce fee drag.
-Long when price breaks above R1 with volume > 1.5x average and ADX > 25.
-Short when price breaks below S1 with volume > 1.5x average and ADX > 25.
-Exit when price crosses back through daily pivot point.
-Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
+4h_12h_RSI_Divergence_Volume_Confirmation
+Hypothesis: Use RSI divergences on 12h timeframe combined with volume confirmation on 4h to capture reversals.
+Long when bullish RSI divergence forms on 12h (price makes lower low, RSI makes higher low) with volume confirmation.
+Short when bearish RSI divergence forms on 12h (price makes higher high, RSI makes lower high) with volume confirmation.
+Exit when RSI crosses above 50 (for longs) or below 50 (for shorts).
+Uses volume confirmation to filter false signals and reduce overtrading. Designed for 4h to limit trade frequency.
 """
 
 import numpy as np
@@ -18,59 +17,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data for RSI divergence calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate RSI on 12h (14-period)
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Camarilla levels: R1, S1, and pivot point (PP)
-    rang = prev_high - prev_low
-    r1 = prev_close + 1.1 * rang / 12
-    s1 = prev_close - 1.1 * rang / 12
-    pp = (prev_high + prev_low + prev_close) / 3
-    
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    
-    # ADX for regime filter (trending vs ranging)
-    if len(prices) < 14:
-        return np.zeros(n)
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    # True Range
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Wilder's smoothing
+    # Wilder's smoothing for RSI
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -81,65 +42,94 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1]/period) + data[i]
         return result
     
-    atr = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    avg_gain = wilder_smooth(gain, 14)
+    avg_loss = wilder_smooth(loss, 14)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_12h = 100 - (100 / (1 + rs))
     
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    # Align RSI to 4h timeframe
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, 14)
+    # Calculate volume confirmation on 4h
+    volume = prices['volume'].values
+    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_ma[:10] = np.nan  # Not enough data for MA
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    # Track recent highs/lows for divergence detection
+    lookback = 10  # Look back 10 periods for swing points
+    
+    for i in range(30, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(adx[i])):
+        if np.isnan(rsi_12h_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume filter: current volume > 1.5 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
-        else:
-            volume_ok = False
-        
-        # Regime filter: ADX > 25 indicates trending market
-        trending = adx[i] > 25
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_ok = vol_ratio > 1.5  # Volume > 1.5x average
         
         if position == 0:
-            # Long conditions: break above R1 + volume + trending
-            if price > r1_aligned[i] and volume_ok and trending:
+            # Check for bullish divergence: price lower low, RSI higher low
+            bullish_div = False
+            if i >= lookback:
+                # Find recent swing low in price
+                price_lows = []
+                for j in range(i-lookback, i+1):
+                    if j == 0 or prices['low'].iloc[j] < prices['low'].iloc[j-1]:
+                        price_lows.append(j)
+                if len(price_lows) >= 2:
+                    low1_idx, low2_idx = price_lows[-2], price_lows[-1]
+                    price_low1 = prices['low'].iloc[low1_idx]
+                    price_low2 = prices['low'].iloc[low2_idx]
+                    rsi_low1 = rsi_12h_aligned[low1_idx]
+                    rsi_low2 = rsi_12h_aligned[low2_idx]
+                    if not (np.isnan(rsi_low1) or np.isnan(rsi_low2)):
+                        if price_low2 < price_low1 and rsi_low2 > rsi_low1:
+                            bullish_div = True
+            
+            # Check for bearish divergence: price higher high, RSI lower high
+            bearish_div = False
+            if i >= lookback:
+                # Find recent swing high in price
+                price_highs = []
+                for j in range(i-lookback, i+1):
+                    if j == 0 or prices['high'].iloc[j] > prices['high'].iloc[j-1]:
+                        price_highs.append(j)
+                if len(price_highs) >= 2:
+                    high1_idx, high2_idx = price_highs[-2], price_highs[-1]
+                    price_high1 = prices['high'].iloc[high1_idx]
+                    price_high2 = prices['high'].iloc[high2_idx]
+                    rsi_high1 = rsi_12h_aligned[high1_idx]
+                    rsi_high2 = rsi_12h_aligned[high2_idx]
+                    if not (np.isnan(rsi_high1) or np.isnan(rsi_high2)):
+                        if price_high2 > price_high1 and rsi_high2 < rsi_high1:
+                            bearish_div = True
+            
+            # Enter long on bullish divergence with volume confirmation
+            if bullish_div and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S1 + volume + trending
-            elif price < s1_aligned[i] and volume_ok and trending:
+            # Enter short on bearish divergence with volume confirmation
+            elif bearish_div and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below pivot point
-            if price < pp_aligned[i]:
+            # Exit long when RSI crosses above 50 (momentum fading)
+            if rsi_12h_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above pivot point
-            if price > pp_aligned[i]:
+            # Exit short when RSI crosses below 50 (momentum fading)
+            if rsi_12h_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -147,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Regime_v1"
-timeframe = "12h"
+name = "4h_12h_RSI_Divergence_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
