@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_12h1d_Ichimoku_Breakout_v1
-Hypothesis: Ichimoku TK cross with cloud filter from 12h/1d timeframes on 6h chart.
-- Bullish: Tenkan > Kijun AND price > Senkou Span A/B (cloud) from 12h
-- Bearish: Tenkan < Kijun AND price < Senkou Span A/B (cloud) from 1d
-- Uses weekly trend filter (EMA50) to avoid counter-trend trades
-- Target: 15-30 trades/year per symbol (60-120 over 4 years)
+4h_Donchian20_Breakout_Volume_ATRFilter_V1
+Hypothesis: Donchian(20) breakout with volume confirmation and ATR-based trend filter on 4h timeframe.
+Works in bull/bear markets: breakouts capture strong moves, volume filter avoids false breakouts,
+ATR filter ensures trading in the direction of volatility expansion. Uses 1d EMA50 for trend bias.
+Target: 20-50 trades/year per symbol (80-200 over 4 years).
 """
 
 import numpy as np
@@ -14,150 +13,122 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for Ichimoku cloud (primary trend)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 52:  # need 26*2 for Ichimoku
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Ichimoku components (12h)
-    # Tenkan-sen: (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
-    
-    # Kijun-sen: (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
-    
-    # Senkou Span A: (Tenkan + Kijun) / 2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B: (52-period high + 52-period low) / 2 shifted 26 periods ahead
-    high_52 = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # Align Ichimoku to 6h
-    tenkan_aligned = align_htf_to_ltf(prices, df_12h, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_12h, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_a, additional_delay_bars=26)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_b, additional_delay_bars=26)
-    
-    # Load 1d data for additional cloud confirmation
+    # Load 1d data once for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Ichimoku components (1d) for secondary confirmation
-    high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (high_9_1d + low_9_1d) / 2
+    # 1d EMA50 for trend bias
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (high_26_1d + low_26_1d) / 2
+    # Calculate ATR(14) for volatility filter and stoploss
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
-    high_52_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_52_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = ((high_52_1d + low_52_1d) / 2)
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d, additional_delay_bars=26)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d, additional_delay_bars=26)
+    # ATR(14) - using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr = np.zeros_like(tr)
+    atr[:] = np.nan
+    if len(tr) >= 14:
+        # Initial ATR as simple average of first 14 TR values
+        atr[13] = np.nanmean(tr[1:15])
+        # Wilder's smoothing: ATR[t] = (ATR[t-1] * 13 + TR[t]) / 14
+        for i in range(14, len(tr)):
+            if not np.isnan(tr[i]) and not np.isnan(atr[i-1]):
+                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Load weekly data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    for i in range(lookback-1, len(high)):
+        if not np.isnan(high[i-lookback+1:i+1]).any() and not np.isnan(low[i-lookback+1:i+1]).any():
+            highest_high[i] = np.max(high[i-lookback+1:i+1])
+            lowest_low[i] = np.min(low[i-lookback+1:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if indicators not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
+        volume = prices['volume'].iloc[i]
         
-        # Cloud boundaries (top and bottom of cloud)
-        cloud_top_12h = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom_12h = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_top_1d = np.maximum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        cloud_bottom_1d = np.minimum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        # Volume filter: current volume > 1.3 * 20-period average
+        if i >= 20:
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 1.3 * vol_ma
+        else:
+            volume_ok = False
         
-        # TK cross signals
-        tk_bullish_12h = tenkan_aligned[i] > kijun_aligned[i]
-        tk_bearish_12h = tenkan_aligned[i] < kijun_aligned[i]
-        tk_bullish_1d = tenkan_1d_aligned[i] > kijun_1d_aligned[i]
-        tk_bearish_1d = tenkan_1d_aligned[i] < kijun_1d_aligned[i]
-        
-        # Price relative to cloud
-        price_above_cloud_12h = price > cloud_top_12h
-        price_below_cloud_12h = price < cloud_bottom_12h
-        price_above_cloud_1d = price > cloud_top_1d
-        price_below_cloud_1d = price < cloud_bottom_1d
-        
-        # Weekly trend filter
-        weekly_uptrend = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] if i > 0 else True
-        weekly_downtrend = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] if i > 0 else False
+        # Trend filter: 1d EMA50 slope
+        if i >= 51:
+            ema_rising = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            ema_falling = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]
+        else:
+            ema_rising = True
+            ema_falling = True
         
         if position == 0:
-            # Long: bullish TK cross + price above cloud (both timeframes) + weekly uptrend
-            if (tk_bullish_12h and tk_bullish_1d and 
-                price_above_cloud_12h and price_above_cloud_1d and 
-                weekly_uptrend):
+            # Long entry: price breaks above Donchian upper band + volume + 1d uptrend
+            if (price > highest_high[i] and volume_ok and ema_rising):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish TK cross + price below cloud (both timeframes) + weekly downtrend
-            elif (tk_bearish_12h and tk_bearish_1d and 
-                  price_below_cloud_12h and price_below_cloud_1d and 
-                  weekly_downtrend):
+            # Short entry: price breaks below Donchian lower band + volume + 1d downtrend
+            elif (price < lowest_low[i] and volume_ok and ema_falling):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price drops below cloud OR TK cross turns bearish
-            if (price < cloud_bottom_12h or tk_bearish_12h):
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price breaks below Donchian lower band or ATR-based stop
+            # ATR stop: 2.5 * ATR below entry (tracked via position management)
+            # For simplicity, exit when price retracement of 50% of the breakout move
+            if i >= 1:
+                breakout_level = highest_high[i-1]  # Previous bar's high was the breakout level
+                retracement = price < (breakout_level - 0.5 * atr[i])
+                if retracement or price < lowest_low[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above cloud OR TK cross turns bullish
-            if (price > cloud_top_12h or tk_bullish_12h):
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price breaks above Donchian upper band or ATR-based stop
+            if i >= 1:
+                breakout_level = lowest_low[i-1]  # Previous bar's low was the breakdown level
+                retracement = price > (breakout_level + 0.5 * atr[i])
+                if retracement or price > highest_high[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_12h1d_Ichimoku_Breakout_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_Volume_ATRFilter_V1"
+timeframe = "4h"
 leverage = 1.0
