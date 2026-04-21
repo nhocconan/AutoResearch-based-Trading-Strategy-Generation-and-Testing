@@ -1,46 +1,50 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_Chaikin_Money_Flow_Trend_Follow_v1
-Hypothesis: Follow weekly trend using EMA34, enter on pullbacks when Chaikin Money Flow confirms institutional accumulation/distribution.
-Long when weekly EMA34 up, price pulls back to EMA20, and CMF > 0.15.
-Short when weekly EMA34 down, price pulls back to EMA20, and CMF < -0.15.
-Exit when CMF crosses zero or price moves against weekly trend.
-Designed for low trade frequency (~15-30 trades/year) to minimize fee drag.
+4h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v2
+Hypothesis: Breakout of daily Camarilla R1/S1 levels with weekly trend filter (EMA34) and volume confirmation (1.5x 20-bar avg).
+Long when price > daily R1 + weekly EMA34 up + volume spike.
+Short when price < daily S1 + weekly EMA34 down + volume spike.
+Exit when price crosses daily pivot point (PP).
+Uses 4h as primary timeframe for signal generation, with 1d for levels and 1w for trend.
+Target: 20-40 trades/year per symbol. Works in bull/bear by following weekly trend.
 """
 
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for CMF calculation
+    # Load 1d data once for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Chaikin Money Flow (20-period)
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    mf_multiplier = np.where((high_1d - low_1d) != 0, 
-                             ((close_1d - low_1d) - (high_1d - close_1d)) / (high_1d - low_1d), 
-                             0)
-    money_flow_volume = mf_multiplier * volume_1d
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # CMF = 20-period sum of Money Flow Volume / 20-period sum of Volume
-    mfv_sum = pd.Series(money_flow_volume).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume_1d).rolling(window=20, min_periods=20).sum().values
-    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0)
+    # Camarilla levels: R1, S1, and pivot point (PP)
+    rang = prev_high - prev_low
+    r1 = prev_close + 1.1 * rang / 12
+    s1 = prev_close - 1.1 * rang / 12
+    pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align CMF to 12h timeframe
-    cmf_aligned = align_htf_to_ltf(prices, df_1d, cmf)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
     # Load weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -50,26 +54,30 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     # Calculate EMA34 on weekly
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Calculate EMA20 on 12h for pullback entries
-    close = prices['close'].values
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(cmf_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or 
-            np.isnan(ema20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
+        
+        # Volume filter: current volume > 1.5 * 20-period average
+        if i >= 20:
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 1.5 * vol_ma
+        else:
+            volume_ok = False
         
         # Weekly trend filter: EMA34 slope
         if i >= 51:
@@ -82,26 +90,26 @@ def generate_signals(prices):
             weekly_downtrend = False
         
         if position == 0:
-            # Long conditions: weekly uptrend + price near EMA20 (pullback) + CMF accumulation
-            if weekly_uptrend and price <= ema20[i] * 1.01 and price >= ema20[i] * 0.99 and cmf_aligned[i] > 0.15:
+            # Long conditions: break above R1 + volume + weekly uptrend
+            if price > r1_aligned[i] and volume_ok and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: weekly downtrend + price near EMA20 (pullback) + CMF distribution
-            elif weekly_downtrend and price >= ema20[i] * 0.99 and price <= ema20[i] * 1.01 and cmf_aligned[i] < -0.15:
+            # Short conditions: break below S1 + volume + weekly downtrend
+            elif price < s1_aligned[i] and volume_ok and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: CMF turns negative or weekly trend breaks down
-            if cmf_aligned[i] < 0 or not weekly_uptrend:
+            # Long exit: price crosses back below pivot point
+            if price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: CMF turns positive or weekly trend breaks up
-            if cmf_aligned[i] > 0 or not weekly_downtrend:
+            # Short exit: price crosses back above pivot point
+            if price > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_Chaikin_Money_Flow_Trend_Follow_v1"
-timeframe = "12h"
+name = "4h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v2"
+timeframe = "4h"
 leverage = 1.0
