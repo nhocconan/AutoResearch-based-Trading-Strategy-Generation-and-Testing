@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Load 1d data ONCE before loop for trend and structure
@@ -27,8 +27,8 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_14 / atr_ma_20
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_ma_50
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Volume confirmation: volume / 30-period average volume (1d)
@@ -39,7 +39,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
             np.isnan(vol_ratio_aligned[i])):
@@ -51,29 +51,29 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         ema_trend = ema_34_1d_aligned[i]
         vol_ratio = vol_ratio_aligned[i]
-        vol_threshold = 1.5  # Volume must be above average
+        vol_threshold = 1.4  # Volume must be above average
         atr_ratio_val = atr_ratio_aligned[i]
         
         if position == 0:
             # Enter long: price above EMA, volume spike, moderate volatility
             if (price_close > ema_trend and 
                 vol_ratio > vol_threshold and 
-                atr_ratio_val > 0.6 and atr_ratio_val < 2.5):
+                atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
                 signals[i] = 0.25
                 position = 1
             # Enter short: price below EMA, volume spike, moderate volatility
             elif (price_close < ema_trend and 
                   vol_ratio > vol_threshold and 
-                  atr_ratio_val > 0.6 and atr_ratio_val < 2.5):
+                  atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
             # Exit: reverse trend or volatility extremes
-            if position == 1 and (price_close < ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.5):
+            if position == 1 and (price_close < ema_trend or atr_ratio_val > 2.2 or atr_ratio_val < 0.6):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.5):
+            elif position == -1 and (price_close > ema_trend or atr_ratio_val > 2.2 or atr_ratio_val < 0.6):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4d_EMA34_Volume_ATRFilter"
-timeframe = "4h"
+name = "6h_1dEMA34_Volume_ATR_Filter"
+timeframe = "6h"
 leverage = 1.0
