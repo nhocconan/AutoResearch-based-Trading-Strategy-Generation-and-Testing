@@ -13,10 +13,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Weekly EMA21 for trend filter ===
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 21:
         return np.zeros(n)
+    
+    # === Weekly EMA21 for trend filter ===
     close_1w = df_1w['close'].values
     ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
@@ -41,7 +43,7 @@ def generate_signals(prices):
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # Align ATR percentile to 4h timeframe
+    # Align ATR percentile to 12h timeframe
     atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
     # === Daily SMA50 for trend filter ===
@@ -78,14 +80,14 @@ def generate_signals(prices):
                 price_close > ema_trend and
                 price_close > sma_trend and
                 vol_ratio_val > 1.5):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Enter short in low volatility (range) + weekly downtrend + daily downtrend + volume
             elif (atr_percentile_val < 30 and   # Low volatility regime
                   price_close < ema_trend and
                   price_close < sma_trend and
                   vol_ratio_val > 1.5):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position != 0:
@@ -98,10 +100,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "4h_WeeklyEMA21_DailyATR_Regime_SMA50_Trend_Volume"
-timeframe = "4h"
+name = "12h_WeeklyEMA21_DailyATR_Regime_SMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
