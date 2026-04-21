@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_WeeklyPivot_Direction_Volume_Confirmation_v1
-Hypothesis: On 6h timeframe, go long when price breaks above 20-period Donchian high
-with weekly pivot direction bullish (price > weekly pivot) and volume > 1.5x 20-period average.
-Go short when price breaks below 20-period Donchian low with weekly pivot direction bearish
-(price < weekly pivot) and volume > 1.5x average. Exit when price crosses back through
-the 20-period Donchian midpoint. Uses weekly pivot for regime filter to avoid counter-trend
-trades and volume confirmation to avoid false breakouts. Target: 15-30 trades/year per symbol.
-Works in bull/bear by following higher timeframe (weekly) regime.
+12h_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1
+Hypothesis: Use weekly timeframe for trend regime and 12h for entries.
+Long when price breaks above 1w R1 with weekly uptrend (price > SMA50) and volume > 2x 20-period average.
+Short when price breaks below 1w S1 with weekly downtrend (price < SMA50) and volume > 2x 20-period average.
+Exit when price crosses 1w pivot point. Uses volume confirmation and regime filter to reduce false signals.
+Target: 15-30 trades/year per symbol. Weekly trend filter helps in both bull and bear markets.
 """
 
 import numpy as np
@@ -19,83 +17,85 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for pivot direction
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Load weekly data once for regime and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Previous week's OHLC for weekly pivot point
-    prev_high_w = np.roll(high_w, 1)
-    prev_low_w = np.roll(low_w, 1)
-    prev_close_w = np.roll(close_w, 1)
-    prev_high_w[0] = np.nan
-    prev_low_w[0] = np.nan
-    prev_close_w[0] = np.nan
+    # Previous week's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Weekly pivot point: (H + L + C) / 3
-    pp_w = (prev_high_w + prev_low_w + prev_close_w) / 3
-    pp_w_aligned = align_htf_to_ltf(prices, df_w, pp_w)
+    # Camarilla levels: R1, S1, and pivot point (PP)
+    rang = prev_high - prev_low
+    r1 = prev_close + 1.1 * rang / 12
+    s1 = prev_close - 1.1 * rang / 12
+    pp = (prev_high + prev_low + prev_close) / 3
+    
+    # Weekly trend filter: price relative to SMA50
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if weekly pivot not ready
-        if np.isnan(pp_w_aligned[i]):
+    for i in range(50, n):
+        # Skip if indicators not ready
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(sma50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        high = prices['high'].iloc[i]
-        low = prices['low'].iloc[i]
-        close = prices['close'].iloc[i]
+        price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Calculate 20-period Donchian channels
+        # Volume filter: current volume > 2.0 * 20-period average
         if i >= 20:
-            lookback_high = prices['high'].iloc[i-20:i].max()
-            lookback_low = prices['low'].iloc[i-20:i].min()
-            donchian_high = lookback_high
-            donchian_low = lookback_low
-            donchian_mid = (donchian_high + donchian_low) / 2
-            
-            # Volume filter: current volume > 1.5 * 20-period average
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
+            volume_ok = volume > 2.0 * vol_ma
         else:
-            donchian_high = np.nan
-            donchian_low = np.nan
-            donchian_mid = np.nan
             volume_ok = False
         
+        # Weekly trend filter: price > SMA50 for uptrend, price < SMA50 for downtrend
+        uptrend = price > sma50_1w_aligned[i]
+        downtrend = price < sma50_1w_aligned[i]
+        
         if position == 0:
-            # Long conditions: break above Donchian high + weekly pivot bullish + volume
-            if (not np.isnan(donchian_high) and high > donchian_high and 
-                close > pp_w_aligned[i] and volume_ok):
+            # Long conditions: break above R1 + volume + weekly uptrend
+            if price > r1_aligned[i] and volume_ok and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below Donchian low + weekly pivot bearish + volume
-            elif (not np.isnan(donchian_low) and low < donchian_low and 
-                  close < pp_w_aligned[i] and volume_ok):
+            # Short conditions: break below S1 + volume + weekly downtrend
+            elif price < s1_aligned[i] and volume_ok and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below Donchian midpoint
-            if not np.isnan(donchian_mid) and close < donchian_mid:
+            # Long exit: price crosses back below pivot point
+            if price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above Donchian midpoint
-            if not np.isnan(donchian_mid) and close > donchian_mid:
+            # Short exit: price crosses back above pivot point
+            if price > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Direction_Volume_Confirmation_v1"
-timeframe = "6h"
+name = "12h_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1"
+timeframe = "12h"
 leverage = 1.0
