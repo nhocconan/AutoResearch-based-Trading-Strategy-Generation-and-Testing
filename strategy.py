@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_ATRStop_v1
-Hypothesis: Use 4h EMA34 for HTF trend regime (captures multi-day momentum) + 1h Camarilla R1/S1 breakout with volume confirmation (>2.0x 20-bar average) and ATR-based stoploss (2.5x). Entry only during 08-20 UTC session to avoid low-liquidity hours. Target 60-150 total trades over 4 years (15-37/year) to stay within fee drag limits. Uses discrete position sizing (0.20) to minimize churn. Works in bull via breakout momentum and bear via trend-filtered mean reversion at Camarilla levels.
+6h_WeeklyDonchian20_Breakout_1dVolumeSpike_Regime_v1
+Hypothesis: Use weekly Donchian(20) breakout direction as HTF trend filter (more reliable than EMAs in chop) + 6h price breakout above/below prior 6h bar's high/low with 1d volume spike (>2.0x 20-period average) for entry confirmation. This avoids false breakouts in ranging markets while capturing strong weekly trends. Target 60-120 trades over 4 years (15-30/year) to stay within 6h fee drag limits. Works in bull via breakout continuation and bear via short breakdowns with volume confirmation.
 """
 
 import numpy as np
@@ -13,48 +13,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (4h for EMA34 trend)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Load HTF data ONCE before loop (1w for Donchian trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 4h EMA34 for HTF trend regime ===
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # === Weekly Donchian(20) for HTF trend regime ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
     
-    # === 1h close, EMA20 for trend alignment ===
+    # === 6h close, high, low for breakout detection ===
     close = prices['close'].values
-    ema_20_1h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # === 1h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     
+    # === 6h ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 1h volume confirmation (volume > 2.0x 20-period average) ===
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma_20)
-    
-    # === 1h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
-    
-    # === Session filter: 08-20 UTC only ===
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    in_session = (hours >= 8) & (hours <= 20)
+    # === 1d volume confirmation (volume > 2.0x 20-period average) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    volume_confirmed = volume_1d > (2.0 * vol_ma_20_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,10 +53,9 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     for i in range(100, n):
-        # Skip if indicators not ready or outside session
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(ema_20_1h[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i]) or 
-            not in_session[i]):
+        # Skip if indicators not ready
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,29 +63,27 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_34_4h_val = ema_34_4h_aligned[i]
-        ema_20_1h_val = ema_20_1h[i]
-        r1_val = r1[i]
-        s1_val = s1[i]
+        donchian_high = donchian_high_20_aligned[i]
+        donchian_low = donchian_low_20_aligned[i]
         vol_conf = volume_confirmed[i]
         
-        # Trend alignment: price above both indicators for long, below both for short
-        uptrend = price > ema_34_4h_val and price > ema_20_1h_val
-        downtrend = price < ema_34_4h_val and price < ema_20_1h_val
+        # Weekly trend: price above Donchian high = uptrend, below low = downtrend
+        uptrend = price > donchian_high
+        downtrend = price < donchian_low
         
         if position == 0:
-            # Long: price closes above R1, uptrend alignment, volume confirmed
-            long_condition = (price > r1_val) and uptrend and vol_conf
-            # Short: price closes below S1, downtrend alignment, volume confirmed
-            short_condition = (price < s1_val) and downtrend and vol_conf
+            # Long: price breaks above prior 6h high, weekly uptrend, volume confirmed
+            long_condition = (price > high[i-1]) and uptrend and vol_conf
+            # Short: price breaks below prior 6h low, weekly downtrend, volume confirmed
+            short_condition = (price < low[i-1]) and downtrend and vol_conf
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
                 bars_since_entry = 0
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
                 bars_since_entry = 0
@@ -105,37 +93,37 @@ def generate_signals(prices):
             
             # Minimum holding period of 3 bars to reduce churn
             if bars_since_entry < 3:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.5x ATR)
+            # Check stoploss (2.0x ATR)
             if position == 1:
-                if price < entry_price - 2.5 * atr[i]:
+                if price < entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price below either indicator)
-                elif price < ema_34_4h_val or price < ema_20_1h_val:
+                # Trend reversal exit (price below weekly Donchian low)
+                elif price < donchian_low:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.5 * atr[i]:
+                if price > entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price above either indicator)
-                elif price > ema_34_4h_val or price > ema_20_1h_val:
+                # Trend reversal exit (price above weekly Donchian high)
+                elif price > donchian_high:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike_ATRStop_v1"
-timeframe = "1h"
+name = "6h_WeeklyDonchian20_Breakout_1dVolumeSpike_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
