@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Overbought_Oversold_With_Volume_Filter
-Hypothesis: In ranging markets, RSI extremes often reverse. In trending markets, 
-extremes can continue but volatility increases. Using 4h RSI with volume 
-confirmation helps filter false signals. Works in bull markets by buying oversold 
-dips in uptrends and selling overbought rallies in downtrends. Works in bear 
-markets by selling bounces in downtrends and buying dips in uptrends. Volume 
-ensures institutional participation, reducing whipsaws. Target: 20-40 trades/year.
+12h_WeeklyTrend_DailyMomentum_With_Volume
+Hypothesis: Use weekly trend direction from EMA34 on 1W timeframe to filter trades, 
+enter on 12h RSI pullbacks with volume confirmation, and exit on opposite RSI extreme. 
+This captures momentum in trending markets while avoiding counter-trend trades. 
+Weekly trend filter reduces whipsaws in sideways markets. Target: 12-37 trades/year.
+Works in bull markets by catching pullbacks in uptrends and in bear markets by 
+shorting bounces in downtrends. Volume confirmation ensures institutional participation.
 """
 
 import numpy as np
@@ -18,17 +18,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1-day data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # === 1-day EMA50 for trend filter ===
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === Weekly EMA34 for trend filter ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 4-hour RSI(14) ===
+    # === 12h RSI(14) ===
     close = prices['close'].values
     delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0)
@@ -54,16 +54,16 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     rsi = np.concatenate([[np.nan], rsi])  # align with close
     
-    # === 4-hour Volume confirmation ===
+    # === 12h Volume confirmation ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(35, n):  # Start after warmup
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(rsi[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
@@ -72,21 +72,21 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_50_1d_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
         rsi_val = rsi[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Long: price above daily EMA50 (uptrend) + RSI oversold + volume
+            # Long: weekly uptrend + RSI oversold bounce + volume
             if (price_close > ema_trend and
                 rsi_val < 30 and
-                vol_ratio_val > 1.5):
+                vol_ratio_val > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily EMA50 (downtrend) + RSI overbought + volume
+            # Short: weekly downtrend + RSI overbought bounce + volume
             elif (price_close < ema_trend and
                   rsi_val > 70 and
-                  vol_ratio_val > 1.5):
+                  vol_ratio_val > 1.3):
                 signals[i] = -0.25
                 position = -1
         
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Overbought_Oversold_With_Volume_Filter"
-timeframe = "4h"
+name = "12h_WeeklyTrend_DailyMomentum_With_Volume"
+timeframe = "12h"
 leverage = 1.0
