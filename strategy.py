@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Donchian breakout with 4h trend filter and 1d volume confirmation.
-# Long: price breaks above 4h Donchian high (20) AND 1h close > 1h VWAP AND 1d volume > 1.5x 20-day average
-# Short: price breaks below 4h Donchian low (20) AND 1h close < 1h VWAP AND 1d volume > 1.5x 20-day average
-# Uses 4h for trend direction (structure), 1h for entry timing precision, 1d for volume confirmation.
-# Target: 15-35 trades/year by requiring multi-timeframe alignment + volume filter.
+# Hypothesis: 6h 3-bar swing + 1d volume profile + 1w trend filter.
+# Identifies short-term exhaustion moves against the weekly trend.
+# In uptrend (price > 1w EMA50): go long on 3-bar downswing with high volume.
+# In downtrend (price < 1w EMA50): go short on 3-bar upswing with high volume.
+# Uses 1d volume spike to confirm institutional participation in the reversal.
+# Target: 15-30 trades/year by requiring weekly trend alignment + 3-bar swing + volume spike.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 4h for Donchian channels (trend structure)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 1w for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     # Load 1d for volume confirmation
@@ -24,27 +25,17 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period high/low)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA50 for trend filter
+    close_w = df_1w['close'].values
+    ema50_w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d volume moving average (20-day)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Daily volume and its 20-period average
+    vol_d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_d).rolling(window=20, min_periods=20).mean().values
     
-    # Align 4h indicators to 1h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Align 1d volume average to 1h
+    # Align weekly and daily indicators to 6h
+    ema50_w_aligned = align_htf_to_ltf(prices, df_1w, ema50_w)
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Calculate 1h VWAP (typical price * volume) / cumulative volume
-    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
-    vwap = (typical_price * prices['volume']).cumsum() / prices['volume'].cumsum()
-    vwap = vwap.values
     
     # Pre-compute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -54,8 +45,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(vwap[i])):
+        if (np.isnan(ema50_w_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,43 +62,54 @@ def generate_signals(prices):
             continue
         
         # Current values
-        close = prices['close'].iloc[i]
-        vol_current = prices['volume'].iloc[i]
+        vol_current = df_1d['volume'].iloc[i // 96] if i >= 96 else 0  # daily volume aligned to 6h (96 bars/day)
+        if i // 96 >= len(vol_d):
+            vol_current = 0
         
-        # Breakout conditions
-        breakout_up = close > donchian_high_aligned[i]
-        breakout_down = close < donchian_low_aligned[i]
+        # Weekly trend filter
+        uptrend = prices['close'].iloc[i] > ema50_w_aligned[i]
+        downtrend = prices['close'].iloc[i] < ema50_w_aligned[i]
         
-        # VWAP filter: price above/below VWAP for directional bias
-        above_vwap = close > vwap[i]
-        below_vwap = close < vwap[i]
+        # 3-bar swing detection (requires 3 consecutive closes in same direction)
+        if i >= 2:
+            close1 = prices['close'].iloc[i-2]
+            close2 = prices['close'].iloc[i-1]
+            close3 = prices['close'].iloc[i]
+            
+            # 3-bar downswing: lower lows and lower closes
+            downswing = (close2 < close1) and (close3 < close2)
+            # 3-bar upswing: higher highs and higher closes
+            upswing = (close2 > close1) and (close3 > close2)
+        else:
+            downswing = False
+            upswing = False
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        volume_confirm = vol_current > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current daily volume > 2.0x 20-day average
+        volume_confirm = vol_current > 2.0 * vol_ma_20_1d_aligned[i]
         
         if position == 0:
-            # Enter long: upward breakout + above VWAP + volume confirmation
-            if breakout_up and above_vwap and volume_confirm:
-                signals[i] = 0.20
+            # Enter long in uptrend on 3-bar downswing with volume (pullback to buy)
+            if uptrend and downswing and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: downward breakout + below VWAP + volume confirmation
-            elif breakout_down and below_vwap and volume_confirm:
-                signals[i] = -0.20
+            # Enter short in downtrend on 3-bar upswing with volume (pullback to sell)
+            elif downtrend and upswing and volume_confirm:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: opposite breakout OR volume drops below average
+            # Exit conditions: reversal of the swing or volume drops
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below Donchian low OR volume drops
-                if close < donchian_low_aligned[i]:
+                # Exit long: 3-bar upswing starts OR volume drops below average
+                if upswing:
                     exit_signal = True
                 elif vol_current < vol_ma_20_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short: price breaks above Donchian high OR volume drops
-                if close > donchian_high_aligned[i]:
+                # Exit short: 3-bar downswing starts OR volume drops below average
+                if downswing:
                     exit_signal = True
                 elif vol_current < vol_ma_20_1d_aligned[i]:
                     exit_signal = True
@@ -118,10 +119,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_Donchian_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_3BarSwing_1dVolume_1wTrend"
+timeframe = "6h"
 leverage = 1.0
