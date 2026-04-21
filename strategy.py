@@ -8,34 +8,31 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for weekly pivot calculation
+    # Load weekly data for weekly pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly high/low from weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot points (using weekly high/low/close)
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+    weekly_r1 = 2 * weekly_pivot - low_1w
+    weekly_s1 = 2 * weekly_pivot - high_1w
+    
+    # Align weekly pivot levels to 12h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # Load daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate weekly high/low from daily data (using 5-day rolling window for weekly)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly high/low (5-day lookback)
-    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    
-    # Calculate weekly pivot points (using weekly high/low/close)
-    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    
-    # Align weekly pivot levels to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    
-    # 60-period moving average for trend filter (6h timeframe)
-    close = prices['close'].values
-    ma_60 = pd.Series(close).rolling(window=60, min_periods=60).mean().values
-    
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 20-period average on 12h
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -47,7 +44,7 @@ def generate_signals(prices):
         if (np.isnan(weekly_pivot_aligned[i]) or 
             np.isnan(weekly_r1_aligned[i]) or 
             np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(ma_60[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -57,17 +54,17 @@ def generate_signals(prices):
         pivot = weekly_pivot_aligned[i]
         r1 = weekly_r1_aligned[i]
         s1 = weekly_s1_aligned[i]
-        ma = ma_60[i]
+        ema_50 = ema_50_1d_aligned[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
-        price = close[i]
+        price = prices['close'].iloc[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = vol > 1.5 * vol_ma
+        # Volume confirmation: current volume > 1.8x 20-period average
+        volume_confirm = vol > 1.8 * vol_ma
         
-        # Trend filter: price above/below 60-period MA
-        uptrend = price > ma
-        downtrend = price < ma
+        # Trend filter: price above/below 50-day EMA
+        uptrend = price > ema_50
+        downtrend = price < ema_50
         
         if position == 0:
             # Long: Price crosses above weekly R1 + uptrend + volume confirmation
@@ -102,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1_S1_Breakout_Trend_Volume"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R1_S1_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
