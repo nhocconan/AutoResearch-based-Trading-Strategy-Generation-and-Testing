@@ -33,7 +33,7 @@ def generate_signals(prices):
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # Align ATR percentile to 4h timeframe
+    # Align ATR percentile to 12h timeframe
     atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
     # === Daily SMA50 for trend filter ===
@@ -90,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATR_Volatility_Regime_SMA50_Trend_Volume"
-timeframe = "4h"
+name = "12h_ATR_Volatility_Regime_SMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
