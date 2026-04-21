@@ -1,19 +1,40 @@
 #!/usr/bin/env python3
 """
-6h_ADX_DMI_Crossover_1dFilter
-Hypothesis: On 6h timeframe, DMI+ crossing above DMI- with ADX > 20 signals trend strength. 
-Use 1d timeframe to filter for bull/bear regime: only go long when 1d close > 1d EMA50, 
-only short when 1d close < 1d EMA50. This avoids counter-trend trades in strong regimes.
-Trades only when trend is aligned across timeframes, reducing whipsaws. Targets 15-35 trades/year.
-Works in bull/bear markets by following the higher timeframe trend.
+12h_KAMA_Trend_Filter_V2
+Hypothesis: Kaufman's Adaptive Moving Average (KAMA) on 12h timeframe provides adaptive trend direction. 
+Enter long when price crosses above KAMA with volume confirmation (1.5x 20-period average) and ADX > 20. 
+Enter short when price crosses below KAMA with same conditions. 
+Exit when price crosses back below/above KAMA or ADX drops below 15 (weakening trend). 
+KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends. 
+Targets 15-35 trades/year by requiring both volume and trend confirmation. 
+Works in bull/bear markets by following adaptive trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_dmi(high, low, close, period=14):
-    """Calculate DMI+ and DMI-"""
+def calculate_kama(close, er_period=10, fast_ema=2, slow_ema=30):
+    """Calculate Kaufman's Adaptive Moving Average"""
+    change = np.abs(close - np.roll(close, er_period))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if hasattr(np, 'sum') else np.abs(np.diff(close, prepend=close[0])).sum()
+    # Handle first er_period values
+    for i in range(len(change)):
+        if i < er_period:
+            change[i] = np.abs(close[i] - close[0])
+            volatility = np.sum(np.abs(np.diff(close[:i+1])))
+    # Avoid division by zero
+    volatility = np.where(volatility == 0, 1, volatility)
+    er = change / volatility
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index (ADX)"""
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -47,16 +68,9 @@ def calculate_dmi(high, low, close, period=14):
     di_plus = np.where(tr_period != 0, 100 * dm_plus_period / tr_period, 0)
     di_minus = np.where(tr_period != 0, 100 * dm_minus_period / tr_period, 0)
     
-    return di_plus, di_minus
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index (ADX)"""
-    di_plus, di_minus = calculate_dmi(high, low, close, period)
-    
-    # Calculate DX
+    # Calculate DX and ADX
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     
-    # Calculate ADX using Wilder's smoothing
     adx = np.zeros_like(dx)
     if len(dx) >= period:
         adx[period-1] = np.mean(dx[:period])  # First ADX value
@@ -70,65 +84,70 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for EMA filter
+    # Load daily data once for ADX filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate daily ADX for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Calculate 6h DMI and ADX
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Align ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    adx_6h = calculate_adx(high, low, close, 14)
-    di_plus_6h, di_minus_6h = calculate_dmi(high, low, close, 14)
+    # Calculate KAMA on 12h price
+    kama = calculate_kama(prices['close'].values, er_period=10, fast_ema=2, slow_ema=30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if indicators not ready
-        if np.isnan(adx_6h[i]) or np.isnan(ema_50_1d_aligned[i]):
+    for i in range(30, n):
+        # Skip if ADX not ready
+        if np.isnan(adx_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # 1d trend filter: long only in uptrend, short only in downtrend
-        bull_regime = close[i] > ema_50_1d_aligned[i]  # Using current close vs 1d EMA
-        bear_regime = close[i] < ema_50_1d_aligned[i]
+        price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
+        kama_val = kama[i]
+        prev_kama = kama[i-1]
         
-        # 6h signals: DMI crossover with ADX > 20
-        bullish_cross = di_plus_6h[i] > di_minus_6h[i] and di_plus_6h[i-1] <= di_minus_6h[i-1]
-        bearish_cross = di_minus_6h[i] > di_plus_6h[i] and di_minus_6h[i-1] <= di_plus_6h[i-1]
-        strong_trend = adx_6h[i] > 20
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        if i >= 20:
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 1.5 * vol_ma
+        else:
+            volume_ok = False
+        
+        # Trend filter: ADX > 20 indicates trending market
+        trending = adx_1d_aligned[i] > 20
         
         if position == 0:
-            # Long: bullish crossover + strong trend + bull regime
-            if bullish_cross and strong_trend and bull_regime:
+            # Long: price crosses above KAMA + volume confirmation + trending market
+            if price > kama_val and price <= prev_kama and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish crossover + strong trend + bear regime
-            elif bearish_cross and strong_trend and bear_regime:
+            # Short: price crosses below KAMA + volume confirmation + trending market
+            elif price < kama_val and price >= prev_kama and volume_ok and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: bearish crossover or trend weakening
-            if bearish_cross or adx_6h[i] < 15:
+            # Long exit: price crosses below KAMA or ADX drops below 15 (weakening trend)
+            if price < kama_val or adx_1d_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: bullish crossover or trend weakening
-            if bullish_cross or adx_6h[i] < 15:
+            # Short exit: price crosses above KAMA or ADX drops below 15 (weakening trend)
+            if price > kama_val or adx_1d_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_DMI_Crossover_1dFilter"
-timeframe = "6h"
+name = "12h_KAMA_Trend_Filter_V2"
+timeframe = "12h"
 leverage = 1.0
