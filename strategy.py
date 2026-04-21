@@ -1,161 +1,133 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_VolumeSpike_SqueezeBreakout
-Hypothesis: In low volatility squeezes (Bollinger Band Width at 20-period low), price breaks out of Donchian(20) channel with volume confirmation (volume > 1.5x 20-period average volume). Works in both bull and breakout phases of bear markets by capturing explosive moves after consolidation. Uses 1d ADX to filter only when higher timeframe trend is strong (ADX > 25).
+6h_RSI_PriceAction_Confluence_V1
+Hypothesis: Combine RSI extremes with price action patterns (inside bars and engulfing candles) on 6h timeframe, filtered by daily trend (EMA50). 
+In bull markets: look for bullish engulfing at RSI < 30. In bear markets: look for bearish engulfing at RSI > 70.
+Inside bars provide low-risk entry points with tight stops. Works in both regimes by adapting to higher timeframe trend.
+Target: 15-30 trades/year per symbol with disciplined entries.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_rsi(close, period=14):
+    """Calculate RSI with proper Wilder's smoothing"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing: alpha = 1/period
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    # First average: simple mean
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
+    
+    # Subsequent: Wilder's smoothing
+    for i in range(period+1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Extract price arrays
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Load 1d data once for ADX filter
+    # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate ADX on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA50 on daily close for trend filter
     close_1d = df_1d['close'].values
+    ema50_1d = np.zeros_like(close_1d)
+    ema50_1d[:] = np.nan
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate EMA manually with proper initialization
+    alpha = 2.0 / (50 + 1)
+    ema50_1d[49] = np.mean(close_1d[:50])  # First EMA value
+    for i in range(50, len(close_1d)):
+        ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Align EMA50 to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        for i in range(len(data)):
-            if np.isnan(result[i-1]) if i > 0 else True:
-                result[i] = np.nanmean(data[max(0, i-period+1):i+1])
-            else:
-                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-        return result
+    # 6h data
+    open_6h = prices['open'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
     
-    period = 14
-    atr = wilders_smooth(tr, period)
-    dm_plus_smooth = wilders_smooth(dm_plus, period)
-    dm_minus_smooth = wilders_smooth(dm_minus, period)
+    # Calculate RSI(14) on 6h
+    rsi_6h = calculate_rsi(close_6h, 14)
     
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    # Price action patterns
+    # Bullish engulfing: current green candle engulfs previous red candle
+    bullish_engulf = np.zeros(n, dtype=bool)
+    bearish_engulf = np.zeros(n, dtype=bool)
+    inside_bar = np.zeros(n, dtype=bool)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smooth(dx, period)
+    for i in range(1, n):
+        # Bullish engulfing
+        if (close_6h[i] > open_6h[i] and  # current bullish
+            open_6h[i] <= close_6h[i-1] and  # current open <= prev close
+            close_6h[i] >= open_6h[i-1] and  # current close >= prev open
+            open_6h[i-1] > close_6h[i-1]):   # previous bearish
+            bullish_engulf[i] = True
+        
+        # Bearish engulfing
+        if (close_6h[i] < open_6h[i] and  # current bearish
+            open_6h[i] >= close_6h[i-1] and  # current open >= prev close
+            close_6h[i] <= open_6h[i-1] and  # current close <= prev open
+            open_6h[i-1] < close_6h[i-1]):   # previous bullish
+            bearish_engulf[i] = True
+        
+        # Inside bar: current range within previous bar's range
+        if (high_6h[i] <= high_6h[i-1] and low_6h[i] >= low_6h[i-1]):
+            inside_bar[i] = True
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Bollinger Bands on 4h
-    bb_period = 20
-    bb_std = 2.0
-    
-    # Simple moving average
-    ma = np.full_like(close, np.nan)
-    for i in range(bb_period-1, len(close)):
-        ma[i] = np.mean(close[i-bb_period+1:i+1])
-    
-    # Standard deviation
-    bb_std_dev = np.full_like(close, np.nan)
-    for i in range(bb_period-1, len(close)):
-        bb_std_dev[i] = np.std(close[i-bb_period+1:i+1])
-    
-    bb_upper = ma + bb_std * bb_std_dev
-    bb_lower = ma - bb_std * bb_std_dev
-    bb_width = bb_upper - bb_lower
-    
-    # Bollinger Band Width percentile (20-period lookback)
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    lookback = 20
-    for i in range(lookback-1, len(bb_width)):
-        window = bb_width[i-lookback+1:i+1]
-        if not np.all(np.isnan(window)):
-            rank = np.sum(~np.isnan(window) & (bb_width[i] >= window))
-            total = np.sum(~np.isnan(window))
-            bb_width_percentile[i] = (rank / total) * 100 if total > 0 else 50
-    
-    # Squeeze condition: BB Width at 20-period low (bottom 10%)
-    squeeze = bb_width_percentile <= 10
-    
-    # Donchian Channel (20-period)
-    dc_period = 20
-    dc_upper = np.full_like(high, np.nan)
-    dc_lower = np.full_like(low, np.nan)
-    
-    for i in range(dc_period-1, len(high)):
-        dc_upper[i] = np.max(high[i-dc_period+1:i+1])
-        dc_lower[i] = np.min(low[i-dc_period+1:i+1])
-    
-    # Volume spike: volume > 1.5x 20-period average volume
-    vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
-    for i in range(vol_period-1, len(volume)):
-        vol_ma[i] = np.mean(volume[i-vol_period+1:i+1])
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # Breakout conditions
-    breakout_up = (close > dc_upper) & squeeze & volume_spike
-    breakout_down = (close < dc_lower) & squeeze & volume_spike
-    
-    # Generate signals
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(50, dc_period, bb_period, vol_period, lookback), n):
-        # Skip if ADX not available
-        if np.isnan(adx_aligned[i]):
+    for i in range(50, n):
+        # Skip if EMA50 not available
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Only take trades when 1d ADX > 25 (strong trend)
-        strong_trend = adx_aligned[i] > 25
+        price = close_6h[i]
+        rsi = rsi_6h[i]
+        trend_up = price > ema50_1d_aligned[i]
         
         if position == 0:
-            if breakout_up[i] and strong_trend:
+            # Long conditions: bullish engulfing OR inside bar + RSI oversold in uptrend
+            if (bullish_engulf[i] or inside_bar[i]) and rsi < 35 and trend_up:
                 signals[i] = 0.25
                 position = 1
-            elif breakout_down[i] and strong_trend:
+            # Short conditions: bearish engulfing OR inside bar + RSI overbought in downtrend
+            elif (bearish_engulf[i] or inside_bar[i]) and rsi > 65 and not trend_up:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close below Donchian lower or ADX weakens
-            if close[i] < dc_lower[i] or adx_aligned[i] < 20:
+            # Long exit: RSI overbought OR bearish engulfing
+            if rsi > 70 or bearish_engulf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close above Donchian upper or ADX weakens
-            if close[i] > dc_upper[i] or adx_aligned[i] < 20:
+            # Short exit: RSI oversold OR bullish engulfing
+            if rsi < 30 or bullish_engulf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -163,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_VolumeSpike_SqueezeBreakout"
-timeframe = "4h"
+name = "6h_RSI_PriceAction_Confluence_V1"
+timeframe = "6h"
 leverage = 1.0
