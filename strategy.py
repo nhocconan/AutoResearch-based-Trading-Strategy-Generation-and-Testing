@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_Donchian20_Breakout_VolumeATRFilter_Tight
-Hypothesis: On 4h timeframe, buy when price breaks above 20-bar Donchian high with volume confirmation and ATR filter; sell when price breaks below 20-bar Donchian low with volume confirmation. Uses 1d EMA50 as trend filter to avoid counter-trend trades. Designed for low trade frequency (<50/year) to minimize fee drag and work in both bull and bear markets by following the higher timeframe trend.
+4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V3
+Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 4h timeframe for BTC and ETH in both bull and bear markets. The strategy uses 12h timeframe for trend filter to reduce false signals and improve risk-adjusted returns. Target: 20-50 trades/year per symbol (80-200 over 4 years).
 """
 
 import numpy as np
@@ -13,17 +13,47 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data once for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Load daily data once for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # ATR for volatility filter and stoploss
+    # Previous day's OHLC for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla pivot point and R1/S1 levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align daily levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Volume filter: 20-period average (approx 3.33 days on 4h)
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -34,21 +64,13 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: 20-period average
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    
-    # Donchian channels on 4h
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,38 +82,40 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume > 1.5 * vol_ma[i]
         
-        # Trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # 12h trend filter
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         if position == 0:
-            # Long: break above Donchian high in uptrend with volume
-            if uptrend and volume_ok and price > donchian_high[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: break below Donchian low in downtrend with volume
-            elif downtrend and volume_ok and price < donchian_low[i]:
-                signals[i] = -0.25
-                position = -1
+            # Long: price breaks above R1 in uptrend with volume
+            if uptrend and volume_ok:
+                if price > r1_aligned[i]:
+                    signals[i] = 0.30
+                    position = 1
+            # Short: price breaks below S1 in downtrend with volume
+            elif downtrend and volume_ok:
+                if price < s1_aligned[i]:
+                    signals[i] = -0.30
+                    position = -1
         
         elif position == 1:
-            # Exit: price closes below Donchian low or stoploss
-            if price < donchian_low[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
+            # Exit: price reaches S1 or stoploss
+            if price <= s1_aligned[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit: price closes above Donchian high or stoploss
-            if price > donchian_high[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
+            # Exit: price reaches R1 or stoploss
+            if price >= r1_aligned[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_1d_Donchian20_Breakout_VolumeATRFilter_Tight"
+name = "4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V3"
 timeframe = "4h"
 leverage = 1.0
