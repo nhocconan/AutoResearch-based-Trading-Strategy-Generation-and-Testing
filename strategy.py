@@ -3,33 +3,61 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d EMA(34) trend filter and volume spike.
-# Long when Williams %R crosses above -20 from below (oversold reversal) in uptrend (price > EMA34).
-# Short when Williams %R crosses below -80 from above (overbought reversal) in downtrend (price < EMA34).
-# Volume > 2.0x 20-period average confirms reversal strength.
-# Williams %R identifies exhaustion points; EMA34 filters trend direction to avoid counter-trend trades.
-# Volume spike ensures momentum behind the reversal. Target: 20-40 trades/year.
-# Works in bull/bear: EMA34 trend filter ensures trades align with higher-timeframe momentum.
+# Hypothesis: 1-day Bollinger Band breakout with 1-week ADX(14) trend filter and volume confirmation.
+# Long when price breaks above upper BB in uptrend (1w ADX > 25), short when breaks below lower BB in downtrend.
+# Volume > 1.5x 20-period average confirms breakout strength. Uses ADX to filter weak trends and avoid chop.
+# Target: 10-25 trades/year by requiring strong trend + volume + breakout alignment.
+# Works in bull/bear: ADX filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA(34) for trend direction
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate 1w ADX(14) for trend strength filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 14-period Williams %R on 12h data
-    high_14 = prices['high'].rolling(window=14, min_periods=14).max()
-    low_14 = prices['low'].rolling(window=14, min_periods=14).min()
-    close = prices['close']
-    williams_r = -100 * (high_14 - close) / (high_14 - low_14)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(0).values
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    
+    # Directional Movement
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = -np.diff(low_1w, prepend=low_1w[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, 14)
+    
+    # Align ADX to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate 20-period Bollinger Bands on daily data
+    sma_20 = prices['close'].rolling(window=20, min_periods=20).mean().values
+    std_20 = prices['close'].rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2.0 * std_20
+    lower_band = sma_20 - 2.0 * std_20
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -37,9 +65,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(williams_r[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(sma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -49,25 +77,20 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Williams %R values
-        wr = williams_r[i]
-        wr_prev = williams_r[i-1] if i > 0 else wr
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirm = volume > 2.0 * vol_ma[i]
-        
-        # Trend filter: price relative to EMA34
-        uptrend = price > ema_34_aligned[i]
-        downtrend = price < ema_34_aligned[i]
+        # Trend filter: strong trend (ADX > 25)
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            if volume_confirm:
-                # Long: Williams %R crosses above -20 from below in uptrend
-                if wr > -20 and wr_prev <= -20 and uptrend:
+            if volume_confirm and strong_trend:
+                # Long: price breaks above upper Bollinger Band
+                if price > upper_band[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R crosses below -80 from above in downtrend
-                elif wr < -80 and wr_prev >= -80 and downtrend:
+                # Short: price breaks below lower Bollinger Band
+                elif price < lower_band[i]:
                     signals[i] = -0.25
                     position = -1
         
@@ -76,13 +99,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if Williams %R rises above -20 (overbought) or trend changes
-                if wr > -20 or not uptrend:
+                # Exit if price breaks below lower Bollinger Band (failed breakout) or weak trend
+                if price < lower_band[i] or adx_aligned[i] < 20:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if Williams %R falls below -80 (oversold) or trend changes
-                if wr < -80 or not downtrend:
+                # Exit if price breaks above upper Bollinger Band (failed breakdown) or weak trend
+                if price > upper_band[i] or adx_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -94,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR14_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "1d_Bollinger20_Breakout_1wADX14_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
