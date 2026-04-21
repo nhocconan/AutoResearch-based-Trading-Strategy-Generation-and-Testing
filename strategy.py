@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_VolumeFilter_V2
-Hypothesis: 4h Donchian(20) breakouts with 1d EMA50 trend filter and volume confirmation work on BTC and ETH in both bull and bear markets. Uses discrete position sizing (0.30) to limit fee drag and ATR-based stoploss for risk control. Target: 20-50 trades/year per symbol (80-200 over 4 years).
+4h_TRIX_VolumeSpike_RegimeFilter_V1
+Hypothesis: TRIX (15-period) crossover with volume spike (>2x 20-bar MA) and chop regime filter (CHOP(14) > 61.8) works on 4h timeframe for BTC and ETH in both bull and bear markets. Uses 1d timeframe for chop calculation to avoid look-ahead. Target: 20-50 trades/year per symbol (80-200 over 4 years).
 """
 
 import numpy as np
@@ -13,20 +13,48 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data once for trend filter
+    # Load 1d data once for chop regime (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate TRIX on primary timeframe (4h)
+    close = prices['close'].values
+    # TRIX: EMA(EMA(EMA(close, 15), 15), 15) - 1 period percent change
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Calculate ATR for stoploss (using 15m data)
+    # Calculate chop regime on 1d timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range for chop calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Chop = 100 * log10(sum(TR14) / (max_high14 - min_low14)) / log10(14)
+    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * (np.log10(atr_14) - np.log10(max_high_14 - min_low_14)) / np.log10(14)
+    chop[np.isnan(chop) | np.isinf(chop)] = 50  # neutral when invalid
+    
+    # Align chop to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume filter: 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -34,16 +62,13 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume filter (20-period average)
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trix_signal[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,60 +77,42 @@ def generate_signals(prices):
         price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation
-        volume_ok = volume > 1.5 * vol_ma[i]
+        # Volume confirmation (>2x average)
+        volume_ok = volume > 2.0 * vol_ma[i]
         
-        # 1d trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Chop regime: range-bound market (CHOP > 61.8)
+        chop_ok = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Calculate 20-period Donchian channels using prior 20 periods
-            lookback_start = max(0, i - 20)
-            lookback_end = i  # exclusive, so we use [lookback_start:lookback_end]
-            if lookback_end - lookback_start >= 20:
-                highest_high = np.max(high[lookback_start:lookback_end])
-                lowest_low = np.min(low[lookback_start:lookback_end])
-                
-                # Long: price breaks above Donchian high in uptrend with volume
-                if uptrend and volume_ok:
-                    if price > highest_high:
-                        signals[i] = 0.30
-                        position = 1
-                        entry_price = price
-                # Short: price breaks below Donchian low in downtrend with volume
-                elif downtrend and volume_ok:
-                    if price < lowest_low:
-                        signals[i] = -0.30
-                        position = -1
-                        entry_price = price
+            # Long: TRIX crosses above signal line in choppy market with volume
+            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]:
+                if chop_ok and volume_ok:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: TRIX crosses below signal line in choppy market with volume
+            elif trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]:
+                if chop_ok and volume_ok:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit: price reaches Donchian low or stoploss
-            lookback_start = max(0, i - 20)
-            lookback_end = i
-            if lookback_end - lookback_start >= 20:
-                lowest_low = np.min(low[lookback_start:lookback_end])
-                if price <= lowest_low or price < entry_price - 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.30
+            # Exit: TRIX crosses below signal line or stoploss
+            if trix[i] < trix_signal[i] or price < prices['close'].iloc[i-1] - 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches Donchian high or stoploss
-            lookback_start = max(0, i - 20)
-            lookback_end = i
-            if lookback_end - lookback_start >= 20:
-                highest_high = np.max(high[lookback_start:lookback_end])
-                if price >= highest_high or price > entry_price + 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.30
+            # Exit: TRIX crosses above signal line or stoploss
+            if trix[i] > trix_signal[i] or price > prices['close'].iloc[i-1] + 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dTrend_VolumeFilter_V2"
+name = "4h_TRIX_VolumeSpike_RegimeFilter_V1"
 timeframe = "4h"
 leverage = 1.0
