@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Regime_ADX_v2
-Hypothesis: On 1d timeframe, KAMA (ER=10) identifies adaptive trend direction while weekly ADX(14) filters for trending regimes (ADX > 25). 
-Entry occurs when KAMA turns bullish/bearish AND weekly ADX confirms trending market. Exit when KAMA reverses or ADX drops below 20 (range regime).
-Discrete sizing (0.25) minimizes fee churn. Target: 30-100 total trades over 4 years.
-Works in both bull (trend following) and bear (trend following with shorts) markets via regime filter.
+6h_ElderRay_Regime_ADX_v1
+Hypothesis: On 6h timeframe, Elder Ray Index (Bull Power = High - EMA13, Bear Power = EMA13 - Low) combined with ADX regime filter (ADX > 25 for trending, ADX < 20 for range) captures strong directional moves with reduced whipsaw. In trending regime (ADX > 25), trade in direction of Elder Ray (long if Bull Power > 0, short if Bear Power > 0). In range regime (ADX < 20), fade extreme Elder Ray values (long if Bear Power < 0 and Bull Power < threshold, short if Bull Power > 0 and Bear Power < threshold). Uses 1d EMA50 for higher timeframe trend filter to avoid counter-trend trades. Discrete sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -16,40 +13,48 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for weekly trend, 1d for ADX)
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop (1d for EMA50 trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1w EMA34 for weekly trend regime (optional filter) ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # === 1d ADX(14) for trend strength regime ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d EMA50 for higher timeframe trend filter ===
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # === 6h Elder Ray Index (EMA13) ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # EMA13
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power = high - ema_13
+    # Bear Power = EMA13 - Low
+    bear_power = ema_13 - low
+    
+    # === 6h ADX (14) for regime filter ===
     # True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     # Directional Movement
-    up_move = pd.Series(high_1d - np.roll(high_1d, 1))
-    down_move = pd.Series(np.roll(low_1d, 1) - low_1d)
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
     # Smoothed DM and TR
     plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(atr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Directional Indicators
     plus_di = 100 * plus_dm_smooth / tr_smooth
@@ -57,97 +62,95 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 1d KAMA (ER=10) for adaptive trend ===
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    er = np.concatenate([np.full(10, np.nan), er])  # align with close
-    
-    # Smoothing Constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # seed
-    
-    for i in range(10, n):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = np.nan
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # KAMA direction (1 = up, -1 = down)
-    kama_dir = np.diff(kama, prepend=kama[0])
-    kama_dir = np.sign(kama_dir)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
+    max_hold_bars = 8  # max 2 days (8 * 6h = 48h)
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(kama[i]) or np.isnan(kama_dir[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx[i]) or np.isnan(ema_13[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
         price = close[i]
-        weekly_ema = ema_34_1w_aligned[i]
-        adx_val = adx_aligned[i]
-        kama_val = kama[i]
-        kama_direction = kama_dir[i]
-        
-        # Weekly trend filter (optional: only trade in direction of weekly trend)
-        weekly_bull = price > weekly_ema
-        weekly_bear = price < weekly_ema
+        htf_ema = ema_50_1d_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        adx_val = adx[i]
+        ema13_val = ema_13[i]
         
         # Regime filters
         is_trending = adx_val > 25
         is_ranging = adx_val < 20
+        is_bull_htf = price > htf_ema
+        is_bear_htf = price < htf_ema
         
         if position == 0:
-            # Long conditions: KAMA turning up AND trending regime
-            long_condition = (kama_direction == 1) and is_trending and weekly_bull
-            # Short conditions: KAMA turning down AND trending regime
-            short_condition = (kama_direction == -1) and is_trending and weekly_bear
+            if is_trending:
+                # Trending regime: trade with Elder Ray direction
+                long_condition = (bull > 0) and is_bull_htf
+                short_condition = (bear > 0) and is_bear_htf
+            elif is_ranging:
+                # Ranging regime: fade extreme Elder Ray
+                # Long when bear power is negative and bull power is not too extreme
+                long_condition = (bear < 0) and (bull < 0.5 * np.std(bull_power[max(0, i-50):i+1])) and is_bull_htf
+                # Short when bull power is positive and bear power is not too extreme
+                short_condition = (bull > 0) and (bear < 0.5 * np.std(bear_power[max(0, i-50):i+1])) and is_bear_htf
+            else:
+                # Transition regime (ADX between 20-25): require stronger signals
+                long_condition = (bull > 0) and (bull > 0.3 * np.std(bull_power[max(0, i-50):i+1])) and is_bull_htf
+                short_condition = (bear > 0) and (bear > 0.3 * np.std(bear_power[max(0, i-50):i+1])) and is_bear_htf
             
             if long_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
+                bars_since_entry = 0
             elif short_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
+                bars_since_entry = 0
         
         elif position != 0:
-            # Exit conditions: KAMA reversal OR ADX drops into ranging
+            bars_since_entry += 1
+            
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if (kama_direction == -1) or is_ranging:
+                if price < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
+                # Time-based exit
+                elif bars_since_entry >= max_hold_bars:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if (kama_direction == 1) or is_ranging:
+                if price > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
+                # Time-based exit
+                elif bars_since_entry >= max_hold_bars:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
     return signals
 
-name = "1d_KAMA_Regime_ADX_v2"
-timeframe = "1d"
+name = "6h_ElderRay_Regime_ADX_v1"
+timeframe = "6h"
 leverage = 1.0
