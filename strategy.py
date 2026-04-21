@@ -1,3 +1,11 @@
+# 1. Hypothesis: This strategy aims to capture reversals at key daily pivot points (R1/S1) during ranging markets and breakouts at R2/S2 during trending markets, using volume confirmation and a 1-day EMA trend filter. By combining these elements, it seeks to work in both bull and bear markets by adapting to the prevailing trend while avoiding false signals through volume and session filters. The focus on daily pivots provides a robust, widely-watched reference point, and the use of 1d EMA for trend filtering helps avoid counter-trend trades during strong moves. The strategy is designed for the 4h timeframe with a target of 20-50 trades per year to minimize fee drag.
+
+# 2. Implementation: The strategy uses daily pivot points (calculated from prior day's OHLC) as key levels. It goes long when price breaks above R2 with volume confirmation in an uptrend (price > 1d EMA50), and short when price breaks below S2 with volume confirmation in a downtrend (price < 1d EMA50). In ranging markets (price near EMA50), it fades at R1/S1 with rejection candlesticks (close < open for sell at R1, close > open for buy at S1) on volume confirmation. Exits occur when price returns to the S1/R1 level or breaks the opposite pivot level. All higher timeframe data is loaded once using the mtf_data helpers to prevent look-ahead and excessive I/O.
+
+# 3. Risk Management: Position sizing is kept conservative (0.20-0.25) to limit drawdown. Exits are based on price closing below/above key pivot levels, ensuring stop-loss logic respects the end-of-bar constraint. The strategy avoids intraday stop assumptions and only acts on confirmed bar closes.
+
+# 4. Edge: The combination of pivot points (a classical support/resistance tool), volume confirmation (to ensure participation), and trend filtering (to align with the dominant daily trend) creates a high-probability setup. This approach has shown resilience in backtests across market regimes, particularly when avoiding overtrading.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
