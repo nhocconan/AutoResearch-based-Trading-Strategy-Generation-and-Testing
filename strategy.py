@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_EMA34_RSI2_VolumeSpike
-Hypothesis: Mean reversion on 6h timeframe using RSI(2) extreme readings filtered by 1d EMA34 trend and volume spikes.
-Works in bull/bear: In uptrend (price>EMA34), buy RSI<10 pullbacks; in downtrend (price<EMA34), sell RSI>90 rallies.
-Volume spike confirms institutional interest. Target: 12-30 trades/year per symbol (50-120 over 4 years).
+4h_Donchian20_Breakout_Volume_Trend_ATRFilter_v1
+Hypothesis: Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation on 4h timeframe.
+Works in bull/bear: Long when price breaks above 20-period high AND 1d EMA50 rising AND volume spike.
+Short when price breaks below 20-period low AND 1d EMA50 falling AND volume spike.
+Uses ATR-based stoploss via signal=0 when price moves against position by 2*ATR.
+Target: 20-50 trades/year per symbol (80-200 over 4 years).
 """
 
 import numpy as np
@@ -15,87 +17,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for EMA34 trend filter
+    # Load 1d data once for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate RSI(2) on 6h close
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # ATR(14) for stoploss and volatility filter
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing for RSI
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    for i in range(1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2  # 2-period Wilder's
-        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+    # ATR(14)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[0] = 50  # neutral for first bar
+    # Donchian channels (20-period)
+    highest_high = pd.Series(close).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(close).rolling(window=20, min_periods=20).min().values
     
     # Volume spike filter: current volume > 2.0 * 20-period average
     volume = prices['volume'].values
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
-        else:
-            vol_ma[i] = np.mean(volume[i-20:i])
-    
-    volume_spike = volume > (2.0 * vol_ma)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(34, n):
+    for i in range(20, n):
         # Skip if indicators not ready
-        if np.isnan(ema_34_1d_aligned[i]):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        rsi_val = rsi[i]
-        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price > 1d EMA34 (uptrend) AND RSI < 10 (extreme oversold) AND volume spike
-            if (price > ema_34_1d_aligned[i] and 
-                rsi_val < 10 and 
-                vol_spike):
+            # Long conditions: price > Donchian high AND 1d EMA50 rising AND volume spike
+            if (price > highest_high[i] and 
+                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and 
+                volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < 1d EMA34 (downtrend) AND RSI > 90 (extreme overbought) AND volume spike
-            elif (price < ema_34_1d_aligned[i] and 
-                  rsi_val > 90 and 
-                  vol_spike):
+                entry_price = price
+            # Short conditions: price < Donchian low AND 1d EMA50 falling AND volume spike
+            elif (price < lowest_low[i] and 
+                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and 
+                  volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Long exit: RSI > 50 (mean reversion complete) or price < 1d EMA34 (trend change)
-            if rsi_val > 50 or price < ema_34_1d_aligned[i]:
+            # Long exit: stoploss or trend reversal
+            if price < entry_price - 2.0 * atr[i] or ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: RSI < 50 (mean reversion complete) or price > 1d EMA34 (trend change)
-            if rsi_val < 50 or price > ema_34_1d_aligned[i]:
+            # Short exit: stoploss or trend reversal
+            if price > entry_price + 2.0 * atr[i] or ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA34_RSI2_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_Volume_Trend_ATRFilter_v1"
+timeframe = "4h"
 leverage = 1.0
