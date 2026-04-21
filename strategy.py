@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_HighLowPivot_Breakout_HTFTrend_V1
-Hypothesis: 6h strategy using 12h HTF pivot levels (weekly high/low from prior 12h bar) as breakout triggers. Entry on break above weekly high (long) or below weekly low (short) with volume confirmation (>1.5x 20-period 6h volume MA) and HTF trend filter (12h EMA34). Uses ATR(14) trailing stop via signal=0 when price moves 2.5*ATR against position. Designed for low trade frequency (target 50-150 total trades over 4 years) to minimize fee drag and capture trending moves in both bull/bear markets via HTF trend alignment.
+4h_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop
+Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation (>1.5x 20-period volume MA) and choppiness regime filter (CHOP > 61.8 for mean reversion, CHOP < 38.2 for trend following). Uses 1d HTF for trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR. Designed for low trade frequency (<200 total 4h trades) to minimize fee drag and work in both bull/bear markets via regime adaptation.
 """
 
 import numpy as np
@@ -13,48 +13,50 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for pivot levels and EMA trend)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load HTF data ONCE before loop (1d for EMA trend filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 12h HTF indicators ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 1d EMA50 for trend filter ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly high/low from prior completed 12h bar (using 2-bar lookback for weekly approx)
-    # For 6h chart, weekly high/low approximated by max/min of last 2 12h bars (24h)
-    weekly_high = pd.Series(high_12h).rolling(window=2, min_periods=2).max().shift(1).values
-    weekly_low = pd.Series(low_12h).rolling(window=2, min_periods=2).min().shift(1).values
-    
-    # 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align HTF indicators to 6h timeframe (completed-bar timing)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_12h, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_12h, weekly_low)
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # === 6h Indicators (primary timeframe) ===
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # === 4h Indicators (primary timeframe) ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Volume MA (20-period) for confirmation
-    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    # Calculate previous day's OHLC for Camarilla levels
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
+    
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Volume MA (20-period) for spike detection
+    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     # ATR (14-period) for stoploss
-    tr1 = pd.Series(high_6h - low_6h)
-    tr2 = pd.Series(np.abs(high_6h - np.roll(close_6h, 1)))
-    tr3 = pd.Series(np.abs(low_6h - np.roll(close_6h, 1)))
+    tr1 = pd.Series(high_4h - low_4h)
+    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
+    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Choppiness Index (14-period)
+    chop_sum = tr.rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(chop_sum / (highest_high - lowest_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,40 +64,41 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) 
-            or np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(chop[i])
+            or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_6h[i]
-        vol = volume_6h[i]
+        price = close_4h[i]
+        vol = volume_4h[i]
         vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
-        # HTF trend filter
-        uptrend = ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1] if i > 0 else False
-        downtrend = ema_34_12h_aligned[i] < ema_34_12h_aligned[i-1] if i > 0 else False
+        # Regime detection
+        is_choppy = chop[i] > 61.8  # mean reversion regime
+        is_trending = chop[i] < 38.2  # trend following regime
         
         if position == 0:
-            # Long: break above weekly high + volume + uptrend
-            if price > weekly_high_aligned[i] and vol_ok and uptrend:
+            # Long: Camarilla R1 breakout + volume + trend filter (in uptrend or choppy market)
+            if price > camarilla_r1[i] and vol_ok and (price > ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: break below weekly low + volume + downtrend
-            elif price < weekly_low_aligned[i] and vol_ok and downtrend:
+            # Short: Camarilla S1 breakdown + volume + trend filter (in downtrend or choppy market)
+            elif price < camarilla_s1[i] and vol_ok and (price < ema_50_1d_aligned[i] or is_choppy):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.5 * atr[i]:
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit: break below weekly low or loss of volume/momentum
-            elif price < weekly_low_aligned[i] or not vol_ok:
+            # Exit conditions: Camarilla S1 breakdown or loss of volume/momentum
+            elif price < camarilla_s1[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,11 +106,11 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.5 * atr[i]:
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit: break above weekly high or loss of volume/momentum
-            elif price > weekly_high_aligned[i] or not vol_ok:
+            # Exit conditions: Camarilla R1 breakout or loss of volume/momentum
+            elif price > camarilla_r1[i] or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_HighLowPivot_Breakout_HTFTrend_V1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_Regime_ATRStop"
+timeframe = "4h"
 leverage = 1.0
