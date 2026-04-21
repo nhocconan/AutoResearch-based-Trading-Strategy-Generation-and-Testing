@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_Engulfing_OBV_Divergence
-Hypothesis: On 12h timeframe, bullish/bearish engulfing candles at key daily support/resistance levels (prior day high/low) with OBV divergence signal high-probability reversals. Works in bull markets by buying dips at support, in bear markets by selling rallies at resistance. Low frequency due to strict candle pattern + volume divergence requirement.
+4h_KAMA_Trend_With_RSI_Filter
+Hypothesis: KAMA adapts to market volatility, providing reliable trend signals in both bull and bear markets. Combined with RSI filter to avoid whipsaws, this strategy aims for low trade frequency (target: 25-40/year) on 4h timeframe. Works in trending markets by following KAMA direction, and avoids counter-trend trades during ranging periods via RSI extremes.
 """
 
 import numpy as np
@@ -10,98 +10,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for prior day high/low
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
-        return np.zeros(n)
-    
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
-    
-    # Prior day high/level (shifted by 1 to avoid look-ahead)
-    prev_high = np.roll(high_daily, 1)
-    prev_low = np.roll(low_daily, 1)
-    prev_high[0] = np.nan  # First day has no prior
-    prev_low[0] = np.nan
-    
-    # Align prior day levels to 12h timeframe
-    prev_high_aligned = align_htf_to_ltf(prices, df_daily, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_daily, prev_low)
-    
-    # Main timeframe data (12h)
-    open_price = prices['open'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # Close prices for calculations
     close = prices['close'].values
+    
+    # KAMA parameters
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    dir = np.abs(np.subtract(close, np.roll(close, er_length)))
+    vol = np.cumsum(change)
+    vol = vol - np.roll(vol, er_length)
+    # Avoid division by zero
+    er = np.where(vol != 0, dir / vol, 0)
+    
+    # Calculate Smoothing Constant (SC)
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI for filter
+    rsi_length = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Calculate average gain and loss
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[rsi_length] = np.mean(gain[1:rsi_length+1])
+    avg_loss[rsi_length] = np.mean(loss[1:rsi_length+1])
+    
+    for i in range(rsi_length+1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_length-1) + gain[i]) / rsi_length
+        avg_loss[i] = (avg_loss[i-1] * (rsi_length-1) + loss[i]) / rsi_length
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: current volume > 1.3x 20-period average
     volume = prices['volume'].values
-    
-    # Calculate OBV
-    obv = np.zeros(n)
-    obv[0] = volume[0]
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            obv[i] = obv[i-1] + volume[i]
-        elif close[i] < close[i-1]:
-            obv[i] = obv[i-1] - volume[i]
+    volume_avg = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i >= 20:
+            volume_avg[i] = np.mean(volume[i-20:i])
         else:
-            obv[i] = obv[i-1]
-    
-    # Calculate EMA of OBV for divergence detection
-    obv_ema = np.zeros(n)
-    if n >= 10:
-        obv_ema[9] = np.mean(obv[:10])
-        for i in range(10, n):
-            obv_ema[i] = 0.18 * obv[i] + 0.82 * obv_ema[i-1]
+            volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+    volume_filter = volume > (1.3 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(10, n):
+    for i in range(max(er_length, rsi_length) + 1, n):
         # Skip if NaN in critical values
-        if np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Bullish engulfing: current green candle engulfs prior red candle
-        bullish_engulf = (close[i] > open_price[i]) and (open_price[i] < close[i-1]) and (close[i] > open_price[i-1])
-        # Bearish engulfing: current red candle engulfs prior green candle
-        bearish_engulf = (close[i] < open_price[i]) and (open_price[i] > close[i-1]) and (close[i] < open_price[i-1])
-        
-        # OBV divergence: price makes new high/low but OBV doesn't confirm
-        bullish_div = (low[i] < low[i-5]) and (obv[i] > obv[i-5]) if i >= 5 else False
-        bearish_div = (high[i] > high[i-5]) and (obv[i] < obv[i-5]) if i >= 5 else False
-        
         price = close[i]
-        prev_high = prev_high_aligned[i]
-        prev_low = prev_low_aligned[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: bullish engulfing at or near prior day low with bullish OBV divergence
-            if bullish_engulf and bullish_div and price <= prev_low * 1.005:  # Within 0.5% of prior low
+            # Long: price above KAMA and RSI not overbought
+            if price > kama_val and rsi_val < 70 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish engulfing at or near prior day high with bearish OBV divergence
-            elif bearish_engulf and bearish_div and price >= prev_high * 0.995:  # Within 0.5% of prior high
+            # Short: price below KAMA and RSI not oversold
+            elif price < kama_val and rsi_val > 30 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price reaches prior day high or bearish engulfing forms
-            if price >= prev_high or bearish_engulf:
+            # Exit long: price crosses below KAMA or RSI overbought
+            if price < kama_val or rsi_val >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price reaches prior day low or bullish engulfing forms
-            if price <= prev_low or bullish_engulf:
+            # Exit short: price crosses above KAMA or RSI oversold
+            if price > kama_val or rsi_val <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Engulfing_OBV_Divergence"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
