@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
-"""
-12h_1d_Donchian20_Breakout_Volume_Regime_Filtered_v1
-Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 12h ADX regime filter.
-Breakouts above 12h upper band go long; below lower band go short.
-Volume filter requires 1d volume > 1.5x 20-day average.
-ADX filter: only trade when ADX(14) > 25 (trending market).
-Exit when price crosses 12h EMA(34) or after 3 bars.
-Designed to work in both bull and bear by capturing strong trending moves with volume confirmation.
-Target: 15-25 trades/year per symbol.
-"""
+# 6h_1d_1w_VolumeWeighted_CCI_Trend_Filtered_v1
+# Hypothesis: CCI(20) on 6h combined with 1d trend filter and 1d volume-weighted CCI confirmation.
+# Long when: 6h CCI crosses above -100, 1d EMA20 > EMA50, and 1d volume-weighted CCI > -50.
+# Short when: 6h CCI crosses below +100, 1d EMA20 < EMA50, and 1d volume-weighted CCI < 50.
+# Exit when 6h CCI crosses zero in opposite direction or trend fails.
+# Uses volume-weighted price for more institutional-grade signals.
+# Target: 20-40 trades/year per symbol.
 
 import numpy as np
 import pandas as pd
@@ -19,129 +15,127 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for Donchian and EMA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate Donchian(20) on 12h
-    if len(high_12h) >= 20:
-        upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-        lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    else:
-        upper_12h = np.full_like(high_12h, np.nan)
-        lower_12h = np.full_like(low_12h, np.nan)
-    
-    # Calculate EMA(34) on 12h for exit
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Calculate ADX(14) on 12h for regime filter
-    if len(high_12h) >= 14:
-        # True Range
-        tr1 = high_12h[1:] - low_12h[1:]
-        tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-        tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        # Directional Movement
-        dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                           np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-        dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                            np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-        dm_plus = np.concatenate([[np.nan], dm_plus])
-        dm_minus = np.concatenate([[np.nan], dm_minus])
-        
-        # Smoothed values
-        atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-        dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-        dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-        
-        # DI+ and DI-
-        di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-        di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-        
-        # DX and ADX
-        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-        adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    else:
-        adx = np.full_like(high_12h, np.nan)
-    
-    # Align 12h indicators to 12h timeframe (no alignment needed as we're already on 12h)
-    upper_12h_aligned = upper_12h
-    lower_12h_aligned = lower_12h
-    ema_34_12h_aligned = ema_34_12h
-    adx_aligned = adx
-    
-    # Load 1d data for volume filter
+    # Load 1d data once for trend and volume-weighted CCI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = volume_1d / (vol_ma_1d + 1e-10)
     
-    # Align 1d volume ratio to 12h timeframe
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # 1d EMA20 and EMA50 for trend filter
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Typical price for CCI calculation
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    
+    # Volume-weighted typical price (VWTP)
+    vwtp_1d = (tp_1d * volume_1d) / (volume_1d + 1e-10)  # Avoid division by zero
+    
+    # CCI calculation on 1d using VWTP
+    # CCI = (VWTP - SMA) / (0.015 * Mean Deviation)
+    sma_vwtp = pd.Series(vwtp_1d).rolling(window=20, min_periods=20).mean()
+    mad_vwtp = pd.Series(vwtp_1d).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    )
+    vwtp_cci_1d = (vwtp_1d - sma_vwtp.values) / (0.015 * mad_vwtp.values + 1e-10)
+    vwtp_cci_1d = vwtp_cci_1d.values
+    
+    # Align 1d indicators to 6h
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vwtp_cci_1d_aligned = align_htf_to_ltf(prices, df_1d, vwtp_cci_1d)
+    
+    # Load 6h data for CCI calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    
+    # Typical price for 6h CCI
+    tp_6h = (high_6h + low_6h + close_6h) / 3.0
+    
+    # CCI calculation on 6h
+    sma_tp = pd.Series(tp_6h).rolling(window=20, min_periods=20).mean()
+    mad_tp = pd.Series(tp_6h).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    )
+    cci_6h = (tp_6h - sma_tp.values) / (0.015 * mad_tp.values + 1e-10)
+    cci_6h = cci_6h.values
+    
+    # Align 6h CCI to its own timeframe (no alignment needed as it's already 6h)
+    # But we need to align it to the main price timeframe (which is also 6h)
+    # Since main price is 6h, we can use it directly
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_in_trade = 0
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vwtp_cci_1d_aligned[i]) or np.isnan(cci_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_in_trade = 0
             continue
         
         price = prices['close'].iloc[i]
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        regime_ok = adx_aligned[i] > 25
+        # Trend condition: 1d EMA20 > EMA50 for long, < for short
+        uptrend = ema20_1d_aligned[i] > ema50_1d_aligned[i]
+        downtrend = ema20_1d_aligned[i] < ema50_1d_aligned[i]
         
-        # Volume filter: 1d volume > 1.5x 20-day average
-        volume_ok = vol_ratio_1d_aligned[i] > 1.5
+        # Volume-weighted CCI condition
+        vwtp_cci = vwtp_cci_1d_aligned[i]
+        vwtp_cci_bullish = vwtp_cci > -50
+        vwtp_cci_bearish = vwtp_cci < 50
+        
+        # 6h CCI signals
+        cci_now = cci_6h[i]
+        cci_prev = cci_6h[i-1] if i > 0 else cci_6h[i]
+        
+        # Bullish crossover: CCI crosses above -100
+        bullish_cross = (cci_prev <= -100) and (cci_now > -100)
+        # Bearish crossover: CCI crosses below +100
+        bearish_cross = (cci_prev >= 100) and (cci_now < 100)
+        # Exit signals: CCI crosses zero
+        exit_long = (cci_prev > 0) and (cci_now <= 0)
+        exit_short = (cci_prev < 0) and (cci_now >= 0)
         
         if position == 0:
-            # Long entry: price breaks above upper Donchian band with volume and regime
-            if price > upper_12h_aligned[i] and volume_ok and regime_ok:
+            # Long conditions
+            if bullish_cross and uptrend and vwtp_cci_bullish:
                 signals[i] = 0.25
                 position = 1
-                bars_in_trade = 0
-            # Short entry: price breaks below lower Donchian band with volume and regime
-            elif price < lower_12h_aligned[i] and volume_ok and regime_ok:
+            # Short conditions
+            elif bearish_cross and downtrend and vwtp_cci_bearish:
                 signals[i] = -0.25
                 position = -1
-                bars_in_trade = 0
         
-        elif position != 0:
-            bars_in_trade += 1
-            
-            # Exit conditions:
-            # 1. Price crosses EMA(34)
-            # 2. Maximum 3 bars in trade (to avoid overtrading)
-            ema_cross = (position == 1 and price < ema_34_12h_aligned[i]) or \
-                        (position == -1 and price > ema_34_12h_aligned[i])
-            max_bars = bars_in_trade >= 3
-            
-            if ema_cross or max_bars:
+        elif position == 1:
+            # Long exit: CCI crosses zero down OR trend fails OR VWTP CCI too bearish
+            if exit_long or not uptrend or vwtp_cci < -100:
                 signals[i] = 0.0
                 position = 0
-                bars_in_trade = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: CCI crosses zero up OR trend fails OR VWTP CCI too bullish
+            if exit_short or not downtrend or vwtp_cci > 100:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_1d_Donchian20_Breakout_Volume_Regime_Filtered_v1"
-timeframe = "12h"
+name = "6h_1d_1w_VolumeWeighted_CCI_Trend_Filtered_v1"
+timeframe = "6h"
 leverage = 1.0
