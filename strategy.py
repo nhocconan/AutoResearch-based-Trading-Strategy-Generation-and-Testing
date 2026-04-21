@@ -1,48 +1,48 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_TRIXVolume_v1
-Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d TRIX trend (TRIX > 0 for long, < 0 for short) and volume spike (volume > 2.0x 20-period MA).
-Only trade in direction of 1d TRIX to avoid whipsaw in ranging markets. Uses ATR(14) stoploss (1.5x) and discrete position sizing (0.25) to minimize fee drag.
-Designed to work in both bull and bear markets by aligning with 1d momentum via TRIX.
+1d_Williams_Fractal_Breakout_1wTrend_VolumeSpike_ATRStop_v1
+Hypothesis: Daily Williams fractal breakouts filtered by 1-week EMA50 trend and volume spike.
+In trending markets (price > EMA50_1w): long on bullish fractal break above prior high,
+short on bearish fractal break below prior low. Uses ATR(14) stoploss (2.0x) and discrete
+position sizing (0.25) to manage risk. Designed for low trade frequency (~15-30/year) to
+minimize fee drag while capturing strong directional moves in both bull and bear regimes.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for TRIX trend)
+    # Load HTF data ONCE before loop (1w for EMA50 trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
+        return np.zeros(n)
+    
+    # Load daily data for fractals
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
-    df_1d_open = df_1d['open'].values
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
+    # === 1-week EMA50 for trend filter ===
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla levels for each 1d bar
-    range_1d = df_1d_high - df_1d_low
-    r1_1d = df_1d_close + 0.275 * range_1d
-    s1_1d = df_1d_close - 0.275 * range_1d
-    
-    # Align 1d Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # === 1d TRIX for trend filter (15-period EMA of 15-period EMA of 15-period EMA) ===
-    close_1d = pd.Series(df_1d_close)
-    ema1 = close_1d.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix_raw = 100 * (ema3.pct_change())
-    trix = trix_raw.fillna(0).values  # TRIX(15)
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # === Williams Fractals on daily (need 2-bar confirmation delay) ===
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Fractals need 2 extra daily bars for confirmation (center bar + 2 after)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
     # === Volume spike filter (volume > 2.0x 20-period MA) ===
     volume = prices['volume'].values
@@ -63,10 +63,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(trix_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,14 +76,14 @@ def generate_signals(prices):
         
         price = close[i]
         vol_spike = volume_spike[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        trix_val = trix_aligned[i]
+        bearish_fractal_val = bearish_fractal_aligned[i]
+        bullish_fractal_val = bullish_fractal_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Only enter in direction of 1d TRIX with volume spike
-            long_condition = (price > r1) and (trix_val > 0) and vol_spike
-            short_condition = (price < s1) and (trix_val < 0) and vol_spike
+            # Only enter in direction of 1w trend with volume spike
+            long_condition = (bullish_fractal_val == 1) and (price > ema_trend) and vol_spike
+            short_condition = (bearish_fractal_val == 1) and (price < ema_trend) and vol_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -93,24 +95,24 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (1.5x ATR)
-            if price < entry_price - 1.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # TRIX trend reversal exit
-            elif trix_val < 0:
+            # Trend reversal exit
+            elif price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (1.5x ATR)
-            if price > entry_price + 1.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # TRIX trend reversal exit
-            elif trix_val > 0:
+            # Trend reversal exit
+            elif price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_TRIXVolume_v1"
-timeframe = "4h"
+name = "1d_Williams_Fractal_Breakout_1wTrend_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
