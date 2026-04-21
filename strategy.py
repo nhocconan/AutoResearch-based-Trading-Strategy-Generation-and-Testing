@@ -3,126 +3,87 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot R3/S3 breakout with volume confirmation and 1d trend filter.
-# Go long when price breaks above Camarilla R3 and volume > 1.5x 20-period average.
-# Go short when price breaks below Camarilla S3 and volume > 1.5x 20-period average.
-# Only take trades in direction of 1d EMA50 trend (long when price > EMA50, short when price < EMA50).
-# Uses 1d EMA50 for trend filter to avoid counter-trend trades.
-# Target: 20-150 total trades over 4 years by requiring trend alignment + breakout + volume confirmation.
+# Hypothesis: 6h Weekly RSI Reversion with 1d Trend Filter
+# Go long when weekly RSI(14) crosses below 30 (oversold) and price > 1d EMA200 (bullish trend)
+# Go short when weekly RSI(14) crosses above 70 (overbought) and price < 1d EMA200 (bearish trend)
+# Exit when RSI returns to 50 (mean reversion complete)
+# Weekly RSI avoids noise; 1d EMA200 ensures trend alignment to avoid counter-trend trades
+# Target: 12-37 trades/year by requiring extreme weekly RSI + trend filter
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d for EMA50 trend filter
+    # Load weekly data for RSI calculation
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 14:
+        return np.zeros(n)
+    
+    # Load daily data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate weekly RSI(14)
+    close_w = df_w['close'].values
+    delta = np.diff(close_w, prepend=close_w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(close_w)
+    avg_loss = np.zeros_like(close_w)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(close_w)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_w = 100 - (100 / (1 + rs))
+    rsi_w[0:13] = np.nan  # Not enough data
+    
+    # Align weekly RSI to 6h
+    rsi_w_aligned = align_htf_to_ltf(prices, df_w, rsi_w)
+    
+    # Calculate daily EMA200 for trend filter
     close_d = df_1d['close'].values
-    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_d = pd.Series(close_d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align 1d EMA50 to 4h
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_d)
-    
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Align daily EMA200 to 6h
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(rsi_w_aligned[i]) or np.isnan(ema200_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Calculate Camarilla levels from previous day
-        # Need previous day's high, low, close
-        if i < 96:  # Need at least 96 4h bars (4 days) to get previous day
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # Get previous day's OHLC (assuming 24*4 = 96 bars per day)
-        prev_day_start = i - 96
-        prev_day_end = i - 24  # Previous day's close is 24 bars ago
-        if prev_day_start < 0:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        prev_high = np.max(prices['high'].iloc[prev_day_start:prev_day_end+1].values)
-        prev_low = np.min(prices['low'].iloc[prev_day_start:prev_day_end+1].values)
-        prev_close = prices['close'].iloc[prev_day_end]
-        
-        # Calculate Camarilla levels
-        range_val = prev_high - prev_low
-        if range_val <= 0:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        camarilla_r3 = prev_close + (range_val * 1.1 / 4)
-        camarilla_s3 = prev_close - (range_val * 1.1 / 4)
-        
-        # Current price and volume
+        # Get current values
+        rsi = rsi_w_aligned[i]
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Calculate 20-period volume average
-        vol_lookback_start = max(0, i - 19)
-        vol_window = prices['volume'].iloc[vol_lookback_start:i+1].values
-        vol_ma_20 = np.mean(vol_window)
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume > 1.5 * vol_ma_20
-        
-        # Trend filter: price vs daily EMA50
-        bull_trend = price > ema50_1d_aligned[i]
-        bear_trend = price < ema50_1d_aligned[i]
+        ema200 = ema200_1d_aligned[i]
         
         if position == 0:
-            # Enter long on breakout above Camarilla R3 with volume and bullish trend
-            if price > camarilla_r3 and volume_confirm and bull_trend:
+            # Enter long: weekly RSI < 30 (oversold) and price above EMA200 (bullish trend)
+            if rsi < 30 and price > ema200:
                 signals[i] = 0.25
                 position = 1
-            # Enter short on breakout below Camarilla S3 with volume and bearish trend
-            elif price < camarilla_s3 and volume_confirm and bear_trend:
+            # Enter short: weekly RSI > 70 (overbought) and price below EMA200 (bearish trend)
+            elif rsi > 70 and price < ema200:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses back through Camarilla opposite level
-            exit_signal = False
-            
-            if position == 1:
-                # Exit long: price breaks below Camarilla S3
-                if price < camarilla_s3:
-                    exit_signal = True
-            elif position == -1:
-                # Exit short: price breaks above Camarilla R3
-                if price > camarilla_r3:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit when RSI returns to 50 (mean reversion complete)
+            if (position == 1 and rsi >= 50) or (position == -1 and rsi <= 50):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA50_Trend_Volume"
-timeframe = "4h"
+name = "6h_WeeklyRSI_Reversion_Trend"
+timeframe = "6h"
 leverage = 1.0
