@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R mean-reversion with 12h EMA trend filter and volume confirmation.
-Longs when Williams %R crosses above -80 (oversold) with price above 12h EMA50 and volume>1.3x average.
-Shorts when Williams %R crosses below -20 (overbought) with price below 12h EMA50 and volume>1.3x average.
-Exit when Williams %R returns to -50 (mean) or 2x ATR stop.
-Designed for 20-30 trades/year to minimize fee fade while capturing mean-reversion extremes in ranging markets.
+Hypothesis: 1h EMA pullback in 4h trend with volume confirmation and session filter.
+Trades only during 08-20 UTC to avoid low-volume Asian session noise.
+Long when price pulls back to 21 EMA in 4h uptrend (EMA50 > EMA200) with volume > 1.5x average.
+Short when price pulls back to 21 EMA in 4h downtrend (EMA50 < EMA200) with volume > 1.5x average.
+Exit on EMA crossover or 2x ATR stop. Designed for 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -16,88 +16,96 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE before loop for trend and EMA
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
     
-    # Williams %R (14-period) on 4h data
-    high_14 = pd.Series(prices['high'].values).rolling(window=14, min_periods=14).max().values
-    low_14 = pd.Series(prices['low'].values).rolling(window=14, min_periods=14).min().values
+    # Calculate 4h EMA50 and EMA200 for trend
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align 4h EMAs to 1h timeframe
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    
+    # 1h EMA21 for entry timing
     close = prices['close'].values
-    willr = -100 * (high_14 - close) / (high_14 - low_14)
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Volume confirmation: volume spike > 1.3x 20-period average
+    # Volume confirmation: volume spike > 1.5x 20-period average
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
-    # ATR for stoploss (20-period)
-    tr1 = prices['high'].values - prices['low'].values
-    tr2 = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
-    tr3 = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
+    # ATR for stoploss (14-period)
+    high = prices['high'].values
+    low = prices['low'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if indicators not ready
-        if (np.isnan(willr[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        # Skip if indicators not ready or outside session
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i]) or 
+            np.isnan(ema21[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        willr_val = willr[i]
-        ema_trend = ema_50_12h_aligned[i]
+        ema50 = ema50_4h_aligned[i]
+        ema200 = ema200_4h_aligned[i]
+        ema21_val = ema21[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Enter long: Williams %R crosses above -80 (oversold) with uptrend and volume
-            if (willr_val > -80 and 
-                willr[i-1] <= -80 and 
-                price_close > ema_trend and 
-                vol_ratio_val > 1.3):
-                signals[i] = 0.25
+            # Enter long: 4h uptrend + price at 21 EMA + volume
+            if (ema50 > ema200 and  # 4h uptrend
+                price_close >= ema21_val * 0.998 and  # near 21 EMA (allow 0.2% slack)
+                price_close <= ema21_val * 1.002 and
+                vol_ratio_val > 1.5):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: Williams %R crosses below -20 (overbought) with downtrend and volume
-            elif (willr_val < -20 and 
-                  willr[i-1] >= -20 and 
-                  price_close < ema_trend and 
-                  vol_ratio_val > 1.3):
-                signals[i] = -0.25
+            # Enter short: 4h downtrend + price at 21 EMA + volume
+            elif (ema50 < ema200 and  # 4h downtrend
+                  price_close >= ema21_val * 0.998 and  # near 21 EMA
+                  price_close <= ema21_val * 1.002 and
+                  vol_ratio_val > 1.5):
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
-            # Exit: Williams %R returns to -50 (mean) OR ATR-based stoploss
+            # Exit: 4h EMA crossover OR 2x ATR stop
             exit_signal = False
             
-            # Mean reversion exit: Williams %R crosses -50
-            if position == 1 and willr_val < -50:
+            # EMA crossover exit
+            if position == 1 and ema50 < ema200:
                 exit_signal = True
-            elif position == -1 and willr_val > -50:
+            elif position == -1 and ema50 > ema200:
                 exit_signal = True
             
-            # ATR-based stoploss (2x ATR from recent extreme)
+            # ATR-based stoploss (2x ATR from entry approximated by 21 EMA)
             if position == 1:
-                # For longs, stop below recent low
-                recent_low = pd.Series(prices['low'].values).rolling(window=10, min_periods=1).min().iloc[i]
-                if price_close < recent_low - 2.0 * atr_val:
+                if price_close < ema21_val - 2.0 * atr_val:
                     exit_signal = True
             elif position == -1:
-                # For shorts, stop above recent high
-                recent_high = pd.Series(prices['high'].values).rolling(window=10, min_periods=1).max().iloc[i]
-                if price_close > recent_high + 2.0 * atr_val:
+                if price_close > ema21_val + 2.0 * atr_val:
                     exit_signal = True
             
             if exit_signal:
@@ -105,10 +113,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_WilliamsR_MeanReversion_12hEMA50_Trend_Volume1.3x_ATR2x"
-timeframe = "4h"
+name = "1h_EMA21_Pullback_4hEMA50_200_Trend_Volume1.5x_Session"
+timeframe = "1h"
 leverage = 1.0
