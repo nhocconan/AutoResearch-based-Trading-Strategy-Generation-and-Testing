@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_Pivot_R1S1_Breakout_Volume_ATRFilter
-Hypothesis: Daily Camarilla pivot breakout on 6h timeframe with volume and ATR filters.
-- Long when price breaks above daily R1 with volume > 1.5x 20-period average and ATR > 30th percentile
-- Short when price breaks below daily S1 with same filters
-- Exit when price reverses to opposite S1/R1 level or volatility drops below threshold
-- Uses 6h timeframe to target 12-37 trades/year, avoiding excessive churn
-- Works in bull markets via breakout continuation and bear markets via breakdown continuation
+1h_Camarilla_Pivot_R1S1_Breakout_With_4h_Trend_Filter
+Hypothesis: 1h breakout strategy using daily Camarilla pivots for structure and 4h trend for direction.
+Long when price breaks above R1 with 4h uptrend (price > 4h EMA20), short when price breaks below S1 with 4h downtrend (price < 4h EMA20).
+Volume confirmation reduces false breakouts. Session filter (08-20 UTC) avoids low-volume periods.
+Designed for 1h timeframe to target 15-37 trades/year with tight entry conditions.
+4h trend filter prevents counter-trend trades in choppy markets, improving win rate in both bull and bear regimes.
 """
 
 import numpy as np
@@ -15,39 +14,27 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def calculate_camarilla_pivot(high, low, close):
     """Calculate Camarilla pivot levels"""
+    typical = (high + low + close) / 3
     range_val = high - low
     R1 = close + range_val * 1.1 / 12
     S1 = close - range_val * 1.1 / 12
     return R1, S1
 
-def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = np.zeros_like(tr)
-    if len(tr) >= period:
-        atr[period-1] = np.mean(tr[:period])
-    
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    return atr
+def calculate_ema(close, period):
+    """Calculate Exponential Moving Average"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla pivots and ATR
+    # Load 1d data once for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1-day Camarilla pivot levels
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -60,20 +47,26 @@ def generate_signals(prices):
         R1_1d[i] = R1
         S1_1d[i] = S1
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 1h timeframe
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
-    # Calculate 1-day ATR for volatility filter
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Load 4h data once for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA20 for trend
+    close_4h = df_4h['close'].values
+    ema_20_4h = calculate_ema(close_4h, 20)
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if indicators not ready
-        if np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]):
+        if np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or np.isnan(ema_20_4h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,37 +92,34 @@ def generate_signals(prices):
         else:
             volume_ok = False
         
-        # Volatility filter: avoid extremely low volatility (choppy markets)
-        vol_filter = atr_1d_aligned[i] > np.percentile(atr_1d_aligned[:i+1], 30) if i >= 30 else True
-        
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation
-            if price > R1_1d_aligned[i] and volume_ok and vol_filter:
-                signals[i] = 0.25
+            # Long: price breaks above R1 with 4h uptrend and volume
+            if price > R1_1d_aligned[i] and price > ema_20_4h_aligned[i] and volume_ok:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 with volume confirmation
-            elif price < S1_1d_aligned[i] and volume_ok and vol_filter:
-                signals[i] = -0.25
+            # Short: price breaks below S1 with 4h downtrend and volume
+            elif price < S1_1d_aligned[i] and price < ema_20_4h_aligned[i] and volume_ok:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 (reversal) or volatility drops
-            if price < S1_1d_aligned[i] or not vol_filter:
+            # Long exit: price breaks below S1 or 4h trend turns down
+            if price < S1_1d_aligned[i] or price < ema_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price breaks above R1 (reversal) or volatility drops
-            if price > R1_1d_aligned[i] or not vol_filter:
+            # Short exit: price breaks above R1 or 4h trend turns up
+            if price > R1_1d_aligned[i] or price > ema_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "6h_Camarilla_Pivot_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "6h"
+name = "1h_Camarilla_Pivot_R1S1_Breakout_With_4h_Trend_Filter"
+timeframe = "1h"
 leverage = 1.0
