@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Regime_VolumeBreakout_V1
-Hypothesis: On 1d timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-combined with weekly pivot bias and volume spike confirmation. Enter long when price > KAMA
-in bullish weekly regime with volume expansion; short when price < KAMA in bearish weekly regime.
-Weekly regime filter avoids counter-trend trades in strong weekly trends. Low frequency (~15-25 trades/year)
-to minimize fee drag. Works in bull/bear: KAMA adapts to trend speed, weekly pivot provides structural bias.
+6h_EMA34_RSI2_VolumeSpike
+Hypothesis: Mean reversion on 6h timeframe using RSI(2) extreme readings filtered by 1d EMA34 trend and volume spikes.
+Works in bull/bear: In uptrend (price>EMA34), buy RSI<10 pullbacks; in downtrend (price<EMA34), sell RSI>90 rallies.
+Volume spike confirms institutional interest. Target: 12-30 trades/year per symbol (50-120 over 4 years).
 """
 
 import numpy as np
@@ -14,132 +12,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for KAMA and volatility
+    # Load 1d data once for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
+    # Calculate 1d EMA34
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Kaufman Adaptive Moving Average (KAMA) with ER=10, fast=2, slow=30
-    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.diff(close_1d, 10))  # |close[t] - close[t-10]|
-    volatility = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
+    # Calculate RSI(2) on 6h close
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    er = np.zeros_like(close_1d)
-    er[10:] = change[10:] / np.where(volatility[10:] == 0, 1, volatility[10:])
+    # Wilder's smoothing for RSI
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)      # EMA(2)
-    slow_sc = 2 / (30 + 1)     # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    for i in range(1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2  # 2-period Wilder's
+        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[29] = close_1d[29]  # seed at period 30
-    for i in range(30, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0] = 50  # neutral for first bar
     
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Volume spike filter: current volume > 2.0 * 20-period average
+    volume = prices['volume'].values
+    vol_ma = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
+        else:
+            vol_ma[i] = np.mean(volume[i-20:i])
     
-    # 1d ATR(14) for volatility filter
-    tr1 = np.zeros_like(close_1d)
-    tr2 = np.zeros_like(close_1d)
-    tr3 = np.zeros_like(close_1d)
-    tr1[1:] = high_1d[1:] - low_1d[1:]
-    tr2[1:] = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3[1:] = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.zeros_like(close_1d)
-    for i in range(14, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    
-    # Load 1w data for weekly pivot bias (long-term direction)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
-    prev_close_1w[0] = np.nan
-    
-    pivot_point = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    r1 = 2 * pivot_point - prev_low_1w
-    s1 = 2 * pivot_point - prev_high_1w
-    
-    # Weekly bias: price above pivot = bullish, below = bearish
-    weekly_bias = align_htf_to_ltf(prices, df_1w, pivot_point)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(34, n):
         # Skip if indicators not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(weekly_bias[i])):
+        if np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume filter: current volume > 2.0 * 20-period average (strict to reduce trades)
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
-        else:
-            volume_ok = False
-        
-        # Weekly trend filter: bullish if close > pivot, bearish if close < pivot
-        weekly_close = align_htf_to_ltf(prices, df_1w, close_1w)
-        weekly_bullish = not np.isnan(weekly_close[i]) and weekly_close[i] > weekly_bias[i]
-        weekly_bearish = not np.isnan(weekly_close[i]) and weekly_close[i] < weekly_bias[i]
+        price = close[i]
+        rsi_val = rsi[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Long: price > KAMA (bullish momentum) AND weekly bullish bias AND volume spike
-            if (price > kama_aligned[i] and 
-                weekly_bullish and 
-                volume_ok):
+            # Long: price > 1d EMA34 (uptrend) AND RSI < 10 (extreme oversold) AND volume spike
+            if (price > ema_34_1d_aligned[i] and 
+                rsi_val < 10 and 
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < KAMA (bearish momentum) AND weekly bearish bias AND volume spike
-            elif (price < kama_aligned[i] and 
-                  weekly_bearish and 
-                  volume_ok):
+            # Short: price < 1d EMA34 (downtrend) AND RSI > 90 (extreme overbought) AND volume spike
+            elif (price < ema_34_1d_aligned[i] and 
+                  rsi_val > 90 and 
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < KAMA (trend reversal) OR weekly bias turns bearish
-            if (price < kama_aligned[i] or 
-                (not np.isnan(weekly_close[i]) and weekly_close[i] < weekly_bias[i])):
+            # Long exit: RSI > 50 (mean reversion complete) or price < 1d EMA34 (trend change)
+            if rsi_val > 50 or price < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > KAMA (trend reversal) OR weekly bias turns bullish
-            if (price > kama_aligned[i] or 
-                (not np.isnan(weekly_close[i]) and weekly_close[i] > weekly_bias[i])):
+            # Short exit: RSI < 50 (mean reversion complete) or price > 1d EMA34 (trend change)
+            if rsi_val < 50 or price > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -147,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_KAMA_Regime_VolumeBreakout_V1"
-timeframe = "1d"
+name = "6h_EMA34_RSI2_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
