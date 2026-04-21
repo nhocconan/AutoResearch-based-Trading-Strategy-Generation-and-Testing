@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeRegime
-Hypothesis: 4h Camarilla pivot (R1/S1) breakouts filtered by daily EMA34 trend and volume regime.
-Enter long when price breaks above 4h R1 with daily uptrend and volume above median.
-Enter short when price breaks below 4h S1 with daily downtrend and volume above median.
-Exit on opposite level break or ATR stoploss (1.5*ATR).
-Designed for moderate trade frequency (target: 20-40 trades/year) to avoid fee drag.
-Works in bull/bear via daily trend alignment and volume regime filter.
+4h_HTFTrend_RegimeFilter_VolumeBreakout
+Hypothesis: 4h price breakouts above/below rolling Donchian(20) channels, filtered by 1d EMA50 trend and 1w ADX regime (trending > 25), with volume confirmation (>1.5x 20-bar average). Uses ATR(14) trailing stop (2.0*ATR) for exits. Designed for low trade frequency (target: 20-40/year) to minimize fee drag. Works in bull/bear via HTF trend alignment and volatility regime filter.
 """
 
 import numpy as np
@@ -18,40 +13,61 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (daily for trend, 4h for pivots)
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop (daily for EMA trend, weekly for ADX regime)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 4h Camarilla Pivot Levels (R1, S1) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_range = (high_4h - low_4h) * 1.1 / 12.0
-    r1_4h = close_4h + camarilla_range
-    s1_4h = close_4h - camarilla_range
-    
-    # Align to 4h timeframe (use previous completed 4h bar)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    
-    # === Daily EMA34 for HTF trend filter ===
+    # === Daily EMA50 for HTF trend filter ===
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Volume regime: above median volume (regime filter) ===
-    volume = prices['volume'].values
-    vol_median = pd.Series(volume).rolling(window=50, min_periods=50).median().values
+    # === Weekly ADX(14) for regime filter (trending > 25) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === ATR (14-period) for stoploss ===
+    # True Range
+    tr1 = pd.Series(high_1w - low_1w)
+    tr2 = pd.Series(np.abs(high_1w - np.roll(close_1w, 1)))
+    tr3 = pd.Series(np.abs(low_1w - np.roll(close_1w, 1)))
+    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    dm_plus = pd.Series(np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                                 np.maximum(high_1w - np.roll(high_1w, 1), 0), 0))
+    dm_minus = pd.Series(np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                                  np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0))
+    
+    # Smoothed values
+    tr_14 = tr_1w.ewm(alpha=1/14, adjust=False).mean()
+    dm_plus_14 = dm_plus.ewm(alpha=1/14, adjust=False).mean()
+    dm_minus_14 = dm_minus.ewm(alpha=1/14, adjust=False).mean()
+    
+    # DI and DX
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx_1w = dx.ewm(alpha=1/14, adjust=False).mean()
+    adx_1w_values = adx_1w.values
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w_values)
+    
+    # === 4h Donchian(20) breakout channels ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    # Donchian channels: upper = max(high, lookback=20), lower = min(low, lookback=20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === Volume confirmation (>1.5x 20-bar average) ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -64,9 +80,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) 
-            or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_median[i]) 
-            or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_1w_aligned[i]) 
+            or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,34 +91,37 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume regime: current volume > 50-period median (avoid low-volume chop)
-            vol_regime = volume[i] > vol_median[i]
+            # Volume confirmation: current volume > 1.5x 20-period average
+            vol_confirm = volume[i] > 1.5 * vol_ma[i]
             
-            # Long conditions: price > 4h R1, daily uptrend, volume regime
-            long_breakout = price > r1_4h_aligned[i]
-            long_trend = price > ema_34_1d_aligned[i]
+            # Regime filter: weekly ADX > 25 (trending market)
+            regime_filter = adx_1w_aligned[i] > 25
             
-            # Short conditions: price < 4h S1, daily downtrend, volume regime
-            short_breakout = price < s1_4h_aligned[i]
-            short_trend = price < ema_34_1d_aligned[i]
+            # Long conditions: price > Donchian upper, price > daily EMA50, volume spike, trending regime
+            long_breakout = price > donch_high[i]
+            long_trend = price > ema_50_1d_aligned[i]
+            
+            # Short conditions: price < Donchian lower, price < daily EMA50, volume spike, trending regime
+            short_breakout = price < donch_low[i]
+            short_trend = price < ema_50_1d_aligned[i]
             
             # Entry logic
-            if long_breakout and long_trend and vol_regime:
+            if long_breakout and long_trend and vol_confirm and regime_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and vol_regime:
+            elif short_breakout and short_trend and vol_confirm and regime_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 1.5 * atr[i]:
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below 4h S1 (support broken)
-            elif price < s1_4h_aligned[i]:
+            # Trailing exit: price closes below Donchian lower (support broken)
+            elif price < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,11 +129,11 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 1.5 * atr[i]:
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above 4h R1 (resistance broken)
-            elif price > r1_4h_aligned[i]:
+            # Trailing exit: price closes above Donchian upper (resistance broken)
+            elif price > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeRegime"
+name = "4h_HTFTrend_RegimeFilter_VolumeBreakout"
 timeframe = "4h"
 leverage = 1.0
