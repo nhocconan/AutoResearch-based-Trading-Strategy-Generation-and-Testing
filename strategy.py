@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_PivotPoint_SR_Bounce_v1
-Hypothesis: Price bounces off weekly pivot support/resistance levels with 1d trend confirmation on 6h timeframe.
-In uptrend (1d close > 1d EMA50), buy near weekly S1/S2; in downtrend (1d close < 1d EMA50), sell near weekly R1/R2.
-Uses volume confirmation to avoid false bounces. Works in bull/bear markets by trading mean reversion within the trend.
+6h_1w_1d_IBS_Trend_v1
+Hypothesis: Intraday Bar Strength (IBS) combined with 1d trend and weekly structure produces high-probability mean-reversion entries in 6h timeframe.
+Long: IBS < 0.3 (oversold) + 1d close > 1d EMA50 (uptrend) + price above weekly S1 (support intact)
+Short: IBS > 0.7 (overbought) + 1d close < 1d EMA50 (downtrend) + price below weekly R1 (resistance intact)
+Uses volume confirmation and ATR-based stops. Works in bull/bear markets by fading extremes within the trend.
 Target: 12-30 trades/year per symbol (50-120 over 4 years).
 """
 
@@ -42,15 +43,11 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3.0
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
     
     # Align weekly levels to 6h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
     # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
@@ -71,14 +68,17 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # IBS (Intraday Bar Strength) = (close - low) / (high - low)
+    ibs = (close - low) / (high - low)
+    ibs[(high - low) == 0] = 0.5  # avoid division by zero
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(ibs[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,28 +95,26 @@ def generate_signals(prices):
         downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: price near weekly support in uptrend with volume
-            if uptrend and volume_ok:
-                if abs(price - s1_aligned[i]) <= 0.3 * atr[i] or abs(price - s2_aligned[i]) <= 0.5 * atr[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: price near weekly resistance in downtrend with volume
-            elif downtrend and volume_ok:
-                if abs(price - r1_aligned[i]) <= 0.3 * atr[i] or abs(price - r2_aligned[i]) <= 0.5 * atr[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: oversold (IBS < 0.3) in uptrend with volume, price above weekly S1
+            if uptrend and volume_ok and ibs[i] < 0.3 and price > s1_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: overbought (IBS > 0.7) in downtrend with volume, price below weekly R1
+            elif downtrend and volume_ok and ibs[i] > 0.7 and price < r1_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit: price reaches weekly pivot or resistance, or stoploss
-            if price >= pivot_aligned[i] or price >= r1_aligned[i] or price < s1_aligned[i] - 1.5 * atr[i]:
+            # Exit: IBS > 0.7 (overbought) or stoploss
+            if ibs[i] > 0.7 or price < s1_aligned[i] - 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches weekly pivot or support, or stoploss
-            if price <= pivot_aligned[i] or price <= s1_aligned[i] or price > r1_aligned[i] + 1.5 * atr[i]:
+            # Exit: IBS < 0.3 (oversold) or stoploss
+            if ibs[i] < 0.3 or price > r1_aligned[i] + 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_PivotPoint_SR_Bounce_v1"
+name = "6h_1w_1d_IBS_Trend_v1"
 timeframe = "6h"
 leverage = 1.0
