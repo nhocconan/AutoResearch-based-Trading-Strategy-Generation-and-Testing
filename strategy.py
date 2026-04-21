@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_VolumeATRFilter_Tight
-Hypothesis: Camarilla R1/S1 breakouts from 1d pivots with volume confirmation and ATR-based stoploss work on 4h timeframe for BTC, ETH, and SOL in both bull and bear markets. Uses 1d timeframe for Camarilla pivot calculation and 4h EMA34 for trend filter. Target: 20-50 trades/year per symbol (80-200 over 4 years) to avoid fee drag.
+4h_Camarilla_R1S1_Breakout_VolumeATRFilter_Tight_V2
+Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 4h timeframe for BTC, ETH, and SOL in both bull and bear markets. Uses 1d timeframe for Camarilla pivot calculation and 4h EMA34 for trend filter. Target: 20-50 trades/year per symbol (80-200 over 4 years) with tight entry conditions to avoid overtrading.
 """
 
 import numpy as np
@@ -11,6 +11,11 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
+        return np.zeros(n)
+    
+    # Load 4h data once for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
     # Load daily data once for Camarilla pivot calculation
@@ -40,17 +45,12 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Load 4h data once for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 35:
-        return np.zeros(n)
-    
     # 4h EMA34 for trend filter
     close_4h = df_4h['close'].values
     ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Volume filter: 20-period average (approx 5 days on 4h)
+    # Volume filter: 20-period average (approx 3.3 days on 4h)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     # ATR for stoploss
@@ -116,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_VolumeATRFilter_Tight"
+name = "4h_Camarilla_R1S1_Breakout_VolumeATRFilter_Tight_V2"
 timeframe = "4h"
 leverage = 1.0
