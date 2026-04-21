@@ -1,68 +1,84 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams Fractal breakout with 12h volume confirmation and ADX trend filter.
-Longs when price breaks above latest bearish fractal with ADX>20 and volume>1.3x average;
-shorts when price breaks below latest bullish fractal with ADX>20 and volume>1.3x average.
-Exit on price crossing back through the opposite fractal or 2x ATR stop.
-Williams Fractals identify potential reversal points; combining with trend and volume filters
-should yield high-probability breakouts in both bull and bear markets while limiting trades.
+Hypothesis: 1d weekly Donchian channel breakout with volume confirmation and ADX trend filter.
+Longs when price breaks above 10-day Donchian high with ADX>25 and volume>1.5x average;
+shorts when price breaks below 10-day Donchian low with ADX>25 and volume>1.5x average.
+Exit on price crossing back through 20-day EMA or 2x ATR stop.
+Designed for 10-20 trades/year to minimize fee decay while capturing major trends.
+Works in bull markets via breakouts and in bear markets via short breakdowns.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for Williams Fractals and ADX
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 5:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 20-period EMA on weekly close for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate Williams Fractals (requires 5 points: t-2, t-1, t, t+1, t+2)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_12h, low_12h)
-    # Bearish fractal: high[t] is highest among [t-2, t-1, t, t+1, t+2]
-    # Bullish fractal: low[t] is lowest among [t-2, t-1, t, t+1, t+2]
-    # These arrays contain the fractal values where they occur, NaN elsewhere
+    # Calculate 14-period ADX on weekly for trend strength
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 14-period ADX for trend filter on 12h
-    plus_dm = np.zeros_like(high_12h)
-    minus_dm = np.zeros_like(high_12h)
-    plus_dm[1:] = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                           np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    minus_dm[1:] = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                            np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    plus_dm = np.zeros_like(high_1w)
+    minus_dm = np.zeros_like(high_1w)
+    plus_dm[1:] = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                           np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    minus_dm[1:] = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                            np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_12h
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_12h
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1w = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Align 12h indicators to 4h timeframe with extra delay for fractals (need 2 bars confirmation)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bullish_fractal, additional_delay_bars=2)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Load daily data for Donchian channels and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume confirmation: volume spike > 1.3x 20-period average on 4h
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 10-day Donchian channels
+    donch_high = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
+    donch_low = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
+    
+    # Calculate 20-day EMA for exit
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align all daily indicators to lower timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # Volume confirmation: volume spike > 1.5x 20-day average
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
-    # ATR for stoploss (20-period) on 4h
+    # ATR for stoploss (20-day)
     tr1 = prices['high'].values - prices['low'].values
     tr2 = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
     tr3 = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
@@ -76,8 +92,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,44 +103,48 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         price_high = prices['high'].iloc[i]
         price_low = prices['low'].iloc[i]
-        bear_fract = bearish_fractal_aligned[i]
-        bull_fract = bullish_fractal_aligned[i]
-        adx_val = adx_aligned[i]
+        donch_high_val = donch_high_aligned[i]
+        donch_low_val = donch_low_aligned[i]
+        ema_20_1d_val = ema_20_1d_aligned[i]
+        ema_20_1w_val = ema_20_1w_aligned[i]
+        adx_val = adx_1w_aligned[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Enter long: break above bearish fractal with volume and trend
-            if (price_high > bear_fract and 
-                adx_val > 20 and 
-                vol_ratio_val > 1.3):
+            # Enter long: break above Donchian high with weekly trend up and volume
+            if (price_high > donch_high_val and 
+                ema_20_1w_val > ema_20_1w[max(0, i-1)] if i > 0 else ema_20_1w_val and  # weekly EMA rising
+                adx_val > 25 and 
+                vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below bullish fractal with volume and trend
-            elif (price_low < bull_fract and 
-                  adx_val > 20 and 
-                  vol_ratio_val > 1.3):
+            # Enter short: break below Donchian low with weekly trend down and volume
+            elif (price_low < donch_low_val and 
+                  ema_20_1w_val < ema_20_1w[max(0, i-1)] if i > 0 else ema_20_1w_val and  # weekly EMA falling
+                  adx_val > 25 and 
+                  vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: opposite fractal cross OR ATR-based stoploss
+            # Exit: 20-day EMA cross OR ATR-based stoploss
             exit_signal = False
             
-            # Opposite fractal exit
-            if position == 1 and price_close < bull_fract:
+            # 20-day EMA exit
+            if position == 1 and price_close < ema_20_1d_val:
                 exit_signal = True
-            elif position == -1 and price_close > bear_fract:
+            elif position == -1 and price_close > ema_20_1d_val:
                 exit_signal = True
             
-            # ATR-based stoploss (2x ATR from fractal level)
+            # ATR-based stoploss (2x ATR from entry level)
             if position == 1:
-                # For longs, stop below bullish fractal minus 2x ATR
-                if price_close < bull_fract - 2.0 * atr_val:
+                # For longs, stop below Donchian low
+                if price_close < donch_low_val - 2.0 * atr_val:
                     exit_signal = True
             elif position == -1:
-                # For shorts, stop above bearish fractal plus 2x ATR
-                if price_close > bear_fract + 2.0 * atr_val:
+                # For shorts, stop above Donchian high
+                if price_close > donch_high_val + 2.0 * atr_val:
                     exit_signal = True
             
             if exit_signal:
@@ -135,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsFractal_Breakout_12hADX20_Volume1.3x_ATR2x"
-timeframe = "4h"
+name = "1d_WeeklyDonchian10_EMA20_ADX25_Volume1.5x_ATR2x"
+timeframe = "1d"
 leverage = 1.0
