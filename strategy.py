@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_ZeroLine_12hTrend_Regime_VolumeSpike_v1
-Hypothesis: 4h TRIX zero-line crosses with 12h trend regime (price vs 12h EMA50) and volume confirmation (>1.8x 20-bar MA). 
-In bull regime (price > 12h EMA50), favor longs on TRIX crosses above zero; in bear regime (price < 12h EMA50), favor shorts on TRIX crosses below zero. 
-ATR-based stoploss (2.5x) and discrete sizing (0.25) reduce churn. Target: 75-150 total trades over 4 years by requiring confluence of TRIX signal, trend, and volume.
-Designed to work in bull (momentum with trend) and bear (counter-trend momentum) markets via regime filter.
+1h_4hTrend_1dVolumeRegime_Entry_v1
+Hypothesis: Use 4h EMA50 for trend direction, 1d volume regime (high/low volume) to filter noise, and 1h RSI(2) for precise entry timing. In 4h uptrend + high volume regime, look for RSI(2) < 10 pullbacks to go long. In 4h downtrend + low volume regime, look for RSI(2) > 90 bounces to go short. Designed for 1h timeframe with tight entry conditions to avoid overtrading. Works in bull (trend + volume) and bear (counter-trend in low volume) markets.
 """
 
 import numpy as np
@@ -16,123 +13,91 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for trend regime)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Load HTF data ONCE before loop (4h for trend, 1d for volume regime)
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 12h EMA50 for trend regime ===
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === 4h EMA50 for trend direction ===
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # === 4h TRIX (15-period, signal 9) ===
+    # === 1d volume regime: high volume if volume > 1.5x 20-day MA, low volume if < 0.5x ===
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # === 1h RSI(2) for entry timing ===
     close = prices['close'].values
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1, then * 100 for percentage
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = (ema3 / np.roll(ema3, 1) - 1) * 100
-    # Handle first value
-    trix[0] = 0
-    
-    # === 4h ATR (14-period) for stoploss ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # === 4h volume confirmation (volume > 1.8x 20-period average) ===
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.8 * vol_ma_20)
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    bars_since_entry = 0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(trix[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
         price = close[i]
-        ema_50_12h_val = ema_50_12h_aligned[i]
-        trix_val = trix[i]
-        trix_prev = trix[i-1]
-        vol_conf = volume_confirmed[i]
+        ema_50_4h_val = ema_50_4h_aligned[i]
+        vol_ma_20_1d_val = vol_ma_20_1d_aligned[i]
+        volume_1d_current = df_1d['volume'].iloc[min(i // 24, len(df_1d)-1)] if i // 24 < len(df_1d) else volume_1d[-1]
+        rsi_val = rsi[i]
         
-        # Trend regime
-        is_bull = price > ema_50_12h_val
-        is_bear = price < ema_50_12h_val
+        # Determine regimes
+        is_4h_uptrend = price > ema_50_4h_val
+        is_4h_downtrend = price < ema_50_4h_val
+        is_high_volume = volume_1d_current > (1.5 * vol_ma_20_1d_val)
+        is_low_volume = volume_1d_current < (0.5 * vol_ma_20_1d_val)
         
         if position == 0:
-            # TRIX zero-line cross signals
-            trix_cross_up = (trix_prev <= 0) and (trix_val > 0)
-            trix_cross_down = (trix_prev >= 0) and (trix_val < 0)
+            # Long conditions: 4h uptrend + high volume + RSI(2) < 10 (oversold pullback)
+            long_condition = is_4h_uptrend and is_high_volume and (rsi_val < 10)
             
-            if is_bull:
-                # Bull regime: favor longs on TRIX crosses above zero
-                long_condition = trix_cross_up and vol_conf
-                short_condition = trix_cross_down and vol_conf and (price < ema_50_12h_val * 0.99)  # stricter for shorts
-            else:  # bear regime
-                # Bear regime: favor shorts on TRIX crosses below zero
-                short_condition = trix_cross_down and vol_conf
-                long_condition = trix_cross_up and vol_conf and (price > ema_50_12h_val * 1.01)  # stricter for longs
+            # Short conditions: 4h downtrend + low volume + RSI(2) > 90 (overbought bounce)
+            short_condition = is_4h_downtrend and is_low_volume and (rsi_val > 90)
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
-                bars_since_entry = 0
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
-                bars_since_entry = 0
         
         elif position != 0:
-            bars_since_entry += 1
-            
-            # Check stoploss (2.5x ATR)
-            if position == 1:
-                if price < entry_price - 2.5 * atr[i]:
+            # Exit conditions
+            if position == 1:  # long
+                # Exit if RSI(2) > 80 (overbought) or trend breaks
+                if rsi_val > 80 or price < ema_50_4h_val:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
-                # Exit if TRIX crosses below zero (momentum loss)
-                elif trix_val < 0:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
                 else:
-                    signals[i] = 0.25
-            else:  # position == -1
-                if price > entry_price + 2.5 * atr[i]:
+                    signals[i] = 0.20
+            else:  # position == -1, short
+                # Exit if RSI(2) < 20 (oversold) or trend breaks
+                if rsi_val < 20 or price > ema_50_4h_val:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
-                # Exit if TRIX crosses above zero (momentum loss)
-                elif trix_val > 0:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_TRIX_ZeroLine_12hTrend_Regime_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_4hTrend_1dVolumeRegime_Entry_v1"
+timeframe = "1h"
 leverage = 1.0
