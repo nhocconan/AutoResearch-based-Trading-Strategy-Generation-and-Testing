@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using 1-week Donchian channel breakout with volume confirmation and ATR-based stop.
-In uptrend (price > weekly SMA50), buy breakouts above weekly Donchian high; in downtrend (price < weekly SMA50),
-sell breakdowns below weekly Donchian low. Volume must exceed 1.5x 20-period average to confirm breakout.
-Designed for 10-30 trades/year (40-120 total over 4 years) to minimize fee drag while capturing directional moves.
-Uses 1-week timeframe for trend and structure, 1d for execution to reduce whipsaw.
+Hypothesis: 6h strategy using 1d Ichimoku Kijun (26) as dynamic support/resistance, 
+filtered by 1d Tenkan (9) crossing above/below Kijun for trend confirmation, 
+with volume spike confirmation (>1.5x 20-period average). 
+Enter long when price touches Kijun from above in bullish TK cross, 
+short when price touches Kijun from below in bearish TK cross. 
+Exit on TK cross reversal or 2x ATR stop. 
+Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag 
+while capturing institutional level bounces in both bull and bear markets.
 """
 
 import numpy as np
@@ -16,26 +19,29 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for Donchian and SMA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for Ichimoku and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 26:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period weekly Donchian channels
-    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # Calculate 50-period weekly SMA for trend filter
-    sma_50 = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    # Align weekly indicators to daily timeframe (wait for weekly bar to close)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
-    sma_50_aligned = align_htf_to_ltf(prices, df_1w, sma_50)
+    # Align 1d Ichimoku to 6h timeframe (wait for 1d bar to close)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
     
     # Volume confirmation (volume spike > 1.5x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -55,54 +61,60 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(sma_50_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        price_high = prices['high'].iloc[i]
         price_low = prices['low'].iloc[i]
-        upper = donch_high_aligned[i]
-        lower = donch_low_aligned[i]
-        sma_trend = sma_50_aligned[i]
+        price_high = prices['high'].iloc[i]
+        tenkan_val = tenkan_aligned[i]
+        kijun_val = kijun_aligned[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Enter long: price breaks above weekly Donchian high in uptrend
-            if (price_high > upper and 
-                price_close > sma_trend and 
+            # TK cross signals
+            tk_bullish = tenkan_val > kijun_val  # Tenkan above Kijun = bullish
+            tk_bearish = tenkan_val < kijun_val  # Tenkan below Kijun = bearish
+            
+            # Enter long: price touches Kijun from above in bullish TK cross
+            if (price_low <= kijun_val * 1.002 and  # Allow 0.2% tolerance for touch
+                price_close >= kijun_val and  # Price at or above Kijun
+                tk_bullish and 
                 vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly Donchian low in downtrend
-            elif (price_low < lower and 
-                  price_close < sma_trend and 
+            # Enter short: price touches Kijun from below in bearish TK cross
+            elif (price_high >= kijun_val * 0.998 and  # Allow 0.2% tolerance for touch
+                  price_close <= kijun_val and  # Price at or below Kijun
+                  tk_bearish and 
                   vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: trend reversal OR ATR-based stoploss
+            # Exit: TK cross reversal OR ATR-based stoploss
             exit_signal = False
             
-            # Trend reversal exit
-            if position == 1 and price_close < sma_trend:
+            # TK cross reversal exit
+            tk_bullish = tenkan_val > kijun_val
+            tk_bearish = tenkan_val < kijun_val
+            
+            if position == 1 and tk_bearish:  # Bullish to bearish reversal
                 exit_signal = True
-            elif position == -1 and price_close > sma_trend:
+            elif position == -1 and tk_bullish:  # Bearish to bullish reversal
                 exit_signal = True
             
-            # ATR-based stoploss (2.5x ATR from breakout/breakdown level)
+            # ATR-based stoploss (2x ATR from Kijun level)
             if position == 1:
-                entry_approx = upper  # Entered near weekly Donchian high
-                if price_close < entry_approx - 2.5 * atr_val:
+                if price_close < kijun_val - 2.0 * atr_val:
                     exit_signal = True
             elif position == -1:
-                entry_approx = lower  # Entered near weekly Donchian low
-                if price_close > entry_approx + 2.5 * atr_val:
+                if price_close > kijun_val + 2.0 * atr_val:
                     exit_signal = True
             
             if exit_signal:
@@ -114,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian20_50SMA_Volume_ATR"
-timeframe = "1d"
+name = "6h_Ichimoku_Kijun_Touch_TKCross_1dVol_ATR"
+timeframe = "6h"
 leverage = 1.0
