@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v8
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>1.8x 20-period MA).
-Uses ATR-based stop (2.0x) and minimum holding period of 3 bars to reduce churn.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v9
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-period MA).
+Uses ATR-based stop (2.5x) and minimum holding period of 4 bars to reduce churn.
 Designed for 4h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
-Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+Target: 80-180 total trades over 4 years (20-45/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -37,7 +37,7 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume confirmation (1.8x 20-period MA) ===
+    # === Volume confirmation (2.0x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -73,8 +73,8 @@ def generate_signals(prices):
         r1_val = r1[i]
         s1_val = s1[i]
         
-        # Volume confirmation: current volume > 1.8x average (stricter threshold)
-        volume_confirm = volume_now > 1.8 * vol_avg
+        # Volume confirmation: current volume > 2.0x average (stricter threshold)
+        volume_confirm = volume_now > 2.0 * vol_avg
         
         if position == 0:
             # Long: price breaks above R1, above 1d EMA50, volume confirm
@@ -96,14 +96,14 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 4 bars to reduce churn
+            if bars_since_entry < 4:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                if price < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -115,7 +115,7 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                if price > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v8"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v9"
 timeframe = "4h"
 leverage = 1.0
