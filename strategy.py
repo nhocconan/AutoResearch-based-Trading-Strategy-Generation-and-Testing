@@ -1,10 +1,11 @@
+# SPDX-FileCopyrightText: 2025 Alpaca Wong
+# SPDX-License-Identifier: MIT
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using daily pivot points (R1/S1) with 1d EMA34 trend filter and volume confirmation.
-In uptrend (price > EMA34), buy breakouts above daily R1; in downtrend (price < EMA34), sell breakdowns below daily S1.
-Daily R1/S1 provide institutional support/resistance with higher success rate than R2/S2.
-1d EMA34 filters for stronger trend alignment; volume confirms breakout strength.
-Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Donchian breakout with 1d ATR filter and volume confirmation.
+In trending markets (1d ATR rising), buy breakouts above 4h Donchian high; sell breakdowns below 4h Donchian low.
+1d ATR acts as a volatility filter to avoid ranging markets. Volume confirms breakout strength.
+Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -16,72 +17,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for pivot points and EMA
+    # Load 1d data ONCE before loop for ATR filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate daily pivot points (using prior day's H/L/C)
+    # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # R1 = Pivot + (High - Low)
-    r1_1d = pivot_1d + (high_1d - low_1d)
-    # S1 = Pivot - (High - Low)
-    s1_1d = pivot_1d - (high_1d - low_1d)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily R1/S1 to 12h timeframe (wait for daily bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # 1d ATR rising: current ATR > ATR 3 periods ago
+    atr_rising = np.zeros_like(atr_14, dtype=bool)
+    atr_rising[3:] = atr_14[3:] > atr_14[:-3]
+    atr_rising_aligned = align_htf_to_ltf(prices, df_1d, atr_rising)
     
-    # 1d EMA34 for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # 4h Donchian channel (20-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # 12h volume confirmation (volume spike > 1.5x 20-period average)
+    # 4h volume confirmation (volume spike > 1.5x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = prices['volume'].values / vol_ma_20
+    vol_ratio = np.divide(prices['volume'].values, vol_ma_20, out=np.zeros_like(prices['volume'].values), where=vol_ma_20!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(atr_rising_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_34_aligned[i]
+        atr_ok = atr_rising_aligned[i]
         vol_ratio_val = vol_ratio[i]
         vol_threshold = 1.5  # Volume spike filter for quality
         
         if position == 0:
-            # Enter long: price breaks above daily R1 + uptrend (price > EMA34) + volume spike
-            if (price_close > r1_aligned[i] and 
-                price_close > ema_trend and 
+            # Enter long: price breaks above 4h Donchian high + ATR rising + volume spike
+            if (price_close > donch_high[i] and 
+                atr_ok and 
                 vol_ratio_val > vol_threshold):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below daily S1 + downtrend (price < EMA34) + volume spike
-            elif (price_close < s1_aligned[i] and 
-                  price_close < ema_trend and 
+            # Enter short: price breaks below 4h Donchian low + ATR rising + volume spike
+            elif (price_close < donch_low[i] and 
+                  atr_ok and 
                   vol_ratio_val > vol_threshold):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: trend reversal (price crosses EMA34 in opposite direction)
-            if position == 1 and price_close < ema_trend:
+            # Exit: opposite breakout (reversion to mean)
+            if position == 1 and price_close < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > ema_trend:
+            elif position == -1 and price_close > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyPivot_R1S1_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dATR_Volume"
+timeframe = "4h"
 leverage = 1.0
