@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_Filter_v2
-Hypothesis: 12h Camarilla R1/S1 breakout with 1w EMA50 trend filter and ATR stop (2.0x). Uses HTF 1w trend to avoid counter-trend trades in bear markets, reducing false breakouts. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing strong trending moves. Works in bull (breakouts with trend) and bear (avoids shorts in strong uptrend, longs in strong downtrend via 1w filter).
+1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_ATRStop_v1
+Hypothesis: Daily Camarilla R1/S1 breakout with weekly EMA34 trend filter and ATR stop (2.5x). Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while capturing medium-term trends in both bull and bear markets. Uses 1d timeframe with 1w HTF for trend regime.
 """
 
 import numpy as np
@@ -13,17 +13,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA50 trend)
+    # Load HTF data ONCE before loop (1w for EMA34 trend)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # === 1w EMA50 for HTF trend regime ===
+    # === 1w EMA34 for HTF trend regime ===
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 12h ATR (14-period) for stoploss ===
+    # === 1d ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -34,7 +34,7 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 12h Camarilla pivot levels (R1, S1) ===
+    # === 1d Camarilla pivot levels (R1, S1) from previous day ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(r1[i]) or np.isnan(s1[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,19 +60,19 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_50_1w_val = ema_50_1w_aligned[i]
+        ema_34_1w_val = ema_34_1w_aligned[i]
         r1_val = r1[i]
         s1_val = s1[i]
         
-        # Trend filter: only trade in direction of 1w EMA50
-        uptrend_filter = price > ema_50_1w_val  # only allow longs in uptrend
-        downtrend_filter = price < ema_50_1w_val  # only allow shorts in downtrend
+        # Trend alignment: price above/below weekly EMA34
+        uptrend = price > ema_34_1w_val
+        downtrend = price < ema_34_1w_val
         
         if position == 0:
-            # Long: price breaks above R1 AND in 1w uptrend
-            long_condition = (price > r1_val) and uptrend_filter
-            # Short: price breaks below S1 AND in 1w downtrend
-            short_condition = (price < s1_val) and downtrend_filter
+            # Long: price breaks above R1, uptrend alignment
+            long_condition = (price > r1_val) and uptrend
+            # Short: price breaks below S1, downtrend alignment
+            short_condition = (price < s1_val) and downtrend
             
             if long_condition:
                 signals[i] = 0.25
@@ -88,31 +88,31 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 3 bars to reduce churn
+            # Minimum holding period of 3 days to reduce churn
             if bars_since_entry < 3:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                if price < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend filter exit: price crosses below 1w EMA50
-                elif price < ema_50_1w_val:
+                # Trend reversal exit (price below weekly EMA34)
+                elif price < ema_34_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                if price > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend filter exit: price crosses above 1w EMA50
-                elif price > ema_50_1w_val:
+                # Trend reversal exit (price above weekly EMA34)
+                elif price > ema_34_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Filter_v2"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
