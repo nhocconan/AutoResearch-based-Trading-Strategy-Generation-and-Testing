@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.0x 20-period average).
-Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to reduce fee drag.
-Designed for 12h timeframe with stricter filters to target 50-150 trades over 4 years.
-Works in bull markets via 1d uptrend filter and in bear markets via 1d downtrend filter for shorts.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike (>2.5x 30-period average).
+Uses ATR(14) stoploss (2.5x) and discrete position sizing (0.30) to balance returns and fee drag.
+Stricter volume and trend filters reduce trade frequency for better test generalization while maintaining edge.
+Designed to work in both bull and bear markets via 1d trend filter and volatility-adjusted exits.
 """
 
 import numpy as np
@@ -21,27 +21,23 @@ def generate_signals(prices):
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 12h OHLC for Camarilla pivot calculation (based on previous 12h bar) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
-        return np.zeros(n)
+    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
+    df_1d_open = df_1d['open'].values
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
     
-    df_12h_open = df_12h['open'].values
-    df_12h_high = df_12h['high'].values
-    df_12h_low = df_12h['low'].values
-    df_12h_close = df_12h['close'].values
+    # Calculate Camarilla levels for each 1d bar
+    range_1d = df_1d_high - df_1d_low
+    r1_1d = df_1d_close + 0.275 * range_1d
+    s1_1d = df_1d_close - 0.275 * range_1d
     
-    # Calculate Camarilla levels for each 12h bar
-    range_12h = df_12h_high - df_12h_low
-    r1_12h = df_12h_close + 0.275 * range_12h
-    s1_12h = df_12h_close - 0.275 * range_12h
-    
-    # Align 12h Camarilla levels to 12h timeframe (no alignment needed as primary TF is 12h)
-    r1_12h_aligned = r1_12h  # Already in 12h resolution
-    s1_12h_aligned = s1_12h  # Already in 12h resolution
+    # Align 1d Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # === 1d EMA50 for trend filter ===
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # === ATR (14-period) for stoploss ===
@@ -54,9 +50,9 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Volume filter: 20-period average (stricter for 12h) ===
+    # === Volume filter: 30-period average (stricter) ===
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,7 +60,7 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) 
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
             or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,53 +72,53 @@ def generate_signals(prices):
         vol_average = vol_ma[i]
         
         if position == 0:
-            # Volume filter: current volume > 2.0x 20-period average
-            vol_filter = vol_current > 2.0 * vol_average
+            # Stricter volume filter: current volume > 2.5x 30-period average
+            vol_filter = vol_current > 2.5 * vol_average
             
             # Long conditions: price > R1 (breakout), 1d uptrend, volume filter
-            long_breakout = price > r1_12h_aligned[i]
+            long_breakout = price > r1_1d_aligned[i]
             long_trend = price > ema_50_1d_aligned[i]
             
             # Short conditions: price < S1 (breakdown), 1d downtrend, volume filter
-            short_breakout = price < s1_12h_aligned[i]
+            short_breakout = price < s1_1d_aligned[i]
             short_trend = price < ema_50_1d_aligned[i]
             
             # Entry logic - stricter filters for fewer, higher-quality trades
             if long_breakout and long_trend and vol_filter:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
             elif short_breakout and short_trend and vol_filter:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.0x ATR to reduce premature exits)
-            if price < entry_price - 2.0 * atr[i]:
+            # Check stoploss (wider 2.5x ATR to reduce premature exits)
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trailing exit: price closes below S1 (breakdown)
-            elif price < s1_12h_aligned[i]:
+            elif price < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Check stoploss (2.0x ATR)
-            if price > entry_price + 2.0 * atr[i]:
+            # Check stoploss (wider 2.5x ATR)
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trailing exit: price closes above R1 (breakout)
-            elif price > r1_12h_aligned[i]:
+            elif price > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
