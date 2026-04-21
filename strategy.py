@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot R2/S2 Breakout with Volume Confirmation and ATR Stop
-Hypothesis: Weekly pivot points R2/S2 act as significant support/resistance levels.
-Breakouts with volume confirmation capture institutional moves, while the 6h timeframe
-reduces noise compared to lower timeframes. ATR-based stops limit losses during false breakouts.
-Designed for low trade frequency (12-37/year) to minimize fee drag and improve generalization.
-Works in both bull and bear markets by capturing breakouts in either direction.
+12h Weekly Pivot R2/S2 Breakout with Volume Confirmation and ATR Stop
+Hypothesis: Weekly pivot points R2/S2 act as stronger support/resistance than daily levels.
+Breakouts with volume confirmation capture institutional moves while reducing false signals.
+ATR-based stops limit losses during false breakouts. Designed for low trade frequency
+(~12-37/year) to minimize fee drag and improve generalization. Uses 12h timeframe to reduce noise.
 """
 
 import numpy as np
@@ -41,12 +40,12 @@ def generate_signals(prices):
     r2_weekly = pivot_weekly + (high_weekly - low_weekly)
     s2_weekly = pivot_weekly - (high_weekly - low_weekly)
     
-    # Align weekly indicators to 6h timeframe
+    # Align weekly indicators to 12h timeframe
     atr_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr_weekly)
     r2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r2_weekly)
     s2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s2_weekly)
     
-    # Main timeframe data (6h)
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -101,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R2S2_Breakout_Volume_ATRFilter"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R2S2_Breakout_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
