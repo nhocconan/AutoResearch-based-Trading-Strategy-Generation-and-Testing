@@ -5,92 +5,106 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for weekly pivot calculation
+    # Load daily data for volatility and trend filters
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly high/low from daily data (using 5-day rolling window for weekly)
+    # ATR for volatility filtering
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Weekly high/low (5-day lookback)
-    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly pivot points (using weekly high/low/close)
-    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly pivot levels to daily timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # Align daily indicators to 6h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 20-period moving average for trend filter (daily timeframe)
+    # 6h timeframe indicators
     close = prices['close'].values
-    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # Volume confirmation: 20-period average
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
+    
+    # 6h ATR for entry/exit
+    tr_6h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_6h[0] = high[0] - low[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    
+    # 6h EMA20 for trend confirmation
+    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume spike detection
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(ma_20[i]) or 
+        if (np.isnan(atr_14_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(atr_6h[i]) or 
+            np.isnan(ema20_6h[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pivot = weekly_pivot_aligned[i]
-        r1 = weekly_r1_aligned[i]
-        s1 = weekly_s1_aligned[i]
-        ma = ma_20[i]
+        atr_daily = atr_14_aligned[i]
+        ema50_daily = ema50_1d_aligned[i]
+        atr_6h_val = atr_6h[i]
+        ema20_6h_val = ema20_6h[i]
         vol_ma = vol_ma_20[i]
         vol = volume[i]
         price = close[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = vol > 1.5 * vol_ma
+        # Volatility filter: daily ATR > 60% of 20-period average (avoid low volatility chop)
+        atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
+        vol_filter = atr_daily > 0.6 * atr_ma_20
         
-        # Trend filter: price above/below 20-period MA
-        uptrend = price > ma
-        downtrend = price < ma
+        # Trend filter: price above/below daily EMA50
+        uptrend = price > ema50_daily
+        downtrend = price < ema50_daily
+        
+        # Entry conditions with volume confirmation
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: Price crosses above weekly R1 + uptrend + volume confirmation
-            if price > r1 and uptrend and volume_confirm:
+            # Long: price breaks above 6h EMA20 + daily uptrend + volatility + volume spike
+            if price > ema20_6h_val and uptrend and vol_filter and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price crosses below weekly S1 + downtrend + volume confirmation
-            elif price < s1 and downtrend and volume_confirm:
+            # Short: price breaks below 6h EMA20 + daily downtrend + volatility + volume spike
+            elif price < ema20_6h_val and downtrend and vol_filter and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: Price crosses back below/above weekly pivot or trend reversal
+            # Exit: price crosses back through 6h EMA20 or volatility drops
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on breakdown below weekly pivot or trend reversal
-                if price < pivot or not uptrend:
+                # Exit on breakdown below EMA20 or volatility collapse
+                if price < ema20_6h_val or not vol_filter:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on breakout above weekly pivot or trend reversal
-                if price > pivot or not downtrend:
+                # Exit on breakout above EMA20 or volatility collapse
+                if price > ema20_6h_val or not vol_filter:
                     exit_signal = True
             
             if exit_signal:
@@ -102,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1_S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_VolTrend_EMA20_DailyEMA50_ATRFilter"
+timeframe = "6h"
 leverage = 1.0
