@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_Volume_ATRFilter_1h_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 1h with 4h trend filter (EMA34), 1d volume spike confirmation, and ATR volatility filter.
-In bull markets: buy R1 breakouts above 4h EMA34. In bear markets: short S1 breakouts below 4h EMA34.
-Volume spike and ATR filter ensure trades occur during high-momentum, volatile sessions (08-20 UTC).
-Target: 20-40 trades/year per symbol (80-160 over 4 years).
+6h_1d_1w_Camarilla_R3S3_Fade_v2
+Hypothesis: Fade extreme Camarilla levels (R3/S3) on 6h with 1d trend filter (EMA34) and 1w pivot bias. 
+Volume confirmation requires current volume > 1.3 * 20-period average. 
+Target: 12-25 trades/year per symbol (50-100 over 4 years). Works in bull/bear: 
+In uptrend, fade R3 for short; in downtrend, fade S3 for long. Uses 1d EMA for trend, 1w pivot for bias.
 """
 
 import numpy as np
@@ -16,130 +16,132 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 4h data once for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # 4h ATR(14) for volatility filter
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
-    
-    # Load 1d data once for volume spike filter
+    # Load 1d data once for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    # 1d volume 20-period EMA for spike detection
-    vol_ema_20_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for Camarilla levels (1h timeframe entry)
-    prev_high_1d = np.roll(df_1d['high'].values, 1)
-    prev_low_1d = np.roll(df_1d['low'].values, 1)
-    prev_close_1d = np.roll(df_1d['close'].values, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Camarilla levels: R1, S1 (primary breakout levels)
-    rang_1d = prev_high_1d - prev_low_1d
-    r1 = prev_close_1d + rang_1d * 1.0 / 12
-    s1 = prev_close_1d - rang_1d * 1.0 / 12
+    # Camarilla levels: R3, S3 (extreme fade levels)
+    rang = prev_high - prev_low
+    r3 = prev_close + rang * 3.0 / 12
+    s3 = prev_close - rang * 3.0 / 12
     
-    # Align Camarilla levels to 1h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Load 1w data for weekly pivot bias (long-term direction)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Previous week's OHLC for weekly pivot (use close as bias)
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_close_1w[0] = np.nan
+    weekly_bias = align_htf_to_ltf(prices, df_1w, prev_close_1w)  # weekly close as trend bias
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour
-    
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(atr_14_4h_aligned[i]) or 
-            np.isnan(vol_ema_20_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(weekly_bias[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC only
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume spike filter: current 1h volume > 2.0 * 1d volume EMA20 (scaled)
-        # Approximate 1h volume vs daily: 1h volume > (daily EMA20 / 24) * 2.0
-        vol_threshold = vol_ema_20_1d_aligned[i] / 24.0 * 2.0
-        volume_ok = volume > vol_threshold
-        
-        # ATR filter: current ATR > 0.5 * 4h ATR(14) (scaled to 1h)
-        # Approximate: 1h ATR > (4h ATR14 / (4*60/60)) * 0.5 = 4h ATR14 * 0.5 / 4
-        atr_threshold = atr_14_4h_aligned[i] * 0.5 / 4.0
-        # Use 1h ATR approximation from price range
-        if i >= 1:
-            tr_1h = max(
-                prices['high'].iloc[i] - prices['low'].iloc[i],
-                abs(prices['high'].iloc[i] - prices['close'].iloc[i-1]),
-                abs(prices['low'].iloc[i] - prices['close'].iloc[i-1])
-            )
+        # Volume filter: current volume > 1.3 * 20-period average
+        if i >= 20:
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 1.3 * vol_ma
         else:
-            tr_1h = 0
-        atr_approx = tr_1h  # simplified, using true range as ATR proxy
-        atr_ok = atr_approx > atr_threshold
+            volume_ok = False
         
-        if position == 0 and in_session:
-            # Long: price breaks above R1 AND 4h uptrend AND volume spike AND ATR ok
-            if (price > r1_aligned[i] and 
-                ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1] and  # 4h EMA rising
-                volume_ok and 
-                atr_ok):
-                signals[i] = 0.20
+        # Determine bias: weekly close > previous weekly close = bullish bias
+        weekly_bullish = weekly_bias[i] > weekly_bias[i-1] if i > 0 and not np.isnan(weekly_bias[i-1]) else True
+        
+        if position == 0:
+            # Long conditions: price < S3 (oversold) AND 1d uptrend AND weekly bullish bias AND volume
+            if (price < s3_aligned[i] and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and  # 1d EMA rising
+                weekly_bullish and 
+                volume_ok):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND 4h downtrend AND volume spike AND ATR ok
-            elif (price < s1_aligned[i] and 
-                  ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1] and  # 4h EMA falling
-                  volume_ok and 
-                  atr_ok):
-                signals[i] = -0.20
+            # Short conditions: price > R3 (overbought) AND 1d downtrend AND weekly bearish bias AND volume
+            elif (price > r3_aligned[i] and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and  # 1d EMA falling
+                  not weekly_bullish and 
+                  volume_ok):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < 4h EMA34 (trend reversal) or time-based exit
-            if price < ema_34_4h_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price > 1d EMA34 (trend exhaustion) or price > R2 (mean reversion fail)
+            # Calculate R2 for exit
+            prev_high_i = high_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_low_i = low_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_close_i = close_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            if not (np.isnan(prev_high_i) or np.isnan(prev_low_i) or np.isnan(prev_close_i)):
+                rang_i = prev_high_i - prev_low_i
+                r2_exit = prev_close_i + rang_i * 2.0 / 12
+                # Align R2 exit level (simplified: use current day's R2)
+                r2_exit_series = pd.Series([prev_close_i + rang_i * 2.0 / 12] * len(df_1d)).values
+                r2_exit_aligned = align_htf_to_ltf(prices, df_1d, r2_exit_series)
+                if price > ema_34_1d_aligned[i] or (not np.isnan(r2_exit_aligned[i]) and price > r2_exit_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > 4h EMA34 (trend reversal) or time-based exit
-            if price > ema_34_4h_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price < 1d EMA34 (trend exhaustion) or price < S2 (mean reversion fail)
+            prev_high_i = high_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_low_i = low_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            prev_close_i = close_1d[np.searchsorted(df_1d.index, prices['open_time'].iloc[i]) - 1] if i > 0 else np.nan
+            if not (np.isnan(prev_high_i) or np.isnan(prev_low_i) or np.isnan(prev_close_i)):
+                rang_i = prev_high_i - prev_low_i
+                s2_exit = prev_close_i - rang_i * 2.0 / 12
+                # Align S2 exit level (simplified: use current day's S2)
+                s2_exit_series = pd.Series([prev_close_i - rang_i * 2.0 / 12] * len(df_1d)).values
+                s2_exit_aligned = align_htf_to_ltf(prices, df_1d, s2_exit_series)
+                if price < ema_34_1d_aligned[i] or (not np.isnan(s2_exit_aligned[i]) and price < s2_exit_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_Volume_ATRFilter_1h_v1"
-timeframe = "1h"
+name = "6h_1d_1w_Camarilla_R3S3_Fade_v2"
+timeframe = "6h"
 leverage = 1.0
