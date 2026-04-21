@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3
-Hypothesis: Camarilla R1/S1 breakout with daily EMA trend filter and volume spike captures institutional breakouts with confirmation. Uses ATR-based trailing stop for risk management. Designed for low trade frequency (~20-50/year) to minimize fee drag and work in both bull and bear regimes by requiring alignment with higher timeframe trend and momentum confirmation.
+12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeConfirm_v7
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume confirmation on 4h.
+Uses ATR-based trailing stop for risk management. Targets low trade frequency (12-37/year) to minimize fee drag.
+Works in both bull and bear regimes by requiring alignment with higher timeframe trend and momentum.
 """
 
 import numpy as np
@@ -16,7 +18,7 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 2 or len(df_1d) < 34:
+    if len(df_4h) < 20 or len(df_1d) < 34:
         return np.zeros(n)
     
     # === Camarilla levels from prior 4-hour session (HLC of previous 4h bar) ===
@@ -111,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v3"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeConfirm_v7"
+timeframe = "12h"
 leverage = 1.0
