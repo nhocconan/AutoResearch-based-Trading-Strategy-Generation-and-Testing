@@ -3,99 +3,112 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA (10-period ER) direction + RSI(14) + 12h chop filter (Choppiness Index > 61.8)
-# Long when KAMA rising, RSI > 50, and market is choppy (mean-reversion prone)
-# Short when KAMA falling, RSI < 50, and market is choppy
-# Uses KAMA for adaptive trend, RSI for momentum, chop filter to avoid trending markets
-# Designed for range-bound markets (2025-2026) while avoiding whipsaws in strong trends
-# Target: 20-40 trades/year by requiring all three conditions to align
+# Hypothesis: 6h Williams Fractal breakout with weekly EMA50 trend filter and volume confirmation.
+# Williams Fractals identify swing points: bearish fractal (high surrounded by two lower highs),
+# bullish fractal (low surrounded by two higher lows). Breakouts above bearish fractal or below
+# bullish fractal with trend confirmation (price > weekly EMA50 for long, < for short) and
+# volume > 1.5x 20-period average capture momentum shifts. Weekly EMA50 filters chop and
+# ensures trades align with multi-week trend, working in both bull (breakouts with trend) and
+# bear (fades against weak trend via fractal failure) markets. Target: 15-30 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for chop filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate KAMA (10-period ER) on close prices
-    close = prices['close'].values
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0])).rolling(window=10, min_periods=1).sum()
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (0.66 - 0.06) + 0.06) ** 2
-    kama = np.full_like(close, np.nan, dtype=float)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Williams Fractals on weekly data
+    # Bearish fractal: high[n] > high[n-2] and high[n] > high[n-1] and high[n] > high[n+1] and high[n] > high[n+2]
+    # Bullish fractal: low[n] < low[n-2] and low[n] < low[n-1] and low[n] < low[n+1] and low[n] < low[n+2]
+    n_1w = len(high_1w)
+    bearish_fractal = np.full(n_1w, np.nan)
+    bullish_fractal = np.full(n_1w, np.nan)
     
-    # Calculate Choppiness Index on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    for i in range(2, n_1w - 2):
+        if (high_1w[i] > high_1w[i-2] and high_1w[i] > high_1w[i-1] and 
+            high_1w[i] > high_1w[i+1] and high_1w[i] > high_1w[i+2]):
+            bearish_fractal[i] = high_1w[i]
+        if (low_1w[i] < low_1w[i-2] and low_1w[i] < low_1w[i-1] and 
+            low_1w[i] < low_1w[i+1] and low_1w[i] < low_1w[i+2]):
+            bullish_fractal[i] = low_1w[i]
     
-    # True Range
-    tr1 = np.abs(high_12h - low_12h)
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Forward fill fractal levels to maintain until next fractal
+    bearish_fractal_filled = pd.Series(bearish_fractal).ffill().bfill().values
+    bullish_fractal_filled = pd.Series(bullish_fractal).ffill().bfill().values
     
-    # ATR(14)
-    atr_12h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align fractal levels to 6h timeframe with 2-bar delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal_filled, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal_filled, additional_delay_bars=2)
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    range_14 = highest_high - lowest_low
-    chop = np.where(range_14 != 0, 100 * np.log10(sum_tr14 / range_14) / np.log10(14), 50)
-    
-    # Align KAMA, RSI, Chop to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, prices, kama)  # already LTF
-    rsi_aligned = align_htf_to_ltf(prices, prices, rsi.values)  # already LTF
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # Pre-compute volume moving average (20-period)
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or \
+           np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
             continue
         
-        # KAMA direction: rising if current > previous
-        kama_rising = kama_aligned[i] > kama_aligned[i-1]
-        kama_falling = kama_aligned[i] < kama_aligned[i-1]
+        # Current price and volume
+        price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
         
-        # Chop filter: choppy market (mean-reversion prone)
-        choppy = chop_aligned[i] > 61.8
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume > 1.5 * vol_ma[i]
         
-        if choppy:
-            # Long: KAMA rising and RSI > 50
-            if kama_rising and rsi_aligned[i] > 50:
-                signals[i] = 0.25
-            # Short: KAMA falling and RSI < 50
-            elif kama_falling and rsi_aligned[i] < 50:
-                signals[i] = -0.25
-            else:
+        # Trend filter: price above/below weekly EMA50
+        price_above_ema = price > ema_50_1w_aligned[i]
+        price_below_ema = price < ema_50_1w_aligned[i]
+        
+        if position == 0:
+            if volume_confirm:
+                # Long: price breaks above bearish fractal resistance in uptrend
+                if price > bearish_fractal_aligned[i] and price_above_ema:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price breaks below bullish fractal support in downtrend
+                elif price < bullish_fractal_aligned[i] and price_below_ema:
+                    signals[i] = -0.25
+                    position = -1
+        
+        elif position != 0:
+            # Exit conditions
+            exit_signal = False
+            
+            if position == 1:  # long position
+                # Exit if price breaks below bullish fractal support (failed hold) or trend weakens
+                if price < bullish_fractal_aligned[i] or not price_above_ema:
+                    exit_signal = True
+            
+            elif position == -1:  # short position
+                # Exit if price breaks above bearish fractal resistance (failed hold) or trend weakens
+                if price > bearish_fractal_aligned[i] or not price_below_ema:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
-        else:
-            # Not choppy - stay flat to avoid trend whipsaws
-            signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_KAMA10_RSI14_12hChop618"
-timeframe = "4h"
+name = "6h_WilliamsFractal_Breakout_1wEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
