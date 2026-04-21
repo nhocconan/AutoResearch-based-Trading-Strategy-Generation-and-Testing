@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_RSI2_Stochastic_1dTrend_Volume
-Hypothesis: Combine RSI(2) oversold/overbought with Stochastic(14,3,3) cross and 1d EMA50 trend filter. Designed to capture mean-reversion bounces in strong trends with volume confirmation. Works in bull/bear markets by following higher timeframe trend while using RSI2/Stoch for entry timing. Target 20-40 trades/year on 4h.
+4h_PivotPoint_Reversal_Volume
+Hypothesis: Combine daily pivot point reversals with volume confirmation. 
+Enter long when price bounces off daily support (S1/S2) with volume spike, 
+enter short when price rejects daily resistance (R1/R2) with volume spike.
+Works in both bull/bear markets by using mean-reversion at key daily levels.
+Target 20-40 trades/year on 4h.
 """
 
 import numpy as np
@@ -13,36 +17,31 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d HTF data ONCE before loop
+    # Load 1d OHLC data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d trend filter: 50-period EMA ===
+    # === Daily pivot points (standard calculation) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === RSI(2) on 4h ===
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Pivot point = (H + L + C) / 3
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Resistance levels
+    r1 = 2 * pp - low_1d
+    r2 = pp + (high_1d - low_1d)
+    # Support levels
+    s1 = 2 * pp - high_1d
+    s2 = pp - (high_1d - low_1d)
     
-    # === Stochastic(14,3,3) on 4h ===
-    high = prices['high'].values
-    low = prices['low'].values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    stoch_k = np.where(highest_high - lowest_low != 0, 
-                       100 * (close - lowest_low) / (highest_high - lowest_low), 50)
-    stoch_k_series = pd.Series(stoch_k)
-    stoch_k_smooth = stoch_k_series.ewm(span=3, adjust=False, min_periods=3).mean().values
-    stoch_d = pd.Series(stoch_k_smooth).ewm(span=3, adjust=False, min_periods=3).mean().values
+    # Align to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # === Volume confirmation: 20-period volume average ===
     volume = prices['volume'].values
@@ -52,49 +51,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(stoch_k_smooth[i]) or
-            np.isnan(stoch_d[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = close[i]
-        trend_1d = ema_50_1d_aligned[i]
-        rsi_val = rsi[i]
-        stoch_k_val = stoch_k_smooth[i]
-        stoch_d_val = stoch_d[i]
+        price_close = prices['close'].iloc[i]
+        price_open = prices['open'].iloc[i]
         vol_spike = vol_ratio[i]
         
         if position == 0:
-            # Long: RSI2 < 10 + Stoch K crosses above D + volume spike > 1.3 + price above 1d EMA50
-            if (rsi_val < 10 and 
-                stoch_k_val > stoch_d_val and 
-                stoch_k_smooth[i-1] <= stoch_d[i-1] and
-                vol_spike > 1.3 and 
-                price_close > trend_1d):
+            # Long: price bounces off S1 or S2 with volume spike
+            # Condition: low touches/below support AND close above support
+            if (vol_spike > 1.5 and 
+                ((price_low := prices['low'].iloc[i]) <= s1_aligned[i] and price_close > s1_aligned[i]) or
+                ((price_low := prices['low'].iloc[i]) <= s2_aligned[i] and price_close > s2_aligned[i])):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI2 > 90 + Stoch K crosses below D + volume spike > 1.3 + price below 1d EMA50
-            elif (rsi_val > 90 and 
-                  stoch_k_val < stoch_d_val and 
-                  stoch_k_smooth[i-1] >= stoch_d[i-1] and
-                  vol_spike > 1.3 and 
-                  price_close < trend_1d):
+            # Short: price rejects R1 or R2 with volume spike
+            # Condition: high touches/above resistance AND close below resistance
+            elif (vol_spike > 1.5 and 
+                  ((price_high := prices['high'].iloc[i]) >= r1_aligned[i] and price_close < r1_aligned[i]) or
+                  ((price_high := prices['high'].iloc[i]) >= r2_aligned[i] and price_close < r2_aligned[i])):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit when RSI2 crosses 50 in opposite direction
-            if position == 1 and rsi_val < 50 and rsi[i-1] >= 50:
+            # Exit when price returns to pivot point (mean reversion complete)
+            if position == 1 and price_close >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and rsi_val > 50 and rsi[i-1] <= 50:
+            elif position == -1 and price_close <= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI20_Stochastic_1dTrend_Volume"
+name = "4h_PivotPoint_Reversal_Volume"
 timeframe = "4h"
 leverage = 1.0
