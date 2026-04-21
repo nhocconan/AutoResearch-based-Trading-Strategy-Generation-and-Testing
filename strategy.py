@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_ChopRegime
-Hypothesis: Donchian(20) breakout on 4h with volume confirmation (>1.8x 20-period MA) and chop regime filter (CHOP(14) > 61.8 = range, < 38.2 = trending). 
-In trending regime (CHOP < 38.2): breakout signals only. In ranging regime (CHOP > 61.8): mean reversion at Donchian bands.
-Uses ATR(14) stoploss (2.0x) and discrete sizing (0.25). Target: 80-140 total trades (20-35/year) to balance edge and fee drag.
-Works in both bull and bear via regime adaptation.
+1d_KAMA_Regime_Filter_DonchianExit
+Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
+combined with choppiness index regime filter to avoid whipsaws, and Donchian(20) breakouts
+for precise entry timing. Uses volume confirmation (>1.5x 20-day average) to filter low-quality
+breakouts. ATR-based stoploss (2.5x) and discrete sizing (0.25). Designed for low trade frequency
+(15-25/year) to minimize fee drag while capturing major trends in both bull and bear markets.
+KAMA adapts to market noise, making it effective in ranging conditions, while the chop filter
+ensures we only trend-follow when markets are truly trending.
 """
 
 import numpy as np
@@ -16,41 +19,75 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for higher timeframe context)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d < 40):
+    # Load weekly HTF data ONCE before loop for regime context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 4h Donchian(20) channels ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # === Weekly EMA20 for HTF trend filter ===
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # === Daily OHLC for indicators ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # === 4h ATR(14) for stoploss ===
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    df_1d_open = df_1d['open'].values
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
+    df_1d_volume = df_1d['volume'].values
+    
+    # === Daily KAMA (ER=10, FAST=2, SLOW=30) for trend direction ===
+    close_s = pd.Series(df_1d_close)
+    change = close_s.diff(10).abs()
+    volatility = close_s.diff().abs().rolling(10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = [np.nan] * len(df_1d_close)
+    kama[0] = df_1d_close[0]
+    for i in range(1, len(df_1d_close)):
+        if np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (df_1d_close[i] - kama[i-1])
+    kama = np.array(kama)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # === Daily Choppiness Index (14-period) for regime filter ===
+    high_low = df_1d_high - df_1d_low
+    high_pc = np.abs(df_1d_high - np.roll(df_1d_close, 1))
+    low_pc = np.abs(df_1d_low - np.roll(df_1d_close, 1))
+    tr = np.maximum(high_low, np.maximum(high_pc, low_pc))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    max_high = pd.Series(df_1d_high).rolling(window=14, min_periods=14).max()
+    min_low = pd.Series(df_1d_low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr14 / (max_high - min_low)) / np.log10(14)
+    chop = chop.fillna(50).values  # neutral when undefined
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # === Daily Donchian(20) for entry/exit ===
+    highest_20 = pd.Series(df_1d_high).rolling(window=20, min_periods=20).max()
+    lowest_20 = pd.Series(df_1d_low).rolling(window=20, min_periods=20).min()
+    donchian_high = highest_20.values
+    donchian_low = lowest_20.values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # === Daily volume confirmation (>1.5x 20-day average) ===
+    vol_ma = pd.Series(df_1d_volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    
+    # === Daily ATR(14) for stoploss ===
+    tr1 = pd.Series(df_1d_high - df_1d_low)
+    tr2 = pd.Series(np.abs(df_1d_high - np.roll(df_1d_close, 1)))
+    tr3 = pd.Series(np.abs(df_1d_low - np.roll(df_1d_close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # === Volume spike filter (1.8x 20-period MA) ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === Choppiness Index (CHOP) regime filter ===
-    # CHOP = 100 * log10(sum(ATR(14) over n) / (log10(n) * (max(high,n) - min(low,n))))
-    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr_14 / (np.log10(14) * (max_high_14 - min_low_14)))
-    # Handle division by zero or invalid values
-    chop = np.where((max_high_14 - min_low_14) > 0, chop, 50.0)  # neutral when no range
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,35 +95,41 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) 
-            or np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(atr_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        volume_now = volume[i]
-        vol_avg = vol_ma[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        mid = donchian_mid[i]
-        chop_val = chop[i]
+        price = df_1d_close[i]
+        volume_now = df_1d_volume[i]
+        kama_val = kama_aligned[i]
+        chop_val = chop_aligned[i]
+        donchian_high_val = donchian_high_aligned[i]
+        donchian_low_val = donchian_low_aligned[i]
+        vol_avg = vol_ma_aligned[i]
+        atr_val = atr_aligned[i]
+        weekly_ema = ema_20_1w_aligned[i]
         
-        # Volume spike: current volume > 1.8x average
-        volume_spike = volume_now > 1.8 * vol_avg
+        # Regime filter: only trend-follow when chop < 50 (trending market)
+        trending_regime = chop_val < 50
+        
+        # Volume confirmation: >1.5x average volume
+        volume_confirm = volume_now > 1.5 * vol_avg
         
         if position == 0:
-            # Regime-based entry logic
-            if chop_val < 38.2:  # Trending regime: breakout only
-                long_condition = (price > upper) and volume_spike
-                short_condition = (price < lower) and volume_spike
-            elif chop_val > 61.8:  # Ranging regime: mean reversion at bands
-                long_condition = (price < lower) and (price > mid * 0.999) and volume_spike  # near lower band
-                short_condition = (price > upper) and (price < mid * 1.001) and volume_spike  # near upper band
-            else:  # Transition regime: no entries
-                long_condition = False
-                short_condition = False
+            # Enter long: price breaks above Donchian high + above KAMA + weekly uptrend + volume + regime
+            long_condition = (price > donchian_high_val) and (price > kama_val) and \
+                           (weekly_ema > np.roll(ema_20_1w_aligned, 1)[i] if i > 0 else True) and \
+                           trending_regime and volume_confirm
+            
+            # Enter short: price breaks below Donchian low + below KAMA + weekly downtrend + volume + regime
+            short_condition = (price < donchian_low_val) and (price < kama_val) and \
+                            (weekly_ema < np.roll(ema_20_1w_aligned, 1)[i] if i > 0 else True) and \
+                            trending_regime and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -98,24 +141,24 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.0x ATR)
-            if price < entry_price - 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit conditions: opposite band touch or regime shift to ranging
-            elif price < lower or (chop_val > 61.8 and price < mid):
+            # Exit conditions: stoploss, Donchian low break, or regime change to choppy
+            stoploss = price < entry_price - 2.5 * atr_val
+            donchian_break = price < donchian_low_val
+            regime_change = chop_val >= 55  # hysteresis to avoid whipsaw
+            
+            if stoploss or donchian_break or regime_change:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (2.0x ATR)
-            if price > entry_price + 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit conditions: opposite band touch or regime shift to ranging
-            elif price > upper or (chop_val > 61.8 and price > mid):
+            # Exit conditions: stoploss, Donchian high break, or regime change to choppy
+            stoploss = price > entry_price + 2.5 * atr_val
+            donchian_break = price > donchian_high_val
+            regime_change = chop_val >= 55  # hysteresis to avoid whipsaw
+            
+            if stoploss or donchian_break or regime_change:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ChopRegime"
-timeframe = "4h"
+name = "1d_KAMA_Regime_Filter_DonchianExit"
+timeframe = "1d"
 leverage = 1.0
