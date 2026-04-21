@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_HTF_1d_Camarilla_R1S1_Breakout_VolumeFilter_V1
-Hypothesis: Use 4h primary timeframe with 1d Camarilla R1/S1 breakout for high-probability momentum.
-Add volume confirmation (>1.5x 30-bar volume MA) to avoid false breakouts.
-Position size 0.25 balances risk/return. Target 20-50 trades/year per symbol.
-Works in bull/bear via breakout logic and volume filter reducing whipsaw in ranging markets.
+1d_HTF_1w_Donchian20_VolumeSpike_ATRStop_V1
+Hypothesis: Use 1d primary timeframe with 1w Donchian channel breakout for strong momentum capture in both bull and bear markets.
+Add volume confirmation (>2.0x 20-bar volume MA) and ATR-based stoploss to reduce whipsaw and manage risk.
+Position size 0.25 balances risk/return. Target 15-25 trades/year per symbol.
+Works in bull via upward breakouts, bear via downward breakouts, with ATR stop protecting against reversals.
 """
 
 import numpy as np
@@ -17,39 +17,46 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w Donchian Channel (20-period) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0  # R1 = Close + 1.1*(High-Low)/4
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0  # S1 = Close - 1.1*(High-Low)/4
+    # Calculate Donchian bands: highest high and lowest low over 20 periods
+    highest_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    highest_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low)
     
-    # === 4h Indicators ===
+    # === 1d Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume MA (30-period) for spike detection
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume MA (20-period) for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) for stoploss
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high_aligned[i]) or np.isnan(lowest_low_aligned[i]) 
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,31 +64,33 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
+        vol_ok = vol > 2.0 * vol_ma[i]  # volume confirmation
         
         if position == 0:
-            # Long: price breaks above 1d R1 + volume confirmation
-            if price > r1_1d_aligned[i-1] and vol_ok:
+            # Long: price breaks above 1w Donchian upper band + volume confirmation
+            if price > highest_high_aligned[i-1] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d S1 + volume confirmation
-            elif price < s1_1d_aligned[i-1] and vol_ok:
+                entry_price = price
+            # Short: price breaks below 1w Donchian lower band + volume confirmation
+            elif price < lowest_low_aligned[i-1] and vol_ok:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Exit: price closes below 1d pivot (mean reversion)
-            pivot_val = pivot_1d[i//16] if i//16 < len(df_1d) else np.nan
-            if not np.isnan(pivot_val) and price < pivot_val:
+            # ATR-based stoploss: exit if price drops below entry - 2.5 * ATR
+            stop_price = entry_price - 2.5 * atr[i]
+            if price < stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above 1d pivot (mean reversion)
-            pivot_val = pivot_1d[i//16] if i//16 < len(df_1d) else np.nan
-            if not np.isnan(pivot_val) and price > pivot_val:
+            # ATR-based stoploss: exit if price rises above entry + 2.5 * ATR
+            stop_price = entry_price + 2.5 * atr[i]
+            if price > stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_1d_Camarilla_R1S1_Breakout_VolumeFilter_V1"
-timeframe = "4h"
+name = "1d_HTF_1w_Donchian20_VolumeSpike_ATRStop_V1"
+timeframe = "1d"
 leverage = 1.0
