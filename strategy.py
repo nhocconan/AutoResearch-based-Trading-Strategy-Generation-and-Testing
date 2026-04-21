@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_v1
-Hypothesis: Daily Camarilla R1/S1 breakouts with weekly EMA34 trend filter. 
-In bull regime (price > weekly EMA34), take longs on R1 breakouts; in bear regime (price < weekly EMA34), take shorts on S1 breakdowns. 
-Designed for low frequency (target: 30-100 trades over 4 years) to minimize fee drag and work in both bull and bear markets via regime-adaptive directionality.
+12h_Camarilla_R1_S1_Breakout_1dTrendRegime_VolumeSpike_v2
+Hypothesis: 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation (>2x 20-bar MA). 
+In bull regime (price > 1d EMA34), take longs on R1 breakouts; in bear regime (price < 1d EMA34), take shorts on S1 breakdowns. 
+Volume confirmation ensures institutional participation. Discrete sizing (0.25) reduces churn. 
+Target: 50-150 total trades over 4 years by requiring confluence of breakout, trend, and volume. 
+Designed to work in bull (breakouts with trend) and bear (faded breakdowns vs trend) markets.
 """
 
 import numpy as np
@@ -15,75 +17,102 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly for trend regime)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop (1d for trend regime)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Weekly EMA34 for trend regime ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 1d EMA34 for trend regime ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (2.0 * vol_ma_20)
+    
+    # === 12h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    bars_since_entry = 0
     
     for i in range(100, n):
-        # Skip if HTF EMA not ready
-        if np.isnan(ema_34_1w_aligned[i]):
+        # Skip if indicators not ready
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirmed[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
-        # Need previous bar's OHLC for Camarilla (bar i-1 must exist)
-        if i == 0:
-            continue
-            
-        price = prices['close'].iloc[i]
-        prev_high = prices['high'].iloc[i-1]
-        prev_low = prices['low'].iloc[i-1]
-        prev_close = prices['close'].iloc[i-1]
-        ema_34_1w_val = ema_34_1w_aligned[i]
-        
-        # Calculate Camarilla levels from previous bar
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
-        s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+        price = close[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
+        r1_val = r1[i]
+        s1_val = s1[i]
+        vol_conf = volume_confirmed[i]
         
         # Trend regime
-        is_bull = price > ema_34_1w_val
-        is_bear = price < ema_34_1w_val
+        is_bull = price > ema_34_1d_val
+        is_bear = price < ema_34_1d_val
         
         if position == 0:
             if is_bull:
-                # Bull regime: favor longs on R1 breakouts
-                if price > r1:
-                    signals[i] = 0.25
-                    position = 1
+                # Bull regime: long breakouts favored
+                long_condition = (price > r1_val) and vol_conf
+                short_condition = (price < s1_val) and vol_conf and (price < ema_34_1d_val * 0.995)  # stricter for shorts
             else:  # bear regime
-                # Bear regime: favor shorts on S1 breakdowns
-                if price < s1:
-                    signals[i] = -0.25
-                    position = -1
+                # Bear regime: short breakdowns favored
+                short_condition = (price < s1_val) and vol_conf
+                long_condition = (price > r1_val) and vol_conf and (price > ema_34_1d_val * 1.005)  # stricter for longs
+            
+            if long_condition:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                bars_since_entry = 0
+            elif short_condition:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                bars_since_entry = 0
         
         elif position != 0:
-            # Exit conditions: reverse signal or price fails to hold breakout/breakdown
+            bars_since_entry += 1
+            
+            # Exit if price breaks opposite Camarilla level (failed breakout/breakdown)
             if position == 1:
-                if price < s1 or price < ema_34_1w_val:  # break below S1 or trend fails
+                if price < s1_val:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > r1 or price > ema_34_1w_val:  # break above R1 or trend fails
+                if price > r1_val:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrendRegime_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
