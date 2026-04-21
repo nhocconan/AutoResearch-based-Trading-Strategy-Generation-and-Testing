@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_HTF_1d_WilliamsAlligator_TrendRegime_V1
-Hypothesis: Use 1d Williams Alligator (Jaw/Teeth/Lips) to define trend regime, then trade 4h breakouts in direction of higher timeframe trend with volume confirmation and ATR trailing stop. 
-The Alligator filters out ranging markets (when lines are intertwined) and only allows trades when there is a clear trend (lines separated and ordered). 
-This reduces whipsaw in chop and captures strong trends in both bull and bear markets. Position size 0.25.
-Target 15-30 trades/year per symbol.
+12h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
+Hypothesis: 12h timeframe with 1d Camarilla R1/S1 breakouts, volume confirmation, and ATR-based stoploss.
+Targets 12-37 trades/year by requiring volume spike (2x volume MA) and strict breakout conditions.
+Uses ATR stoploss (2.5x) for risk control. Works in bull/bear by capturing breakouts with volatility filters.
 """
 
 import numpy as np
@@ -17,38 +16,36 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')  # for 1d Williams Alligator
+    df_1d = get_htf_data(prices, '1d')  # for 1d Camarilla levels
     
-    if len(df_1d) < 13:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d Williams Alligator ===
-    # Jaw (13-period SMMA, 8 bars ahead)
-    jaw = pd.Series(df_1d['close']).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (8-period SMMA, 5 bars ahead)
-    teeth = pd.Series(df_1d['close']).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (5-period SMMA, 3 bars ahead)
-    lips = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).mean().shift(3).values
+    # === 1d Camarilla Pivot Levels (R1, S1) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to 4h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # === 4h Indicators ===
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === 12h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) for breakouts
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume MA (20-period) for spike confirmation
+    # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR (14-period) for trailing stop
+    # ATR (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -58,13 +55,11 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_high_since_entry = 0.0  # for long trailing stop
-    lowest_low_since_entry = 0.0    # for short trailing stop
+    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i])
-            or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -73,44 +68,31 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
-        
-        # Alligator trend detection: 
-        # Bullish: Lips > Teeth > Jaw (all lines separated and ordered upward)
-        # Bearish: Lips < Teeth < Jaw (all lines separated and ordered downward)
-        # Otherwise: ranging/choppy (lines intertwined) - no trades
-        bullish_trend = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        bearish_trend = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        vol_ok = vol > 2.0 * vol_ma[i]  # volume spike confirmation
         
         if position == 0:
-            # Long entry: price breaks above 4h Donchian high in bullish Alligator regime + volume
-            if bullish_trend and price > highest_high[i-1] and vol_ok:
+            # Long: break above 1d Camarilla R1 with volume spike
+            if price > r1_aligned[i-1] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-                highest_high_since_entry = price
-            # Short entry: price breaks below 4h Donchian low in bearish Alligator regime + volume
-            elif bearish_trend and price < lowest_low[i-1] and vol_ok:
+                entry_price = price
+            # Short: break below 1d Camarilla S1 with volume spike
+            elif price < s1_aligned[i-1] and vol_ok:
                 signals[i] = -0.25
                 position = -1
-                lowest_low_since_entry = price
+                entry_price = price
         
         elif position == 1:
-            # Update highest high since entry
-            if price > highest_high_since_entry:
-                highest_high_since_entry = price
-            # ATR trailing stop: exit if price drops 2.0*ATR from highest high since entry
-            if price < highest_high_since_entry - 2.0 * atr[i]:
+            # ATR stoploss: exit if price drops 2.5*ATR from entry
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Update lowest low since entry
-            if price < lowest_low_since_entry:
-                lowest_low_since_entry = price
-            # ATR trailing stop: exit if price rises 2.0*ATR from lowest low since entry
-            if price > lowest_low_since_entry + 2.0 * atr[i]:
+            # ATR stoploss: exit if price rises 2.5*ATR from entry
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_1d_WilliamsAlligator_TrendRegime_V1"
-timeframe = "4h"
+name = "12h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
+timeframe = "12h"
 leverage = 1.0
