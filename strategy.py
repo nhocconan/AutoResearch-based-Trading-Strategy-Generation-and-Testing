@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_VolumeSpike_HTFTrend_ATRStop_v2
-Hypothesis: 4h Donchian(20) breakout with volume confirmation (>2.0x 20-period volume MA) and 1d EMA50 trend filter. ATR trailing stop (2.5x ATR) manages risk. Works in bull via upper band breakouts, in bear via lower band breakdowns. Position size 0.25 balances risk/return. Target ~20-50 trades/year per symbol (80-200 total over 4 years). Uses 4h primary timeframe with 1d HTF for trend alignment, avoiding overtrading while capturing multi-day moves.
+1d_KAMA_Trend_Filter_Volume_Spike
+Hypothesis: 1d KAMA trend direction with volume spike (>2.0x 20-period volume MA) for entry.
+KAMA adapts to market noise, reducing whipsaw in sideways markets. Volume confirmation ensures
+institutional participation. Works in bull via upward KAMA + volume, in bear via downward KAMA + volume.
+ATR trailing stop (2.5x ATR) manages risk. Position size 0.25 balances risk/return.
+Target ~7-25 trades/year per symbol (30-100 total over 4 years) to minimize fee drag.
+Uses 1d primary timeframe with 1w HTF for trend alignment.
 """
 
 import numpy as np
@@ -13,38 +18,55 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for trend filter)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (1w for trend filter)
+    df_1w = get_htf_data(prices, '1w')
     
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # === 1w EMA34 for HTF trend filter ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # === 1d Indicators (primary timeframe) ===
+    df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d EMA50 for trend filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    volume_1d = df_1d['volume'].values
     
-    # === 4h Indicators (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # KAMA (adaptive moving average)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)
+    # Handle array shapes
+    change_padded = np.concatenate([[np.nan] * 10, change])
+    volatility_padded = np.concatenate([[np.nan], volatility])
+    er = np.where(volatility_padded != 0, change_padded / volatility_padded, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan, dtype=np.float64)
+    kama[9] = close_1d[9]  # Start after first 10 periods
+    for i in range(10, len(close_1d)):
+        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
+            kama[i] = close_1d[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
     # Volume MA (20-period) for spike detection
-    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # ATR (14-period) for stoploss
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
@@ -56,26 +78,27 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(kama[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_4h[i]
-        vol = volume_4h[i]
-        vol_ok = vol > 2.0 * vol_ma[i]  # stricter volume confirmation to reduce trades
+        price = close_1d[i]
+        vol = volume_1d[i]
+        vol_ok = vol > 2.0 * vol_ma[i]  # volume confirmation (strict to reduce trades)
+        kama_dir = 1 if kama[i] > kama[i-1] else -1  # KAMA slope direction
         
         if position == 0:
-            # Long: price breaks above upper Donchian + volume confirmation + price > 1d EMA50
-            if price > highest_high[i] and vol_ok and price > ema_50_1d_aligned[i]:
+            # Long: KAMA rising + volume confirmation + price > 1w EMA34 (HTF uptrend)
+            if kama_dir == 1 and vol_ok and price > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
-            # Short: price breaks below lower Donchian + volume confirmation + price < 1d EMA50
-            elif price < lowest_low[i] and vol_ok and price < ema_50_1d_aligned[i]:
+            # Short: KAMA falling + volume confirmation + price < 1w EMA34 (HTF downtrend)
+            elif kama_dir == -1 and vol_ok and price < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -103,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_VolumeSpike_HTFTrend_ATRStop_v2"
-timeframe = "4h"
+name = "1d_KAMA_Trend_Filter_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
