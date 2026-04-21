@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_Volume_ATRFilter
-Hypothesis: Camarilla pivot levels (R1/S1) on 1d chart act as strong support/resistance.
-Breakouts above R1 or below S1 with volume confirmation (>1.5x avg) and 1w trend filter
-(price above/below 200 EMA) capture institutional breakouts. Works in bull (breakouts up)
-and bear (breakdowns down). Low frequency due to strict breakout conditions.
+1h_4d_RSI_Momentum_TrendFilter
+Hypothesis: In 1h timeframe, use RSI(2) for mean-reversion entries aligned with 4h trend (EMA50) and 1d trend filter (ADX>25). 
+Only take longs when RSI<15 and price>4h EMA50 and 1d ADX>25; shorts when RSI>85 and price<4h EMA50 and 1d ADX>25.
+Use session filter (08-20 UTC) to avoid low-volume periods. Target 20-40 trades/year to minimize fee drift.
 """
 
 import numpy as np
@@ -16,71 +15,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla pivots and 1w EMA200
+    # Load 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Load 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (R1, S1)
+    # Calculate 4h EMA50
+    close_4h = df_4h['close'].values
+    ema50_4h = np.zeros_like(close_4h)
+    ema50_4h[0] = close_4h[0]
+    alpha = 2.0 / (50 + 1)
+    for i in range(1, len(close_4h)):
+        ema50_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema50_4h[i-1]
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # Calculate 1d ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Align 1d Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Calculate 1w EMA200 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema200_1w = np.zeros_like(close_1w)
-    # Initialize with SMA200
-    if len(close_1w) >= 200:
-        ema200_1w[199] = np.mean(close_1w[:200])
-        alpha = 2.0 / (200 + 1)
-        for i in range(200, len(close_1w)):
-            ema200_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema200_1w[i-1]
-    else:
-        # Not enough data, use close as fallback
-        ema200_1w = close_1w.copy()
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+        return result
     
-    # Align 1w EMA200 to 12h timeframe
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    atr_1d = wilder_smooth(tr, 14)
+    plus_di_1d = 100 * wilder_smooth(plus_dm, 14) / atr_1d
+    minus_di_1d = 100 * wilder_smooth(minus_dm, 14) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilder_smooth(dx_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Main timeframe data (12h)
+    # Main timeframe data (1h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period average
-    volume_avg = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i >= 20:
-            volume_avg[i] = np.mean(volume[i-20:i])
-        else:
-            volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.5 * volume_avg)
+    # RSI(2) for mean reversion
+    def rsi(close, period):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # ATR for stoploss (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = np.zeros_like(close)
-    for i in range(len(tr)):
-        if i < 14:
-            atr[i] = np.mean(tr[:i+1])
-        else:
-            atr[i] = np.mean(tr[i-14:i])
+    rsi_values = rsi(close, 2)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -88,59 +103,54 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema200_1w_aligned[i]):
+        if np.isnan(ema50_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(rsi_values[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        if not (8 <= hours[i] <= 20):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema200 = ema200_1w_aligned[i]
-        vol_ok = volume_filter[i]
-        atr_val = atr[i]
-        
-        # Stoploss: 2.5 * ATR from entry
-        if position == 1 and price < entry_price - 2.5 * atr_val:
-            signals[i] = 0.0
-            position = 0
-            continue
-        elif position == -1 and price > entry_price + 2.5 * atr_val:
-            signals[i] = 0.0
-            position = 0
-            continue
+        ema50 = ema50_4h_aligned[i]
+        adx = adx_1d_aligned[i]
+        rsi_val = rsi_values[i]
         
         if position == 0:
-            # Long: break above R1 with volume and 1w uptrend (price > 200 EMA)
-            if price > r1_val and vol_ok and price > ema200:
-                signals[i] = 0.25
+            # Long: RSI<15 (oversold) + price>4h EMA50 (uptrend) + ADX>25 (trending market)
+            if rsi_val < 15 and price > ema50 and adx > 25:
+                signals[i] = 0.20
                 position = 1
                 entry_price = price
-            # Short: break below S1 with volume and 1w downtrend (price < 200 EMA)
-            elif price < s1_val and vol_ok and price < ema200:
-                signals[i] = -0.25
+            # Short: RSI>85 (overbought) + price<4h EMA50 (downtrend) + ADX>25 (trending market)
+            elif rsi_val > 85 and price < ema50 and adx > 25:
+                signals[i] = -0.20
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price falls below S1 (breakdown) or breaks below 200 EMA (trend change)
-            if price < s1_val or price < ema200:
+            # Long exit: RSI>70 (overbought) or price<4h EMA50 (trend change)
+            if rsi_val > 70 or price < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price rises above R1 (breakout) or breaks above 200 EMA (trend change)
-            if price > r1_val or price > ema200:
+            # Short exit: RSI<30 (oversold) or price>4h EMA50 (trend change)
+            if rsi_val < 30 or price > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "12h"
+name = "1h_4d_RSI_Momentum_TrendFilter"
+timeframe = "1h"
 leverage = 1.0
