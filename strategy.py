@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeATRFilter_Tight_V2
-Hypothesis: 4h Donchian(20) breakout with volume confirmation (>2.0x 20-bar MA) and ATR-based stoploss (2.0x ATR) works on BTC and ETH in both bull and bear markets. Uses tight volume filter to reduce trades and avoid fee drag. Target: 20-50 trades/year per symbol (80-200 over 4 years).
+12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V2
+Hypothesis: Camarilla R1/S1 breakout with volume confirmation (>1.5x 20-bar MA) and ATR-based stoploss works on 12h timeframe for BTC and ETH in both bull and bear markets. Uses 1d timeframe for Camarilla calculation (proven pattern: tight entries, volume confirmation, price channel structure). Target: 12-37 trades/year per symbol (50-150 over 4 years). Version 2 adds ATR-based volatility filter to reduce trades in low-volatility regimes and improve Sharpe.
 """
 
 import numpy as np
@@ -13,7 +13,40 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # ATR for stoploss and position sizing
+    # Load 1d data once for Camarilla pivot calculation (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels on 1d timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla levels: based on previous day's range
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    
+    # First bar: use same values (will be filtered by min_periods later)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    range_1d = prev_high - prev_low
+    camarilla_r1 = prev_close + range_1d * 1.1 / 12
+    camarilla_s1 = prev_close - range_1d * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume filter: 20-period average on 12h timeframe
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for stoploss and volatility filter
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -25,20 +58,17 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: 20-period average on 4h timeframe
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # ATR ratio filter: current ATR vs 50-period average (avoid low volatility regimes)
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / atr_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(atr[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -47,32 +77,35 @@ def generate_signals(prices):
         price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation (>2.0x average to reduce trades significantly)
-        volume_ok = volume > 2.0 * vol_ma[i]
+        # Volume confirmation (>1.5x average to reduce trades)
+        volume_ok = volume > 1.5 * vol_ma[i]
+        
+        # Volatility filter: only trade when ATR ratio > 0.8 (avoid low volatility)
+        vol_filter_ok = atr_ratio[i] > 0.8
         
         if position == 0:
-            # Long: price breaks above Donchian upper band with volume
-            if price > highest_high[i]:
-                if volume_ok:
+            # Long: price breaks above Camarilla R1 with volume and volatility
+            if price > camarilla_r1_aligned[i]:
+                if volume_ok and vol_filter_ok:
                     signals[i] = 0.25
                     position = 1
-            # Short: price breaks below Donchian lower band with volume
-            elif price < lowest_low[i]:
-                if volume_ok:
+            # Short: price breaks below Camarilla S1 with volume and volatility
+            elif price < camarilla_s1_aligned[i]:
+                if volume_ok and vol_filter_ok:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: price closes below Donchian lower band or ATR stoploss
-            if price < lowest_low[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
+            # Exit: price closes below Camarilla S1 (mean reversion) or ATR stoploss
+            if price < camarilla_s1_aligned[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above Donchian upper band or ATR stoploss
-            if price > highest_high[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
+            # Exit: price closes above Camarilla R1 (mean reversion) or ATR stoploss
+            if price > camarilla_r1_aligned[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeATRFilter_Tight_V2"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V2"
+timeframe = "12h"
 leverage = 1.0
