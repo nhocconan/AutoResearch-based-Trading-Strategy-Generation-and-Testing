@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h strategy using 12h Camarilla pivot levels with volume confirmation.
-In both bull and bear markets, price reacts strongly at Camarilla levels (R3/S3 for reversal, 
-R4/S4 for breakout). Uses 12h Camarilla for structural levels and 6h volume spike for confirmation.
-Target: 15-35 trades/year to minimize fee drag on 6h timeframe.
+4h Camarilla R1/S1 Breakout with 1d EMA Trend Filter and Volume Spike
+Based on top performers: Uses Camarilla pivot levels from daily timeframe for structure,
+1d EMA34 for trend filter, and volume spike for confirmation. Targets 20-50 trades/year.
 """
 
 import numpy as np
@@ -15,34 +14,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 1d data ONCE before loop for Camarilla levels and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla levels (using previous day's high-low-close)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla calculation: based on previous period's range
-    # R4 = Close + (High - Low) * 1.1/2
-    # R3 = Close + (High - Low) * 1.1/4
-    # S3 = Close - (High - Low) * 1.1/4
-    # S4 = Close - (High - Low) * 1.1/2
-    rng = high_12h - low_12h
-    r4 = close_12h + rng * 1.1 / 2
-    r3 = close_12h + rng * 1.1 / 4
-    s3 = close_12h - rng * 1.1 / 4
-    s4 = close_12h - rng * 1.1 / 2
+    # Camarilla levels: R1, S1 (most important for intraday)
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    rang = high_1d - low_1d
+    R1 = close_1d + rang * 1.1 / 12
+    S1 = close_1d - rang * 1.1 / 12
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    # Align to 4h timeframe (values update only after daily bar closes)
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: 6h volume / 20-period average
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: current volume / 20-period average
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
@@ -51,9 +48,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
+            np.isnan(ema_34_4h[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,43 +57,35 @@ def generate_signals(prices):
         
         price_close = prices['close'].iloc[i]
         vol_ratio_val = vol_ratio[i]
-        vol_threshold = 1.5  # Volume spike filter
         
         if position == 0:
-            # Enter long: price at S3/S4 with volume spike
-            # S3: potential reversal zone (go long if price holds above S3)
-            # S4: breakout level (go long if price breaks above S4 with volume)
-            if ((price_close > s3_aligned[i] * 1.001 and price_close < s3_aligned[i] * 1.02) or
-                (price_close > s4_aligned[i] and vol_ratio_val > vol_threshold)):
+            # Enter long: price breaks above R1 + above EMA34 + volume spike
+            if (price_close > R1_4h[i] and 
+                price_close > ema_34_4h[i] and 
+                vol_ratio_val > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price at R3/R4 with volume spike
-            # R3: potential reversal zone (go short if price holds below R3)
-            # R4: breakdown level (go short if price breaks below R4 with volume)
-            elif ((price_close < r3_aligned[i] * 0.999 and price_close > r3_aligned[i] * 0.98) or
-                  (price_close < r4_aligned[i] and vol_ratio_val > vol_threshold)):
+            # Enter short: price breaks below S1 + below EMA34 + volume spike
+            elif (price_close < S1_4h[i] and 
+                  price_close < ema_34_4h[i] and 
+                  vol_ratio_val > 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price reaches opposite level or volume drops
-            if position == 1:
-                # Exit long: price reaches R3 (resistance) or volume drops significantly
-                if price_close >= r3_aligned[i] * 0.995 or vol_ratio_val < 0.8:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1
-                # Exit short: price reaches S3 (support) or volume drops significantly
-                if price_close <= s3_aligned[i] * 1.005 or vol_ratio_val < 0.8:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: price returns to opposite Camarilla level or volume drops
+            if position == 1 and price_close < S1_4h[i]:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and price_close > R1_4h[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "6h_Camarilla_Pivot_Volume_Spike"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
