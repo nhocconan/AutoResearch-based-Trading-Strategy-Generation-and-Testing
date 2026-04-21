@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_WeeklyPivot_Filter_v1
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-filtered by weekly Camarilla pivot levels (R1/S1) for mean-reversion entries.
-Long when price > KAMA and touches weekly S1; short when price < KAMA and touches weekly R1.
-Volume confirmation (1.5x average) reduces false signals. ATR-based stoploss (2.0x) manages risk.
-Designed for low trade frequency (~15-25/year) to minimize fee drag and work in both bull/bear markets.
-Timeframe: 1d, uses 1w HTF for pivot calculation and trend alignment.
+6h_ElderRay_BullBearPower_1dRegime_V1
+Hypothesis: 6h Elder Ray (Bull Power/Bear Power) filtered by 1d regime (ADX + EMA200). 
+Long when Bull Power > 0 and price > EMA200_1d (bull regime). 
+Short when Bear Power < 0 and price < EMA200_1d (bear regime). 
+Uses volume confirmation (1.5x average) to avoid false signals. 
+Designed to work in both bull and bear markets by adapting to regime via EMA200 filter.
+Timeframe: 6h, uses 1d HTF for regime filter.
+Target: 50-150 total trades over 4 years = 12-37/year.
 """
 
 import numpy as np
@@ -18,59 +19,64 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for Camarilla pivots and trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load HTF data ONCE before loop (1d for regime: EMA200 and ADX)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1w OHLC for Camarilla pivot calculation (based on previous weekly bar) ===
-    df_1w_open = df_1w['open'].values
-    df_1w_high = df_1w['high'].values
-    df_1w_low = df_1w['low'].values
-    df_1w_close = df_1w['close'].values
+    # === 1d EMA200 for regime (bull/bear) ===
+    df_1d_close = df_1d['close'].values
+    ema_200_1d = pd.Series(df_1d_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate Camarilla levels for each weekly bar
-    range_1w = df_1w_high - df_1w_low
-    r1_1w = df_1w_close + 0.275 * range_1w
-    s1_1w = df_1w_close - 0.275 * range_1w
-    h3_1w = df_1w_close + 1.1 * range_1w
-    l3_1w = df_1w_close - 1.1 * range_1w
-    h4_1w = df_1w_close + 1.382 * range_1w
-    l4_1w = df_1w_close - 1.382 * range_1w
+    # === 1d ADX for trend strength (optional filter) ===
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
     
-    # Align 1w Camarilla levels to daily timeframe
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    h3_1w_aligned = align_htf_to_ltf(prices, df_1w, h3_1w)
-    l3_1w_aligned = align_htf_to_ltf(prices, df_1w, l3_1w)
-    h4_1w_aligned = align_htf_to_ltf(prices, df_1w, h4_1w)
-    l4_1w_aligned = align_htf_to_ltf(prices, df_1w, l4_1w)
+    # True Range
+    tr1 = pd.Series(df_1d_high - df_1d_low)
+    tr2 = pd.Series(np.abs(df_1d_high - np.roll(df_1d_close, 1)))
+    tr3 = pd.Series(np.abs(df_1d_low - np.roll(df_1d_close, 1)))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # === Daily KAMA for trend direction ===
+    # Directional Movement
+    dm_plus = pd.Series(np.where(df_1d_high - np.roll(df_1d_high, 1) > np.roll(df_1d_low, 1) - df_1d_low,
+                                 np.maximum(df_1d_high - np.roll(df_1d_high, 1), 0), 0))
+    dm_minus = pd.Series(np.where(np.roll(df_1d_low, 1) - df_1d_low > df_1d_high - np.roll(df_1d_high, 1),
+                                  np.maximum(np.roll(df_1d_low, 1) - df_1d_low, 0), 0))
+    
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === 6h Elder Ray: Bull Power and Bear Power ===
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    # Efficiency ratio over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) > 1 else 0
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed after 10 periods
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 13-period EMA of close (standard for Elder Ray)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    bull_power = high - ema_13  # Bull Power = High - EMA13
+    bear_power = low - ema_13   # Bear Power = Low - EMA13
     
     # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === ATR (14-period) for stoploss ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -81,9 +87,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(kama[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i])
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) 
+            or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) 
             or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -92,22 +99,23 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        kama_val = kama[i]
-        r1 = r1_1w_aligned[i]
-        s1 = s1_1w_aligned[i]
-        h3 = h3_1w_aligned[i]
-        l3 = l3_1w_aligned[i]
-        h4 = h4_1w_aligned[i]
-        l4 = l4_1w_aligned[i]
+        ema_200 = ema_200_1d_aligned[i]
+        adx = adx_1d_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
         vol_avg = vol_ma[i]
         
-        # Volume confirmation: current volume > 1.5x average
+        # Volume confirmation: current volume > 1.5x average (moderate filter)
         volume_confirmed = volume_now > 1.5 * vol_avg
         
+        # Regime filter: only trade in strong trends (ADX > 20) to avoid whipsaw
+        strong_trend = adx > 20
+        
         if position == 0:
-            # Mean reversion entries at weekly S1/R1 with KAMA trend filter
-            long_condition = (price <= s1 * 1.005) and (price > kama_val) and volume_confirmed
-            short_condition = (price >= r1 * 0.995) and (price < kama_val) and volume_confirmed
+            # Long: Bull Power > 0 (strong buying) AND price > EMA200_1d (bull regime)
+            long_condition = (bull > 0) and (price > ema_200) and volume_confirmed and strong_trend
+            # Short: Bear Power < 0 (strong selling) AND price < EMA200_1d (bear regime)
+            short_condition = (bear < 0) and (price < ema_200) and volume_confirmed and strong_trend
             
             if long_condition:
                 signals[i] = 0.25
@@ -119,32 +127,32 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Stoploss (2.0x ATR)
+            # Check stoploss (2.0x ATR)
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price < kama_val:
+            # Regime change exit: price crosses below EMA200_1d
+            elif price < ema_200:
                 signals[i] = 0.0
                 position = 0
-            # Mean reversion exit at weekly H3 (overbought)
-            elif price >= h3:
+            # Momentum exit: Bull Power turns negative
+            elif bull <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Stoploss (2.0x ATR)
+            # Check stoploss (2.0x ATR)
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit
-            elif price > kama_val:
+            # Regime change exit: price crosses above EMA200_1d
+            elif price > ema_200:
                 signals[i] = 0.0
                 position = 0
-            # Mean reversion exit at weekly L3 (oversold)
-            elif price <= l3:
+            # Momentum exit: Bear Power turns positive
+            elif bear >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -152,6 +160,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Trend_WeeklyPivot_Filter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dRegime_V1"
+timeframe = "6h"
 leverage = 1.0
