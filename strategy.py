@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_TrendFilter
-Hypothesis: Camarilla pivot levels (R1/S1) from 1d combined with volume spike (>1.5x avg) and 1w EMA100 trend filter provides high-probability breakout trades. The 1w EMA100 ensures we trade with the weekly trend, reducing false signals during counter-trend moves. Volume confirmation ensures breakout is backed by participation. Designed for low trade frequency (target: 20-40/year) to minimize fee drag in 4h timeframe. Uses discrete position sizing (0.25) to reduce churn.
+1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter
+Hypothesis: Daily Camarilla pivot R1/S1 breakouts with weekly trend filter (price > weekly EMA50) and volume confirmation (>1.5x average) capture institutional breakouts in both bull and bear markets. The weekly EMA50 ensures we trade with the higher timeframe trend, reducing false signals during sideways periods. Volume confirmation ensures breakouts are backed by participation. Designed for low trade frequency (target: 15-25/year) to minimize fee drag in 1d timeframe. Uses discrete position sizing (0.25) to reduce churn.
 """
 
 import numpy as np
@@ -13,55 +13,42 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # AlCamarilla levels to 4h timeframe (use previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Load 1w data for EMA100 trend filter
+    # Load weekly data once for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA100 for trend filter
+    # Calculate weekly EMA50 for trend filter
     close_1w = df_1w['close'].values
-    ema100_1w = np.zeros_like(close_1w)
-    ema100_1w[0] = close_1w[0]
-    alpha = 2.0 / (100 + 1)
+    ema50_1w = np.zeros_like(close_1w)
+    ema50_1w[0] = close_1w[0]
+    alpha = 2.0 / (50 + 1)
     for i in range(1, len(close_1w)):
-        ema100_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema100_1w[i-1]
+        ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
     
-    # Align 1w EMA100 to 4h timeframe
-    ema100_1w_aligned = align_htf_to_ltf(prices, df_1w, ema100_1w)
+    # Align weekly EMA50 to daily timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Main timeframe data (4h)
+    # Daily data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period average
-    volume_avg = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i >= 20:
-            volume_avg[i] = np.mean(volume[i-20:i])
-        else:
-            volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.5 * volume_avg)
+    # Calculate daily Camarilla pivot levels (based on previous day)
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # First day: use same values
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    camarilla_factor = (prev_high - prev_low) * 1.1 / 12
+    r1 = prev_close + camarilla_factor
+    s1 = prev_close - camarilla_factor
     
     # ATR for stoploss (14-period)
     tr1 = high - low
@@ -76,22 +63,31 @@ def generate_signals(prices):
         else:
             atr[i] = np.mean(tr[i-14:i])
     
+    # Volume filter: current volume > 1.5x 20-period average
+    volume_avg = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i >= 20:
+            volume_avg[i] = np.mean(volume[i-20:i])
+        else:
+            volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+    volume_filter = volume > (1.5 * volume_avg)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(50, n):  # Start after EMA warmup
         # Skip if NaN in critical values
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema100_1w_aligned[i]):
+        if np.isnan(ema50_1w_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        ema100 = ema100_1w_aligned[i]
+        ema50 = ema50_1w_aligned[i]
+        r1_level = r1[i]
+        s1_level = s1[i]
         vol_ok = volume_filter[i]
         atr_val = atr[i]
         
@@ -106,28 +102,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume and 1w uptrend (price > 1w EMA100)
-            if price > r1_level and vol_ok and price > ema100:
+            # Long: price breaks above R1 with volume and weekly uptrend (price > weekly EMA50)
+            if price > r1_level and vol_ok and price > ema50:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S1 with volume and 1w downtrend (price < 1w EMA100)
-            elif price < s1_level and vol_ok and price < ema100:
+            # Short: price breaks below S1 with volume and weekly downtrend (price < weekly EMA50)
+            elif price < s1_level and vol_ok and price < ema50:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price falls back below R1 (failed breakout) or breaks below 1w EMA100 (trend change)
-            if price < r1_level or price < ema100:
+            # Long exit: price falls back below R1 or breaks below weekly EMA50 (trend change)
+            if price < r1_level or price < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above S1 (failed breakdown) or breaks above 1w EMA100 (trend change)
-            if price > s1_level or price > ema100:
+            # Short exit: price rises back above S1 or breaks above weekly EMA50 (trend change)
+            if price > s1_level or price > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -135,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_TrendFilter"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter"
+timeframe = "1d"
 leverage = 1.0
