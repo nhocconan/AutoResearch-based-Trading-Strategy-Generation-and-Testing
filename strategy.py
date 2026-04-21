@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_1w_DonchianBreakout_VolumeTrend_v1
-Hypothesis: Daily timeframe with weekly Donchian channel breakouts (20-period), volume confirmation (>1.5x 20-day average), and ADX > 25 for trend confirmation.
-Designed to capture strong breakouts in trending markets while avoiding false signals in ranging markets. Works in both bull and bear by only trading strong breaks with volume and trend confirmation.
+1h_4h_1d_Camarilla_R1S1_Breakout_Volume_Filtered_v1
+Hypothesis: Use 1d for primary signal direction (Camarilla R1/S1 breakouts), 4h for trend filter (EMA50 slope), and 1h for precise entry timing with volume confirmation.
+Trades only in direction of 4h trend to avoid counter-trend whipsaws. Target: 15-30 trades/year (60-120 total over 4 years).
+Works in bull/bear by aligning with higher timeframe trend, avoiding false breaks in chop.
 """
 
 import numpy as np
@@ -11,86 +12,59 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data once for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data once for Camarilla levels (signal direction)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels on weekly data
-    upper = np.full_like(high_1w, np.nan)
-    lower = np.full_like(low_1w, np.nan)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    for i in range(20, len(high_1w)):
-        upper[i] = np.max(high_1w[i-20:i])
-        lower[i] = np.min(low_1w[i-20:i])
+    # Camarilla levels: R1, S1, and pivot point (PP)
+    rang = prev_high - prev_low
+    r1 = prev_close + 1.1 * rang / 12
+    s1 = prev_close - 1.1 * rang / 12
+    pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
+    # Align to 1h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
-    # ADX for regime filter (trending vs ranging) on daily data
-    if len(prices) < 14:
+    # Load 4h data once for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
     
-    # True Range
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    close_4h = df_4h['close'].values
+    # EMA50 for trend direction
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Wilder's smoothing
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = result[i-1] - (result[i-1]/period) + data[i]
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, 14)
+    # EMA50 slope (trending up/down)
+    ema_slope = np.zeros_like(ema_50_aligned)
+    ema_slope[1:] = ema_50_aligned[1:] - ema_50_aligned[:-1]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(adx[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(ema_slope[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,44 +73,45 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 1.5 * 20-day average
+        # Volume filter: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
             volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending = adx[i] > 25
+        # Trend filter: EMA50 slope positive for long, negative for short
+        trending_up = ema_slope[i] > 0
+        trending_down = ema_slope[i] < 0
         
         if position == 0:
-            # Long conditions: break above upper Donchian + volume + trending
-            if price > upper_aligned[i] and volume_ok and trending:
-                signals[i] = 0.25
+            # Long conditions: break above R1 + volume + uptrend
+            if price > r1_aligned[i] and volume_ok and trending_up:
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: break below lower Donchian + volume + trending
-            elif price < lower_aligned[i] and volume_ok and trending:
-                signals[i] = -0.25
+            # Short conditions: break below S1 + volume + downtrend
+            elif price < s1_aligned[i] and volume_ok and trending_down:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below lower Donchian
-            if price < lower_aligned[i]:
+            # Long exit: price crosses back below pivot point OR trend turns down
+            if price < pp_aligned[i] or ema_slope[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Short exit: price crosses back above upper Donchian
-            if price > upper_aligned[i]:
+            # Short exit: price crosses back above pivot point OR trend turns up
+            if price > pp_aligned[i] or ema_slope[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "1d_1w_DonchianBreakout_VolumeTrend_v1"
-timeframe = "1d"
+name = "1h_4h_1d_Camarilla_R1S1_Breakout_Volume_Filtered_v1"
+timeframe = "1h"
 leverage = 1.0
