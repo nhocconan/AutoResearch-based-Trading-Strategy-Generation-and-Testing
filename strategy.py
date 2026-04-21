@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h weekly pivot breakout with volume confirmation and daily ATR filter.
-Long when price breaks above weekly R1 with volume > 1.5x average and daily ATR > daily ATR mean;
-Short when price breaks below weekly S1 with volume > 1.5x average and daily ATR > daily ATR mean.
-Exit when price returns to weekly pivot or 1.5x ATR stop. Weekly pivot levels represent key
-institutional support/resistance. Volume surge confirms breakout validity. ATR filter ensures
-sufficient volatility for meaningful moves. Designed for 15-25 trades/year to minimize fee drag.
+Hypothesis: 6h Donchian breakout with weekly volume confirmation and daily ATR filter.
+Long when price breaks above weekly Donchian upper with volume > 1.5x average and daily ATR > daily ATR mean;
+Short when price breaks below weekly Donchian lower with volume > 1.5x average and daily ATR > daily ATR mean.
+Exit when price returns to weekly Donchian midpoint or 1.5x ATR stop. Weekly Donchian provides institutional
+support/resistance levels, volume surge confirms breakout validity, ATR filter ensures sufficient volatility.
+Designed for 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -17,27 +17,26 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for pivot calculation
+    # Load weekly data ONCE before loop for Donchian calculation
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate weekly pivot levels (using prior week's OHLC)
+    # Calculate weekly Donchian channel (20-period)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
-    # Standard pivot point calculation
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    # R1 and S1 are the first resistance/support levels
-    r1 = pivot + range_1w * 0.1
-    s1 = pivot - range_1w * 0.1
+    # 20-period high and low for Donchian channel
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    # Midpoint for exit
+    midpoint = (high_20 + low_20) / 2.0
+    
+    # Align weekly Donchian levels to 6h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    midpoint_aligned = align_htf_to_ltf(prices, df_1w, midpoint)
     
     # Load daily data ONCE before loop for ATR filter
     df_1d = get_htf_data(prices, '1d')
@@ -80,8 +79,8 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(atr_mean_20_aligned[i]) or 
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(midpoint_aligned[i]) or np.isnan(atr_mean_20_aligned[i]) or 
             np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_6h[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -99,39 +98,39 @@ def generate_signals(prices):
         vol_1d_current = vol_1d_aligned[i]
         
         if position == 0:
-            # Enter long: break above weekly R1 with volume surge and sufficient volatility
-            if (price_high > r1_aligned[i] and 
+            # Enter long: break above weekly Donchian upper with volume surge and sufficient volatility
+            if (price_high > high_20_aligned[i] and 
                 vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
                 atr_1d_current > atr_mean_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below weekly S1 with volume surge and sufficient volatility
-            elif (price_low < s1_aligned[i] and 
+            # Enter short: break below weekly Donchian lower with volume surge and sufficient volatility
+            elif (price_low < low_20_aligned[i] and 
                   vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
                   atr_1d_current > atr_mean_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: return to weekly pivot or 1.5x ATR stop
+            # Exit: return to weekly Donchian midpoint or 1.5x ATR stop
             exit_signal = False
             
             if position == 1:
-                # Exit long: touch weekly pivot OR price < entry - 1.5*ATR
-                if price_low <= pivot_aligned[i]:
+                # Exit long: touch weekly midpoint OR price < entry - 1.5*ATR
+                if price_low <= midpoint_aligned[i]:
                     exit_signal = True
                 else:
-                    # Track entry approximation: use R1 as entry level for long
-                    entry_level = r1_aligned[i-1] if i >= 1 else r1_aligned[0]
+                    # Track entry approximation: use Donchian upper as entry level for long
+                    entry_level = high_20_aligned[i-1] if i >= 1 else high_20_aligned[0]
                     if price_close < entry_level - 1.5 * atr_6h[i]:
                         exit_signal = True
             elif position == -1:
-                # Exit short: touch weekly pivot OR price > entry + 1.5*ATR
-                if price_high >= pivot_aligned[i]:
+                # Exit short: touch weekly midpoint OR price > entry + 1.5*ATR
+                if price_high >= midpoint_aligned[i]:
                     exit_signal = True
                 else:
-                    # Track entry approximation: use S1 as entry level for short
-                    entry_level = s1_aligned[i-1] if i >= 1 else s1_aligned[0]
+                    # Track entry approximation: use Donchian lower as entry level for short
+                    entry_level = low_20_aligned[i-1] if i >= 1 else low_20_aligned[0]
                     if price_close > entry_level + 1.5 * atr_6h[i]:
                         exit_signal = True
             
@@ -144,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_R1_S1_Breakout_DailyATR_Volume1.5x"
+name = "6h_Donchian20_Weekly_Volume1.5x_ATRFilter"
 timeframe = "6h"
 leverage = 1.0
