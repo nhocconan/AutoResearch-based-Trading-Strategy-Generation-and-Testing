@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot level (R1/S1) breakout with volume confirmation and daily EMA(34) trend filter.
-Long when price breaks above R1 with volume > 2x average and close > daily EMA(34);
-Short when price breaks below S1 with volume > 2x average and close < daily EMA(34).
-Exit on opposite pivot touch or 1.5x ATR stop. Designed for 20-30 trades/year to minimize fee drag.
+Hypothesis: 4h Donchian channel (20) breakout with volume confirmation and 1h EMA(50) trend filter.
+Long when price breaks above upper band with volume > 2x 1h average volume and close > 1h EMA(50);
+Short when price breaks below lower band with volume > 2x 1h average volume and close < 1h EMA(50).
+Exit on opposite band touch or 1.5x ATR stop. Designed for 15-25 trades/year to minimize fee drag.
 Works in bull markets via upward breakouts and in bear via downward breakdowns with volume confirmation.
 """
 
@@ -13,41 +13,40 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for pivot calculation and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 1h data ONCE before loop for EMA and volume average
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from daily OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channel (20-period) on 4h data
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    upper_band = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_band = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align daily pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # 1h EMA(50) for trend filter
+    close_1h = df_1h['close'].values
+    ema_50 = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1h, ema_50)
     
-    # Daily EMA(34) for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # 1h volume average (20-period)
+    vol_1h = df_1h['volume'].values
+    vol_avg_20 = pd.Series(vol_1h).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1h, vol_avg_20)
     
-    # Daily volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # 1h volume (current) aligned to 4h
+    vol_1h_current = df_1h['volume'].values
+    vol_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_1h_current)
     
     # ATR for stop (14-period on 4h)
-    tr1 = prices['high'].values - prices['low'].values
-    tr2 = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
-    tr3 = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
@@ -56,11 +55,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_avg_20_aligned[i]) or 
+            np.isnan(vol_1h_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,44 +69,43 @@ def generate_signals(prices):
         price_high = prices['high'].iloc[i]
         price_low = prices['low'].iloc[i]
         
-        # Current daily volume aligned to 4h
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_1d_current = vol_1d_aligned[i]
+        # Current 1h volume aligned to 4h
+        vol_1h_current = vol_1h_aligned[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume surge and close > daily EMA34
-            if (price_high > r1_aligned[i] and 
-                vol_1d_current > 2.0 * vol_ma_20_aligned[i] and
-                price_close > ema_34_aligned[i]):
+            # Enter long: break above upper band with volume surge and close > 1h EMA50
+            if (price_high > upper_band[i] and 
+                vol_1h_current > 2.0 * vol_avg_20_aligned[i] and
+                price_close > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume surge and close < daily EMA34
-            elif (price_low < s1_aligned[i] and 
-                  vol_1d_current > 2.0 * vol_ma_20_aligned[i] and
-                  price_close < ema_34_aligned[i]):
+            # Enter short: break below lower band with volume surge and close < 1h EMA50
+            elif (price_low < lower_band[i] and 
+                  vol_1h_current > 2.0 * vol_avg_20_aligned[i] and
+                  price_close < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: opposite pivot touch or 1.5x ATR stop
+            # Exit: opposite band touch or 1.5x ATR stop
             exit_signal = False
             
             if position == 1:
-                # Exit long: touch S1 OR price < entry - 1.5*ATR
-                if price_low < s1_aligned[i]:
+                # Exit long: touch lower band OR price < entry - 1.5*ATR
+                if price_low < lower_band[i]:
                     exit_signal = True
                 else:
-                    # Track entry approximation: use R1 as entry level for long
-                    entry_level = r1_aligned[i-1] if i >= 1 else r1_aligned[0]
+                    # Track entry approximation: use upper band as entry level for long
+                    entry_level = upper_band[i-1] if i >= 1 else upper_band[0]
                     if price_close < entry_level - 1.5 * atr[i]:
                         exit_signal = True
             elif position == -1:
-                # Exit short: touch R1 OR price > entry + 1.5*ATR
-                if price_high > r1_aligned[i]:
+                # Exit short: touch upper band OR price > entry + 1.5*ATR
+                if price_high > upper_band[i]:
                     exit_signal = True
                 else:
-                    # Track entry approximation: use S1 as entry level for short
-                    entry_level = s1_aligned[i-1] if i >= 1 else s1_aligned[0]
+                    # Track entry approximation: use lower band as entry level for short
+                    entry_level = lower_band[i-1] if i >= 1 else lower_band[0]
                     if price_close > entry_level + 1.5 * atr[i]:
                         exit_signal = True
             
@@ -120,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume2x"
+name = "4h_Donchian20_Volume2x_1hEMA50_Trend"
 timeframe = "4h"
 leverage = 1.0
