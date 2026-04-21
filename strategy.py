@@ -3,77 +3,101 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
-# Long when price breaks above 20-period high AND weekly pivot trend is up AND volume > 1.5x average
-# Short when price breaks below 20-period low AND weekly pivot trend is down AND volume > 1.5x average
-# Exit when price crosses back through the 20-period midpoint or opposite breakout occurs
-# Weekly pivot trend: price > weekly pivot = bullish, price < weekly pivot = bearish
-# This captures strong momentum moves in alignment with higher timeframe structure
-# Volume ensures conviction, reducing false breakouts
-# Target: 15-30 trades/year by requiring confluence of breakout, trend, and volume
+# Hypothesis: 12h Williams Alligator + 1d Volume Spike + 1w EMA34 Trend
+# Long when Jaw < Teeth < Lips (bullish alignment), 1d volume > 2.0x 20-day average, price > 1w EMA34
+# Short when Jaw > Teeth > Lips (bearish alignment), 1d volume > 2.0x 20-day average, price < 1w EMA34
+# Williams Alligator uses SMAs: Jaw=13, Teeth=8, Lips=5 (all smoothed)
+# Works in both bull (strong bullish alignment) and bear (strong bearish alignment)
+# Volume confirms conviction, weekly EMA filters trend direction
+# Target: 12-37 trades/year by requiring strict alignment + volume spike
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d and 1w data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot point (standard formula)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
-    weekly_pivot = (high_weekly + low_weekly + close_weekly) / 3.0
+    # Williams Alligator components (1d timeframe)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    # Jaw (13-period SMMA, smoothed with 8-period shift)
+    jaw_raw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
+    jaw = pd.Series(jaw_raw).rolling(window=8, min_periods=8).mean().values
     
-    # Calculate Donchian channels (20-period) on 6h data
+    # Teeth (8-period SMMA, smoothed with 5-period shift)
+    teeth_raw = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(teeth_raw).rolling(window=5, min_periods=5).mean().values
+    
+    # Lips (5-period SMMA, smoothed with 3-period shift)
+    lips_raw = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(lips_raw).rolling(window=3, min_periods=3).mean().values
+    
+    # 1d volume moving average (20-period)
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
+    # 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Price and volume arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    
-    # 20-period highest high and lowest low
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    midpoint_20 = (highest_20 + lowest_20) / 2.0
-    
-    # Calculate 6h volume moving average (20-period)
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(13, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Current values
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         price = close[i]
-        highest = highest_20[i]
-        lowest = lowest_20[i]
-        midpoint = midpoint_20[i]
-        weekly_pivot_val = weekly_pivot_aligned[i]
-        vol_ma_val = vol_ma[i]
-        current_volume = volume[i]
+        vol_ma = vol_ma_1d_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = current_volume > 1.5 * vol_ma_val
+        # Get current 1d volume (12h = 0.5 day, so 2 bars per day)
+        day_idx = i // 2
+        if day_idx < len(df_1d):
+            volume = df_1d['volume'].iloc[day_idx]
+        else:
+            volume = df_1d['volume'].iloc[-1] if len(df_1d) > 0 else 0
+        
+        # Volume confirmation: current 1d volume > 2.0x 20-day average
+        volume_confirm = volume > 2.0 * vol_ma if vol_ma > 0 else False
+        
+        # Williams Alligator alignments
+        bullish_align = jaw_val < teeth_val < lips_val  # Jaw < Teeth < Lips
+        bearish_align = jaw_val > teeth_val > lips_val  # Jaw > Teeth > Lips
         
         if position == 0:
-            # Long breakout: price > 20-period high AND price > weekly pivot (bullish trend) AND volume confirmation
-            if price > highest and price > weekly_pivot_val and volume_confirm:
+            # Long: Bullish alignment, volume confirmation, price > weekly EMA34
+            if bullish_align and volume_confirm and price > ema34_1w_val:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price < 20-period low AND price < weekly pivot (bearish trend) AND volume confirmation
-            elif price < lowest and price < weekly_pivot_val and volume_confirm:
+            # Short: Bearish alignment, volume confirmation, price < weekly EMA34
+            elif bearish_align and volume_confirm and price < ema34_1w_val:
                 signals[i] = -0.25
                 position = -1
         
@@ -82,13 +106,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price crosses below 20-period midpoint OR breaks below 20-period low
-                if price < midpoint or price < lowest:
+                # Exit if bullish alignment breaks or price crosses below weekly EMA34
+                if not bullish_align or price < ema34_1w_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price crosses above 20-period midpoint OR breaks above 20-period high
-                if price > midpoint or price > highest:
+                # Exit if bearish alignment breaks or price crosses above weekly EMA34
+                if not bearish_align or price > ema34_1w_val:
                     exit_signal = True
             
             if exit_signal:
@@ -100,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dVolumeSpike_1wEMA34_Trend"
+timeframe = "12h"
 leverage = 1.0
