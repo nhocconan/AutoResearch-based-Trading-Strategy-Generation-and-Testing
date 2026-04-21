@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_HTFBreakout_LTFVolume_Confirmation_v1
-Hypothesis: 6h breakouts of weekly pivot levels (R2/S2) with 1d EMA50 trend filter and volume confirmation (1.8x 24-period average) capture institutional interest at key weekly levels. Works in both bull/bear regimes by aligning with HTF trend. Uses discrete sizing (0.25) to minimize fee drag. Target: 50-150 total trades over 4 years.
+12h_Camarilla_R1_S1_Breakout_1dTrendRegime_VolumeSpike_v1
+Hypothesis: 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike (2.0x 20-period average) capture momentum in both bull and bear regimes. Uses discrete sizing (0.25) and ATR-based stoploss (2.0x) to minimize fee drag. Target: 50-150 total trades over 4 years for BTC/ETH/SOL.
 """
 
 import numpy as np
@@ -13,36 +13,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA, 1w for pivot)
+    # Load HTF data ONCE before loop (1d for trend regime)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 60 or len(df_1w) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d EMA50 for trend regime ===
+    # === 1d EMA34 for trend regime ===
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Weekly pivot points (R2, S2) based on previous week's OHLC ===
-    # Using previous week's data for pivot calculation (standard practice)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot: (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly R2: P + 2*(H - L)
-    r2_1w = pivot_1w + 2.0 * (high_1w - low_1w)
-    # Weekly S2: P - 2*(H - L)
-    s2_1w = pivot_1w - 2.0 * (high_1w - low_1w)
-    
-    # Align weekly levels to 6h timeframe (wait for weekly bar close)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    
-    # === 6h ATR (14-period) for stoploss ===
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -53,10 +34,20 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 6h volume confirmation (volume > 1.8x 24-period average) ===
+    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirmed = volume > (1.8 * vol_ma_24)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (2.0 * vol_ma_20)
+    
+    # === 12h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,9 +56,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
-            np.isnan(s2_1w_aligned[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,27 +65,24 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_50_1d_val = ema_50_1d_aligned[i]
-        pivot_val = pivot_1w_aligned[i]
-        r2_val = r2_1w_aligned[i]
-        s2_val = s2_1w_aligned[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
+        r1_val = r1[i]
+        s1_val = s1[i]
         vol_conf = volume_confirmed[i]
         
         # Trend regime
-        is_bull = price > ema_50_1d_val
-        is_bear = price < ema_50_1d_val
+        is_bull = price > ema_34_1d_val
+        is_bear = price < ema_34_1d_val
         
         if position == 0:
             if is_bull:
-                # Bull regime: favor long breakouts above R2
-                long_condition = (price > r2_val) and vol_conf
-                # Only allow shorts if strong breakdown below S2 with volume
-                short_condition = (price < s2_val) and vol_conf and (price < ema_50_1d_val * 0.98)
+                # Bull regime: long breakouts favored
+                long_condition = (price > r1_val) and vol_conf
+                short_condition = (price < s1_val) and vol_conf and (price < ema_34_1d_val * 0.99)  # stricter for shorts
             else:  # bear regime
-                # Bear regime: favor short breakdowns below S2
-                short_condition = (price < s2_val) and vol_conf
-                # Only allow longs if strong breakout above R2 with volume
-                long_condition = (price > r2_val) and vol_conf and (price > ema_50_1d_val * 1.02)
+                # Bear regime: short breakdowns favored
+                short_condition = (price < s1_val) and vol_conf
+                long_condition = (price > r1_val) and vol_conf and (price > ema_34_1d_val * 1.01)  # stricter for longs
             
             if long_condition:
                 signals[i] = 0.25
@@ -111,31 +98,31 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 4 bars to reduce churn
-            if bars_since_entry < 4:
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.5x ATR) - wider for 6h timeframe
+            # Check stoploss (2.0x ATR)
             if position == 1:
-                if price < entry_price - 2.5 * atr[i]:
+                if price < entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks below weekly pivot (failed breakout)
-                elif price < pivot_val:
+                # Exit if price breaks below S1 (failed breakout)
+                elif price < s1_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.5 * atr[i]:
+                if price > entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks above weekly pivot (failed breakdown)
-                elif price > pivot_val:
+                # Exit if price breaks above R1 (failed breakdown)
+                elif price > r1_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -144,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_HTFBreakout_LTFVolume_Confirmation_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrendRegime_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
