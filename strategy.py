@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 12h Camarilla pivot (R1/S1) breakouts filtered by 1d EMA50 trend and volume spike (>2x average).
-Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. ATR-based trailing stop with 2.5x ATR.
-Designed for 12-37 trades/year per symbol. Works in bull/bear via 1d trend alignment and volume confirmation.
+4h_Donchian20_Breakout_VolumeSpike_HTFTrend_ATRStop_v1
+Hypothesis: 4h Donchian(20) breakouts filtered by 1d EMA50 trend and volume spike (>2x average).
+Works in bull/bear via 1d trend alignment and volume confirmation to avoid false breakouts.
+Discrete position sizing (0.0, ±0.25) minimizes fee churn. ATR trailing stop with 2.5x ATR.
+Target: <25 trades/year per symbol to avoid fee drag.
 """
 
 import numpy as np
@@ -15,25 +16,24 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for pivots, 1d for trend)
-    df_12h = get_htf_data(prices, '12h')
+    # Load HTF data ONCE before loop (4h for Donchian, 1d for trend)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 20 or len(df_1d) < 20:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 12h Camarilla Pivot Levels (R1, S1) ===
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 4h Donchian Channel (20-period) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_range = (high_12h - low_12h) * 1.1 / 12.0
-    r1_12h = close_12h + camarilla_range
-    s1_12h = close_12h - camarilla_range
+    # Donchian: upper = max(high, 20), lower = min(low, 20)
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align to 12h timeframe (use previous completed 12h bar)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Align to 4h timeframe (use previous completed 4h bar)
+    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
     
     # === 1d EMA50 for HTF trend filter ===
     close_1d = df_1d['close'].values
@@ -57,7 +57,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) 
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) 
             or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -72,12 +72,12 @@ def generate_signals(prices):
             vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
             vol_spike = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
             
-            # Long conditions: price > 12h R1, 1d uptrend, volume spike
-            long_breakout = price > r1_12h_aligned[i]
+            # Long conditions: price > 4h upper Donchian, 1d uptrend, volume spike
+            long_breakout = price > upper_20_aligned[i]
             long_trend = price > ema_50_1d_aligned[i]
             
-            # Short conditions: price < 12h S1, 1d downtrend, volume spike
-            short_breakout = price < s1_12h_aligned[i]
+            # Short conditions: price < 4h lower Donchian, 1d downtrend, volume spike
+            short_breakout = price < lower_20_aligned[i]
             short_trend = price < ema_50_1d_aligned[i]
             
             # Entry logic - ONLY enter on volume spike + trend alignment
@@ -95,8 +95,8 @@ def generate_signals(prices):
             if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below 12h S1 (support broken)
-            elif price < s1_12h_aligned[i]:
+            # Trailing exit: price closes below 4h lower Donchian (support broken)
+            elif price < lower_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,8 +107,8 @@ def generate_signals(prices):
             if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above 12h R1 (resistance broken)
-            elif price > r1_12h_aligned[i]:
+            # Trailing exit: price closes above 4h upper Donchian (resistance broken)
+            elif price > upper_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_VolumeSpike_HTFTrend_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
