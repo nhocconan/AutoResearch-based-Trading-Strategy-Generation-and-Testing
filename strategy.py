@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_VolumeATRFilter_V1
-Hypothesis: Daily Donchian(20) breakouts with volume confirmation and ATR-based stoploss work on 1d timeframe for BTC and ETH in both bull and bear markets. Uses 1w EMA34 for trend filter. Target: 7-25 trades/year per symbol (30-100 over 4 years).
+6h_Donchian20_Breakout_WeeklyPivot_VolumeFilter_V1
+Hypothesis: 6h Donchian(20) breakouts in direction of weekly pivot bias with volume confirmation work for BTC/ETH in both bull and bear markets. Uses 1d for Donchian calculation and 1w for weekly pivot (bullish if close > weekly pivot, bearish if <). Target: 12-37 trades/year per symbol (50-150 over 4 years). Discrete sizing 0.25 minimizes fee drag.
 """
 
 import numpy as np
@@ -13,33 +13,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Load daily data once for Donchian calculation
+    # Load daily data once for Donchian channels (6h entry timeframe)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Load weekly data once for pivot bias (HTF = 1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Daily Donchian(20) channels
+    # Daily Donchian(20) for breakout signals
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align daily Donchian to 6h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Volume filter: 20-day average
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    # Weekly pivot: (weekly high + weekly low + weekly close) / 3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
     
-    # ATR(14) for stoploss
+    # Align weekly pivot to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    
+    # Volume filter: 24-period average (approx 6 days on 6h)
+    vol_ma = prices['volume'].rolling(window=24, min_periods=24).mean().values
+    
+    # ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -56,7 +62,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,24 +74,24 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume > 1.5 * vol_ma[i]
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # Weekly pivot bias
+        bullish_bias = price > weekly_pivot_aligned[i]
+        bearish_bias = price < weekly_pivot_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high in uptrend with volume
-            if uptrend and volume_ok:
+            # Long: price breaks above daily Donchian high in bullish bias with volume
+            if bullish_bias and volume_ok:
                 if price > donchian_high_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-            # Short: price breaks below Donchian low in downtrend with volume
-            elif downtrend and volume_ok:
+            # Short: price breaks below daily Donchian low in bearish bias with volume
+            elif bearish_bias and volume_ok:
                 if price < donchian_low_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: price reaches Donchian low or stoploss
+            # Exit: price reaches daily Donchian low or stoploss
             if price <= donchian_low_aligned[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
@@ -93,7 +99,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches Donchian high or stoploss
+            # Exit: price reaches daily Donchian high or stoploss
             if price >= donchian_high_aligned[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
@@ -102,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_VolumeATRFilter_V1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_WeeklyPivot_VolumeFilter_V1"
+timeframe = "6h"
 leverage = 1.0
