@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_Donchian20_Breakout_Volume_Trend_HTF
-Hypothesis: 4-hour Donchian(20) breakouts with 1-day EMA(50) trend filter and volume confirmation work in both bull and bear markets by capturing strong momentum moves aligned with higher timeframe trend. Target: 20-50 trades/year for low fee drag.
+4h_Donchian20_Breakout_VolumeTrend_HMA
+Hypothesis: 4h Donchian(20) breakouts with volume confirmation and HMA(21) trend filter capture strong momentum moves. Works in both bull and bear markets by requiring volume surge and trend alignment, reducing false breakouts. Target: 20-50 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -10,84 +10,111 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1-day data once for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 4h data for Donchian and HMA
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Calculate EMA(50) on daily close
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Main timeframe data (4h)
+    # Donchian(20) channels
+    upper = np.full_like(close_4h, np.nan)
+    lower = np.full_like(close_4h, np.nan)
+    for i in range(20, len(close_4h)):
+        upper[i] = np.max(high_4h[i-20:i])
+        lower[i] = np.min(low_4h[i-20:i])
+    
+    # HMA(21) for trend filter
+    def wma(arr, n):
+        if len(arr) < n:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, n + 1)
+        return np.convolve(arr, weights/weights.sum(), mode='valid')
+    
+    def hma(arr, n):
+        half_n = n // 2
+        sqrt_n = int(np.sqrt(n))
+        wma_half = wma(arr, half_n)
+        wma_full = wma(arr, n)
+        wma2_half = 2 * wma_half
+        diff = wma2_half - wma_full
+        if len(diff) < sqrt_n:
+            return np.full_like(arr, np.nan)
+        return wma(diff, sqrt_n)
+    
+    hma_21 = hma(close_4h, 21)
+    
+    # Align to lower timeframe (1h base, but we use 4h as primary)
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower)
+    hma_21_aligned = align_htf_to_ltf(prices, df_4h, hma_21)
+    
+    # 1h data for volume and price
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
-    
-    # Volume filter: current volume > 1.8x 30-period average
-    volume_avg = np.full(n, np.nan)
-    for i in range(30, n):
-        volume_avg[i] = np.mean(volume[i-30:i])
-    volume_filter = volume > (1.8 * volume_avg)
+    # Volume filter: current volume > 2.0x 24-period average (more selective)
+    volume_avg = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i >= 24:
+            volume_avg[i] = np.mean(volume[i-24:i])
+        else:
+            volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+    volume_filter = volume > (2.0 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(30, n):  # start after warmup
         # Skip if NaN in critical values
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(hma_21_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        trend = ema_50_1d_aligned[i]
+        upper_chan = upper_aligned[i]
+        lower_chan = lower_aligned[i]
+        hma_val = hma_21_aligned[i]
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper with volume and above daily EMA50
-            if price > upper and vol_ok and price > trend:
-                signals[i] = 0.25
+            # Long: break above upper Donchian with volume and above HMA (uptrend)
+            if price > upper_chan and vol_ok and price > hma_val:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below Donchian lower with volume and below daily EMA50
-            elif price < lower and vol_ok and price < trend:
-                signals[i] = -0.25
+            # Short: break below lower Donchian with volume and below HMA (downtrend)
+            elif price < lower_chan and vol_ok and price < hma_val:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to Donchian lower or breaks below EMA50
-            if price < lower or price < trend:
+            # Long exit: price crosses below HMA or breaks lower Donchian (reversal)
+            if price < hma_val or price < lower_chan:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price returns to Donchian upper or breaks above EMA50
-            if price > upper or price > trend:
+            # Short exit: price crosses above HMA or breaks upper Donchian (reversal)
+            if price > hma_val or price > upper_chan:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_1d_Donchian20_Breakout_Volume_Trend_HTF"
+name = "4h_Donchian20_Breakout_VolumeTrend_HMA"
 timeframe = "4h"
 leverage = 1.0
