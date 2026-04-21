@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_VolumeSpike_Pullback_4hTrend
-Hypothesis: On 1h timeframe, enter long on volume-confirmed pullbacks to 20 EMA during 4h uptrend,
-and short on volume-confirmed rallies to 20 EMA during 4h downtrend. Uses session filter (08-20 UTC)
-to avoid low-liquidity periods. Designed for 15-37 trades/year by requiring volume spikes (>2x average)
-and strong 4h trend alignment (EMA50). Discrete position sizing (0.20) minimizes fee drag.
+12h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v3
+Hypothesis: 12h Donchian(20) breakout filtered by 1d EMA50 trend and volume confirmation.
+In trending markets (price > EMA50_1d): breakout continuation (long above DC20 high, short below DC20 low).
+Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to balance returns and fee drag.
+Designed to work in both bull and bear markets by requiring trend alignment.
+Timeframe: 12h, uses 1d HTF for trend filter.
+Target: 50-150 total trades over 4 years = 12-37/year.
 """
 
 import numpy as np
@@ -13,49 +15,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (4h for EMA50 trend)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    # Load HTF data ONCE before loop (1d for EMA50 trend)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Precompute indicators
-    close = prices['close'].values
+    # === 1d EMA50 for trend filter ===
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === Donchian Channel (20-period) on 12h timeframe ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    
+    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
-    
-    # 1h EMA20 for pullback entries
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # 1h volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Session filter: 08-20 UTC (precompute for efficiency)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # === ATR (14-period) for stoploss ===
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(60, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
         # Skip if indicators not ready
-        if (np.isnan(ema_20[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_4h_aligned[i])):
+        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) 
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,47 +61,54 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        ema20 = ema_20[i]
+        dc_high_val = dc_high[i]
+        dc_low_val = dc_low[i]
+        ema_trend = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
-        ema50_4h = ema_50_4h_aligned[i]
         
-        # Volume confirmation: current volume > 2x average (strict to reduce trades)
-        volume_spike = volume_now > 2.0 * vol_avg
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirmed = volume_now > 1.5 * vol_avg
         
         if position == 0:
-            # Long: volume spike + pullback to EMA20 during 4h uptrend
-            long_condition = volume_spike and (price <= ema20 * 1.005) and (price >= ema20 * 0.995) and (ema50_4h > ema20)
-            
-            # Short: volume spike + rally to EMA20 during 4h downtrend
-            short_condition = volume_spike and (price >= ema20 * 0.995) and (price <= ema20 * 1.005) and (ema50_4h < ema20)
+            # Trending regime entries with volume confirmation
+            long_condition = (price > dc_high_val) and (price > ema_trend) and volume_confirmed
+            short_condition = (price < dc_low_val) and (price < ema_trend) and volume_confirmed
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
-                
+        
         elif position == 1:
-            # Exit long: price breaks above EMA20 or 4h trend turns down
-            if price > ema20 * 1.01 or ema50_4h < ema20:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trend reversal exit
+            elif price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-                
+                signals[i] = 0.25
+        
         elif position == -1:
-            # Exit short: price breaks below EMA20 or 4h trend turns up
-            if price < ema20 * 0.99 or ema50_4h > ema20:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trend reversal exit
+            elif price > ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_VolumeSpike_Pullback_4hTrend"
-timeframe = "1h"
+name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v3"
+timeframe = "12h"
 leverage = 1.0
