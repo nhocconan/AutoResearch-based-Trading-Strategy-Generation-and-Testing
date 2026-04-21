@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_1d_200EMA_WeeklyTrend_StochRSI_Oversold
-Hypothesis: On 6H timeframe, buy when price > daily 200 EMA (long-term uptrend), weekly trend is up (price > weekly 200 EMA), and StochRSI is oversold (<0.2). Sell when StochRSI overbought (>0.8) or trend breaks. Designed to catch pullbacks in strong uptrends, works in bull markets by buying dips, avoids bear markets by requiring both daily and weekly uptrend. Low turnover expected (~15-25 trades/year).
+4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v2
+Hypothesis: 4h timeframe with 1d Camarilla R1/S1 breakouts, volume > 2.0x 12-period average, and ADX > 30 for trend confirmation.
+Designed to capture strong breakouts in trending markets while avoiding chop. Target: 15-30 trades/year (60-120 total over 4 years).
+Works in bull/bear by only trading strong trending breaks, avoiding false signals in ranging markets.
 """
 
 import numpy as np
@@ -13,96 +15,140 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily and weekly data once
+    # Load 1d data once for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 200 or len(df_1w) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily 200 EMA
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Weekly 200 EMA
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # StochRSI on 6H close (14-period RSI, then Stoch of RSI)
+    # Camarilla levels: R1, S1, and pivot point (PP)
+    # R1 = Close + 1.1*(High-Low)/12
+    # S1 = Close - 1.1*(High-Low)/12
+    # PP = (High + Low + Close)/3
+    rang = prev_high - prev_low
+    r1 = prev_close + 1.1 * rang / 12
+    s1 = prev_close - 1.1 * rang / 12
+    pp = (prev_high + prev_low + prev_close) / 3
+    
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    
+    # ADX for regime filter (trending vs ranging)
+    if len(prices) < 14:
+        return np.zeros(n)
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    rsi_period = 14
-    stoch_period = 14
     
-    # RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # True Range
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Wilder's smoothing for RSI
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values (Wilder's smoothing)
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
+        # First value is simple average
         result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
         for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
                 result[i] = result[i-1] - (result[i-1]/period) + data[i]
         return result
     
-    avg_gain = wilder_smooth(gain, rsi_period)
-    avg_loss = wilder_smooth(loss, rsi_period)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    atr = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
     
-    # Stochastic of RSI
-    rsi_min = np.full_like(rsi, np.nan)
-    rsi_max = np.full_like(rsi, np.nan)
-    for i in range(stoch_period-1, len(rsi)):
-        rsi_min[i] = np.nanmin(rsi[i-stoch_period+1:i+1])
-        rsi_max[i] = np.nanmax(rsi[i-stoch_period+1:i+1])
-    rsi_range = rsi_max - rsi_min
-    stoch_rsi = np.where(rsi_range != 0, (rsi - rsi_min) / rsi_range, 0.5)
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
     
-    # Align trends
-    trend_daily = ema_200_1d_aligned > 0  # placeholder for actual comparison
-    trend_weekly = ema_200_1w_aligned > 0
-    
-    # Actual trend conditions: price > EMA200
-    trend_daily = close > ema_200_1d_aligned
-    trend_weekly = close > ema_200_1w_aligned
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(stoch_rsi[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
+        
+        # Volume filter: current volume > 2.0 * 12-period average (4h timeframe = 12 bars = 2 days)
+        if i >= 12:
+            vol_ma = prices['volume'].iloc[i-12:i].mean()
+            volume_ok = volume > 2.0 * vol_ma
+        else:
+            volume_ok = False
+        
+        # Regime filter: ADX > 30 indicates trending market
+        trending = adx[i] > 30
         
         if position == 0:
-            # Enter long: price above both daily and weekly 200 EMA, and StochRSI oversold
-            if trend_daily[i] and trend_weekly[i] and stoch_rsi[i] < 0.2:
+            # Long conditions: break above R1 + volume + trending
+            if price > r1_aligned[i] and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
+            # Short conditions: break below S1 + volume + trending
+            elif price < s1_aligned[i] and volume_ok and trending:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit: StochRSI overbought OR trend breaks (price below either EMA)
-            if stoch_rsi[i] > 0.8 or not (trend_daily[i] and trend_weekly[i]):
+            # Long exit: price crosses back below pivot point
+            if price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
+        elif position == -1:
+            # Short exit: price crosses back above pivot point
+            if price > pp_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "6h_1d_200EMA_WeeklyTrend_StochRSI_Oversold"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_Tight_v2"
+timeframe = "4h"
 leverage = 1.0
