@@ -3,12 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d volume surge and ADX trend filter.
+# Works in bull/bear: uses volatility-based pivot levels (not moving averages) and requires volume confirmation.
+# Target: 20-40 trades/year by requiring strict confluence of price, volume, and trend.
+# Entry: Long when price > R1 + volume surge + ADX > 20; Short when price < S1 + volume surge + ADX > 20.
+# Exit: Opposite touch of S1/R1 or volume drops below average.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for pivot levels, trend, and volume
+    # Load daily data for pivot levels, volume, and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -22,23 +28,50 @@ def generate_signals(prices):
     pivot_d = (high_d + low_d + close_d) / 3
     r1_d = 2 * pivot_d - low_d
     s1_d = 2 * pivot_d - high_d
-    r2_d = pivot_d + (high_d - low_d)
-    s2_d = pivot_d - (high_d - low_d)
     
     # Align daily data to 4h (wait for daily close)
     pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
     r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
     s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
-    r2_d_aligned = align_htf_to_ltf(prices, df_1d, r2_d)
-    s2_d_aligned = align_htf_to_ltf(prices, df_1d, s2_d)
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 14-period ADX on daily timeframe for trend strength
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    
+    # +DM and -DM
+    up_move = high_d[1:] - high_d[:-1]
+    down_move = low_d[:-1] - low_d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period])  # Skip first NaN
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smooth(dx, 14)
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation using 1d volume
-    vol_ma_20_1d = pd.Series(vol_d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    vol_ma_10_1d = pd.Series(vol_d).rolling(window=10, min_periods=10).mean().values
+    vol_ma_10_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_10_1d)
     
     # Pre-compute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -49,8 +82,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(pivot_d_aligned[i]) or np.isnan(r1_d_aligned[i]) or np.isnan(s1_d_aligned[i]) or
-            np.isnan(r2_d_aligned[i]) or np.isnan(s2_d_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_10_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,32 +100,28 @@ def generate_signals(prices):
         
         # Current values
         price_close = prices['close'].iloc[i]
-        price_open = prices['open'].iloc[i]
         vol_current = align_htf_to_ltf(prices, df_1d, vol_d)[i]  # 1d volume aligned to 4h
         
         # Daily pivot levels
         r1_val = r1_d_aligned[i]
         s1_val = s1_d_aligned[i]
-        r2_val = r2_d_aligned[i]
-        s2_val = s2_d_aligned[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = price_close > ema50_1d_aligned[i]
-        downtrend = price_close < ema50_1d_aligned[i]
+        # Trend filter: ADX > 20 indicates trending market
+        trending = adx_aligned[i] > 20
         
-        # Volume confirmation
-        volume_confirm = vol_current > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x 10-day average
+        volume_confirm = vol_current > 1.5 * vol_ma_10_1d_aligned[i]
         
         if position == 0:
-            # Enter long: price breaks above R2 with volume in uptrend
-            if (uptrend and 
-                price_close > r2_val and 
+            # Enter long: price breaks above R1 with volume surge in trending market
+            if (trending and 
+                price_close > r1_val and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S2 with volume in downtrend
-            elif (downtrend and 
-                  price_close < s2_val and 
+            # Enter short: price breaks below S1 with volume surge in trending market
+            elif (trending and 
+                  price_close < s1_val and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
@@ -103,12 +131,16 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below R1
-                if price_close < r1_val:
+                # Exit long: price breaks below S1 OR volume drops below average
+                if price_close < s1_val:
+                    exit_signal = True
+                elif vol_current < vol_ma_10_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short: price breaks above S1
-                if price_close > s1_val:
+                # Exit short: price breaks above R1 OR volume drops below average
+                if price_close > r1_val:
+                    exit_signal = True
+                elif vol_current < vol_ma_10_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -120,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_R1S1_R2S2_Breakout"
+name = "4h_Camarilla_R1S1_VolumeSurge_ADX"
 timeframe = "4h"
 leverage = 1.0
