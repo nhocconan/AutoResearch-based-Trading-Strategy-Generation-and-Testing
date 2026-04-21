@@ -3,102 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h 4h EMA trend filter with 1d RSI mean reversion entries.
-# Long when 4h EMA(50) bullish and 1h RSI(14) < 30 (oversold), short when 4h EMA(50) bearish and 1h RSI > 70 (overbought).
-# Uses 1h only for entry timing, 4h for trend direction, 1d RSI for additional overbought/oversold confirmation.
-# Time-based filter: trade only 08-20 UTC to avoid low-liquidity hours.
-# Target: 20-40 trades/year by requiring trend alignment + RSI extremes + session filter.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d EMA34 trend filter + volume spike confirmation.
+# Long when Bull Power > 0 and Bear Power < 0 in uptrend (1d EMA34 rising), short when Bear Power < 0 and Bull Power < 0 in downtrend.
+# Volume > 2x 20-period average confirms momentum. Uses EMA34 to filter weak trends and avoid chop.
+# Target: 12-30 trades/year by requiring strong trend + volume + Elder Ray alignment.
+# Works in bull/bear: EMA34 filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
-    
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate 4h EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d RSI(14) for overbought/oversold filter
+    # Calculate 1d EMA34 for trend direction filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False).mean().values
+    ema_34_slope = np.diff(ema_34, prepend=ema_34[0])  # positive = rising
     
-    # Wilder's smoothing for RSI
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align EMA34 slope to 6h timeframe
+    ema_34_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_34_slope)
     
-    avg_gain = wilder_smooth(gain, 14)
-    avg_loss = wilder_smooth(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Pre-calculate 1h RSI(14) for entry signals
+    # Calculate Elder Ray components on 6h data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = wilder_smooth(gain, 14)
-    avg_loss = wilder_smooth(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
     
-    # Pre-calculate session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # 13-period EMA for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power = high - ema_13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema_13
+    
+    # Pre-compute volume moving average (20-period)
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or not in_session[i]):
+    for i in range(13, n):
+        # Skip if data not ready
+        if np.isnan(ema_34_slope_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: 4h EMA slope (bullish if current > previous)
-        ema_bullish = ema_4h_aligned[i] > ema_4h_aligned[i-1]
-        ema_bearish = ema_4h_aligned[i] < ema_4h_aligned[i-1]
+        # Current price and volume
+        price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
         
-        # Entry conditions
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirm = volume > 2.0 * vol_ma[i]
+        
+        # Trend filter: rising EMA34 (uptrend) or falling EMA34 (downtrend)
+        uptrend = ema_34_slope_aligned[i] > 0
+        downtrend = ema_34_slope_aligned[i] < 0
+        
         if position == 0:
-            # Long: 4h EMA bullish + 1h RSI oversold + 1d RSI not extremely overbought
-            if ema_bullish and rsi[i] < 30 and rsi_1d_aligned[i] < 70:
-                signals[i] = 0.20
-                position = 1
-            # Short: 4h EMA bearish + 1h RSI overbought + 1d RSI not extremely oversold
-            elif ema_bearish and rsi[i] > 70 and rsi_1d_aligned[i] > 30:
-                signals[i] = -0.20
-                position = -1
+            if volume_confirm:
+                # Long: Bull Power > 0 and Bear Power < 0 in uptrend
+                if bull_power[i] > 0 and bear_power[i] < 0 and uptrend:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Bear Power < 0 and Bull Power < 0 in downtrend
+                elif bear_power[i] < 0 and bull_power[i] < 0 and downtrend:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position != 0:
-            # Exit conditions: trend reversal or RSI normalization
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if 4h EMA turns bearish or RSI returns to neutral
-                if ema_bearish or rsi[i] > 50:
+                # Exit if Bull Power <= 0 (lost bullish momentum) or trend turns down
+                if bull_power[i] <= 0 or not uptrend:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if 4h EMA turns bullish or RSI returns to neutral
-                if ema_bullish or rsi[i] < 50:
+                # Exit if Bear Power >= 0 (lost bearish momentum) or trend turns up
+                if bear_power[i] >= 0 or not downtrend:
                     exit_signal = True
             
             if exit_signal:
@@ -106,10 +93,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_EMA50_RSI_MeanReversion_Session"
-timeframe = "1h"
+name = "6h_ElderRay_Power_1dEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
