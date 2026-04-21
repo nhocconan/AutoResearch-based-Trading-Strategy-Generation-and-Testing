@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
-# Long when price breaks above upper Donchian in uptrend (1d ADX > 25), short when breaks below lower Donchian in downtrend.
-# Volume > 1.5x 20-period average confirms breakout strength. Uses ADX to filter weak trends and avoid chop.
-# Target: 20-40 trades/year by requiring strong trend + volume + breakout alignment.
-# Works in bull/bear: ADX filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume spike.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Long when Bull Power > 0 and Bear Power < 0 (bullish momentum) in uptrend (1d EMA34 rising).
+# Short when Bear Power > 0 and Bull Power < 0 (bearish momentum) in downtrend (1d EMA34 falling).
+# Volume > 2x 20-period average confirms momentum strength.
+# Works in bull/bear: EMA34 trend filter ensures trading with dominant trend, avoiding counter-trend whipsaws.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,47 +18,27 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ADX(14) for trend strength filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA34 for trend direction
     close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_prev = np.roll(ema_34, 1)
+    ema_34_prev[0] = ema_34[0]
+    ema_34_rising = ema_34 > ema_34_prev  # uptrend
+    ema_34_falling = ema_34 < ema_34_prev  # downtrend
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    # Align EMA34 trend to 6h timeframe
+    ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
+    ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate EMA13 for Elder Ray on 6h data
+    close = prices['close'].values
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, 14)
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 20-period Donchian channels on 4h data
-    high_roll = prices['high'].rolling(window=20, min_periods=20).max()
-    low_roll = prices['low'].rolling(window=20, min_periods=20).min()
-    upper = high_roll.values
-    lower = low_roll.values
+    # Calculate Bull Power and Bear Power
+    high = prices['high'].values
+    low = prices['low'].values
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = ema_13 - low   # EMA13 - Low
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -65,9 +46,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(13, n):
         # Skip if data not ready
-        if np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i]) or \
+           np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or \
+           np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,20 +60,17 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume > 1.5 * vol_ma[i]
-        
-        # Trend filter: strong trend (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
+        # Volume confirmation: current volume > 2x 20-period average
+        volume_confirm = volume > 2.0 * vol_ma[i]
         
         if position == 0:
-            if volume_confirm and strong_trend:
-                # Long: price breaks above upper Donchian
-                if price > upper[i]:
+            if volume_confirm:
+                # Long: Bull Power > 0 and Bear Power < 0 (bullish momentum) in uptrend
+                if bull_power[i] > 0 and bear_power[i] < 0 and ema_34_rising_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: price breaks below lower Donchian
-                elif price < lower[i]:
+                # Short: Bear Power > 0 and Bull Power < 0 (bearish momentum) in downtrend
+                elif bear_power[i] > 0 and bull_power[i] < 0 and ema_34_falling_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         
@@ -99,13 +79,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price breaks below lower Donchian (failed breakout) or weak trend
-                if price < lower[i] or adx_aligned[i] < 20:
+                # Exit if bullish momentum fails (Bear Power >= 0) or trend changes
+                if bear_power[i] >= 0 or not ema_34_rising_aligned[i]:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price breaks above upper Donchian (failed breakdown) or weak trend
-                if price > upper[i] or adx_aligned[i] < 20:
+                # Exit if bearish momentum fails (Bull Power >= 0) or trend changes
+                if bull_power[i] >= 0 or not ema_34_falling_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -117,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dADX14_Trend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_Power_1dEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
