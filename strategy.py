@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_Volume_WeeklyTrendFilter
-Hypothesis: Daily Camarilla R1/S1 breakout with volume confirmation (>1.5x average) and weekly EMA20 trend filter captures strong momentum moves while avoiding false signals in sideways markets. The weekly trend filter ensures we trade with the higher timeframe direction, reducing whipsaws. Designed for low trade frequency (target: 15-25/year) to minimize fee drag in daily timeframe. Uses discrete position sizing (0.25) to reduce churn.
+6h_Liquidity_Zone_Reversal
+Hypothesis: Price respects liquidity zones (equal highs/lows) as support/resistance. 
+In ranging markets (CHOP > 61.8), price reverses from these zones with volume confirmation.
+In trending markets (CHOP < 38.2), breakouts of these zones continue the trend.
+Uses 1d CHOP for regime filter and 6h equal highs/lows for liquidity zones.
+Designed for low trade frequency (target: 20-40/year) with clear entry/exit rules.
+Works in both bull and bear markets by adapting to regime.
 """
 
 import numpy as np
@@ -10,125 +15,161 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data once for EMA20 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data once for CHOP regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = np.zeros_like(close_1w)
-    ema20_1w[0] = close_1w[0]
-    alpha = 2.0 / (20 + 1)
-    for i in range(1, len(close_1w)):
-        ema20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema20_1w[i-1]
+    # Calculate 14-period CHOP on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly EMA20 to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Daily data
+    # ATR and Chop calculation
+    atr_1d = np.zeros_like(close_1d)
+    for i in range(len(tr)):
+        if i < 14:
+            atr_1d[i] = np.mean(tr[:i+1])
+        else:
+            atr_1d[i] = np.mean(tr[i-14:i])
+    
+    # Chop = 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
+    chop_1d = np.full_like(close_1d, 50.0)  # default neutral
+    for i in range(14, len(close_1d)):
+        atr_sum = np.sum(atr_1d[i-13:i+1])
+        max_high = np.max(high_1d[i-13:i+1])
+        min_low = np.min(low_1d[i-13:i+1])
+        if max_high > min_low:
+            chop_1d[i] = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+    
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Main timeframe data (6h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # First day
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
+    # Calculate liquidity zones (equal highs/lows) - look for price levels tested 2+ times
+    liquidity_long = np.zeros(n, dtype=bool)   # support from equal lows
+    liquidity_short = np.zeros(n, dtype=bool)  # resistance from equal highs
     
-    # Calculate Camarilla levels (based on previous day)
-    range_val = prev_high - prev_low
-    R1 = close + (range_val * 1.1 / 12)
-    S1 = close - (range_val * 1.1 / 12)
+    # Scan for equal lows (within 0.1% tolerance) - support
+    for i in range(20, n):
+        lookback = min(60, i)  # look back max 60 periods (~10 days)
+        for j in range(i-lookback, i):
+            if j < 0:
+                continue
+            # Check if current low equals a prior low within tolerance
+            if abs(low[i] - low[j]) / low[i] < 0.001:
+                liquidity_long[i] = True
+                break
     
-    # Volume filter: current volume > 1.5x 20-day average
+    # Scan for equal highs (within 0.1% tolerance) - resistance
+    for i in range(20, n):
+        lookback = min(60, i)
+        for j in range(i-lookback, i):
+            if j < 0:
+                continue
+            if abs(high[i] - high[j]) / high[i] < 0.001:
+                liquidity_short[i] = True
+                break
+    
+    # Volume filter: current volume > 1.3x 20-period average
     volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
         if i >= 20:
             volume_avg[i] = np.mean(volume[i-20:i])
         else:
             volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.5 * volume_avg)
-    
-    # ATR for stoploss (14-day)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = np.zeros_like(close)
-    for i in range(len(tr)):
-        if i < 14:
-            atr[i] = np.mean(tr[:i+1])
-        else:
-            atr[i] = np.mean(tr[i-14:i])
+    volume_filter = volume > (1.3 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(60, n):  # Start after lookback period
         # Skip if NaN in critical values
-        if np.isnan(ema20_1w_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]):
+        if np.isnan(chop_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema20 = ema20_1w_aligned[i]
-        r1 = R1[i]
-        s1 = S1[i]
+        chop = chop_1d_aligned[i]
         vol_ok = volume_filter[i]
-        atr_val = atr[i]
-        
-        # Stoploss: 2.5 * ATR from entry
-        if position == 1 and price < entry_price - 2.5 * atr_val:
-            signals[i] = 0.0
-            position = 0
-            continue
-        elif position == -1 and price > entry_price + 2.5 * atr_val:
-            signals[i] = 0.0
-            position = 0
-            continue
+        liq_long = liquidity_long[i]
+        liq_short = liquidity_short[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume and weekly uptrend (price > weekly EMA20)
-            if price > r1 and vol_ok and price > ema20:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            # Short: price breaks below S1 with volume and weekly downtrend (price < weekly EMA20)
-            elif price < s1 and vol_ok and price < ema20:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+            # Regime-based logic
+            if chop > 61.8:  # Ranging market - mean reversion from liquidity zones
+                # Long at support (equal lows) with volume
+                if liq_long and vol_ok:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                # Short at resistance (equal highs) with volume
+                elif liq_short and vol_ok:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+            elif chop < 38.2:  # Trending market - breakout continuation
+                # Long on breakout of resistance (equal highs) with volume
+                if liq_short and vol_ok:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                # Short on breakdown of support (equal lows) with volume
+                elif liq_long and vol_ok:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+            # In transition zone (38.2-61.8), stay neutral
         
         elif position == 1:
-            # Long exit: price falls below S1 (reversal) or breaks below weekly EMA20 (trend change)
-            if price < s1 or price < ema20:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Long exit conditions
+            if chop > 61.8:  # In range, exit at opposite liquidity zone
+                if liq_short:  # Hit resistance
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # Trending or transition, trail with liquidity
+                if liq_short and vol_ok:  # Strong resistance
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above R1 (reversal) or breaks above weekly EMA20 (trend change)
-            if price > r1 or price > ema20:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Short exit conditions
+            if chop > 61.8:  # In range, exit at opposite liquidity zone
+                if liq_long:  # Hit support
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # Trending or transition, trail with liquidity
+                if liq_long and vol_ok:  # Strong support
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_Volume_WeeklyTrendFilter"
-timeframe = "1d"
+name = "6h_Liquidity_Zone_Reversal"
+timeframe = "6h"
 leverage = 1.0
