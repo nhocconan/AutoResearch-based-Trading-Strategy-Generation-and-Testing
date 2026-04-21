@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeConfirm_v1
-Hypothesis: Camarilla R1/S1 breakout on 1h with 4h EMA50 trend filter and volume spike confirmation. Designed for 1h timeframe with tight entries (15-37/year) to minimize fee drag. Uses 4h HTF for trend and volume context, 1h only for precise entry timing. Session filter (08-20 UTC) reduces noise. Position size 0.20.
+6h_WilliamsAlligator_ADX_Regime_v1
+Hypothesis: Combines Williams Alligator (trend detection) with ADX regime filter on 6h timeframe.
+Uses 1d HTF for trend bias and 1w HTF for major regime filter. Designed for low trade frequency
+(~15-30/year) to minimize fee drag while capturing major trends in both bull and bear markets.
+Alligator identifies trend direction, ADX filters for strong trends, and HTF context prevents
+counter-trend trading during major regime shifts.
 """
 
 import numpy as np
@@ -14,126 +18,148 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 60 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 4h trend filter: 50-period EMA ===
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # === 1d trend bias: 34-period EMA ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 4h volume average (20-period) for spike detection ===
-    volume_4h = df_4h['volume'].values
-    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h[np.isnan(vol_ma_4h)] = 1.0  # avoid division by zero
-    vol_ratio_4h = volume_4h / vol_ma_4h
-    vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
+    # === 1w regime filter: 50-period EMA (major trend) ===
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === Calculate Camarilla levels from previous day on 1h ===
+    # === Williams Alligator on 6h (primary timeframe) ===
+    # Alligator consists of three smoothed moving averages (SMMA)
+    median_price = (prices['high'].values + prices['low'].values) / 2
+    
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars forward
+    def smma(source, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(source, np.nan, dtype=float)
+        if len(source) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(source[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + PRICE) / PERIOD
+        for i in range(period, len(source)):
+            result[i] = (result[i-1] * (period-1) + source[i]) / period
+        return result
+    
+    jaw = smma(median_price, 13)
+    # Teeth (Red): 8-period SMMA, shifted 5 bars forward
+    teeth = smma(median_price, 8)
+    # Lips (Green): 5-period SMMA, shifted 3 bars forward
+    lips = smma(median_price, 5)
+    
+    # Apply Alligator shifts (forward shift means we use past values)
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    # Fill shifted values with NaN
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
+    
+    # === ADX (14-period) for trend strength ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Group by date to get daily OHLC for Camarilla calculation
-    dates = pd.to_datetime(prices['open_time']).date
-    unique_dates = np.unique(dates)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Arrays to store Camarilla levels for each 1h bar
-    camarilla_R1 = np.full(n, np.nan)
-    camarilla_S1 = np.full(n, np.nan)
-    camarilla_R3 = np.full(n, np.nan)
-    camarilla_S3 = np.full(n, np.nan)
-    camarilla_close = np.full(n, np.nan)
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low),
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)),
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    for date in unique_dates:
-        mask = (dates == date)
-        if not np.any(mask):
-            continue
-        
-        # Get prior day's OHLC (shift by 1)
-        prev_date_idx = np.where(unique_dates == date)[0][0] - 1
-        if prev_date_idx < 0:
-            continue
-        prev_date = unique_dates[prev_date_idx]
-        prev_mask = (dates == prev_date)
-        
-        if not np.any(prev_mask):
-            continue
-            
-        # Prior day's OHLC
-        ph = high[prev_mask].max()
-        pl = low[prev_mask].min()
-        pc = close[prev_mask][-1]  # last close of prior day
-        
-        # Camarilla levels
-        range_ = ph - pl
-        camarilla_close_val = pc
-        camarilla_R1_val = pc + (range_ * 1.1 / 12)
-        camarilla_S1_val = pc - (range_ * 1.1 / 12)
-        camarilla_R3_val = pc + (range_ * 1.1 / 4)
-        camarilla_S3_val = pc - (range_ * 1.1 / 4)
-        
-        # Assign to today's bars
-        camarilla_close[mask] = camarilla_close_val
-        camarilla_R1[mask] = camarilla_R1_val
-        camarilla_S1[mask] = camarilla_S1_val
-        camarilla_R3[mask] = camarilla_R3_val
-        camarilla_S3[mask] = camarilla_S3_val
+    # Smoothed TR, DM+, DM- (using Wilder's smoothing = EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.to_datetime(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if indicators not ready or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(vol_ratio_4h_aligned[i]) or
-            np.isnan(camarilla_R1[i]) or np.isnan(camarilla_S1[i]) or
-            not in_session[i]):
+        # Skip if indicators not ready
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
+            np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = close[i]
-        trend_4h = ema_50_4h_aligned[i]
-        vol_spike = vol_ratio_4h_aligned[i]
-        R1 = camarilla_R1[i]
-        S1 = camarilla_S1[i]
+        # Alligator conditions
+        # Bullish alignment: Lips > Teeth > Jaw
+        bull_alligator = lips_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > jaw_shifted[i]
+        # Bearish alignment: Jaw > Teeth > Lips
+        bear_alligator = jaw_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > lips_shifted[i]
+        
+        # ADX trend strength filter (>25 = strong trend)
+        strong_trend = adx[i] > 25
+        
+        # HTF regime filters
+        # 1d trend bias: price above/below EMA34
+        price_above_1d_trend = prices['close'].values[i] > ema_34_1d_aligned[i]
+        price_below_1d_trend = prices['close'].values[i] < ema_34_1d_aligned[i]
+        
+        # 1w major regime: price above/below EMA50
+        price_above_1w_regime = prices['close'].values[i] > ema_50_1w_aligned[i]
+        price_below_1w_regime = prices['close'].values[i] < ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 + volume spike > 2.0 + price above 4h EMA50
-            if price_close > R1 and vol_spike > 2.0 and price_close > trend_4h:
-                signals[i] = 0.20
+            # Long: Bullish Alligator + strong trend + price above 1d EMA + price above 1w EMA
+            if bull_alligator and strong_trend and price_above_1d_trend and price_above_1w_regime:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume spike > 2.0 + price below 4h EMA50
-            elif price_close < S1 and vol_spike > 2.0 and price_close < trend_4h:
-                signals[i] = -0.20
+            # Short: Bearish Alligator + strong trend + price below 1d EMA + price below 1w EMA
+            elif bear_alligator and strong_trend and price_below_1d_trend and price_below_1w_regime:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: reverse signal or loss of trend/volume
+            # Exit conditions: Alligator reversal OR ADX weakens OR price crosses 1d EMA opposite
             if position == 1:
-                # Exit long: price below S1 or loss of trend or low volume
-                if price_close < S1 or price_close < trend_4h or vol_spike < 1.2:
+                # Exit long: bearish Alligator OR weak trend OR price below 1d EMA
+                if (not bull_alligator) or (adx[i] < 20) or (not price_above_1d_trend):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                # Exit short: price above R1 or loss of trend or low volume
-                if price_close > R1 or price_close > trend_4h or vol_spike < 1.2:
+                # Exit short: bullish Alligator OR weak trend OR price above 1d EMA
+                if (not bear_alligator) or (adx[i] < 20) or (not price_below_1d_trend):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeConfirm_v1"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ADX_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
