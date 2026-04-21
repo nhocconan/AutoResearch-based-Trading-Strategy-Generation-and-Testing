@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v1
-Hypothesis: 6h Camarilla pivot (R1/S1) breakout filtered by 12h EMA50 trend and volume spike.
-In trending markets (price > EMA50_12h for long, < for short): breakout continuation (long above R1, short below S1).
-Volume confirmation (2.0x average) filters false breakouts. ATR(14) stoploss (2.0x) and discrete sizing (0.25).
-Designed for 6h timeframe to target 50-150 trades over 4 years (12-37/year). Works in bull/bear via trend alignment.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
+Hypothesis: 4h Camarilla R1/S1 breakout filtered by 1d EMA34 trend and volume spike (2.0x).
+Only trade in direction of 1d trend (price > EMA34 for long, < for short). Volume confirmation avoids false breakouts.
+ATR(14) stoploss (2.0x) and discrete sizing (0.25). Designed for 4h timeframe to target 75-200 trades over 4 years (19-50/year).
+Works in bull/bear via 1d trend alignment - avoids counter-trend trades that fail in ranging/bear markets.
 """
 
 import numpy as np
@@ -16,42 +16,38 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for EMA50 trend)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Load HTF data ONCE before loop (1d for EMA34 trend and Camarilla pivots)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 12h OHLC for EMA50 trend ===
-    df_12h_close = df_12h['close'].values
-    ema_50_12h = pd.Series(df_12h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === 1d OHLC for EMA34 trend ===
+    df_1d_close = df_1d['close'].values
+    ema_34_1d = pd.Series(df_1d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 6h OHLC for Camarilla pivot calculation (based on previous 6h bar) ===
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 60:
-        return np.zeros(n)
+    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
+    df_1d_open = df_1d['open'].values
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
     
-    df_6h_open = df_6h['open'].values
-    df_6h_high = df_6h['high'].values
-    df_6h_low = df_6h['low'].values
-    df_6h_close = df_6h['close'].values
+    # Calculate Camarilla levels for each 1d bar
+    range_1d = df_1d_high - df_1d_low
+    r1_1d = df_1d_close + 0.275 * range_1d
+    s1_1d = df_1d_close - 0.275 * range_1d
+    h3_1d = df_1d_close + 1.1 * range_1d
+    l3_1d = df_1d_close - 1.1 * range_1d
+    h4_1d = df_1d_close + 1.382 * range_1d
+    l4_1d = df_1d_close - 1.382 * range_1d
     
-    # Calculate Camarilla levels for each 6h bar
-    range_6h = df_6h_high - df_6h_low
-    r1_6h = df_6h_close + 0.275 * range_6h
-    s1_6h = df_6h_close - 0.275 * range_6h
-    h3_6h = df_6h_close + 1.1 * range_6h
-    l3_6h = df_6h_close - 1.1 * range_6h
-    h4_6h = df_6h_close + 1.382 * range_6h
-    l4_6h = df_6h_close - 1.382 * range_6h
-    
-    # Align 6h Camarilla levels to 6h timeframe (no shift needed as we use previous bar's levels)
-    r1_6h_aligned = align_htf_to_ltf(prices, df_6h, r1_6h)
-    s1_6h_aligned = align_htf_to_ltf(prices, df_6h, s1_6h)
-    h3_6h_aligned = align_htf_to_ltf(prices, df_6h, h3_6h)
-    l3_6h_aligned = align_htf_to_ltf(prices, df_6h, l3_6h)
-    h4_6h_aligned = align_htf_to_ltf(prices, df_6h, h4_6h)
-    l4_6h_aligned = align_htf_to_ltf(prices, df_6h, l4_6h)
+    # Align 1d Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
     # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
@@ -74,8 +70,8 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_6h_aligned[i]) or np.isnan(s1_6h_aligned[i]) 
-            or np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
+            or np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,20 +79,20 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        r1 = r1_6h_aligned[i]
-        s1 = s1_6h_aligned[i]
-        h3 = h3_6h_aligned[i]
-        l3 = l3_6h_aligned[i]
-        h4 = h4_6h_aligned[i]
-        l4 = l4_6h_aligned[i]
-        ema_trend = ema_50_12h_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        h3 = h3_1d_aligned[i]
+        l3 = l3_1d_aligned[i]
+        h4 = h4_1d_aligned[i]
+        l4 = l4_1d_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_avg = vol_ma[i]
         
         # Volume confirmation: current volume > 2.0x average (strict filter)
         volume_confirmed = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Only enter in trending markets (price > EMA50_12h for long, < for short)
+            # Only enter in trending markets (price > EMA34_1d for long, < for short)
             # Volume confirmation required to avoid false breakouts
             long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
             short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
@@ -144,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
