@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 4h Donchian(20) breakout filtered by 1d EMA50 trend and volume spike (1.8x average).
-Long when price > upper Donchian and above 1d EMA50; short when price < lower Donchian and below 1d EMA50.
-Volume confirmation reduces false breakouts. ATR(14) stoploss (2.0x) and discrete sizing (0.25).
-Designed to work in both bull and bear markets via 1d trend alignment and strict entry filters.
+12h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v2
+Hypothesis: 12h Donchian(20) breakout filtered by 1d EMA50 trend and volume spike (1.8x average).
+Designed to work in both bull and bear markets via 1d trend alignment.
 Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
 """
 
@@ -27,17 +25,16 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h Donchian channels (20-period) ===
+    # === 12h Donchian channels (20-period) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Upper channel: highest high of past 20 bars (including current)
-    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower channel: lowest low of past 20 bars (including current)
-    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate rolling max/min for Donchian channels
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === 12h ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -54,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) 
-            or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_roll[i]) 
+            or np.isnan(low_roll[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,6 +60,8 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
+        upper_donchian = high_roll[i]
+        lower_donchian = low_roll[i]
         ema_trend = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
         
@@ -72,8 +71,8 @@ def generate_signals(prices):
         if position == 0:
             # Only enter in trending markets (price > 1d EMA50 for long, < for short)
             # Volume confirmation required to avoid false breakouts
-            long_condition = (price > upper[i]) and (price > ema_trend) and volume_confirmed
-            short_condition = (price < lower[i]) and (price < ema_trend) and volume_confirmed
+            long_condition = (price > upper_donchian) and (price > ema_trend) and volume_confirmed
+            short_condition = (price < lower_donchian) and (price < ema_trend) and volume_confirmed
             
             if long_condition:
                 signals[i] = 0.25
@@ -85,24 +84,32 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.0x ATR)
-            if price < entry_price - 2.0 * atr[i]:
+            # Check stoploss (2.5x ATR)
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trend reversal exit
             elif price < ema_trend:
                 signals[i] = 0.0
                 position = 0
+            # Mean reversion exit at upper Donchian (extreme overbought)
+            elif price > upper_donchian + 0.5 * (upper_donchian - lower_donchian):
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (2.0x ATR)
-            if price > entry_price + 2.0 * atr[i]:
+            # Check stoploss (2.5x ATR)
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trend reversal exit
             elif price > ema_trend:
+                signals[i] = 0.0
+                position = 0
+            # Mean reversion exit at lower Donchian (extreme oversold)
+            elif price < lower_donchian - 0.5 * (upper_donchian - lower_donchian):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
+timeframe = "12h"
 leverage = 1.0
