@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_KAMA_Trend_RSI_Momentum_V1
-Hypothesis: Use 1d KAMA for trend direction and 4h RSI for momentum timing.
-Long when 1d KAMA is rising and 4h RSI crosses above 50 from below.
-Short when 1d KAMA is falling and 4h RSI crosses below 50 from above.
-Exit when KAMA trend reverses.
-Designed for 4h timeframe to capture intermediate trends with ~20-40 trades/year.
-Works in bull markets by following uptrends and in bear markets by following downtrends.
-KAMA adapts to volatility, reducing whipsaw in choppy markets.
+12h_1d_Camarilla_R1S1_Breakout_Volume_Pullback
+Hypothesis: Breakout pullback strategy using 1d Camarilla levels (R1/S1) on 12h timeframe.
+Enter on retest of breakout level after initial breakout with volume confirmation.
+Long: Price breaks above R1 (volume > 1.5x avg), then pulls back to touch R1.
+Short: Price breaks below S1 (volume > 1.5x avg), then pulls back to touch S1.
+Exit when price crosses the pivot point (PP).
+Works in bull markets by buying breakout pullbacks and in bear markets by selling breakdown pullbacks.
+Pullback entry reduces false breakouts and improves risk-reward.
+Target: 15-30 trades/year.
 """
 
 import numpy as np
@@ -19,99 +20,96 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for KAMA trend
+    # Load 1d data once for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio (ER) for KAMA
-    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)[:len(change)]  # 10-period volatility
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    # Camarilla pivot levels (based on previous day)
+    pp = np.full_like(close_1d, np.nan)
+    r1 = np.full_like(close_1d, np.nan)
+    s1 = np.full_like(close_1d, np.nan)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    for i in range(1, len(high_1d)):
+        pp[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
+        r1[i] = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
+        s1[i] = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
     
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # Start after 10 periods
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i-10] * (close_1d[i] - kama[i-1])
+    # Shift to align with current day (levels are based on previous day)
+    pp = np.roll(pp, 1)
+    r1 = np.roll(r1, 1)
+    s1 = np.roll(s1, 1)
+    pp[0] = np.nan
+    r1[0] = np.nan
+    s1[0] = np.nan
     
-    # KAMA direction: 1 if rising, -1 if falling
-    kama_dir = np.zeros_like(kama)
-    kama_dir[1:] = np.where(kama[1:] > kama[:-1], 1, -1)
-    
-    kama_dir_aligned = align_htf_to_ltf(prices, df_1d, kama_dir)
-    
-    # Calculate 4h RSI
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First 14-period average
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # RSI crossing signals
-    rsi_above = np.zeros_like(rsi, dtype=bool)
-    rsi_below = np.zeros_like(rsi, dtype=bool)
-    rsi_above[1:] = (rsi[1:] > 50) & (rsi[:-1] <= 50)
-    rsi_below[1:] = (rsi[1:] < 50) & (rsi[:-1] >= 50)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    breakout_state = 0  # 0: none, 1: long breakout, -1: short breakout
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if np.isnan(kama_dir_aligned[i]) or np.isnan(rsi[i]):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
+        
+        # Volume filter: current volume > 1.5 * 20-period average
+        if i >= 20:
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 1.5 * vol_ma
+        else:
+            volume_ok = False
+        
         if position == 0:
-            # Long conditions: KAMA rising + RSI crosses above 50
-            if kama_dir_aligned[i] == 1 and rsi_above[i]:
+            # Check for new breakouts
+            if price > r1_aligned[i] and volume_ok:
+                breakout_state = 1  # Long breakout detected
+            elif price < s1_aligned[i] and volume_ok:
+                breakout_state = -1  # Short breakout detected
+            
+            # Enter on pullback to breakout level
+            if breakout_state == 1 and abs(price - r1_aligned[i]) < 0.001 * r1_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: KAMA falling + RSI crosses below 50
-            elif kama_dir_aligned[i] == -1 and rsi_below[i]:
+                breakout_state = 0  # Reset after entry
+            elif breakout_state == -1 and abs(price - s1_aligned[i]) < 0.001 * s1_aligned[i]:
                 signals[i] = -0.25
                 position = -1
+                breakout_state = 0  # Reset after entry
         
         elif position == 1:
-            # Long exit: KAMA turns down
-            if kama_dir_aligned[i] == -1:
+            # Long exit: price crosses back below pivot point
+            if price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                breakout_state = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: KAMA turns up
-            if kama_dir_aligned[i] == 1:
+            # Short exit: price crosses back above pivot point
+            if price > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                breakout_state = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_1d_KAMA_Trend_RSI_Momentum_V1"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Pullback"
+timeframe = "12h"
 leverage = 1.0
