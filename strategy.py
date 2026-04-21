@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Camarilla_Pullback_Volume_Momentum_v1
-Hypothesis: Pullback to Camarilla H3/L3 levels with 12h momentum confirmation and volume filter.
-Long when price pulls back to H3 with 12h RSI > 50 and volume spike.
-Short when price pulls back to L3 with 12h RSI < 50 and volume spike.
-Exit when price reaches H4/L4 or reverses at H3/L3.
-Works in both bull/bear by following 12h momentum and using mean-reversion pullbacks.
-Target: 25-40 trades/year per symbol.
+4h_Donchian_Breakout_Volume_Trend_v1
+Hypothesis: Breakout of 20-period Donchian channel with volume confirmation and 4h EMA trend filter.
+Long when price breaks above upper band with volume spike and EMA50 > EMA200.
+Short when price breaks below lower band with volume spike and EMA50 < EMA200.
+Exit when price crosses the EMA50 or reaches opposite band.
+Designed to work in both bull/bear by following trend filter and using volatility-based stops.
+Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -15,103 +15,59 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate EMA50 and EMA200 for trend filter
+    close = prices['close'].values
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels (20-period)
+    high = prices['high'].values
+    low = prices['low'].values
+    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Camarilla levels: H3, L3, H4, L4
-    rang = prev_high - prev_low
-    h3 = prev_close + 1.1 * rang / 4
-    l3 = prev_close - 1.1 * rang / 4
-    h4 = prev_close + 1.1 * rang / 2
-    l4 = prev_close - 1.1 * rang / 2
-    
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Load 12h data for momentum (RSI)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    # Calculate RSI(14) on 12h
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h = rsi_12h.values
-    # Align to 4h timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    # Volume filter: current volume > 1.5 * 20-period average
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(rsi_12h_aligned[i])):
+        if np.isnan(ema50[i]) or np.isnan(ema200[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume filter: current volume > 1.8 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.8 * vol_ma
-        else:
-            volume_ok = False
+        price = close[i]
+        vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long conditions: pullback to H3 with bullish momentum and volume
-            if (abs(price - h3_aligned[i]) < 0.001 * h3_aligned[i] and  # near H3
-                rsi_12h_aligned[i] > 50 and volume_ok):
+            # Long conditions: break above upper band with volume and uptrend
+            if price > upper[i] and vol_ok and ema50[i] > ema200[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: pullback to L3 with bearish momentum and volume
-            elif (abs(price - l3_aligned[i]) < 0.001 * l3_aligned[i] and  # near L3
-                  rsi_12h_aligned[i] < 50 and volume_ok):
+            # Short conditions: break below lower band with volume and downtrend
+            elif price < lower[i] and vol_ok and ema50[i] < ema200[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: reach H4 or reverse at H3
-            if price >= h4_aligned[i] or price <= h3_aligned[i]:
+            # Long exit: cross below EMA50 or reach lower band
+            if price < ema50[i] or price < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: reach L4 or reverse at L3
-            if price <= l4_aligned[i] or price >= l3_aligned[i]:
+            # Short exit: cross above EMA50 or reach upper band
+            if price > ema50[i] or price > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_1d_Camarilla_Pullback_Volume_Momentum_v1"
+name = "4h_Donchian_Breakout_Volume_Trend_v1"
 timeframe = "4h"
 leverage = 1.0
