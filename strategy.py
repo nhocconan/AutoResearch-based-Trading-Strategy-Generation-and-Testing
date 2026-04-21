@@ -5,15 +5,31 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA50
+    close_4h = df_4h['close'].values
+    ema_4h_50 = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Calculate 4h EMA200
+    ema_4h_200 = pd.Series(close_4h).ewm(span=200, min_periods=200, adjust=False).mean().values
+    
+    # Align 4h EMAs to 1h timeframe
+    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
+    ema_4h_200_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_200)
+    
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d < 50):
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d RSI (14-period)
+    # Calculate 1d RSI14
     close_1d = df_1d['close'].values
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
@@ -29,71 +45,63 @@ def generate_signals(prices):
         avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate 1d Bollinger Bands (20, 2.0)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper = sma_20 + 2 * std_20
-    lower = sma_20 - 2 * std_20
+    # Align 1d RSI to 1h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate 12h price position within Bollinger Bands
-    close_12h = prices['close'].values
-    bb_position = np.zeros_like(close_12h)
-    bb_width = upper - lower
-    bb_position = np.where(bb_width != 0, (close_12h - lower) / bb_width, 0.5)
+    # Calculate 1h volume average (20-period)
+    vol_1h = prices['volume'].values
+    vol_ma_20 = pd.Series(vol_1h).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    bb_position_aligned = align_htf_to_ltf(prices, df_1d, bb_position)
-    
-    # Calculate 12h volume average (20-period)
-    vol_12h = prices['volume'].values
-    vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Bollinger warmup
-        # Skip if data not ready
-        if (np.isnan(rsi_aligned[i]) or np.isnan(bb_position_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+    for i in range(100, n):  # Start after sufficient warmup
+        # Skip if data not ready or outside session
+        if (np.isnan(ema_4h_50_aligned[i]) or np.isnan(ema_4h_200_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current price and volume (12h)
         price_close = prices['close'].iloc[i]
-        vol_current = vol_12h[i]
         
         if position == 0:
-            # Enter long: Price at lower BB + RSI oversold + volume confirmation
-            if (bb_position_aligned[i] <= 0.2 and
-                rsi_aligned[i] < 30 and
-                vol_current > 1.2 * vol_ma_20[i]):
-                signals[i] = 0.25
+            # Enter long: Price above EMA50 & EMA200, RSI not overbought, volume surge
+            if (price_close > ema_4h_50_aligned[i] and
+                price_close > ema_4h_200_aligned[i] and
+                rsi_1d_aligned[i] < 70 and
+                vol_1h[i] > 1.5 * vol_ma_20[i]):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: Price at upper BB + RSI overbought + volume confirmation
-            elif (bb_position_aligned[i] >= 0.8 and
-                  rsi_aligned[i] > 70 and
-                  vol_current > 1.2 * vol_ma_20[i]):
-                signals[i] = -0.25
+            # Enter short: Price below EMA50 & EMA200, RSI not oversold, volume surge
+            elif (price_close < ema_4h_50_aligned[i] and
+                  price_close < ema_4h_200_aligned[i] and
+                  rsi_1d_aligned[i] > 30 and
+                  vol_1h[i] > 1.5 * vol_ma_20[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
-            # Exit: Price returns to middle of BB or RSI normalizes
+            # Exit: Price crosses EMA50 or RSI extreme
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price reaches middle BB or RSI > 50
-                if (bb_position_aligned[i] >= 0.5 or
-                    rsi_aligned[i] > 50):
+                # Exit long: Price below EMA50 or RSI overbought
+                if (price_close < ema_4h_50_aligned[i] or
+                    rsi_1d_aligned[i] > 70):
                     exit_signal = True
             elif position == -1:
-                # Exit short: Price reaches middle BB or RSI < 50
-                if (bb_position_aligned[i] <= 0.5 or
-                    rsi_aligned[i] < 50):
+                # Exit short: Price above EMA50 or RSI oversold
+                if (price_close > ema_4h_50_aligned[i] or
+                    rsi_1d_aligned[i] < 30):
                     exit_signal = True
             
             if exit_signal:
@@ -101,10 +109,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12h_BB_RSI_MeanReversion_Volume"
-timeframe = "12h"
+name = "1h_EMA50_200_RSI14_Volume1.5x_Session"
+timeframe = "1h"
 leverage = 1.0
