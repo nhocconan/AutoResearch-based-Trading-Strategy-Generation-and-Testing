@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_1W_Weekly_Camarilla_R1S1_Breakout_Volume_TrendFilter_v1
-Hypothesis: Weekly timeframe determines trend direction via price position relative to 20-week SMA.
-Daily timeframe provides entry signals via breakouts of weekly-derived Camarilla levels (R1, S1) with volume confirmation.
-In uptrend (price > weekly SMA20), only long breakouts above R1 are taken.
-In downtrend (price < weekly SMA20), only short breakdowns below S1 are taken.
-This avoids counter-trend trades in strong trends, reducing whipsaws. Volume filter ensures breakout strength.
-Designed for 1d timeframe to capture multi-week moves with ~10-25 trades/year.
-Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
+6h_1d_RangeBreakout_RSI_Confirmation
+Hypothesis: On 6h timeframe, trade breakouts from daily ranges with RSI confirmation.
+Long when price breaks above previous day's high with RSI(14) > 50 (momentum confirmation).
+Short when price breaks below previous day's low with RSI(14) < 50.
+Exit when price returns to previous day's close (mean reversion to daily equilibrium).
+Works in bull markets by buying strength and in bear markets by selling weakness.
+Uses daily range as dynamic support/resistance and RSI to avoid counter-trend breaks.
+Target: 15-30 trades/year per symbol with controlled risk.
 """
 
 import numpy as np
@@ -19,90 +19,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for trend filter and Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load daily data once for range calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly SMA20 for trend filter
-    close_s_1w = pd.Series(close_1w)
-    sma20_1w = close_s_1w.rolling(window=20, min_periods=20).mean().values
+    # Previous day's range (levels based on prior day)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Weekly Camarilla pivot levels (based on previous week)
-    pp = np.full_like(close_1w, np.nan)
-    r1 = np.full_like(close_1w, np.nan)
-    s1 = np.full_like(close_1w, np.nan)
+    # Align to 6h timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
     
-    for i in range(1, len(high_1w)):
-        pp[i] = (high_1w[i-1] + low_1w[i-1] + close_1w[i-1]) / 3.0
-        r1[i] = close_1w[i-1] + (high_1w[i-1] - low_1w[i-1]) * 1.1 / 12.0
-        s1[i] = close_1w[i-1] - (high_1w[i-1] - low_1w[i-1]) * 1.1 / 12.0
-    
-    # Shift to align with current week (levels based on previous week)
-    pp = np.roll(pp, 1)
-    r1 = np.roll(r1, 1)
-    s1 = np.roll(s1, 1)
-    pp[0] = np.nan
-    r1[0] = np.nan
-    s1[0] = np.nan
-    
-    # Align weekly indicators to daily timeframe
-    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # RSI(14) on 6h close
+    close_series = prices['close']
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral before warmup
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if indicators not ready
-        if (np.isnan(sma20_1w_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+        # Skip if daily levels not ready
+        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or 
+            np.isnan(prev_close_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume filter: current volume > 1.5 * 20-day average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
-        else:
-            volume_ok = False
-        
-        # Trend filter: price relative to weekly SMA20
-        uptrend = price > sma20_1w_aligned[i]
-        downtrend = price < sma20_1w_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long conditions: break above R1 + volume confirmation + uptrend filter
-            if price > r1_aligned[i] and volume_ok and uptrend:
+            # Long: break above prev day high with bullish momentum
+            if price > prev_high_aligned[i] and rsi_val > 50:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S1 + volume confirmation + downtrend filter
-            elif price < s1_aligned[i] and volume_ok and downtrend:
+            # Short: break below prev day low with bearish momentum
+            elif price < prev_low_aligned[i] and rsi_val < 50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below weekly pivot point
-            if price < pp_aligned[i]:
+            # Long exit: return to previous day's close (mean reversion)
+            if price <= prev_close_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above weekly pivot point
-            if price > pp_aligned[i]:
+            # Short exit: return to previous day's close
+            if price >= prev_close_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1W_Weekly_Camarilla_R1S1_Breakout_Volume_TrendFilter_v1"
-timeframe = "1d"
+name = "6h_1d_RangeBreakout_RSI_Confirmation"
+timeframe = "6h"
 leverage = 1.0
