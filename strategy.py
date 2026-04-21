@@ -1,78 +1,62 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_ChopRegime_V1
-Hypothesis: TRIX momentum with volume confirmation and choppiness regime filter works on 4h timeframe for BTC and ETH in both bull and bear markets.
-- TRIX(12) captures smoothed momentum with reduced whipsaw
-- Volume spike (>2x 20-bar average) confirms institutional participation
-- Choppiness Index (14) > 61.8 defines ranging markets for mean-reversion TRIX signals
-- Discrete position sizing (0.25) minimizes fee churn
-- Target: 25-60 trades/year per symbol (100-240 over 4 years)
+6h_WilliamsFractal_TrendRegime_v1
+Hypothesis: Williams fractals on 1d timeframe combined with 1w trend regime (EMA50) provide high-probability breakout entries on 6h timeframe. Uses volume confirmation and ATR-based stops. Designed for low trade frequency (12-37/year) to minimize fee drag while capturing strong trending moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for higher timeframe regime filter
+    # Load 1d data once for Williams fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # TRIX(12) - Triple Exponential Average momentum
-    close = prices['close'].values
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = np.nan  # First value is invalid
+    # Load 1w data once for trend regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Volume filter: 20-period average
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    
-    # Choppiness Index (14) from 1d timeframe for regime detection
+    # Williams fractals on 1d (requires 2 extra bars for confirmation)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Additional delay of 2 bars for fractal confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # 1w EMA50 for trend regime
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # ATR for stoploss (6h timeframe)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # +DM and -DM
-    up_move = np.diff(high_1d, prepend=np.nan)
-    down_move = np.abs(np.diff(low_1d, prepend=np.nan))
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM and TR
-    atr_period = 14
-    tr_period = pd.Series(atr_1d).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values / tr_period
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values / tr_period
-    
-    # DX and Choppiness Index
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx[np.isnan(plus_di) | np.isnan(minus_di) | (plus_di + minus_di) == 0] = np.nan
-    chop = 100 * np.log10(pd.Series(tr).rolling(window=14, min_periods=14).sum().values) / np.log10(14)
-    
-    # Align 1d chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Volume confirmation (20-period average)
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(trix[i]) or np.isnan(vol_ma[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,33 +65,42 @@ def generate_signals(prices):
         price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation (>2x average)
-        volume_ok = volume > 2.0 * vol_ma[i]
+        # Volume confirmation
+        volume_ok = volume > 1.5 * vol_ma[i]
         
-        # Choppiness regime: > 61.8 = ranging market (mean reversion favorable)
-        chop_regime = chop_aligned[i] > 61.8
+        # Trend regime: bullish if price > weekly EMA50, bearish if price < weekly EMA50
+        bullish_regime = close[i] > ema_50_1w_aligned[i]
+        bearish_regime = close[i] < ema_50_1w_aligned[i]
         
         if position == 0:
-            # Long: TRIX crosses above zero in ranging market with volume
-            if trix[i] > 0 and np.roll(trix, 1)[i] <= 0 and chop_regime and volume_ok:
-                signals[i] = 0.25
-                position = 1
-            # Short: TRIX crosses below zero in ranging market with volume
-            elif trix[i] < 0 and np.roll(trix, 1)[i] >= 0 and chop_regime and volume_ok:
-                signals[i] = -0.25
-                position = -1
+            # Long: bullish fractal breakout in bullish regime with volume
+            if bullish_regime and volume_ok:
+                if bullish_fractal_aligned[i] and price > high_1d[-1]:  # Use last known fractal high
+                    signals[i] = 0.25
+                    position = 1
+            # Short: bearish fractal breakout in bearish regime with volume
+            elif bearish_regime and volume_ok:
+                if bearish_fractal_aligned[i] and price < low_1d[-1]:  # Use last known fractal low
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit: TRIX crosses below zero or volume dries up
-            if trix[i] < 0 or volume < vol_ma[i]:
+            # Exit: price reaches bearish fractal level or stoploss
+            if bearish_fractal_aligned[i] and price < low_1d[-1]:
+                signals[i] = 0.0
+                position = 0
+            elif price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: TRIX crosses above zero or volume dries up
-            if trix[i] > 0 or volume < vol_ma[i]:
+            # Exit: price reaches bullish fractal level or stoploss
+            if bullish_fractal_aligned[i] and price > high_1d[-1]:
+                signals[i] = 0.0
+                position = 0
+            elif price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_ChopRegime_V1"
-timeframe = "4h"
+name = "6h_WilliamsFractal_TrendRegime_v1"
+timeframe = "6h"
 leverage = 1.0
