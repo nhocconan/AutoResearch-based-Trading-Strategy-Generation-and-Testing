@@ -1,86 +1,124 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using weekly R1/S1 pivot levels with 1w trend filter and volume confirmation.
-In uptrend (price > weekly EMA34), buy breakouts above weekly R1; in downtrend (price < weekly EMA34), sell breakdowns below weekly S1.
-Weekly pivots provide strong institutional support/resistance; weekly EMA34 filters for trend alignment; volume confirms breakout strength.
-Target: 20-50 trades over 4 years (5-12/year) to minimize fee drag. Works in bull markets (buy R1 breaks) and bear markets (sell S1 breaks).
+Hypothesis: 6h strategy using 12-hour RSI divergence with 1-day ADX trend filter.
+Look for bullish/bearish RSI divergence on 12h chart (price makes new low/high but RSI does not)
+combined with strong trend (ADX > 25) on daily timeframe. Enter on RSI reversal confirmation.
+Works in trending markets (both bull and bear) by fading momentum exhaustion. Target: 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_rsi(prices, period=14):
+    delta = np.diff(prices, prepend=prices[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_adx(high, low, close, period=14):
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop for weekly pivot points and EMA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Load 12h data ONCE for RSI divergence
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week's H/L/C)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 12h RSI
+    rsi_12h = calculate_rsi(df_12h['close'].values, 14)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
-    # Pivot = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # R1 = 2*Pivot - Low
-    r1_1w = 2 * pivot_1w - low_1w
-    # S1 = 2*Pivot - High
-    s1_1w = 2 * pivot_1w - high_1w
+    # Calculate 12h price highs/lows for divergence detection
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    high_12h_aligned = align_htf_to_ltf(prices, df_12h, high_12h)
+    low_12h_aligned = align_htf_to_ltf(prices, df_12h, low_12h)
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Load 1d data ONCE for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Align weekly indicators to daily timeframe (wait for weekly bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Daily volume confirmation (volume spike > 2.0x 20-period average)
-    vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = prices['volume'].values / vol_ma_20
+    # Calculate 1d ADX
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(30, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(rsi_12h_aligned[i]) or np.isnan(high_12h_aligned[i]) or 
+            np.isnan(low_12h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        weekly_trend = ema_34_aligned[i]
-        vol_ratio_val = vol_ratio[i]
-        vol_threshold = 2.0  # Volume spike filter
+        rsi_now = rsi_12h_aligned[i]
+        rsi_prev = rsi_12h_aligned[i-1] if i > 0 else rsi_now
+        high_now = high_12h_aligned[i]
+        high_prev = high_12h_aligned[i-1] if i > 0 else high_now
+        low_now = low_12h_aligned[i]
+        low_prev = low_12h_aligned[i-1] if i > 0 else low_now
+        adx_val = adx_1d_aligned[i]
+        
+        # Detect RSI divergence (need at least 3 bars to compare)
+        if i >= 3:
+            # Bullish divergence: price makes lower low but RSI makes higher low
+            bull_div = (low_now < low_prev and 
+                       rsi_now > rsi_12h_aligned[i-2])
+            # Bearish divergence: price makes higher high but RSI makes lower high
+            bear_div = (high_now > high_prev and 
+                       rsi_now < rsi_12h_aligned[i-2])
+        else:
+            bull_div = bear_div = False
         
         if position == 0:
-            # Enter long: price breaks above weekly R1 + uptrend (price > weekly EMA34) + volume spike
-            if (price_close > r1_aligned[i] and 
-                price_close > weekly_trend and 
-                vol_ratio_val > vol_threshold):
+            # Enter long: bullish RSI divergence + strong uptrend (ADX > 25)
+            if bull_div and adx_val > 25:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly S1 + downtrend (price < weekly EMA34) + volume spike
-            elif (price_close < s1_aligned[i] and 
-                  price_close < weekly_trend and 
-                  vol_ratio_val > vol_threshold):
+            # Enter short: bearish RSI divergence + strong downtrend (ADX > 25)
+            elif bear_div and adx_val > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: trend reversal (price crosses weekly EMA34 in opposite direction)
-            if position == 1 and price_close < weekly_trend:
+            # Exit: RSI reaches overbought/oversold or trend weakens
+            if position == 1 and (rsi_now > 70 or adx_val < 20):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price_close > weekly_trend:
+            elif position == -1 and (rsi_now < 30 or adx_val < 20):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1S1_WeeklyEMA34_Volume"
-timeframe = "1d"
+name = "6h_RSIDivergence_1dADX_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
