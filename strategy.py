@@ -8,17 +8,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for trend and ATR
+    # Load daily data ONCE before loop for trend and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
+    # Daily EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily ATR for volatility filter and stop-loss
+    # Daily ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -29,8 +29,6 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Daily volatility ratio: current ATR / 50-period average ATR
     atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
     atr_ratio = atr_14 / atr_ma_50
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
@@ -44,7 +42,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -52,22 +50,22 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        daily_ema = ema_50_1d_aligned[i]
+        daily_ema = ema_34_1d_aligned[i]
         atr_ratio_val = atr_ratio_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long: price above daily EMA, moderate volatility, volume spike
+            # Enter long: price above daily EMA, volume spike, moderate volatility
             if (price_close > daily_ema and 
                 vol_ratio_val > 1.8 and 
                 atr_ratio_val > 0.7 and atr_ratio_val < 2.2):
-                signals[i] = 0.25
+                signals[i] = 0.28
                 position = 1
-            # Enter short: price below daily EMA, moderate volatility, volume spike
+            # Enter short: price below daily EMA, volume spike, moderate volatility
             elif (price_close < daily_ema and 
                   vol_ratio_val > 1.8 and 
                   atr_ratio_val > 0.7 and atr_ratio_val < 2.2):
-                signals[i] = -0.25
+                signals[i] = -0.28
                 position = -1
         
         elif position != 0:
@@ -80,10 +78,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.28 if position == 1 else -0.28
     
     return signals
 
-name = "12h_DailyEMA50_Volume_ATR_Filter"
-timeframe = "12h"
+name = "1d_DailyEMA34_Volume_ATR_Filter"
+timeframe = "1d"
 leverage = 1.0
