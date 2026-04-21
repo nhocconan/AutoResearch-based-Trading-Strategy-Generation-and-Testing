@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter
-Hypothesis: Daily Camarilla pivot levels R1/S1 act as mean-reversion zones, while R4/S4 indicate breakout strength. Fade at R1/S1 with volume confirmation, breakout at R4/S4 with volume confirmation. Designed for low trade frequency (target: 20-50/year) to minimize fee drag in 4h timeframe. Works in both bull and bear markets by adapting to regime via price action at key levels.
+1d_1W_PriceChannel_Breakout_VolumeFilter
+Hypothesis: On the daily timeframe, price breaks of a 20-period Donchian channel with volume confirmation capture strong momentum moves. This works in both bull and bear markets because breakouts signal the start of new trends, and the volume filter ensures only high-conviction moves are taken. Weekly trend filter (price above/below 40-week EMA) avoids counter-trend trades. Target: 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,62 +13,48 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for Camarilla pivot points
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Load weekly data for trend filter (40-week EMA)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 40:
         return np.zeros(n)
     
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    close_weekly = df_weekly['close'].values
+    # Calculate 40-week EMA
+    ema_weekly = np.zeros_like(close_weekly)
+    for i in range(len(close_weekly)):
+        if i < 40:
+            ema_weekly[i] = np.mean(close_weekly[:i+1])
+        else:
+            ema_weekly[i] = close_weekly[i] * 0.0488 + ema_weekly[i-1] * (1 - 0.0488)  # alpha = 2/(40+1)
     
-    # Calculate daily Camarilla pivot levels
-    # P = (H + L + C) / 3
-    # Range = H - L
-    # R1 = P + (Range * 0.382)
-    # S1 = P - (Range * 0.382)
-    # R4 = P + (Range * 1.5000)
-    # S4 = P - (Range * 1.5000)
-    P = (high_daily + low_daily + close_daily) / 3.0
-    range_daily = high_daily - low_daily
-    r1_daily = P + (range_daily * 0.382)
-    s1_daily = P - (range_daily * 0.382)
-    r4_daily = P + (range_daily * 1.5000)
-    s4_daily = P - (range_daily * 1.5000)
+    # Align weekly EMA to daily
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # Align daily Camarilla levels to 4h timeframe
-    r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
-    s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
-    r4_daily_aligned = align_htf_to_ltf(prices, df_daily, r4_daily)
-    s4_daily_aligned = align_htf_to_ltf(prices, df_daily, s4_daily)
-    
-    # Main timeframe data (4h)
+    # Load daily data for Donchian channel (we are on 1d timeframe, so prices is already daily)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period average (20*4h = 10 days)
+    # Donchian channel (20-period) on daily data
+    upper = np.zeros_like(high)
+    lower = np.zeros_like(low)
+    for i in range(len(high)):
+        if i < 20:
+            upper[i] = np.max(high[:i+1])
+            lower[i] = np.min(low[:i+1])
+        else:
+            upper[i] = np.max(high[i-20:i+1])
+            lower[i] = np.min(low[i-20:i+1])
+    
+    # Volume filter: current volume > 1.5x 20-day average
     volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i >= 20:
-            volume_avg[i] = np.mean(volume[i-20:i])
-        else:
+        if i < 20:
             volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.5 * volume_avg)
-    
-    # ATR for stoploss (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = np.zeros_like(close)
-    for i in range(len(tr)):
-        if i < 14:
-            atr[i] = np.mean(tr[:i+1])
         else:
-            atr[i] = np.mean(tr[i-14:i])
+            volume_avg[i] = np.mean(volume[i-20:i+1])
+    volume_filter = volume > (1.5 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,77 +62,51 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if NaN in critical values
-        if (np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i]) or 
-            np.isnan(r4_daily_aligned[i]) or np.isnan(s4_daily_aligned[i])):
+        if np.isnan(ema_weekly_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r1 = r1_daily_aligned[i]
-        s1 = s1_daily_aligned[i]
-        r4 = r4_daily_aligned[i]
-        s4 = s4_daily_aligned[i]
+        up = upper[i]
+        low_ch = lower[i]
         vol_ok = volume_filter[i]
-        atr_val = atr[i]
+        weekly_ema = ema_weekly_aligned[i]
         
-        # Stoploss: 2 * ATR from entry
-        if position == 1 and price < entry_price - 2.0 * atr_val:
-            signals[i] = 0.0
-            position = 0
+        # Exit conditions
+        if position == 1:
+            # Exit long if price breaks below lower band or weekly trend turns down
+            if price < low_ch or price < weekly_ema:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.30
             continue
-        elif position == -1 and price > entry_price + 2.0 * atr_val:
-            signals[i] = 0.0
-            position = 0
+        elif position == -1:
+            # Exit short if price breaks above upper band or weekly trend turns up
+            if price > up or price > weekly_ema:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.30
             continue
         
+        # Entry conditions (only when flat)
         if position == 0:
-            # Fade at R1/S1: mean reversion from extreme levels
-            # Long: price rejects S1 with volume confirmation (buying pressure)
-            if price > s1 and price < (s1 + (r1 - s1) * 0.3) and vol_ok:
-                # Additional confirmation: price closing near high of bar
-                if close[i] > (high[i] + low[i]) / 2:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-            # Short: price rejects R1 with volume confirmation (selling pressure)
-            elif price < r1 and price > (r1 - (r1 - s1) * 0.3) and vol_ok:
-                # Additional confirmation: price closing near low of bar
-                if close[i] < (high[i] + low[i]) / 2:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
-            # Breakout at R4/S4: strong momentum continuation
-            # Long: price breaks above R4 with volume
-            elif price > r4 and vol_ok:
-                signals[i] = 0.25
+            # Long: price breaks above upper Donchian band with volume confirmation and weekly uptrend
+            if price > up and vol_ok and price > weekly_ema:
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
-            # Short: price breaks below S4 with volume
-            elif price < s4 and vol_ok:
-                signals[i] = -0.25
+            # Short: price breaks below lower Donchian band with volume confirmation and weekly downtrend
+            elif price < low_ch and vol_ok and price < weekly_ema:
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
-        
-        elif position == 1:
-            # Long exit: price returns to S1 (mean reversion) or breaks S4 (failed breakout)
-            if price < s1 or price > r4:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: price returns to R1 (mean reversion) or breaks S4 (failed breakdown)
-            if price > r1 or price < s4:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "4h"
+name = "1d_1W_PriceChannel_Breakout_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
