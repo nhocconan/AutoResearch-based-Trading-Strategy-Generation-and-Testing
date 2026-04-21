@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_VolumeATR_Regime_v1
-Hypothesis: Breakout of Camarilla R1/S1 levels with volume confirmation and choppy regime filter.
-Long when price breaks above R1 with volume spike and CHOP > 61.8 (rangy market favors mean reversion).
-Short when price breaks below S1 with volume spike and CHOP > 61.8.
-Exit when price reaches R2/S2 or reverses at R1/S1.
-Works in both bull/bear by using 1d Camarilla levels and volume/regime filters to avoid false breakouts.
-Target: 20-40 trades/year per symbol.
+6h_1d_1w_Adaptive_Kelly_Volume_Regime_v1
+Hypothesis: Adaptive Kelly sizing based on volatility regime (6h ATR ratio) and 1d/1w trend alignment.
+In high volatility regime (expanding ATR), reduce size; in low volatility (contraction), increase size.
+Only trade when 1d and 1w EMA50 agree on direction. Uses volume confirmation for entry timing.
+Target: 12-25 trades/year per symbol. Works in bull/bear by aligning with higher timeframe trend and adapting to volatility.
 """
 
 import numpy as np
@@ -15,106 +13,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
+    # Load 1d data once for trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Load 1w data once for higher timeframe trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Camarilla levels: R1, S1, R2, S2
-    rang = prev_high - prev_low
-    r1 = prev_close + 1.1 * rang / 12
-    s1 = prev_close - 1.1 * rang / 12
-    r2 = prev_close + 1.1 * rang / 6
-    s2 = prev_close - 1.1 * rang / 6
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # 6h ATR for volatility regime
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Choppiness Index (CHOP) on 1d
-    if len(df_1d) >= 14:
-        high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-        low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-        atr_1d = np.abs(high_1d - low_1d)
-        sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-        range_14 = high_14 - low_14
-        chop = 100 * np.log10(sum_atr_14 / range_14) / np.log10(14)
-        chop = np.where(range_14 == 0, 100, chop)  # avoid div by zero
-        chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    else:
-        chop_aligned = np.full(n, 50.0)  # default neutral
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # ATR ratio: current ATR / 50-period average ATR (volatility regime)
+    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr_ratio = atr / (atr_ma + 1e-10)
+    
+    # Base Kelly fraction (adjusted for win rate ~0.55, avg win/loss ~1.2)
+    kelly_base = 0.25  # conservative base
+    
+    # Volatility scaling: inverse relationship with ATR ratio
+    # When ATR ratio > 1.5 (high vol), scale down; < 0.8 (low vol), scale up
+    vol_scale = np.clip(1.0 / atr_ratio, 0.5, 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
+        # Volume filter: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
-        # Regime filter: CHOP > 61.8 indicates rangy market (good for mean reversion)
-        regime_ok = chop_aligned[i] > 61.8
+        # Determine trend direction from 1d and 1w EMA50
+        trend_1d = 1 if price > ema_50_1d_aligned[i] else -1
+        trend_1w = 1 if price > ema_50_1w_aligned[i] else -1
         
-        if position == 0:
-            # Long conditions: break above R1 with volume and rangy regime
-            if (price > r1_aligned[i] and volume_ok and regime_ok):
-                signals[i] = 0.25
+        # Only trade when both timeframes agree
+        if trend_1d == trend_1w and volume_ok:
+            # Adaptive position size based on volatility regime
+            size = kelly_base * vol_scale[i]
+            size = np.clip(size, 0.15, 0.35)  # enforce limits
+            
+            if trend_1d == 1 and position <= 0:  # go long
+                signals[i] = size
                 position = 1
-            # Short conditions: break below S1 with volume and rangy regime
-            elif (price < s1_aligned[i] and volume_ok and regime_ok):
-                signals[i] = -0.25
+            elif trend_1d == -1 and position >= 0:  # go short
+                signals[i] = -size
                 position = -1
-        
-        elif position == 1:
-            # Long exit: reach R2 or reverse below R1
-            if price >= r2_aligned[i] or price <= r1_aligned[i]:
+            else:
+                # Hold current position
+                signals[i] = signals[i-1] if i > 0 else 0.0
+        else:
+            # No clear signal or volume filter failed - exit or hold flat
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Short exit: reach S2 or reverse above S1
-            if price <= s2_aligned[i] or price >= s1_aligned[i]:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_VolumeATR_Regime_v1"
-timeframe = "4h"
+name = "6h_1d_1w_Adaptive_Kelly_Volume_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
