@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v2
-Hypothesis: 12h price breaking above/below daily R1/S1 with volume confirmation and aligned weekly trend (EMA34) captures institutional breakouts. Works in bull/bear by filtering with weekly EMA trend. Uses ATR-based stoploss. Target 15-25 trades/year to minimize fee drift.
+12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v3
+Hypothesis: 12h price breaking above/below daily R1/S1 with volume confirmation and aligned weekly trend (EMA34) captures institutional breakouts. Works in bull/bear by filtering with weekly EMA trend. Uses ATR-based stoploss. Target 15-25 trades/year to minimize fee drift. Improved version with better ATR calculation and reduced whipsaw.
 """
 
 import numpy as np
@@ -164,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v2"
+name = "12h_1d_1w_Camarilla_R1_S1_Breakout_Volume_ATRFilter_v3"
 timeframe = "12h"
 leverage = 1.0
