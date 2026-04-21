@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Camarilla_R1S1_Breakout_Volume_TrendFilter_V1
-Hypothesis: Use 1d Camarilla pivot levels (R1/S1) and 1w trend (price > 1w EMA34) for bias.
-On 4h, enter long when price breaks above S1 with volume spike and 1w uptrend.
-Enter short when price breaks below R1 with volume spike and 1w downtrend.
-Exit on trend reversal or price crossing the pivot point (PP).
-Designed for 4h timeframe with 1d/1w filters to limit trades to ~20-50/year.
+1d_1w_Camarilla_R1S1_Breakout_Volume_Trend_Filter_v2
+Hypothesis: Use 1w Camarilla pivot levels (R1/S1) as breakout levels on 1d.
+Enter long when price breaks above weekly R1 with volume confirmation and 1w uptrend.
+Enter short when price breaks below weekly S1 with volume confirmation and 1w downtrend.
+Exit when price returns to weekly pivot (PP) or trend reverses.
+Designed for 1d timeframe with 1w filters to limit trades to ~10-20/year.
 Works in bull markets by buying strength and in bear markets by selling weakness.
 """
 
@@ -25,58 +25,51 @@ def calculate_ema(close, period):
 
 def calculate_camarilla(high, low, close):
     """Calculate Camarilla pivot levels"""
-    range_val = high - low
+    range_ = high - low
     pp = (high + low + close) / 3
-    r1 = close + range_val * 1.1 / 12
-    s1 = close - range_val * 1.1 / 12
+    r1 = close + range_ * 1.1 / 12
+    s1 = close - range_ * 1.1 / 12
     return pp, r1, s1
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    pp_1d = np.zeros_like(high_1d)
-    r1_1d = np.zeros_like(high_1d)
-    s1_1d = np.zeros_like(high_1d)
-    
-    for i in range(len(high_1d)):
-        pp, r1, s1 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        pp_1d[i] = pp
-        r1_1d[i] = r1
-        s1_1d[i] = s1
-    
-    # Align 1d levels to 4h
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Load 1w data for trend filter
+    # Load 1w data once for trend and Camarilla levels
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema34_1w = calculate_ema(close_1w, 34)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # 1w EMA10 for trend filter
+    ema10_1w = calculate_ema(close_1w, 10)
+    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
+    
+    # 1w Camarilla levels (calculate from prior week's OHLC)
+    pp_1w = np.full_like(high_1w, np.nan)
+    r1_1w = np.full_like(high_1w, np.nan)
+    s1_1w = np.full_like(low_1w, np.nan)
+    
+    for i in range(1, len(high_1w)):
+        pp_1w[i], r1_1w[i], s1_1w[i] = calculate_camarilla(
+            high_1w[i-1], low_1w[i-1], close_1w[i-1]
+        )
+    
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(ema10_1w_aligned[i]) or np.isnan(pp_1w_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,38 +78,38 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
+        # Volume filter: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
         if position == 0:
-            # Long conditions: uptrend + break above S1 + volume
-            if (price > ema34_1w_aligned[i] and 
-                price > s1_1d_aligned[i] and 
+            # Long conditions: uptrend + break above weekly R1 + volume
+            if (price > ema10_1w_aligned[i] and 
+                price > r1_1w_aligned[i] and 
                 volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: downtrend + break below R1 + volume
-            elif (price < ema34_1w_aligned[i] and 
-                  price < r1_1d_aligned[i] and 
+            # Short conditions: downtrend + break below weekly S1 + volume
+            elif (price < ema10_1w_aligned[i] and 
+                  price < s1_1w_aligned[i] and 
                   volume_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or price crosses below PP
-            if price < ema34_1w_aligned[i] or price < pp_1d_aligned[i]:
+            # Long exit: return to weekly PP or trend reversal
+            if price < pp_1w_aligned[i] or price < ema10_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or price crosses above PP
-            if price > ema34_1w_aligned[i] or price > pp_1d_aligned[i]:
+            # Short exit: return to weekly PP or trend reversal
+            if price > pp_1w_aligned[i] or price > ema10_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_Camarilla_R1S1_Breakout_Volume_TrendFilter_V1"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Volume_Trend_Filter_v2"
+timeframe = "1d"
 leverage = 1.0
