@@ -3,36 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w ADX(14) trend filter and volume spike confirmation.
-# Long when price breaks above upper Donchian in uptrend (1w ADX > 25), short when breaks below lower Donchian in downtrend.
-# Volume > 2.0x 20-period average confirms breakout strength. Uses weekly ADX to filter weak trends and avoid chop.
-# Target: 15-25 trades/year by requiring strong trend + volume + breakout alignment.
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation.
+# Long when price breaks above upper Donchian in uptrend (1d ADX > 25), short when breaks below lower Donchian in downtrend.
+# Volume > 1.5x 20-period average confirms breakout strength. Uses ADX to filter weak trends and avoid chop.
+# Target: 25-50 trades/year by requiring strong trend + volume + breakout alignment.
 # Works in bull/bear: ADX filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
-# Focus on BTC and ETH as primary assets; requires confluence of trend, volume, and price action.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w ADX(14) for trend strength filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d ADX(14) for trend strength filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     
     # Directional Movement
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = -np.diff(low_1w, prepend=low_1w[0])
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
@@ -51,10 +50,10 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilder_smooth(dx, 14)
     
-    # Align ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 20-period Donchian channels on 1d data
+    # Calculate 20-period Donchian channels on 4h data
     high_roll = prices['high'].rolling(window=20, min_periods=20).max()
     low_roll = prices['low'].rolling(window=20, min_periods=20).min()
     upper = high_roll.values
@@ -78,8 +77,8 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirm = volume > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume > 1.5 * vol_ma[i]
         
         # Trend filter: strong trend (ADX > 25)
         strong_trend = adx_aligned[i] > 25
@@ -118,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wADX14_Trend_Volume"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_1dADX14_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
