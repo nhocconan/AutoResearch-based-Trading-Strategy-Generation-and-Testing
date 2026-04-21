@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_HTFTrend_VolumeRegime_ATRStop
-Hypothesis: 4h Donchian(20) breakout aligned with 12h EMA34 trend and volume spike regime filter.
-Enter long when price breaks above 20-period Donchian high with 12h uptrend and above-average volume.
-Enter short when price breaks below 20-period Donchian low with 12h downtrend and above-average volume.
-Exit on ATR(14) trailing stop (2.5*ATR) or opposite Donchian break.
-Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
-Works in bull/bear via 12h trend alignment and volume confirmation as regime filter.
+1d_FundingRate_MeanReversion_WeeklyTrend_Filter
+Hypothesis: Funding rate mean-reversion on 1d timeframe filtered by weekly EMA trend.
+Enter long when 30d funding rate z-score < -2.0 (extreme pessimism) and weekly uptrend.
+Enter short when 30d funding rate z-score > +2.0 (extreme optimism) and weekly downtrend.
+Exit when z-score reverts toward zero (|z| < 0.5) or opposite extreme.
+Designed for low trade frequency (target: 10-20 trades/year) to minimize fee drag.
+Works in bull/bear via weekly trend alignment and funding extremes as contrarian signal.
 """
 
 import numpy as np
@@ -18,92 +18,87 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for trend filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 40:
+    # Load funding rate data (assuming available as parquet, same structure as prices)
+    try:
+        funding_df = pd.read_parquet('data/processed/funding/BTCUSDT.parquet')
+    except:
+        # Fallback: if funding data not available, use zero signal
         return np.zeros(n)
     
-    # === 12h EMA34 for HTF trend filter ===
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Ensure we have funding rate column
+    if 'funding_rate' not in funding_df.columns:
+        return np.zeros(n)
     
-    # === Donchian(20) channels ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Align funding data to prices timeframe (1d)
+    funding_rates = funding_df['funding_rate'].values
+    funding_times = funding_df['open_time'].values
     
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Create funding series aligned to prices index
+    funding_aligned = np.full(n, np.nan)
+    # Simple alignment: find closest funding rate for each price bar
+    for i in range(n):
+        price_time = prices['open_time'].iloc[i]
+        # Find funding rate from same day (simplified)
+        mask = funding_times <= price_time
+        if np.any(mask):
+            funding_aligned[i] = funding_rates[mask][-1]
     
-    # === Volume spike filter (20-period average) ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 30-day z-score of funding rate
+    funding_series = pd.Series(funding_aligned)
+    funding_ma = funding_series.rolling(window=30, min_periods=30).mean().values
+    funding_std = funding_series.rolling(window=30, min_periods=30).std().values
+    funding_z = (funding_aligned - funding_ma) / funding_std
+    # Replace infinite/NaN values
+    funding_z = np.nan_to_num(funding_z, nan=0.0, posinf=0.0, neginf=0.0)
     
-    # === ATR (14-period) for stoploss ===
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Load HTF data ONCE before loop (weekly for trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    # === Weekly EMA34 for HTF trend filter ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) 
-            or np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]) 
-            or np.isnan(atr[i])):
+        if (np.isnan(funding_z[i]) or np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        z = funding_z[i]
+        price = prices['close'].iloc[i]
+        ema_trend = ema_34_1w_aligned[i]
         
         if position == 0:
-            # Volume confirmation: current volume > 20-period average
-            vol_confirm = volume[i] > vol_ma[i]
+            # Entry conditions
+            long_signal = (z < -2.0) and (price > ema_trend)  # Extreme pessimism + weekly uptrend
+            short_signal = (z > 2.0) and (price < ema_trend)  # Extreme optimism + weekly downtrend
             
-            # Long conditions: price > Donchian high, 12h uptrend, volume spike
-            long_breakout = price > donchian_high[i]
-            long_trend = price > ema_34_12h_aligned[i]
-            
-            # Short conditions: price < Donchian low, 12h downtrend, volume spike
-            short_breakout = price < donchian_low[i]
-            short_trend = price < ema_34_12h_aligned[i]
-            
-            # Entry logic
-            if long_breakout and long_trend and vol_confirm:
+            if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            elif short_breakout and short_trend and vol_confirm:
+            elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Check stoploss
-            if price < entry_price - 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Trailing exit: price closes below Donchian low (support broken)
-            elif price < donchian_low[i]:
+            # Exit conditions: z-score reverts or extreme optimism
+            if (z > -0.5) or (z > 2.0):  # Reversion to neutral or opposite extreme
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss
-            if price > entry_price + 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Trailing exit: price closes above Donchian high (resistance broken)
-            elif price > donchian_high[i]:
+            # Exit conditions: z-score reverts or extreme pessimism
+            if (z < 0.5) or (z < -2.0):  # Reversion to neutral or opposite extreme
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_HTFTrend_VolumeRegime_ATRStop"
-timeframe = "4h"
+name = "1d_FundingRate_MeanReversion_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
