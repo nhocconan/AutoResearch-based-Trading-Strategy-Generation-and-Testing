@@ -1,7 +1,10 @@
-# 12h_Camarilla_R1_S1_Breakout_With_Volume_and_Trend
-# Hypothesis: Breakout above R1 or below S1 using daily pivot levels with volume confirmation and daily trend filter.
-# Exit at opposite pivot level. Uses tighter volume filter (2.0) and longer lookback to reduce trades and improve quality.
-# Target: 12-37 trades/year on 12h timeframe for BTC/ETH/SOL.
+#!/usr/bin/env python3
+"""
+4h_Camarilla_Pivot_R1_S1_Breakout_With_Volume
+Hypothesis: Break above Camarilla R1 or below S1 using 1D levels, with volume confirmation and 1D trend filter.
+Exit at opposite pivot level. Works in bull markets by buying breakouts above R1 in uptrends and in bear markets by selling breakdowns below S1 in downtrends.
+Volume confirmation ensures institutional participation. Target: 20-50 trades/year on 4h timeframe.
+"""
 
 import numpy as np
 import pandas as pd
@@ -30,7 +33,7 @@ def generate_signals(prices):
     r1 = pp + (range_hl * 1.1 / 12)
     s1 = pp - (range_hl * 1.1 / 12)
     
-    # Align to 12h timeframe (previous day's levels available at open)
+    # Align to 4h timeframe (previous day's levels available at open)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -38,7 +41,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Volume confirmation (20-period average) - stricter threshold ===
+    # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma
     
@@ -63,16 +66,16 @@ def generate_signals(prices):
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend + strong volume
+            # Long: price breaks above R1 + uptrend + volume
             if (price_close > r1_level and
                 price_close > ema_trend and
-                vol_ratio_val > 2.0):  # Stricter volume filter
+                vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + downtrend + strong volume
+            # Short: price breaks below S1 + downtrend + volume
             elif (price_close < s1_level and
                   price_close < ema_trend and
-                  vol_ratio_val > 2.0):  # Stricter volume filter
+                  vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
@@ -90,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_With_Volume_and_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R1_S1_Breakout_With_Volume"
+timeframe = "4h"
 leverage = 1.0
