@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI divergence with 4h trend filter and volume confirmation.
-In ranging markets, RSI divergence at extremes signals reversals. Trend filter ensures
-we only take reversals in the direction of higher timeframe momentum to avoid
-counter-trend trades. Volume confirmation filters weak signals. Designed for 15-30
-trades/year to minimize fee drag, works in bull/bear via trend alignment.
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike.
+Camarilla levels provide strong intraday support/resistance. Breakouts above R1 or below S1 with
+volume confirmation and aligned daily trend capture momentum. EMA34 filter avoids counter-trend trades.
+Designed for ~20-40 trades/year to minimize fee drag, works in bull/bear via trend filter.
 """
 
 import numpy as np
@@ -16,33 +15,28 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # 4h EMA34 for trend filter
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Load 1d data ONCE before loop for RSI(14)
+    # Load 1d data ONCE before loop for Camarilla levels and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # RSI(14) calculation
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
+    
+    # Camarilla: R4 = close + 1.5*(high-low)*1.1/2, R3 = close + 1.25*(high-low)*1.1/2, etc.
+    # We only need R1 and S1 for breakout
+    r1 = close_prev + 1.1 * (high_prev - low_prev) * 1.05 / 2
+    s1 = close_prev - 1.1 * (high_prev - low_prev) * 1.05 / 2
+    
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: volume / 20-period average volume (1d)
     vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -52,60 +46,52 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(35, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_34_4h_aligned[i]
-        rsi_val = rsi_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_ratio = vol_ratio_aligned[i]
-        vol_threshold = 1.3  # Volume must be 1.3x average
+        vol_threshold = 1.5  # Volume must be 1.5x average
         
         if position == 0:
-            # Enter long: RSI oversold (<30) with bullish divergence, volume spike, uptrend
-            # Bullish divergence: price making lower low, RSI making higher low
-            if i >= 2:
-                price_lower_low = prices['close'].iloc[i] < prices['close'].iloc[i-2]
-                rsi_higher_low = rsi_val > rsi_aligned[i-2]
-                if (rsi_val < 30 and 
-                    price_lower_low and 
-                    rsi_higher_low and
-                    vol_ratio > vol_threshold and 
-                    price_close > ema_trend):
-                    signals[i] = 0.20
-                    position = 1
-            # Enter short: RSI overbought (>70) with bearish divergence, volume spike, downtrend
-            elif i >= 2:
-                price_higher_high = prices['close'].iloc[i] > prices['close'].iloc[i-2]
-                rsi_lower_high = rsi_val < rsi_aligned[i-2]
-                if (rsi_val > 70 and 
-                    price_higher_high and 
-                    rsi_lower_high and
-                    vol_ratio > vol_threshold and 
-                    price_close < ema_trend):
-                    signals[i] = -0.20
-                    position = -1
+            # Enter long: price breaks above R1, volume spike, uptrend
+            if (price_close > r1_val and 
+                vol_ratio > vol_threshold and 
+                price_close > ema_trend):
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price breaks below S1, volume spike, downtrend
+            elif (price_close < s1_val and 
+                  vol_ratio > vol_threshold and 
+                  price_close < ema_trend):
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit: RSI returns to neutral zone (40-60) or trend reversal
-            if position == 1 and (rsi_val > 50 or price_close < ema_trend):
+            # Exit: price returns to previous day's close or trend reversal
+            close_prev_val = close_prev[i] if not np.isnan(close_prev[i]) else 0
+            
+            if position == 1 and (price_close < close_prev_val or price_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (rsi_val < 50 or price_close > ema_trend):
+            elif position == -1 and (price_close > close_prev_val or price_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_RSIDivergence_4hEMA34_Trend_Volume"
-timeframe = "1h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
