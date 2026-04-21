@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Regime_Trend_ATRStop_v3
-Hypothesis: Daily KAMA direction + chop regime filter + ATR-based trailing stop.
-KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends.
-Choppiness Index regime filter avoids trend-following in high-chop environments.
-Designed for low trade frequency (<20 trades/year) to minimize fee drag on 1d timeframe.
-Works in bull/bear via regime-adaptive logic: trend follow when chop low, avoid when chop high.
+6h_Donchian20_Breakout_WeeklyPivotTrend_VolumeFilter
+Hypothesis: 6h Donchian(20) breakouts aligned with weekly pivot trend (price above/below weekly pivot) and volume confirmation.
+Weekly pivot acts as institutional reference point - price above weekly pivot indicates bullish bias, below indicates bearish bias.
+Volume spike (>1.5x 20-period average) confirms breakout strength.
+Designed for low trade frequency (12-30 trades/year) to minimize fee drag.
+Works in bull/bear via weekly pivot alignment and volume confirmation filter.
 """
 
 import numpy as np
@@ -17,50 +17,42 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for regime context)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop (1d for weekly pivot calculation)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === KAMA (Adaptive Moving Average) on 1d close ===
-    close = prices['close'].values
-    # Efficiency Ratio: |close - close[10]| / sum(|diff|) over 10 periods
-    change = np.abs(np.subtract(close[10:], close[:-10]))  # length n-10
-    volatility = np.abs(np.subtract(close[1:], close[:-1]))  # length n-1
-    # Pad volatility for rolling sum
-    volatility_padded = np.concatenate([np.full(9, np.nan), volatility])
-    er_numerator = np.concatenate([np.full(10, np.nan), change])
-    er_denominator = pd.Series(volatility_padded).rolling(window=10, min_periods=10).sum().values
-    er = np.divide(er_numerator, er_denominator, out=np.full_like(er_numerator, np.nan), where=er_denominator!=0)
-    # Smoothing constants: fast=2/(2+1), slow=2/(30+1)
-    fast_sc = 2.0 / (2 + 1)
-    slow_sc = 2.0 / (30 + 1)
-    sc = np.power(er * (fast_sc - slow_sc) + slow_sc, 2)
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # === Weekly Pivot Point calculation from daily data ===
+    # Weekly pivot = (Weekly High + Weekly Low + Weekly Close) / 3
+    # We'll approximate using rolling window on daily data (5 trading days ≈ 1 week)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Choppiness Index (14-period) for regime filter ===
-    high = prices['high'].values
-    low = prices['low'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    # Handle division by zero or invalid cases
-    chop = np.where((highest_high - lowest_low) > 0, chop, 50.0)
+    # Calculate weekly high, low, close using 5-day rolling window
+    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
     
-    # === ATR (20-period) for stoploss ===
-    atr_val = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Weekly pivot point
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    
+    # Align weekly pivot to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    
+    # === 6h Donchian Channel (20-period) ===
+    # We need to calculate Donchian on 6h data directly from prices
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    
+    # === Volume confirmation ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.5 * vol_ma  # Pre-compute boolean array
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,52 +60,52 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(kama[i]) or np.isnan(chop[i]) or np.isnan(atr_val[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) 
+            or np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        price = close_6h[i]
         
         if position == 0:
-            # Regime filter: only trend follow when chop < 61.8 (trending market)
-            # Avoid signals when chop >= 61.8 (ranging/choppy market)
-            trending_regime = chop[i] < 61.8
+            # Volume spike condition
+            if not vol_spike[i]:
+                if position != 0:
+                    signals[i] = 0.0
+                    position = 0
+                continue
             
-            # Long conditions: price > KAMA and trending regime
-            long_condition = price > kama[i] and trending_regime
-            # Short conditions: price < KAMA and trending regime
-            short_condition = price < kama[i] and trending_regime
+            # Long conditions: price breaks above 6h Donchian high AND price > weekly pivot
+            long_breakout = price > donchian_high[i]
+            long_trend = price > weekly_pivot_aligned[i]
             
-            if long_condition:
+            # Short conditions: price breaks below 6h Donchian low AND price < weekly pivot
+            short_breakout = price < donchian_low[i]
+            short_trend = price < weekly_pivot_aligned[i]
+            
+            # Entry logic
+            if long_breakout and long_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_condition:
+            elif short_breakout and short_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss
-            if price < entry_price - 2.5 * atr_val[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit if price closes back below KAMA (trend reversal)
-            elif price < kama[i]:
+            # Exit conditions: price closes below weekly pivot OR Donchian low broken
+            if price < weekly_pivot_aligned[i] or price < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss
-            if price > entry_price + 2.5 * atr_val[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit if price closes back above KAMA (trend reversal)
-            elif price > kama[i]:
+            # Exit conditions: price closes above weekly pivot OR Donchian high broken
+            if price > weekly_pivot_aligned[i] or price > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Regime_Trend_ATRStop_v3"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_WeeklyPivotTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
