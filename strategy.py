@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Donchian20_Breakout_VolumeATRFilter_v1
-Hypothesis: Donchian(20) breakout on 6h timeframe with 12h trend filter (EMA34) and 1d volume spike + ATR filter.
-Works in bull/bear: Breakouts capture momentum in both directions. Volume confirms conviction, ATR filters low-volatility false breakouts.
-Target: 12-30 trades/year per symbol (50-120 over 4 years).
+4h_1d_Donchian20_VolumeRegime_ATRStop_V1
+Hypothesis: Donchian(20) breakout with 1d EMA200 trend filter, volume confirmation, and ATR-based trailing stop.
+Works in bull/bear: In uptrend (price>EMA200), long on upper band breakout; in downtrend (price<EMA200), short on lower band breakout.
+Volume confirms breakout strength. ATR stop limits drawdown. Target: 25-40 trades/year per symbol (100-160 over 4 years).
 """
 
 import numpy as np
@@ -15,119 +15,93 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data once for trend filter (EMA34)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Load 1d data once for volume and ATR filters
+    # Load 1d data once for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # 1d ATR(14) for volatility filter
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate Donchian channels on 4h data (20-period)
+    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
     
-    # 1d volume MA(20) for volume spike filter
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    volume_ok = prices['volume'].values > 1.5 * vol_ma
+    
+    # ATR for stoploss (20-period)
+    tr1 = prices['high'] - prices['low']
+    tr2 = abs(prices['high'] - prices['close'].shift(1))
+    tr3 = abs(prices['low'] - prices['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    atr_at_entry = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if np.isnan(ema_200_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                atr_at_entry = 0.0
             continue
         
-        price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Donchian(20) on 6h: lookback 20 periods (excluding current)
-        if i >= 20:
-            lookback_start = i - 20
-            lookback_end = i  # exclusive
-            high_20 = prices['high'].iloc[lookback_start:lookback_end].max()
-            low_20 = prices['low'].iloc[lookback_start:lookback_end].min()
-        else:
-            high_20 = np.nan
-            low_20 = np.nan
-        
-        if np.isnan(high_20) or np.isnan(low_20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume filter: current volume > 1.5 * 20-period 1d volume MA
-        volume_ok = volume > 1.5 * vol_ma_20_1d_aligned[i]
-        
-        # ATR filter: current ATR > 0.5 * 1d ATR(14) (avoid low-volatility breakouts)
-        # Approximate 6h ATR using recent price action (simplified: use price range)
-        if i >= 2:
-            atr_approx = np.max([
-                abs(prices['high'].iloc[i] - prices['low'].iloc[i]),
-                abs(prices['high'].iloc[i] - prices['close'].iloc[i-1]),
-                abs(prices['low'].iloc[i] - prices['close'].iloc[i-1])
-            ])
-            atr_filter_ok = atr_approx > 0.5 * atr_14_1d_aligned[i]
-        else:
-            atr_filter_ok = False
+        close_price = prices['close'].iloc[i]
         
         if position == 0:
-            # Long breakout: price > Donchian high + volume + ATR + 12h uptrend
-            if (price > high_20 and 
-                volume_ok and 
-                atr_filter_ok and 
-                ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1]):
-                signals[i] = 0.25
+            # Check for breakout with volume confirmation and trend filter
+            bullish_breakout = (close_price > high_20[i]) and volume_ok[i] and (ema_200_1d_aligned[i] < close_price)
+            bearish_breakout = (close_price < low_20[i]) and volume_ok[i] and (ema_200_1d_aligned[i] > close_price)
+            
+            if bullish_breakout:
+                signals[i] = 0.30
                 position = 1
-            # Short breakout: price < Donchian low + volume + ATR + 12h downtrend
-            elif (price < low_20 and 
-                  volume_ok and 
-                  atr_filter_ok and 
-                  ema_34_12h_aligned[i] < ema_34_12h_aligned[i-1]):
-                signals[i] = -0.25
+                entry_price = close_price
+                atr_at_entry = atr[i]
+            elif bearish_breakout:
+                signals[i] = -0.30
                 position = -1
+                entry_price = close_price
+                atr_at_entry = atr[i]
+            else:
+                signals[i] = 0.0
         
         elif position == 1:
-            # Long exit: price < 12h EMA34 (trend reversal) or Donchian mean reversion
-            if price < ema_34_12h_aligned[i] or price < (high_20 + low_20) / 2:
+            # Long exit: price < entry - 2.5 * ATR (stoploss) or price < EMA200 (trend reversal)
+            stop_price = entry_price - 2.5 * atr_at_entry
+            trend_exit = close_price < ema_200_1d_aligned[i]
+            
+            if close_price <= stop_price or trend_exit:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                atr_at_entry = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price > 12h EMA34 (trend reversal) or Donchian mean reversion
-            if price > ema_34_12h_aligned[i] or price > (high_20 + low_20) / 2:
+            # Short exit: price > entry + 2.5 * ATR (stoploss) or price > EMA200 (trend reversal)
+            stop_price = entry_price + 2.5 * atr_at_entry
+            trend_exit = close_price > ema_200_1d_aligned[i]
+            
+            if close_price >= stop_price or trend_exit:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                atr_at_entry = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_12h_1d_Donchian20_Breakout_VolumeATRFilter_v1"
-timeframe = "6h"
+name = "4h_1d_Donchian20_VolumeRegime_ATRStop_V1"
+timeframe = "4h"
 leverage = 1.0
