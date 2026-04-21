@@ -3,105 +3,90 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot (R1/S1) breakout with 1d EMA34 trend filter and volume confirmation.
-# In uptrend (price > 1d EMA34): long on break above R1, short on break below S1.
-# In downtrend (price < 1d EMA34): short on break below S1, long on break above R1.
-# Uses volume > 1.5x 20-period average for confirmation.
-# Target: 25-50 trades/year by requiring trend alignment + pivot breakout + volume spike.
+# Hypothesis: 1d weekly Bollinger Band squeeze breakout with volume confirmation.
+# In low volatility (BBW < 20th percentile): breakout in direction of weekly trend (EMA50).
+# Uses volume > 1.5x 20-day average for confirmation. Avoids false breakouts in high volatility.
+# Target: 10-25 trades/year by requiring Bollinger squeeze + breakout + volume + weekly trend alignment.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) == 0:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Weekly EMA50 for trend direction
+    weekly_close = df_weekly['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema50)
     
-    # Pre-compute volume moving average (20-period)
+    # Daily Bollinger Bands (20, 2)
+    close_series = prices['close']
+    bb_mid = close_series.rolling(window=20, min_periods=20).mean()
+    bb_std = close_series.rolling(window=20, min_periods=20).std()
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_mid
+    
+    # Bollinger Band width percentile (252-day lookback for 1-year)
+    bb_width_percentile = bb_width.rolling(window=252, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50,
+        raw=False
+    ).values
+    
+    # Pre-compute volume moving average (20-day)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(bb_width_percentile[i]) or np.isnan(vol_ma[i]) or np.isnan(weekly_ema50_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        # Calculate Camarilla levels from previous day
-        # Need high, low, close from previous completed day
-        prev_day_idx = i // 96  # 96 = 24*4 (4h bars per day)
-        if prev_day_idx < 1:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Get previous day's OHLC from 1d data
-        if prev_day_idx >= len(df_1d):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        ph = df_1d['high'].iloc[prev_day_idx - 1]
-        pl = df_1d['low'].iloc[prev_day_idx - 1]
-        pc = df_1d['close'].iloc[prev_day_idx - 1]
-        
-        # Camarilla levels
-        range_ = ph - pl
-        r1 = pc + (range_ * 1.1 / 12)
-        s1 = pc - (range_ * 1.1 / 12)
         
         # Current price and volume
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Bollinger squeeze: width below 20th percentile (low volatility)
+        is_squeeze = bb_width_percentile[i] < 20.0
+        
+        # Volume confirmation: current volume > 1.5x 20-day average
         volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Trend filter: price vs 1d EMA34
-        is_uptrend = price > ema_34_aligned[i]
-        is_downtrend = price < ema_34_aligned[i]
+        # Weekly trend direction
+        weekly_trend_up = price > weekly_ema50_aligned[i]
+        weekly_trend_down = price < weekly_ema50_aligned[i]
         
         if position == 0:
-            if volume_confirm:
-                if is_uptrend and price > r1:
+            if is_squeeze and volume_confirm:
+                # Breakout in direction of weekly trend
+                if price > bb_upper.iloc[i] and weekly_trend_up:
                     signals[i] = 0.25
                     position = 1
-                elif is_downtrend and price < s1:
-                    signals[i] = -0.25
-                    position = -1
-                # Counter-trend entries in strong momentum
-                elif not is_uptrend and price > r1:
-                    signals[i] = 0.25
-                    position = 1
-                elif not is_downtrend and price < s1:
+                elif price < bb_lower.iloc[i] and weekly_trend_down:
                     signals[i] = -0.25
                     position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: mean reversion to middle band or volatility expansion
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on reversal below S1 or if trend changes against position
-                if price < s1 or (is_downtrend and price < ema_34_aligned[i]):
+                # Exit when price returns to middle band or volatility expands (squeeze ends)
+                if price <= bb_mid.iloc[i] or bb_width_percentile[i] >= 50.0:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on reversal above R1 or if trend changes against position
-                if price > r1 or (is_uptrend and price > ema_34_aligned[i]):
+                # Exit when price returns to middle band or volatility expands
+                if price >= bb_mid.iloc[i] or bb_width_percentile[i] >= 50.0:
                     exit_signal = True
             
             if exit_signal:
@@ -113,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_BB_Squeeze_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
