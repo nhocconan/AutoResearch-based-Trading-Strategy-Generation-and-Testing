@@ -3,45 +3,44 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Candlestick Range Breakout with 1d EMA Trend Filter and Volume Confirmation.
-# Uses 1d EMA(34) to determine trend direction, enters long when price breaks above 4h range + volume,
-# short when breaks below 4h range + volume in downtrend. Avoids whipsaws by requiring trend alignment.
-# Target: 20-35 trades/year by requiring strong breakout with volume and trend confirmation.
+# Hypothesis: 4h Daily Williams %R with 4h Volume Spike and Trend Filter
+# Uses daily Williams %R (overbought/oversold) for mean-reversion signals
+# Only trades when 4h EMA50 confirms trend direction to avoid counter-trend whipsaws
+# Requires volume > 1.5x 20-period average for confirmation
+# Target: 20-40 trades/year by combining oversold/overbought signals with trend alignment
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Calculate 4h range (high-low of current bar)
-    range_high = prices['high'].values
-    range_low = prices['low'].values
+    # Get daily data for Williams %R
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate Williams %R (14-period) on daily data
+    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max()
+    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low)
+    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(-50).values
+    
+    # Align Williams %R to 4h timeframe (no extra delay needed for Williams %R)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate 4h EMA50 for trend filter
+    close_series = pd.Series(prices['close'])
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d EMA(34) for trend filter - calculated once, aligned to 4h
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    
-    # Calculate EMA(34) on 1d close
-    close_1d = df_1d['close'].values
-    ema_1d = np.zeros_like(close_1d)
-    ema_1d[0] = close_1d[0]
-    alpha = 2 / (34 + 1)
-    for i in range(1, len(close_1d)):
-        ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
-    
-    # Align 1d EMA to 4h timeframe (waits for 1d bar to close)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after EMA warmup
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(vol_ma[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(williams_r_aligned[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,19 +53,19 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Trend filter: use 1d EMA(34)
-        trend_up = ema_1d_aligned[i] > ema_1d_aligned[i-1]  # EMA rising
-        trend_down = ema_1d_aligned[i] < ema_1d_aligned[i-1]  # EMA falling
+        # Trend filter: price above/below EMA50
+        uptrend = price > ema_50[i]
+        downtrend = price < ema_50[i]
         
         if position == 0:
             if volume_confirm:
-                # Long: price breaks above 4h range in uptrend
-                if price > range_high[i] and trend_up:
-                    signals[i] = 0.30
+                # Long when Williams %R oversold (< -80) and in uptrend
+                if williams_r_aligned[i] < -80 and uptrend:
+                    signals[i] = 0.25
                     position = 1
-                # Short: price breaks below 4h range in downtrend
-                elif price < range_low[i] and trend_down:
-                    signals[i] = -0.30
+                # Short when Williams %R overbought (> -20) and in downtrend
+                elif williams_r_aligned[i] > -20 and downtrend:
+                    signals[i] = -0.25
                     position = -1
         
         elif position != 0:
@@ -74,13 +73,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on trend reversal or range breakdown
-                if not trend_up or price < range_low[i]:
+                # Exit long when Williams %R reaches overbought (> -20) or trend changes
+                if williams_r_aligned[i] > -20 or not uptrend:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on trend reversal or range breakout
-                if not trend_down or price > range_high[i]:
+                # Exit short when Williams %R reaches oversold (< -80) or trend changes
+                if williams_r_aligned[i] < -80 or not downtrend:
                     exit_signal = True
             
             if exit_signal:
@@ -88,10 +87,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_RangeBreakout_1dEMA34Trend_Volume"
+name = "4h_WilliamsR_EMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
