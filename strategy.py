@@ -8,94 +8,103 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data for trend and volatility filters
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA10 for trend filter
-    close_1w = df_1w['close'].values
-    ema10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Daily ATR for volatility filtering
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly trend to daily
-    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily data
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align daily indicators to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # 4h timeframe indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily ATR(14) for volatility and position sizing
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h ATR for entry/exit
+    tr_4h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_4h[0] = high[0] - low[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
-    # Daily Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h EMA20 for trend confirmation
+    ema20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Daily volume MA(20) for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(ema10_1w_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(atr_14_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(atr_4h[i]) or 
+            np.isnan(ema20_4h[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema10_weekly = ema10_1w_aligned[i]
-        atr_val = atr[i]
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
-        vol_ma_val = vol_ma[i]
+        atr_daily = atr_14_aligned[i]
+        ema50_daily = ema50_1d_aligned[i]
+        atr_4h_val = atr_4h[i]
+        ema20_4h_val = ema20_4h[i]
+        vol_ma = vol_ma_20[i]
         vol = volume[i]
         price = close[i]
         
-        # Trend filter: weekly EMA10 slope
-        if i >= 51:
-            ema10_prev = ema10_1w_aligned[i-1]
-            weekly_uptrend = ema10_weekly > ema10_prev
-            weekly_downtrend = ema10_weekly < ema10_prev
-        else:
-            weekly_uptrend = weekly_downtrend = False
+        # Volatility filter: daily ATR > 60% of 20-period average (avoid low volatility chop)
+        atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
+        vol_filter = atr_daily > 0.6 * atr_ma_20
         
-        # Volume filter: above average
-        vol_filter = vol > 1.5 * vol_ma_val
+        # Trend filter: price above/below daily EMA50
+        uptrend = price > ema50_daily
+        downtrend = price < ema50_daily
+        
+        # Entry conditions with volume confirmation
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: price breaks above upper Donchian + weekly uptrend + volume
-            if price > upper_channel and weekly_uptrend and vol_filter:
+            # Long: price breaks above 4h EMA20 + daily uptrend + volatility + volume spike
+            if price > ema20_4h_val and uptrend and vol_filter and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian + weekly downtrend + volume
-            elif price < lower_channel and weekly_downtrend and vol_filter:
+            # Short: price breaks below 4h EMA20 + daily downtrend + volatility + volume spike
+            elif price < ema20_4h_val and downtrend and vol_filter and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back through Donchian channel or volume drops
+            # Exit: price crosses back through 4h EMA20 or volatility drops
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on breakdown below lower channel
-                if price < lower_channel:
+                # Exit on breakdown below EMA20 or volatility collapse
+                if price < ema20_4h_val or not vol_filter:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on breakout above upper channel
-                if price > upper_channel:
+                # Exit on breakout above EMA20 or volatility collapse
+                if price > ema20_4h_val or not vol_filter:
                     exit_signal = True
             
             if exit_signal:
@@ -107,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_WeeklyEMA10_Trend_Volume"
-timeframe = "1d"
+name = "4h_VolTrend_EMA20_DailyEMA50_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
