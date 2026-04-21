@@ -1,136 +1,88 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend
-Hypothesis: Donchian(20) breakout on 4h timeframe with volume confirmation and trend filter (1d EMA200).
-In uptrend (price > 1d EMA200), buy on breakout above Donchian high with volume > 1.5x 20-period average.
-In downtrend (price < 1d EMA200), sell on breakout below Donchian low with volume > 1.5x 20-period average.
-Exit when price crosses back through Donchian midpoint or trend reverses.
-Designed for 4h timeframe to target 20-50 trades/year with high-conviction entries.
-Works in bull markets by capturing continuation and in bear markets by capturing breakdowns.
+4h_Donchian20_Volume_HMA_Trend
+Hypothesis: Use 4h Donchian(20) breakout with HMA(21) trend filter and volume confirmation.
+Long when price breaks above upper band with rising HMA and volume spike; short when breaks below lower band with falling HMA and volume spike.
+Works in bull markets by catching breakouts and in bear markets by catching breakdowns. Volume filter reduces false breakouts.
+Target: 20-40 trades/year on 4h timeframe for low fee drag and high signal quality.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    ema = np.zeros_like(close)
-    if len(close) >= period:
-        ema[period-1] = np.mean(close[:period])
-        multiplier = 2 / (period + 1)
-        for i in range(period, len(close)):
-            ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
-    return ema
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr = np.zeros_like(tr)
-    if len(tr) >= period:
-        atr[period-1] = np.mean(tr[:period])
-    
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    return atr
+from mats import HMA  # HMA is available via mats module
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for trend filter
+    # Load daily data for HMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Calculate HMA(21) on daily close
+    hma_21_1d = HMA(df_1d['close'].values, 21)
+    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
     
-    # Daily EMA200 for trend filter
-    ema200_1d = calculate_ema(close_1d, 200)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate Donchian bands (20-period) on 4h data
+    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
+    
+    # Volume spike: current volume > 1.8 * 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    volume_spike = prices['volume'].values > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if indicators not ready
-        if np.isnan(ema200_1d_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: 08-20 UTC only (avoid low-volume Asian session)
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
+        if (np.isnan(hma_21_1d_aligned[i]) or 
+            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        high = prices['high'].iloc[i]
-        low = prices['low'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Donchian(20) channels
-        if i >= 20:
-            donch_high = prices['high'].iloc[i-20:i].max()
-            donch_low = prices['low'].iloc[i-20:i].min()
-            donch_mid = (donch_high + donch_low) / 2
-        else:
-            donch_high = prices['high'].iloc[:i+1].max()
-            donch_low = prices['low'].iloc[:i+1].min()
-            donch_mid = (donch_high + donch_low) / 2
-        
-        # Volume filter: current volume > 1.5 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
-        else:
-            volume_ok = False
-        
         if position == 0:
-            # Uptrend: price > daily EMA200
-            if price > ema200_1d_aligned[i]:
-                # Long: price breaks above Donchian high with volume confirmation
-                if (price > donch_high and volume_ok):
-                    signals[i] = 0.30
-                    position = 1
-            # Downtrend: price < daily EMA200
-            elif price < ema200_1d_aligned[i]:
-                # Short: price breaks below Donchian low with volume confirmation
-                if (price < donch_low and volume_ok):
-                    signals[i] = -0.30
-                    position = -1
+            # Long: price breaks above upper Donchian band with rising HMA and volume spike
+            if (price > high_20[i] and 
+                hma_21_1d_aligned[i] > hma_21_1d_aligned[i-1] and 
+                volume_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below lower Donchian band with falling HMA and volume spike
+            elif (price < low_20[i] and 
+                  hma_21_1d_aligned[i] < hma_21_1d_aligned[i-1] and 
+                  volume_spike[i]):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Long exit: price crosses below Donchian midpoint or trend reverses
-            if price < donch_mid or price < ema200_1d_aligned[i]:
+            # Long exit: price crosses below HMA or breaks below lower Donchian band
+            if (price < hma_21_1d_aligned[i] or 
+                price < low_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above Donchian midpoint or trend reverses
-            if price > donch_mid or price > ema200_1d_aligned[i]:
+            # Short exit: price crosses above HMA or breaks above upper Donchian band
+            if (price > hma_21_1d_aligned[i] or 
+                price > high_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_Trend"
+name = "4h_Donchian20_Volume_HMA_Trend"
 timeframe = "4h"
 leverage = 1.0
