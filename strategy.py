@@ -1,8 +1,8 @@
-# 12h_Camarilla_Pivot_R1_S1_Breakout_With_Volume
-# Hypothesis: Break above Camarilla R1 or below S1 using 1D levels, with volume confirmation and 1D trend filter.
-# Exit at opposite pivot level. Works in bull markets by buying breakouts above R1 in uptrends and in bear markets by selling breakdowns below S1 in downtrends.
-# Volume confirmation ensures institutional participation. Target: 12-37 trades/year on 12h timeframe.
-
+#!/usr/bin/env python3
+"""
+1h_Camarilla_Pivot_R1_S1_Breakout_With_Volume_4hTrend
+Hypothesis: On 1h timeframe, buy breakouts above previous day's R1 when 4h trend is up and volume > 1.5x average; sell breakdowns below S1 when 4h trend is down and volume > 1.5x average. Use 4h trend for direction, 1h for entry timing. Target 15-30 trades/year per symbol.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,7 +17,12 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Camarilla pivot levels from previous day ===
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # === Daily Camarilla pivot levels ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -30,13 +35,14 @@ def generate_signals(prices):
     r1 = pp + (range_hl * 1.1 / 12)
     s1 = pp - (range_hl * 1.1 / 12)
     
-    # Align to 12h timeframe (previous day's levels available at open)
+    # Align to 1h timeframe (previous day's levels available at open)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === Daily EMA34 for trend filter ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 4h EMA34 for trend filter ===
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
     # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -49,7 +55,7 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_34_4h_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,21 +65,21 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         r1_level = r1_aligned[i]
         s1_level = s1_aligned[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_34_4h_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend + volume
+            # Long: price breaks above R1 + 4h uptrend + volume
             if (price_close > r1_level and
                 price_close > ema_trend and
                 vol_ratio_val > 1.5):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 + downtrend + volume
+            # Short: price breaks below S1 + 4h downtrend + volume
             elif (price_close < s1_level and
                   price_close < ema_trend and
                   vol_ratio_val > 1.5):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
@@ -86,10 +92,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12h_Camarilla_Pivot_R1_S1_Breakout_With_Volume"
-timeframe = "12h"
+name = "1h_Camarilla_Pivot_R1_S1_Breakout_With_Volume_4hTrend"
+timeframe = "1h"
 leverage = 1.0
