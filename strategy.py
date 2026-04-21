@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h strategy using daily pivot points (R1/S1) with 1d EMA34 trend filter and volume confirmation.
+12h strategy using daily pivot points (R1/S1) with 1d EMA34 trend filter and volume confirmation.
 In uptrend (price > EMA34), buy breakouts above daily R1; in downtrend (price < EMA34), sell breakdowns below daily S1.
 Daily R1/S1 provide institutional support/resistance with higher success rate than R2/S2.
 1d EMA34 filters for stronger trend alignment; volume confirms breakout strength.
-Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
+Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -33,7 +33,7 @@ def generate_signals(prices):
     # S1 = Pivot - (High - Low)
     s1_1d = pivot_1d - (high_1d - low_1d)
     
-    # Align daily R1/S1 to 6h timeframe (wait for daily bar to close)
+    # Align daily R1/S1 to 12h timeframe (wait for daily bar to close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -41,7 +41,7 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # 6h volume confirmation (volume spike > 1.5x 20-period average)
+    # 12h volume confirmation (volume spike > 1.5x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
@@ -90,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyPivot_R1S1_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_DailyPivot_R1S1_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
