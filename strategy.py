@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_ChopRegime_V1
-Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and choppiness regime filter work on 12h timeframe for BTC and ETH in both bull and bear markets. Uses 1d timeframe for Camarilla pivot calculation and 14-period choppiness index to avoid whipsaws in ranging markets. Target: 12-37 trades/year per symbol (50-150 over 4 years).
+4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1
+Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 4h timeframe for BTC and ETH in both bull and bear markets. The strategy uses 1d timeframe for Camarilla pivot calculation and 4h EMA50 for trend filter. Target: 19-50 trades/year per symbol (75-200 over 4 years).
 """
 
 import numpy as np
@@ -35,37 +35,36 @@ def generate_signals(prices):
     r1 = pivot + (prev_high - prev_low) * 1.1 / 12
     s1 = pivot - (prev_high - prev_low) * 1.1 / 12
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: 20-period average (approx 10 days on 12h)
+    # 4h EMA50 for trend filter
+    close_4h = prices['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: 20-period average (approx 3.3 days on 4h)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index (14-period)
+    # ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,39 +76,40 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume > 1.5 * vol_ma[i]
         
-        # Choppiness regime: only trade when market is trending (CHOP < 38.2)
-        chop_ok = chop[i] < 38.2
+        # 4h trend filter
+        uptrend = close[i] > ema_50_4h[i]
+        downtrend = close[i] < ema_50_4h[i]
         
         if position == 0:
-            # Long: price breaks above R1 in trending market with volume
-            if volume_ok and chop_ok:
+            # Long: price breaks above R1 in uptrend with volume
+            if uptrend and volume_ok:
                 if price > r1_aligned[i]:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
                     position = 1
-            # Short: price breaks below S1 in trending market with volume
-            elif volume_ok and chop_ok:
+            # Short: price breaks below S1 in downtrend with volume
+            elif downtrend and volume_ok:
                 if price < s1_aligned[i]:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: price reaches S1 or reverse signal
-            if price <= s1_aligned[i]:
+            # Exit: price reaches S1 or stoploss
+            if price <= s1_aligned[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price reaches R1 or reverse signal
-            if price >= r1_aligned[i]:
+            # Exit: price reaches R1 or stoploss
+            if price >= r1_aligned[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_ChopRegime_V1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1"
+timeframe = "4h"
 leverage = 1.0
