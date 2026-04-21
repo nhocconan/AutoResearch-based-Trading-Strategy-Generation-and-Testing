@@ -1,15 +1,13 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# Long when Bull Power > 0 and Bear Power < 0 (bullish momentum) in uptrend (1d EMA34 rising).
-# Short when Bear Power < 0 and Bull Power > 0 (bearish momentum) in downtrend (1d EMA34 falling).
-# Volume > 1.3x 20-period average confirms momentum strength.
-# Target: 12-30 trades/year by requiring strong momentum + trend + volume alignment.
-# Works in bull/bear: EMA34 filter ensures trading with the trend, avoiding counter-trend whipsaws.
+# Hypothesis: 12h Williams %R with 1d EMA trend filter and volume confirmation.
+# Long when Williams %R crosses above -80 (oversold) in uptrend (price > 1d EMA34), short when crosses below -20 (overbought) in downtrend.
+# Volume > 1.3x 20-period average confirms momentum. EMA filter avoids counter-trend trades.
+# Target: 20-40 trades/year by requiring oversold/overbought extremes + trend alignment.
+# Works in bull/bear: EMA filter ensures trades with trend, Williams %R captures mean reversion within trend.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,26 +17,19 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA34 for trend direction
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False).values
-    ema_34_prev = np.roll(ema_34, 1)
-    ema_34_prev[0] = ema_34[0]
-    ema_34_rising = ema_34 > ema_34_prev
-    ema_34_falling = ema_34 < ema_34_prev
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Align EMA34 trend to 6h timeframe
-    ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
-    ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
-    
-    # Calculate Elder Ray on 6h data (EMA13 for power calculation)
+    # Calculate Williams %R(14) on 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False).values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -46,10 +37,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):
+    for i in range(34, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,14 +52,18 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.3x 20-period average
         volume_confirm = volume > 1.3 * vol_ma[i]
         
+        # Trend filter: price above/below 1d EMA34
+        uptrend = price > ema_34_aligned[i]
+        downtrend = price < ema_34_aligned[i]
+        
         if position == 0:
             if volume_confirm:
-                # Long: Bull Power > 0 and Bear Power < 0 (bullish momentum) in uptrend
-                if bull_power[i] > 0 and bear_power[i] < 0 and ema_34_rising_aligned[i]:
+                # Long: Williams %R crosses above -80 from oversold in uptrend
+                if williams_r[i] > -80 and williams_r[i-1] <= -80 and uptrend:
                     signals[i] = 0.25
                     position = 1
-                # Short: Bear Power < 0 and Bull Power > 0 (bearish momentum) in downtrend
-                elif bear_power[i] < 0 and bull_power[i] > 0 and ema_34_falling_aligned[i]:
+                # Short: Williams %R crosses below -20 from overbought in downtrend
+                elif williams_r[i] < -20 and williams_r[i-1] >= -20 and downtrend:
                     signals[i] = -0.25
                     position = -1
         
@@ -78,13 +72,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if momentum fades (Bear Power >= 0) or trend turns down
-                if bear_power[i] >= 0 or ema_34_falling_aligned[i]:
+                # Exit if Williams %R crosses below -50 (momentum fading) or trend reversal
+                if williams_r[i] < -50 or (price < ema_34_aligned[i] and williams_r[i] < -30):
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if momentum fades (Bull Power <= 0) or trend turns up
-                if bull_power[i] <= 0 or ema_34_rising_aligned[i]:
+                # Exit if Williams %R crosses above -50 (momentum fading) or trend reversal
+                if williams_r[i] > -50 or (price > ema_34_aligned[i] and williams_r[i] > -70):
                     exit_signal = True
             
             if exit_signal:
@@ -96,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Power_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR14_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
