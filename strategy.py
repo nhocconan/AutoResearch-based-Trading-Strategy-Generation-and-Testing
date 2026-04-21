@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_HTFVolumeRegime_Align_v1
-Hypothesis: Use 1d volume regime (high/low volume days) to filter Camarilla breakouts on 4h. 
-In high-volume 1d regimes, breakouts are more likely to sustain; in low-volume regimes, 
-fade or avoid. Combines with 4h EMA20 trend filter and discrete sizing (0.25) to reduce 
-trade frequency and fee drag. Target: 60-120 trades over 4 years (15-30/year). 
-Works in bull/bear via volume regime adaptation.
+1d_KAMA_Regime_Adaptive_Breakout_v1
+Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) to detect trend regime.
+In trending regimes (KAMA slope > 0), trade Donchian(20) breakouts with volume confirmation.
+In ranging regimes (KAMA slope ≈ 0), fade extreme Donchian touches with RSI filter.
+Uses 1w EMA50 as HTF trend filter to avoid counter-trend trades in strong weekly trends.
+Discrete sizing (0.25) and ATR-based stoploss to control risk and minimize fee drag.
+Designed to work in both bull and bear markets via regime adaptation.
+Target: 20-60 trades over 4 years (5-15/year).
 """
 
 import numpy as np
@@ -17,51 +19,70 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for volume regime and EMA trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load HTF data ONCE before loop (1w for trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 1d volume regime: classify as high/low volume based on 20-day median ===
-    vol_1d = df_1d['volume'].values
-    vol_median_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).median().values
-    vol_median_20_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
-    high_vol_regime = vol_1d > vol_median_20  # raw 1d signal
-    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime.astype(float))
+    # === 1w EMA50 for HTF trend regime ===
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === 1d EMA34 for HTF trend regime ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # === 4h close, EMA20 for trend alignment ===
+    # === Daily close, high, low, volume ===
     close = prices['close'].values
-    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
-    
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
+    
+    # === KAMA ( Kaufman Adaptive Moving Average ) on daily close ===
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[i] - close[i-10]|
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # sum |close[i] - close[i-1]| over 10 periods
+    # Avoid division by zero
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        if not np.isnan(sc[i-10]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i-10] * (close[i] - kama[i-1])
+        else:
+            kama[i] = np.nan
+    
+    # === KAMA slope (5-period difference) for regime detection ===
+    kama_slope = np.diff(kama, n=5)  # kama[i] - kama[i-5]
+    kama_slope = np.concatenate([np.full(5, np.nan), kama_slope])
+    
+    # === Daily ATR (14-period) for stoploss ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = np.nan  # first bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # === Daily Donchian(20) channels ===
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === Daily volume confirmation (volume > 1.5x 20-period average) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma_20)
+    volume_confirmed = volume > (1.5 * vol_ma_20)
     
-    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+    # === Daily RSI(14) for mean reversion in ranging markets ===
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,9 +91,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_20_4h[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i]) or 
-            np.isnan(high_vol_regime_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama_slope[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(volume_confirmed[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,28 +101,28 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_34_1d_val = ema_34_1d_aligned[i]
-        ema_20_4h_val = ema_20_4h[i]
-        r1_val = r1[i]
-        s1_val = s1[i]
+        kama_val = kama[i]
+        kama_slope_val = kama_slope[i]
+        ema_50_1w_val = ema_50_1w_aligned[i]
+        atr_val = atr[i]
+        highest_20_val = highest_20[i]
+        lowest_20_val = lowest_20[i]
         vol_conf = volume_confirmed[i]
-        high_vol = high_vol_regime_aligned[i] > 0.5  # boolean from aligned float
+        rsi_val = rsi[i]
         
-        # Trend alignment: price above both indicators for long, below both for short
-        uptrend = price > ema_34_1d_val and price > ema_20_4h_val
-        downtrend = price < ema_34_1d_val and price < ema_20_4h_val
+        # Regime detection: trending if |KAMA slope| > 0.001 * price
+        trending_regime = np.abs(kama_slope_val) > 0.001 * price
         
         if position == 0:
-            # In high volume regimes: trade breakouts
-            # In low volume regimes: require stronger alignment (both EMAs) and avoid fading
-            if high_vol:
-                # High volume: breakout strategy
-                long_condition = (price > r1_val) and uptrend and vol_conf
-                short_condition = (price < s1_val) and downtrend and vol_conf
+            if trending_regime:
+                # Trending regime: trade Donchian breakouts with HTF trend filter
+                # Only long if price above weekly EMA50, only short if below
+                long_condition = (price > highest_20_val) and (price > ema_50_1w_val) and vol_conf
+                short_condition = (price < lowest_20_val) and (price < ema_50_1w_val) and vol_conf
             else:
-                # Low volume: only trade with strong trend alignment, avoid false breakouts
-                long_condition = (price > r1_val) and uptrend and vol_conf and (price > ema_34_1d_val * 1.005)
-                short_condition = (price < s1_val) and downtrend and vol_conf and (price < ema_34_1d_val * 0.995)
+                # Ranging regime: fade extreme Donchian touches with RSI filter
+                long_condition = (price <= lowest_20_val) and (rsi_val < 30) and vol_conf
+                short_condition = (price >= highest_20_val) and (rsi_val > 70) and vol_conf
             
             if long_condition:
                 signals[i] = 0.25
@@ -117,31 +138,31 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 2 days to reduce churn
+            if bars_since_entry < 2:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                if price < entry_price - 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks below S1 (failed breakout) or trend deteriorates
-                elif price < s1_val or price < ema_20_4h_val:
+                # Exit if price crosses below KAMA (trend change) or weekly trend deteriorates
+                elif price < kama_val or price < ema_50_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                if price > entry_price + 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks above R1 (failed breakdown) or trend deteriorates
-                elif price > r1_val or price > ema_20_4h_val:
+                # Exit if price crosses above KAMA (trend change) or weekly trend deteriorates
+                elif price > kama_val or price > ema_50_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -150,6 +171,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_HTFVolumeRegime_Align_v1"
-timeframe = "4h"
+name = "1d_KAMA_Regime_Adaptive_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
