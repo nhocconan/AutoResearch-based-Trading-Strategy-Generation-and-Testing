@@ -1,92 +1,118 @@
 #!/usr/bin/env python3
 """
-1h_MACD_Trend_With_1d_TrendFilter_V1
-Hypothesis: MACD histogram crossing zero with volume confirmation on 1h,
-filtered by 1d EMA trend (EMA34), provides reliable entries in both bull and bear markets.
-1d trend filter reduces whipsaws; volume ensures conviction. Target: 15-35 trades/year per symbol.
+12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter
+Hypothesis: On 12h timeframe, breakouts above daily R1 or below daily S1 with volume confirmation and aligned 1d trend (EMA50) yield high-probability trades. Uses tight entry criteria to limit trades (12-37/year) and avoid fee drift. Works in bull/bear markets by only taking breakouts in direction of daily trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close"""
+    range_val = high - low
+    if range_val == 0:
+        return close, close, close, close
+    r1 = close + range_val * 1.1 / 12
+    s1 = close - range_val * 1.1 / 12
+    return r1, s1, close  # pivot not used directly
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 34:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for trend filter
+    # Load daily data once for trend and pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate MACD on 1h data
-    close = prices['close'].values
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
-    
-    # Volume average for confirmation (20-period)
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
-        # Skip if 1d trend not ready
-        if np.isnan(ema_34_1d_aligned[i]):
+    for i in range(50, n):
+        # Skip if EMA not ready
+        if np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # MACD zero cross conditions
-        macd_cross_up = macd_hist[i-1] <= 0 and macd_hist[i] > 0
-        macd_cross_down = macd_hist[i-1] >= 0 and macd_hist[i] < 0
+        # Calculate daily Camarilla levels from previous day's OHLC
+        # Need to find index of previous completed 1d bar
+        # Since we're on 12h timeframe, we use the prior day's data directly
+        prev_day_idx = len(df_1d) - 1  # This is approximate; better to use actual alignment
+        # Instead, we calculate pivots using the prior completed day's data
+        # We'll use a rolling window approach on the daily data
+        
+        # Get current 12h bar's timestamp to find corresponding prior day
+        # Simpler: use the daily data up to the current point
+        # We need the prior completed day's OHLC
+        # Since we aligned the EMA, we can use the same logic for pivots
+        # Extract daily OHLC series
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d_arr = df_1d['close'].values
+        
+        # Align these to 12h timeframe
+        high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+        low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_arr)
+        
+        # Use prior bar's aligned daily values (previous completed day)
+        prev_high = high_1d_aligned[i-1]
+        prev_low = low_1d_aligned[i-1]
+        prev_close = close_1d_aligned[i-1]
+        
+        r1, s1, _ = calculate_camarilla(prev_high, prev_low, prev_close)
+        
+        price = prices['close'].iloc[i]
+        volume = prices['volume'].iloc[i]
         
         # Volume confirmation: current volume > 1.5 * 20-period average
-        volume_ok = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+        if i >= 20:
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 1.5 * vol_ma
+        else:
+            volume_ok = False
         
-        # Trend filter: EMA34 direction
-        trend_long = close[i] > ema_34_1d_aligned[i]
-        trend_short = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price > EMA50 for long, price < EMA50 for short
+        trend_long = price > ema_50_1d_aligned[i]
+        trend_short = price < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: MACD crosses up + volume + uptrend
-            if macd_cross_up and volume_ok and trend_long:
-                signals[i] = 0.20
+            # Long: price breaks above R1 + volume confirmation + uptrend
+            if price > r1 and volume_ok and trend_long:
+                signals[i] = 0.25
                 position = 1
-            # Short: MACD crosses down + volume + downtrend
-            elif macd_cross_down and volume_ok and trend_short:
-                signals[i] = -0.20
+            # Short: price breaks below S1 + volume confirmation + downtrend
+            elif price < s1 and volume_ok and trend_short:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: MACD crosses down or trend turns bearish
-            if macd_cross_down or not trend_long:
+            # Long exit: price breaks below S1 or trend turns bearish
+            if price < s1 or not trend_long:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: MACD crosses up or trend turns bullish
-            if macd_cross_up or not trend_short:
+            # Short exit: price breaks above R1 or trend turns bullish
+            if price > r1 or not trend_short:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_MACD_Trend_With_1d_TrendFilter_V1"
-timeframe = "1h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
