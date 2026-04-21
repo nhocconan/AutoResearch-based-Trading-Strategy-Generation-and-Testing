@@ -1,11 +1,3 @@
-# 1. Hypothesis: This strategy aims to capture reversals at key daily pivot points (R1/S1) during ranging markets and breakouts at R2/S2 during trending markets, using volume confirmation and a 1-day EMA trend filter. By combining these elements, it seeks to work in both bull and bear markets by adapting to the prevailing trend while avoiding false signals through volume and session filters. The focus on daily pivots provides a robust, widely-watched reference point, and the use of 1d EMA for trend filtering helps avoid counter-trend trades during strong moves. The strategy is designed for the 4h timeframe with a target of 20-50 trades per year to minimize fee drag.
-
-# 2. Implementation: The strategy uses daily pivot points (calculated from prior day's OHLC) as key levels. It goes long when price breaks above R2 with volume confirmation in an uptrend (price > 1d EMA50), and short when price breaks below S2 with volume confirmation in a downtrend (price < 1d EMA50). In ranging markets (price near EMA50), it fades at R1/S1 with rejection candlesticks (close < open for sell at R1, close > open for buy at S1) on volume confirmation. Exits occur when price returns to the S1/R1 level or breaks the opposite pivot level. All higher timeframe data is loaded once using the mtf_data helpers to prevent look-ahead and excessive I/O.
-
-# 3. Risk Management: Position sizing is kept conservative (0.20-0.25) to limit drawdown. Exits are based on price closing below/above key pivot levels, ensuring stop-loss logic respects the end-of-bar constraint. The strategy avoids intraday stop assumptions and only acts on confirmed bar closes.
-
-# 4. Edge: The combination of pivot points (a classical support/resistance tool), volume confirmation (to ensure participation), and trend filtering (to align with the dominant daily trend) creates a high-probability setup. This approach has shown resilience in backtests across market regimes, particularly when avoiding overtrading.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,10 +5,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for pivot levels and trend
+    # Load 1d data for pivot levels, trend, and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -25,6 +17,7 @@ def generate_signals(prices):
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
+    vol_d = df_1d['volume'].values
     
     pivot_d = (high_d + low_d + close_d) / 3
     r1_d = 2 * pivot_d - low_d
@@ -32,7 +25,7 @@ def generate_signals(prices):
     r2_d = pivot_d + (high_d - low_d)
     s2_d = pivot_d - (high_d - low_d)
     
-    # Align daily pivots to 4h (wait for daily close)
+    # Align daily data to 4h (wait for daily close)
     pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
     r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
     s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
@@ -43,9 +36,8 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation using 1d volume (more stable than 4h)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation using 1d volume
+    vol_ma_20_1d = pd.Series(vol_d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     # Pre-compute session hours (08-20 UTC)
@@ -54,7 +46,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(pivot_d_aligned[i]) or np.isnan(r1_d_aligned[i]) or np.isnan(s1_d_aligned[i]) or
             np.isnan(r2_d_aligned[i]) or np.isnan(s2_d_aligned[i]) or
@@ -77,7 +69,7 @@ def generate_signals(prices):
         # Current values
         price_close = prices['close'].iloc[i]
         price_open = prices['open'].iloc[i]
-        vol_current = align_htf_to_ltf(prices, df_1d, vol_1d)[i]  # 1d volume aligned to 4h
+        vol_current = align_htf_to_ltf(prices, df_1d, vol_d)[i]  # 1d volume aligned to 4h
         
         # Daily pivot levels
         r1_val = r1_d_aligned[i]
