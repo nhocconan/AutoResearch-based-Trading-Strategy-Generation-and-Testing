@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h strategy using 12h Donchian channel breakout with 12h EMA50 trend filter and volume confirmation.
-In uptrend (price > 12h EMA50), buy breakouts above 12h Donchian upper channel; in downtrend (price < 12h EMA50), sell breakdowns below 12h Donchian lower channel.
-Volume must exceed 2.0x 20-period average to confirm breakout strength. Exit on trend reversal or 1.5x ATR stop.
-Designed for 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while capturing major trend moves.
-Works in bull markets via upper channel breakouts and in bear markets via lower channel breakdowns with trend filter.
+Hypothesis: 4h strategy using 1d Bollinger Band squeeze and reversal with volume confirmation.
+In low volatility (BB width < 20th percentile), look for mean reversion at Bollinger Bands:
+- Buy when price touches lower band and closes back inside with volume spike
+- Sell when price touches upper band and closes back inside with volume spike
+Use 1d EMA200 as trend filter: only take long if price > EMA200, short if price < EMA200.
+Exit on opposite band touch or 2x ATR stop.
+Designed for 20-50 trades/year to minimize fee flood while capturing mean reversion in ranging markets.
+Works in bull markets via buying dips in uptrend and selling rallies in uptrend.
+Works in bear markets via selling rallies in downtrend and buying dips in downtrend.
 """
 
 import numpy as np
@@ -16,28 +20,38 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for Donchian and EMA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for Bollinger Bands and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    bb_width = bb_upper - bb_lower
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Bollinger Band width percentile (20-period lookback)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_pct = bb_width_series.rolling(window=20, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) == 20 else np.nan, raw=False
+    ).values
     
-    # Align 12h indicators to 6h timeframe (wait for 12h bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Calculate 1d EMA200 for trend filter
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume confirmation (volume spike > 2.0x 20-period average)
+    # Align 1d indicators to 4h timeframe (wait for 1d bar to close)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    bb_width_pct_aligned = align_htf_to_ltf(prices, df_1d, bb_width_pct)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    
+    # Volume confirmation (volume spike > 1.5x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
@@ -55,54 +69,60 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(bb_width_pct_aligned[i]) or np.isnan(ema_200_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        donchian_high_val = donchian_high_aligned[i]
-        donchian_low_val = donchian_low_aligned[i]
-        ema_trend = ema_50_aligned[i]
+        bb_upper_val = bb_upper_aligned[i]
+        bb_lower_val = bb_lower_aligned[i]
+        bb_width_pct_val = bb_width_pct_aligned[i]
+        ema_trend = ema_200_aligned[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Enter long: price breaks above 12h Donchian upper + uptrend + volume spike
-            if (price_close > donchian_high_val and 
-                price_close > ema_trend and 
-                vol_ratio_val > 2.0):
+            # Enter long: price touches lower BB, closes inside, low volatility, uptrend filter, volume spike
+            if (prices['low'].iloc[i] <= bb_lower_val and  # touched lower band
+                price_close > bb_lower_val and            # closed back inside
+                bb_width_pct_val < 0.2 and                # low volatility (BB width < 20th percentile)
+                price_close > ema_trend and               # uptrend filter
+                vol_ratio_val > 1.5):                     # volume spike
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 12h Donchian lower + downtrend + volume spike
-            elif (price_close < donchian_low_val and 
-                  price_close < ema_trend and 
-                  vol_ratio_val > 2.0):
+            # Enter short: price touches upper BB, closes inside, low volatility, downtrend filter, volume spike
+            elif (prices['high'].iloc[i] >= bb_upper_val and  # touched upper band
+                  price_close < bb_upper_val and             # closed back inside
+                  bb_width_pct_val < 0.2 and                 # low volatility (BB width < 20th percentile)
+                  price_close < ema_trend and                # downtrend filter
+                  vol_ratio_val > 1.5):                      # volume spike
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: trend reversal OR ATR-based stoploss
+            # Exit: opposite band touch OR ATR-based stoploss
             exit_signal = False
             
-            # Trend reversal exit
-            if position == 1 and price_close < ema_trend:
+            # Opposite band touch exit
+            if position == 1 and prices['high'].iloc[i] >= bb_upper_val:
                 exit_signal = True
-            elif position == -1 and price_close > ema_trend:
-                exit_signal = True
+            elif position == -1 and prices['low'].iloc[i] <= bb_lower_val:
+                exit_signal =True
             
-            # ATR-based stoploss (1.5x ATR from entry)
+            # ATR-based stoploss (2x ATR from approximate entry)
             if position == 1:
-                # Approximate entry price as the Donchian high breakout level
-                entry_approx = donchian_high_aligned[i-1] if i > 0 else donchian_high_aligned[i]
-                if price_close < entry_approx - 1.5 * atr_val:
+                # Approximate entry price as the lower BB touch level
+                entry_approx = bb_lower_aligned[i-1] if i > 0 else bb_lower_aligned[i]
+                if price_close < entry_approx - 2.0 * atr_val:
                     exit_signal = True
             elif position == -1:
-                # Approximate entry price as the Donchian low breakdown level
-                entry_approx = donchian_low_aligned[i-1] if i > 0 else donchian_low_aligned[i]
-                if price_close > entry_approx + 1.5 * atr_val:
+                # Approximate entry price as the upper BB touch level
+                entry_approx = bb_upper_aligned[i-1] if i > 0 else bb_upper_aligned[i]
+                if price_close > entry_approx + 2.0 * atr_val:
                     exit_signal = True
             
             if exit_signal:
@@ -114,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_12hEMA50_Volume_ATR"
-timeframe = "6h"
+name = "4h_BollingerSqueeze_Reversion_1dEMA200_Volume_ATR"
+timeframe = "4h"
 leverage = 1.0
