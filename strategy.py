@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_WeeklyPivotDirection_VolumeFilter_v1
-Hypothesis: 6h Donchian(20) breakout filtered by weekly Camarilla pivot direction and volume confirmation.
-In bullish weekly regime (price above weekly H3): long breakouts above 20-period high.
-In bearish weekly regime (price below weekly L3): short breakouts below 20-period low.
-Volume confirmation (1.5x average) filters false breakouts. Designed to work in both bull and bear markets.
-Timeframe: 6h, uses 1d HTF for weekly pivot calculation via resampling (using actual 1d candles).
+12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v1
+Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1w EMA34 trend and volume spike.
+In trending markets (price > EMA34_1w): breakout continuation (long above R1, short below S1).
+In ranging markets: no entries to avoid whipsaw. Uses volume confirmation (2.0x average) to filter false breakouts.
+ATR(14) stoploss (1.5x) and discrete position sizing (0.25) to limit fee drag and drawdown.
+Designed to work in both bull and bear markets by requiring strong trend alignment.
+Timeframe: 12h, uses 1w HTF for trend filter.
 Target: 50-150 total trades over 4 years = 12-37/year.
+Improvement: Added volume spike filter and tighter trend condition to reduce overtrading.
 """
 
 import numpy as np
@@ -15,93 +17,126 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for weekly pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Load HTF data ONCE before loop (1w for EMA34 trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # === Weekly Camarilla pivot from 1d data (using last 5 trading days) ===
-    # We approximate weekly using last 5x 1d bars (Mon-Fri)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w OHLC for EMA34 trend ===
+    df_1w_close = df_1w['close'].values
+    ema_34_1w = pd.Series(df_1w_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate rolling 5-day high/low/close for weekly approximation
-    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    # === 1w OHLC for Camarilla pivot calculation (based on previous 1w bar) ===
+    df_1w_open = df_1w['open'].values
+    df_1w_high = df_1w['high'].values
+    df_1w_low = df_1w['low'].values
+    df_1w_close = df_1w['close'].values
     
-    # Weekly Camarilla levels based on 5-day approximation
-    range_5d = high_5d - low_5d
-    h3_1d = close_5d + 1.1 * range_5d  # Weekly resistance 3
-    l3_1d = close_5d - 1.1 * range_5d  # Weekly support 3
+    # Calculate Camarilla levels for each 1w bar
+    range_1w = df_1w_high - df_1w_low
+    r1_1w = df_1w_close + 0.275 * range_1w
+    s1_1w = df_1w_close - 0.275 * range_1w
+    h3_1w = df_1w_close + 1.1 * range_1w
+    l3_1w = df_1w_close - 1.1 * range_1w
+    h4_1w = df_1w_close + 1.382 * range_1w
+    l4_1w = df_1w_close - 1.382 * range_1w
     
-    # Align weekly levels to 6h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    
-    # === 6h Donchian channels (20-period) ===
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # Align 1w Camarilla levels to 12h timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    h3_1w_aligned = align_htf_to_ltf(prices, df_1w, h3_1w)
+    l3_1w_aligned = align_htf_to_ltf(prices, df_1w, l3_1w)
+    h4_1w_aligned = align_htf_to_ltf(prices, df_1w, h4_1w)
+    l4_1w_aligned = align_htf_to_ltf(prices, df_1w, l4_1w)
     
     # === Volume confirmation (20-period average) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # === ATR (14-period) for stoploss ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) 
-            or np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) 
-            or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) 
+            or np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
         volume_now = volume[i]
-        dh = donchian_high[i]
-        dl = donchian_low[i]
-        weekly_h3 = h3_1d_aligned[i]
-        weekly_l3 = l3_1d_aligned[i]
+        r1 = r1_1w_aligned[i]
+        s1 = s1_1w_aligned[i]
+        h3 = h3_1w_aligned[i]
+        l3 = l3_1w_aligned[i]
+        h4 = h4_1w_aligned[i]
+        l4 = l4_1w_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
         vol_avg = vol_ma[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirmed = volume_now > 1.5 * vol_avg
-        
-        # Determine weekly regime
-        bullish_weekly = price > weekly_h3
-        bearish_weekly = price < weekly_l3
+        # Volume confirmation: current volume > 2.0x average (strict filter)
+        volume_confirmed = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: bullish weekly + price breaks above Donchian high + volume
-            if bullish_weekly and price > dh and volume_confirmed:
+            # Only enter in trending markets (price > EMA34_1w for long, < for short)
+            # Volume confirmation required to avoid false breakouts
+            long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
+            short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
+            
+            if long_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish weekly + price breaks below Donchian low + volume
-            elif bearish_weekly and price < dl and volume_confirmed:
+                entry_price = price
+            elif short_condition:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position == 1:
-            # Exit long: price breaks below Donchian low or weekly turns bearish
-            if price < dl or not bullish_weekly:
+            # Check stoploss (1.5x ATR)
+            if price < entry_price - 1.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trend reversal exit
+            elif price < ema_trend:
+                signals[i] = 0.0
+                position = 0
+            # Mean reversion exit at H3 (overbought)
+            elif price > h3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian high or weekly turns bullish
-            if price > dh or not bearish_weekly:
+            # Check stoploss (1.5x ATR)
+            if price > entry_price + 1.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Trend reversal exit
+            elif price > ema_trend:
+                signals[i] = 0.0
+                position = 0
+            # Mean reversion exit at L3 (oversold)
+            elif price < l3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_WeeklyPivotDirection_VolumeFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
