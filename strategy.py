@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_ChoppinessIndex_VolumeSpike_Breakout_V1
-Hypothesis: In low-chop regimes (trending markets), price breakouts from the prior 12h candle with volume spike capture strong moves in both bull and bear markets. Uses 1d timeframe for chop regime filter and ATR-based trailing stop. Target: 12-37 trades/year per symbol.
+4h_Donchian20_Breakout_VolumeATRFilter_Regime_V1
+Hypothesis: Donchian(20) breakouts with volume confirmation, ATR-based stoploss, and choppiness regime filter work on 4h for BTC and ETH in both bull and bear markets. Uses 12h EMA50 for trend filter and 12h choppiness index to avoid ranging markets. Target: 20-50 trades/year per symbol.
 """
 
 import numpy as np
@@ -13,54 +13,36 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data once for chop regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data once for trend filter and choppiness
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Choppiness Index (14-period) on daily timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # 12h Choppiness Index (CHOP) for regime filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h_arr = df_12h['close'].values
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h_arr, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h_arr, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_12h.sum() / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # avoid div/0
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
     
-    # Sum of ATR over 14 periods
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum_atr_14 / (hh_14 - ll_14)) / log10(14)
-    range_14 = hh_14 - ll_14
-    chop = np.where(range_14 > 0, 100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 100)
-    chop = np.where(np.isnan(chop), 100, chop)
-    
-    # Align chop to 12h timeframe (no extra delay needed for chop)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # 12h price channel: prior candle high/low
+    # ATR for stoploss (4h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # Prior 12h candle high/low (shifted by 1)
-    prior_high = np.roll(high, 1)
-    prior_low = np.roll(low, 1)
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    
-    # Volume filter: 20-period average
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for stoploss (12h timeframe)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -68,13 +50,20 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(chop_aligned[i]) or np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,35 +72,39 @@ def generate_signals(prices):
         price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Regime filter: chop < 38.2 = trending (favor breakouts)
-        trending_regime = chop_aligned[i] < 38.2
-        
         # Volume confirmation
-        volume_ok = volume > 2.0 * vol_ma[i]
+        volume_ok = volume > 1.5 * vol_ma[i]
+        
+        # 12h trend filter
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
+        
+        # Regime filter: avoid choppy markets (CHOP > 61.8 = range)
+        trending_market = chop_aligned[i] < 61.8
         
         if position == 0:
-            # Long: break above prior high in trending regime with volume
-            if trending_regime and volume_ok:
-                if price > prior_high[i]:
+            # Long: price breaks above Donchian high in uptrend with volume and trending regime
+            if uptrend and volume_ok and trending_market:
+                if price > high_max[i]:
                     signals[i] = 0.30
                     position = 1
-            # Short: break below prior low in trending regime with volume
-            elif trending_regime and volume_ok:
-                if price < prior_low[i]:
+            # Short: price breaks below Donchian low in downtrend with volume and trending regime
+            elif downtrend and volume_ok and trending_market:
+                if price < low_min[i]:
                     signals[i] = -0.30
                     position = -1
         
         elif position == 1:
-            # Exit: price reaches prior low or ATR stoploss
-            if price <= prior_low[i] or price < np.maximum.accumulate(close[:i+1])[-1] - 2.5 * atr[i]:
+            # Exit: price reaches Donchian low or stoploss
+            if price <= low_min[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         
         elif position == -1:
-            # Exit: price reaches prior high or ATR stoploss
-            if price >= prior_high[i] or price < np.minimum.accumulate(close[:i+1])[-1] + 2.5 * atr[i]:
+            # Exit: price reaches Donchian high or stoploss
+            if price >= high_max[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ChoppinessIndex_VolumeSpike_Breakout_V1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_VolumeATRFilter_Regime_V1"
+timeframe = "4h"
 leverage = 1.0
