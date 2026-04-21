@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1
-Hypothesis: 4h Camarilla R1/S1 breakouts filtered by 1d EMA50 trend and volume spike (>2x average).
-Uses discrete position sizing (0.0, ±0.25) to minimize fee churn and overtrading.
-ATR-based trailing stop with 2.0x ATR distance. Designed for <50 trades/year per symbol.
-Works in bull/bear via 1d trend alignment and volume confirmation to avoid false breakouts.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2
+Hypothesis: 4h Camarilla R1/S1 breakouts filtered by 1d EMA50 trend and volume spike (>1.5x average).
+Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. ATR trailing stop with 2.0x ATR.
+Added stricter volume confirmation (1.5x vs 2.0x) to reduce trades and avoid overtrading.
+Designed for <50 trades/year per symbol. Works in bull/bear via 1d trend alignment.
 """
 
 import numpy as np
@@ -28,8 +28,6 @@ def generate_signals(prices):
     close_4h = df_4h['close'].values
     
     # Calculate Camarilla levels using previous completed 4h bar
-    # R1 = Close + (High - Low) * 1.1 / 12
-    # S1 = Close - (High - Low) * 1.1 / 12
     camarilla_range = (high_4h - low_4h) * 1.1 / 12
     r1 = close_4h + camarilla_range
     s1 = close_4h - camarilla_range
@@ -70,10 +68,10 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume spike: current volume > 2x 20-period average
+            # Volume spike: current volume > 1.5x 20-period average (stricter than 2.0x)
             volume = prices['volume'].values
             vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-            vol_spike = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+            vol_spike = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
             
             # Long conditions: price > 4h R1, 1d uptrend, volume spike
             long_breakout = price > r1_aligned[i]
@@ -119,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
 timeframe = "4h"
 leverage = 1.0
