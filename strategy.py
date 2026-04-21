@@ -1,150 +1,136 @@
 #!/usr/bin/env python3
 """
-12h_WVAF_Momentum_Breakout_V1
-Hypothesis: Combine Williams %R momentum with Volume-Weighted Average Price (VWAP) on 12h timeframe.
-Enter long when price crosses above VWAP and Williams %R exits oversold (< -80), short when price crosses below VWAP and Williams %R exits overbought (> -20).
-Use 1-week trend filter: only take trades aligned with weekly EMA20 direction.
-Includes ATR-based stop loss via signal=0 when price moves against position by 2*ATR.
-Designed for low trade frequency (target 15-30/year) to minimize fee drag while capturing momentum shifts in both bull and bear markets.
+4h_Camarilla_R1S1_Breakout_VolumeFilter_Tight
+Hypothesis: Camarilla pivot levels (R1, S1) from 1d timeframe act as key support/resistance.
+Long when price breaks above R1 with volume confirmation; short when price breaks below S1 with volume confirmation.
+Only trade in trending markets (ADX > 25) to avoid whipsaw in chop. Works in bull/bear by following momentum.
+Uses tight entry conditions to limit trades (<50/year) and reduce fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_williams_r(high, low, close, period=14):
-    """Calculate Williams %R"""
-    highest_high = np.maximum.accumulate(high)
-    lowest_low = np.minimum.accumulate(low)
-    wr = np.full_like(high, np.nan)
-    for i in range(len(high)):
-        start = max(0, i - period + 1)
-        hh = np.max(high[start:i+1])
-        ll = np.min(low[start:i+1])
-        if hh != ll:
-            wr[i] = (hh - close[i]) / (hh - ll) * -100
-        else:
-            wr[i] = -50
-    return wr
-
-def calculate_vwap(high, low, close, volume):
-    """Calculate Volume Weighted Average Price"""
-    typical_price = (high + low + close) / 3
-    vwap = np.full_like(close, np.nan)
-    cum_tpv = np.zeros(len(close))
-    cum_vol = np.zeros(len(close))
-    for i in range(len(close)):
-        cum_tpv[i] = cum_tpv[i-1] + typical_price[i] * volume[i] if i > 0 else typical_price[i] * volume[i]
-        cum_vol[i] = cum_vol[i-1] + volume[i] if i > 0 else volume[i]
-        if cum_vol[i] > 0:
-            vwap[i] = cum_tpv[i] / cum_vol[i]
-    return vwap
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
-    tr = np.full_like(high, np.nan)
-    for i in range(len(high)):
-        if i == 0:
-            tr[i] = high[i] - low[i]
-        else:
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    plus_dm = np.zeros_like(high)
+    minus_dm = np.zeros_like(high)
+    tr = np.zeros_like(high)
     
-    atr = np.full_like(high, np.nan)
-    for i in range(len(high)):
-        if i < period - 1:
-            atr[i] = np.nan
-        else:
-            start = i - period + 1
-            atr[i] = np.mean(tr[start:i+1])
-    return atr
+    for i in range(1, len(high)):
+        plus_dm[i] = max(0, high[i] - high[i-1])
+        minus_dm[i] = max(0, low[i-1] - low[i])
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Smooth using Wilder's smoothing (alpha = 1/period)
+    atr = np.zeros_like(high)
+    plus_dm_smooth = np.zeros_like(high)
+    minus_dm_smooth = np.zeros_like(high)
+    
+    atr[period] = np.mean(tr[1:period+1])
+    plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
+    minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
+    
+    for i in range(period+1, len(high)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+    
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    adx = np.zeros_like(high)
+    adx[2*period] = np.mean(dx[period+1:2*period+1])
+    for i in range(2*period+1, len(high)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1w data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data once for Camarilla levels and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = np.full_like(close_1w, np.nan)
-    alpha = 2 / (20 + 1)
-    for i in range(len(close_1w)):
-        if i == 0:
-            ema_20_1w[i] = close_1w[i]
-        elif not np.isnan(close_1w[i]):
-            ema_20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_20_1w[i-1]
-        else:
-            ema_20_1w[i] = ema_20_1w[i-1]
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly EMA to 12h
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Camarilla levels: based on previous day's range
+    R1 = np.zeros_like(close_1d)
+    S1 = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        range_ = high_1d[i-1] - low_1d[i-1]
+        close_prev = close_1d[i-1]
+        R1[i] = close_prev + range_ * 1.1 / 12
+        S1[i] = close_prev - range_ * 1.1 / 12
     
-    # 12h data for signals
-    high = prices['high'].values
-    low = prices['low'].values
+    # ADX for trend filter
+    adx = calculate_adx(high_1d, low_1d, close_1d, 14)
+    
+    # Align to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 4h price and volume
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate indicators
-    williams_r = calculate_williams_r(high, low, close, 14)
-    vwap = calculate_vwap(high, low, close, volume)
-    atr = calculate_atr(high, low, close, 14)
+    # Volume spike: current volume > 1.5 * 20-period average
+    vol_ma = np.zeros_like(volume)
+    for i in range(20, len(volume)):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if NaN in critical values
-        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vwap[i]) or np.isnan(atr[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema_20 = ema_20_1w_aligned[i]
-        wr = williams_r[i]
-        vwap_val = vwap[i]
-        atr_val = atr[i]
+        vol_spike = volume_spike[i]
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        adx_val = adx_aligned[i]
         
-        # Trend filter: only trade in direction of weekly EMA20
-        trend_up = price > ema_20
-        trend_down = price < ema_20
+        # Only trade in trending markets (ADX > 25)
+        trending = adx_val > 25
         
         if position == 0:
-            # Long: price crosses above VWAP, WR exits oversold, uptrend
-            if price > vwap_val and williams_r[i-1] <= -80 and wr > -80 and trend_up:
+            # Long: price breaks above R1 with volume spike in trending market
+            if price > r1 and vol_spike and trending:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price crosses below VWAP, WR exits overbought, downtrend
-            elif price < vwap_val and williams_r[i-1] >= -20 and wr < -20 and trend_down:
+            # Short: price breaks below S1 with volume spike in trending market
+            elif price < s1 and vol_spike and trending:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Long exit: stop loss or reversal signal
-            if price < entry_price - 2.0 * atr_val:  # stop loss
-                signals[i] = 0.0
-                position = 0
-            elif price < vwap_val and wr < -50:  # momentum loss
+            # Long exit: price drops below S1 or loses momentum (ADX < 20)
+            if price < s1 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: stop loss or reversal signal
-            if price > entry_price + 2.0 * atr_val:  # stop loss
-                signals[i] = 0.0
-                position = 0
-            elif price > vwap_val and wr > -50:  # momentum loss
+            # Short exit: price rises above R1 or loses momentum (ADX < 20)
+            if price > r1 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -152,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WVAF_Momentum_Breakout_V1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_VolumeFilter_Tight"
+timeframe = "4h"
 leverage = 1.0
