@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_ATR_Stop_v2
-Hypothesis: On 4h timeframe, price breaking above Camarilla R1 or below S1 from 1d timeframe indicates institutional breakout, with 1d EMA34 filter for trend alignment and ATR-based stoploss for risk control. Uses discrete sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_ATRStop_v1
+Hypothesis: On 4h timeframe, price breaking above Camarilla R1 or below S1 from 12h timeframe indicates institutional breakout, with 12h EMA50 filter for trend alignment and ATR-based stoploss. Uses discrete sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years (19-50/year). Works in both bull and bear markets by capturing breakouts with trend filter and volatility-based risk control.
 """
 
 import numpy as np
@@ -13,44 +13,44 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for Camarilla levels and EMA)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load HTF data ONCE before loop (12h for Camarilla levels and EMA)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Levels (based on previous day) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h Camarilla Pivot Levels (based on previous bar) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels for today using yesterday's OHLC
-    # Shift by 1 to use previous day's data (no look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Calculate Camarilla levels for current bar using previous 12h bar's OHLC
+    # Shift by 1 to use previous bar's data (no look-ahead)
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close = np.roll(close_12h, 1)
     
-    # First bar: use same day's data (will be filtered by min_periods anyway)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # First bar: use same bar's data (will be filtered by min_periods anyway)
+    prev_high[0] = high_12h[0]
+    prev_low[0] = low_12h[0]
+    prev_close[0] = close_12h[0]
     
-    range_1d = prev_high - prev_low
-    camarilla_r1 = prev_close + range_1d * 1.1 / 12
-    camarilla_s1 = prev_close - range_1d * 1.1 / 12
-    camarilla_r3 = prev_close + range_1d * 1.1 / 4
-    camarilla_s3 = prev_close - range_1d * 1.1 / 4
+    range_12h = prev_high - prev_low
+    camarilla_r1 = prev_close + range_12h * 1.1 / 12
+    camarilla_s1 = prev_close - range_12h * 1.1 / 12
+    camarilla_r3 = prev_close + range_12h * 1.1 / 4
+    camarilla_s3 = prev_close - range_12h * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 4h timeframe (completed 12h bar only)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
     
-    # === 1d EMA34 for trend filter ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 12h EMA50 for trend filter ===
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # === 4h ATR(14) for stoploss ===
+    # === ATR for dynamic stoploss and volatility filter ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -60,7 +60,7 @@ def generate_signals(prices):
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,11 +69,10 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             continue
         
         price = close[i]
@@ -81,44 +80,42 @@ def generate_signals(prices):
         s1 = camarilla_s1_aligned[i]
         r3 = camarilla_r3_aligned[i]
         s3 = camarilla_s3_aligned[i]
-        ema_34 = ema_34_aligned[i]
+        ema_50 = ema_50_aligned[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above R1 + above EMA34
-            if price > r1 and price > ema_34:
+            # Long: price breaks above R1 + above EMA50
+            if price > r1 and price > ema_50:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S1 + below EMA34
-            elif price < s1 and price < ema_34:
+            # Short: price breaks below S1 + below EMA50
+            elif price < s1 and price < ema_50:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position != 0:
-            # Check stoploss: 2 * ATR from entry
+            # ATR-based stoploss: 2.5 * ATR from entry
+            stop_distance = 2.5 * atr_val
+            
             if position == 1:
-                stop_price = entry_price - 2.0 * atr_val
-                # Exit conditions: stoploss hit OR price re-enters R1-S1 range
-                if price <= stop_price or price < r1:
+                # Long exit: stoploss hit OR price re-enters R1-S1 range
+                if price <= entry_price - stop_distance or price < r1:
                     signals[i] = 0.0
                     position = 0
-                    entry_price = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                stop_price = entry_price + 2.0 * atr_val
-                # Exit conditions: stoploss hit OR price re-enters R1-S1 range
-                if price >= stop_price or price > s1:
+                # Short exit: stoploss hit OR price re-enters R1-S1 range
+                if price >= entry_price + stop_distance or price > s1:
                     signals[i] = 0.0
                     position = 0
-                    entry_price = 0.0
                 else:
                     signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_ATR_Stop_v2"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
