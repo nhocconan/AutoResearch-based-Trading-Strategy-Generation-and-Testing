@@ -5,63 +5,49 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for pivot levels
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Daily ATR for volatility filter and stop-loss
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Typical price
-    tp_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla range
-    range_1d = high_1d - low_1d
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla levels (based on previous day)
-    # R4 = close + 1.5 * range
-    # R3 = close + 1.1 * range
-    # R2 = close + 0.6 * range
-    # R1 = close + 0.3 * range
-    # S1 = close - 0.3 * range
-    # S2 = close - 0.6 * range
-    # S3 = close - 1.1 * range
-    # S4 = close - 1.5 * range
+    # Daily volatility ratio: current ATR / 50-period average ATR
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_ma_50
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    r1 = close_1d + 0.3 * range_1d
-    r2 = close_1d + 0.6 * range_1d
-    r3 = close_1d + 1.1 * range_1d
-    r4 = close_1d + 1.5 * range_1d
-    s1 = close_1d - 0.3 * range_1d
-    s2 = close_1d - 0.6 * range_1d
-    s3 = close_1d - 1.1 * range_1d
-    s4 = close_1d - 1.5 * range_1d
-    
-    # Align to 6h timeframe (previous day's levels available at next 6h bar)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: volume / 20-period average volume
+    # Volume confirmation: volume / 20-day average volume
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,59 +55,38 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
+        weekly_ema = ema_34_1w_aligned[i]
+        atr_ratio_val = atr_ratio_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long at S3/S4 bounce or break above R4
-            if vol_ratio_val > 1.3:  # Volume confirmation
-                # Bounce from S3 (strong support)
-                if price_close > s3_aligned[i] and price_close < s2_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Breakout above R4 (strong bullish)
-                elif price_close > r4_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Bounce from S4 (extreme support)
-                elif price_close > s4_aligned[i] and price_close < s3_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Enter short at R3/R4 rejection or break below S4
-            elif vol_ratio_val > 1.3:  # Volume confirmation
-                # Rejection at R3 (strong resistance)
-                if price_close < r3_aligned[i] and price_close > r2_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                # Breakdown below S4 (strong bearish)
-                elif price_close < s4_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                # Rejection at R4 (extreme resistance)
-                elif price_close < r4_aligned[i] and price_close > r3_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: price above weekly EMA, moderate volatility, volume spike
+            if (price_close > weekly_ema and 
+                vol_ratio_val > 1.5 and 
+                atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price below weekly EMA, moderate volatility, volume spike
+            elif (price_close < weekly_ema and 
+                  vol_ratio_val > 1.5 and 
+                  atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit conditions
-            if position == 1:  # Long position
-                # Exit if price reaches R1 (first resistance) or breaks below S1
-                if price_close >= r1_aligned[i] or price_close <= s1_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                # Hold
-                else:
-                    signals[i] = 0.25
-            elif position == -1:  # Short position
-                # Exit if price reaches S1 (first support) or breaks above R1
-                if price_close <= s1_aligned[i] or price_close >= r1_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                # Hold
-                else:
-                    signals[i] = -0.25
+            # Exit: reverse crossover or volatility extremes
+            if position == 1 and (price_close < weekly_ema or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and (price_close > weekly_ema or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "6h_Camarilla_S3_S4_R3_R4_Bounce_Breakout"
-timeframe = "6h"
+name = "1d_WeeklyEMA34_Volume_ATR_Filter"
+timeframe = "1d"
 leverage = 1.0
