@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_WeeklyTrend_v1
-Hypothesis: On 1d timeframe, price breaking above Camarilla R1 or below S1 from previous day indicates intraday momentum, with weekly EMA50 filter for trend alignment and ADX(14) < 20 for ranging regime avoidance. Uses discrete sizing (0.25) to minimize fee churn. Target: 30-100 total trades over 4 years.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Regime_v1
+Hypothesis: On 12h timeframe, price breaking above Camarilla R1 or below S1 from 1d timeframe indicates institutional breakout, with 1d EMA34 filter for trend alignment and ADX(14) < 20 for ranging regime avoidance. Uses discrete sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for Camarilla levels, 1w for EMA)
+    # Load HTF data ONCE before loop (1d for Camarilla levels and EMA)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -40,21 +40,17 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + range_1d * 1.1 / 4
     camarilla_s3 = prev_close - range_1d * 1.1 / 4
     
-    # Align Camarilla levels to 1d timeframe (completed 1d bar only)
+    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # === 1w EMA50 for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === 1d EMA34 for trend filter ===
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 1d ADX(14) for regime filter (avoid ranging markets) ===
+    # === 12h ADX(14) for regime filter (avoid ranging markets) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -91,7 +87,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(adx[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -102,19 +98,19 @@ def generate_signals(prices):
         s1 = camarilla_s1_aligned[i]
         r3 = camarilla_r3_aligned[i]
         s3 = camarilla_s3_aligned[i]
-        ema_50 = ema_50_aligned[i]
+        ema_34 = ema_34_aligned[i]
         adx_val = adx[i]
         
         # Regime filter: avoid ranging markets (ADX < 20 = ranging)
         is_trending_regime = adx_val >= 20
         
         if position == 0:
-            # Long: price breaks above R1 + above EMA50 + trending regime
-            if price > r1 and price > ema_50 and is_trending_regime:
+            # Long: price breaks above R1 + above EMA34 + trending regime
+            if price > r1 and price > ema_34 and is_trending_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below EMA50 + trending regime
-            elif price < s1 and price < ema_50 and is_trending_regime:
+            # Short: price breaks below S1 + below EMA34 + trending regime
+            elif price < s1 and price < ema_34 and is_trending_regime:
                 signals[i] = -0.25
                 position = -1
         
@@ -135,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
