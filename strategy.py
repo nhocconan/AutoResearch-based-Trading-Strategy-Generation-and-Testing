@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d Weekly Pivot R1/S1 Breakout with Volume Confirmation and ATR Stop
-Hypothesis: Weekly pivot points R1/S1 act as strong support/resistance levels.
-Breakouts with volume confirmation capture institutional moves in both bull and bear markets.
-ATR-based stops limit losses during false breakouts. Designed for low trade frequency
-(~7-25/year) to minimize fee drag and improve generalization. Uses 1d timeframe to capture daily momentum.
+6h Elder Ray + ADX + Volume Spike Strategy
+Hypothesis: Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13) 
+measures bull/bear strength relative to trend. Combined with ADX for trend strength 
+and volume spikes for confirmation, this captures strong directional moves while 
+avoiding chop. Works in bull (strong bull power) and bear (strong bear power) 
+markets. Low trade frequency via strict ADX>25 and volume>2x average filters.
 """
 
 import numpy as np
@@ -13,86 +14,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for pivot points and ATR
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Load daily data for EMA and ADX calculation
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Calculate weekly True Range for ATR
-    tr1 = np.abs(high_weekly - low_weekly)
-    tr2 = np.abs(high_weekly - np.roll(close_weekly, 1))
-    tr3 = np.abs(low_weekly - np.roll(close_weekly, 1))
-    tr1[0] = high_weekly[0] - low_weekly[0]
-    tr2[0] = np.abs(high_weekly[0] - close_weekly[0])
-    tr3[0] = np.abs(low_weekly[0] - close_weekly[0])
+    # Calculate EMA13 for Elder Ray
+    ema13 = pd.Series(close_daily).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high_daily - ema13
+    bear_power = low_daily - ema13
+    
+    # Calculate ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_daily - low_daily)
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    tr1[0] = high_daily[0] - low_daily[0]
+    tr2[0] = np.abs(high_daily[0] - close_daily[0])
+    tr3[0] = np.abs(low_daily[0] - close_daily[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_weekly = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    r1_weekly = 2 * pivot_weekly - low_weekly
-    s1_weekly = 2 * pivot_weekly - high_weekly
+    # Directional Movement
+    plus_dm = np.where((high_daily - np.roll(high_daily, 1)) > (np.roll(low_daily, 1) - low_daily),
+                       np.maximum(high_daily - np.roll(high_daily, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_daily, 1) - low_daily) > (high_daily - np.roll(high_daily, 1)),
+                        np.maximum(np.roll(low_daily, 1) - low_daily, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # Align weekly indicators to 1d timeframe
-    atr_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr_weekly)
-    r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1_weekly)
-    s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1_weekly)
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Main timeframe data (1d)
+    # Align daily indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_daily, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_daily, bear_power)
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    
+    # Main timeframe data (6h)
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(atr_weekly_aligned[i]) or np.isnan(r1_weekly_aligned[i]) or np.isnan(s1_weekly_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        atr = atr_weekly_aligned[i]
-        r1 = r1_weekly_aligned[i]
-        s1 = s1_weekly_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
+        adx_val = adx_aligned[i]
         vol_current = volume[i]
         
-        # Volume filter: current volume > 2.0x 30-period average
-        vol_ma = np.mean(volume[max(0, i-30):i]) if i >= 30 else volume[i]
+        # Volume filter: current volume > 2.0x 20-period average
+        vol_ma = np.mean(volume[max(0, i-20):i]) if i >= 20 else volume[i]
         vol_ok = vol_current > 2.0 * vol_ma
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume confirmation
-            if price > r1 and vol_ok:
+            # Long entry: strong bull power + strong trend + volume
+            if bull_power_val > 0 and adx_val > 25 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with volume confirmation
-            elif price < s1 and vol_ok:
+            # Short entry: strong bear power + strong trend + volume
+            elif bear_power_val < 0 and adx_val > 25 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 (failed breakout) or ATR-based stop
-            if price < s1 or (i > 0 and close[i-1] > s1 and price < close[i-1] - 1.5 * atr):
+            # Long exit: bull power turns negative or trend weakens
+            if bull_power_val <= 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 (failed breakdown) or ATR-based stop
-            if price > r1 or (i > 0 and close[i-1] < r1 and price > close[i-1] + 1.5 * atr):
+            # Short exit: bear power turns positive or trend weakens
+            if bear_power_val >= 0 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "1d"
+name = "6h_ElderRay_ADX_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
