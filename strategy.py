@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Trend_Follow_With_Pullback_Entry_V1
-Hypothesis: In strong trends (4h EMA20 > EMA50), buy pullbacks to 1h VWAP with volume confirmation; sell short when trend reverses. Uses 1d ADX to filter weak markets. Designed for 15-30 trades/year.
+4h_1d_1w_ElderRay_Momentum_Breakout_V1
+Hypothesis: Elder Ray bull/bear power breaks above/below zero with 1w trend confirmation and volume filter.
+Long when bull power crosses above zero with 1w close > 200 EMA and volume spike.
+Short when bear power crosses below zero with 1w close < 200 EMA and volume spike.
+Exit when power crosses back through zero or price reaches 1w ATR-based stop.
+Works in both bull/bear by following 1w trend and using momentum exhaustion signals.
+Target: 20-35 trades/year per symbol.
 """
 
 import numpy as np
@@ -10,58 +15,49 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # --- 4h Trend Filter ---
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # --- 1d ADX Filter (trend strength) ---
+    # Load 1d data for Elder Ray (13-period EMA)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    # Smooth TR, +DM, -DM
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # --- 1h VWAP ---
-    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
-    vwap_num = (typical_price * prices['volume']).cumsum()
-    vwap_den = prices['volume'].cumsum()
-    vwap = vwap_num / vwap_den
+    # Calculate 13-period EMA for Elder Ray
+    close_ser = pd.Series(close_1d)
+    ema13 = close_ser.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d - ema13
+    bear_power = low_1d - ema13
+    
+    # Align to 4h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Load 1w data for trend filter (200 EMA)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    close_1w_ser = pd.Series(close_1w)
+    ema200_1w = close_1w_ser.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align 1w EMA200 to 4h timeframe
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema200_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,48 +65,44 @@ def generate_signals(prices):
         
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
-        vwap_val = vwap.iloc[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
+        # Volume filter: current volume > 2.0 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
+            volume_ok = volume > 2.0 * vol_ma
         else:
             volume_ok = False
         
-        # Trend condition: 4h EMA20 > EMA50 for long, < for short
-        uptrend = ema20_4h_aligned[i] > ema50_4h_aligned[i]
-        downtrend = ema20_4h_aligned[i] < ema50_4h_aligned[i]
-        strong_trend = adx_aligned[i] > 25
-        
         if position == 0:
-            # Long: uptrend + strong trend + pullback to VWAP + volume
-            if uptrend and strong_trend and (abs(price - vwap_val) < 0.005 * vwap_val) and volume_ok:
-                signals[i] = 0.20
+            # Long conditions: bull power crosses above zero with 1w uptrend and volume
+            if (bull_power_aligned[i] > 0 and bull_power_aligned[i-1] <= 0 and  # crossover up
+                price > ema200_1w_aligned[i] and volume_ok):
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + strong trend + pullback to VWAP + volume
-            elif downtrend and strong_trend and (abs(price - vwap_val) < 0.005 * vwap_val) and volume_ok:
-                signals[i] = -0.20
+            # Short conditions: bear power crosses below zero with 1w downtrend and volume
+            elif (bear_power_aligned[i] < 0 and bear_power_aligned[i-1] >= 0 and  # crossover down
+                  price < ema200_1w_aligned[i] and volume_ok):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or ADX weak
-            if not (uptrend and strong_trend):
+            # Long exit: bull power crosses below zero or trend fails
+            if bull_power_aligned[i] < 0 or price < ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or ADX weak
-            if not (downtrend and strong_trend):
+            # Short exit: bear power crosses above zero or trend fails
+            if bear_power_aligned[i] > 0 or price > ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_1d_Trend_Follow_With_Pullback_Entry_V1"
-timeframe = "1h"
+name = "4h_1d_1w_ElderRay_Momentum_Breakout_V1"
+timeframe = "4h"
 leverage = 1.0
