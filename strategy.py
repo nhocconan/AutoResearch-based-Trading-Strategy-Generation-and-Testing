@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_VolumeFilter_V2
-Hypothesis: Breakout of Camarilla R1/S1 levels on 12h timeframe with 1d trend filter (EMA34) and volume confirmation.
-Works in bull/bear: In uptrend, buy R1 breakout; in downtrend, sell S1 breakout. Uses 1d EMA34 for trend, volume spike for confirmation.
-Target: 12-37 trades/year per symbol (50-150 over 4 years).
+4h_Camarilla_R1S1_Breakout_VolumeFilter_Tight
+Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with volume confirmation and 1d trend filter.
+In bull markets: buy R1 breakouts above 1d EMA50. In bear markets: short S1 breakdowns below 1d EMA50.
+Volume filter ensures institutional participation. Target: 20-40 trades/year per symbol.
+Works in both bull and bear by following the 1d trend direction.
 """
 
 import numpy as np
@@ -37,13 +38,13 @@ def generate_signals(prices):
     r1 = prev_close + rang * 1.0 / 12
     s1 = prev_close - rang * 1.0 / 12
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,7 +52,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,40 +61,38 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
+        # Volume filter: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
         if position == 0:
             # Long conditions: price > R1 (breakout) AND 1d uptrend AND volume
             if (price > r1_aligned[i] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and  # 1d EMA rising
+                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and  # 1d EMA rising
                 volume_ok):
                 signals[i] = 0.25
                 position = 1
             # Short conditions: price < S1 (breakdown) AND 1d downtrend AND volume
             elif (price < s1_aligned[i] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and  # 1d EMA falling
+                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and  # 1d EMA falling
                   volume_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < 1d EMA34 (trend reversal) or price < S1 (mean reversion)
-            if (price < ema_34_1d_aligned[i] or 
-                price < s1_aligned[i]):
+            # Long exit: price < 1d EMA50 (trend reversal) or price < R0.5 (mean reversion)
+            if price < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > 1d EMA34 (trend reversal) or price > R1 (mean reversion)
-            if (price > ema_34_1d_aligned[i] or 
-                price > r1_aligned[i]):
+            # Short exit: price > 1d EMA50 (trend reversal) or price > S0.5 (mean reversion)
+            if price > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_VolumeFilter_V2"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_VolumeFilter_Tight"
+timeframe = "4h"
 leverage = 1.0
