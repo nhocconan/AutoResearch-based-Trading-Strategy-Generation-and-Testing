@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d Volume Spike + Chop Regime Filter
-# Long when Jaw < Teeth < Lips (bullish alignment), volume > 1.5x 20-day avg, CHOP > 61.8 (range)
-# Short when Jaw > Teeth > Lips (bearish alignment), volume > 1.5x 20-day avg, CHOP > 61.8 (range)
-# Exit when alignment breaks or CHOP < 38.2 (trend)
-# Williams Alligator identifies trend phases via SMAs: Jaw=13, Teeth=8, Lips=5 (all shifted)
-# Chop regime filter ensures we only trade in ranging markets where mean reversion works
-# Volume spike confirms conviction
-# Target: 15-25 trades/year by requiring triple confluence
+# Hypothesis: 6h Williams %R + 1d Supertrend + Volume Spike
+# Long when Williams %R < -80 (oversold) + price > Supertrend + volume > 1.5x 20-day avg
+# Short when Williams %R > -20 (overbought) + price < Supertrend + volume > 1.5x 20-day avg
+# Williams %R identifies reversals, Supertrend filters direction, volume confirms conviction
+# Works in both bull (buy oversold dips) and bear (sell overbought rallies) markets
+# Target: 15-25 trades/year by requiring all three conditions
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,89 +18,99 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Williams Alligator components (all SMAs with shift)
+    # Calculate 1d Williams %R (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Jaw: 13-period SMA, shifted 8 bars
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # shift 8 bars forward
-    jaw[:8] = np.nan
     
-    # Teeth: 8-period SMA, shifted 5 bars
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # shift 5 bars forward
-    teeth[:5] = np.nan
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
     
-    # Lips: 5-period SMA, shifted 3 bars
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # shift 3 bars forward
-    lips[:3] = np.nan
+    # Calculate 1d Supertrend (ATR=10, multiplier=3.0)
+    atr_period = 10
+    multiplier = 3.0
+    
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (high_1d + low_1d) / 2 + multiplier * atr
+    basic_lb = (high_1d + low_1d) / 2 - multiplier * atr
+    
+    # Final Supertrend
+    final_ub = np.zeros(len(close_1d))
+    final_lb = np.zeros(len(close_1d))
+    supertrend = np.zeros(len(close_1d))
+    trend = np.ones(len(close_1d))  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_1d)):
+        final_ub[i] = basic_ub[i] if (basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]) else final_ub[i-1]
+        final_lb[i] = basic_lb[i] if (basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]) else final_lb[i-1]
+        
+        if i == 1:
+            supertrend[i] = final_ub[i]
+            trend[i] = 1
+        else:
+            if supertrend[i-1] == final_ub[i-1]:
+                supertrend[i] = final_lb[i] if close_1d[i] > final_lb[i] else final_ub[i]
+                trend[i] = -1 if supertrend[i] == final_ub[i] else 1
+            else:
+                supertrend[i] = final_ub[i] if close_1d[i] < final_ub[i] else final_lb[i]
+                trend[i] = 1 if supertrend[i] == final_lb[i] else -1
     
     # Calculate 1d volume moving average (20-period)
     vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Chopiness Index (14-period) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    atr_14 = pd.Series(np.maximum(np.maximum(high_1d - low_1d, 
-                                             np.abs(high_1d - np.roll(close_1d, 1))), 
-                                  np.abs(low_1d - np.roll(close_1d, 1)))).rolling(window=14, min_periods=14).mean().values
-    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / np.log(14) / (highest_high - lowest_low))
-    
-    # Align all 1d indicators to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Align all 1d indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    trend_aligned = align_htf_to_ltf(prices, df_1d, trend)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Calculate 12h price for entry
+    # Calculate 6h price data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after Chop warmup
+    for i in range(14, n):  # Start after Williams %R warmup
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
+            np.isnan(trend_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Current values
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        chop_val = chop_aligned[i]
+        wr = williams_r_aligned[i]
+        st = supertrend_aligned[i]
+        tr = trend_aligned[i]
         price = close[i]
-        
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        vol_idx = i // 2  # 2 bars per day (24h/12h)
-        if vol_idx >= len(df_1d):
-            vol_idx = len(df_1d) - 1
-        volume = df_1d['volume'].iloc[vol_idx] if vol_idx >= 0 else df_1d['volume'].iloc[0]
         vol_ma = vol_ma_1d_aligned[i]
-        volume_confirm = volume > 1.5 * vol_ma
         
-        # Alligator alignment conditions
-        bullish_align = jaw_val < teeth_val < lips_val  # Jaw < Teeth < Lips
-        bearish_align = jaw_val > teeth_val > lips_val  # Jaw > Teeth > Lips
-        
-        # Chop regime: only trade in ranging markets (CHOP > 61.8)
-        in_range = chop_val > 61.8
+        # Get current 1d volume (for volume confirmation)
+        # Each 6h bar = 1/4 of a 1d bar, so we need to look at the current 1d bar
+        idx_1d = i // 4
+        if idx_1d >= len(df_1d):
+            idx_1d = len(df_1d) - 1
+        volume = df_1d['volume'].iloc[idx_1d] if idx_1d >= 0 else df_1d['volume'].iloc[0]
+        volume_confirm = volume > 1.5 * vol_ma if vol_ma > 0 else False
         
         if position == 0:
-            # Long: Bullish alignment + volume confirmation + ranging market
-            if bullish_align and volume_confirm and in_range:
+            # Long: Williams %R < -80 (oversold), price > Supertrend (uptrend), volume confirmation
+            if wr < -80 and price > st and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment + volume confirmation + ranging market
-            elif bearish_align and volume_confirm and in_range:
+            # Short: Williams %R > -20 (overbought), price < Supertrend (downtrend), volume confirmation
+            elif wr > -20 and price < st and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
@@ -111,13 +119,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if bullish alignment breaks OR market starts trending
-                if not bullish_align or chop_val < 38.2:
+                # Exit if Williams %R > -50 (exiting oversold) or price crosses below Supertrend
+                if wr > -50 or price < st:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if bearish alignment breaks OR market starts trending
-                if not bearish_align or chop_val < 38.2:
+                # Exit if Williams %R < -50 (exiting overbought) or price crosses above Supertrend
+                if wr < -50 or price > st:
                     exit_signal = True
             
             if exit_signal:
@@ -129,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1dVolumeSpike_ChopRegime"
-timeframe = "12h"
+name = "6h_WilliamsR_Supertrend_Volume"
+timeframe = "6h"
 leverage = 1.0
