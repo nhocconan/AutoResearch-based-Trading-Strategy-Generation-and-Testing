@@ -3,35 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume spike confirmation.
-# Long when price breaks above upper Donchian in uptrend (1d ADX > 25), short when breaks below lower Donchian in downtrend.
-# Volume > 1.5x 20-period average confirms breakout strength. Uses ADX to filter weak trends and avoid chop.
-# Target: 25-50 trades/year by requiring strong trend + volume + breakout alignment.
-# Works in bull/bear: ADX filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
+# Hypothesis: 1d weekly Donchian(20) breakout with weekly ADX(14) trend filter and volume confirmation.
+# Long when price breaks above weekly upper Donchian in weekly uptrend (weekly ADX > 25), short when breaks below lower Donchian in weekly downtrend.
+# Volume > 1.5x 20-period average confirms breakout strength. Uses weekly ADX to filter weak trends and avoid chop.
+# Target: 10-25 trades/year by requiring strong weekly trend + volume + breakout alignment.
+# Works in bull/bear: weekly ADX filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1d ADX(14) for trend strength filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly ADX(14) for trend strength filter
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = np.abs(high_w - low_w)
+    tr2 = np.abs(high_w - np.roll(close_w, 1))
+    tr3 = np.abs(low_w - np.roll(close_w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first period
     
     # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    up_move = np.diff(high_w, prepend=high_w[0])
+    down_move = -np.diff(low_w, prepend=low_w[0])
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
@@ -44,22 +44,26 @@ def generate_signals(prices):
                 result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, 14)
+    atr_w = wilder_smooth(tr, 14)
+    plus_di_w = 100 * wilder_smooth(plus_dm, 14) / atr_w
+    minus_di_w = 100 * wilder_smooth(minus_dm, 14) / atr_w
+    dx_w = 100 * np.abs(plus_di_w - minus_di_w) / (plus_di_w + minus_di_w)
+    adx_w = wilder_smooth(dx_w, 14)
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align weekly ADX to daily timeframe
+    adx_w_aligned = align_htf_to_ltf(prices, df_weekly, adx_w)
     
-    # Calculate 20-period Donchian channels on 4h data
-    high_roll = prices['high'].rolling(window=20, min_periods=20).max()
-    low_roll = prices['low'].rolling(window=20, min_periods=20).min()
-    upper = high_roll.values
-    lower = low_roll.values
+    # Calculate weekly Donchian channels (20-period)
+    high_roll_w = df_weekly['high'].rolling(window=20, min_periods=20).max()
+    low_roll_w = df_weekly['low'].rolling(window=20, min_periods=20).min()
+    upper_w = high_roll_w.values
+    lower_w = low_roll_w.values
     
-    # Pre-compute volume moving average (20-period)
+    # Align weekly Donchian channels to daily timeframe
+    upper_w_aligned = align_htf_to_ltf(prices, df_weekly, upper_w)
+    lower_w_aligned = align_htf_to_ltf(prices, df_weekly, lower_w)
+    
+    # Pre-compute daily volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -67,7 +71,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(adx_w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper_w_aligned[i]) or np.isnan(lower_w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,17 +84,17 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Trend filter: strong trend (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
+        # Trend filter: strong trend (weekly ADX > 25)
+        strong_trend = adx_w_aligned[i] > 25
         
         if position == 0:
             if volume_confirm and strong_trend:
-                # Long: price breaks above upper Donchian
-                if price > upper[i]:
+                # Long: price breaks above weekly upper Donchian
+                if price > upper_w_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: price breaks below lower Donchian
-                elif price < lower[i]:
+                # Short: price breaks below weekly lower Donchian
+                elif price < lower_w_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         
@@ -99,13 +103,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price breaks below lower Donchian (failed breakout) or weak trend
-                if price < lower[i] or adx_aligned[i] < 20:
+                # Exit if price breaks below weekly lower Donchian (failed breakout) or weak trend
+                if price < lower_w_aligned[i] or adx_w_aligned[i] < 20:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price breaks above upper Donchian (failed breakdown) or weak trend
-                if price > upper[i] or adx_aligned[i] < 20:
+                # Exit if price breaks above weekly upper Donchian (failed breakdown) or weak trend
+                if price > upper_w_aligned[i] or adx_w_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -117,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dADX14_Trend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_WeeklyADX14_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
