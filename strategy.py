@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v2
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and ADX regime filter.
-Long only when price > EMA50_1d and ADX > 25 (trending market); short only when price < EMA50_1d and ADX > 25.
-Breakout above R1 (long) or below S1 (short) with volume confirmation (1.5x average).
-ATR(14) stoploss (2.5x) and discrete sizing (0.25).
-Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year). Works in bull/bear via trend alignment.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike.
+In trending markets (price > EMA50_1d for long, < for short): breakout continuation (long above R1, short below S1).
+Volume confirmation (2.0x average) filters false breakouts. ATR(14) stoploss (2.0x) and discrete sizing (0.25).
+Designed for 4h timeframe to target 75-200 trades over 4 years (19-50/year). Works in bull/bear via trend alignment.
 """
 
 import numpy as np
@@ -42,7 +41,7 @@ def generate_signals(prices):
     h4_1d = df_1d_close + 1.382 * range_1d
     l4_1d = df_1d_close - 1.382 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
@@ -65,16 +64,6 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === ADX (14-period) for regime filter ===
-    plus_dm = pd.Series(np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0))
-    minus_dm = pd.Series(np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0))
-    tr_adx = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_adx = tr_adx.rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / atr_adx)
-    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / atr_adx)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -82,7 +71,7 @@ def generate_signals(prices):
     for i in range(60, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(adx[i])):
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,17 +87,15 @@ def generate_signals(prices):
         l4 = l4_1d_aligned[i]
         ema_trend = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
-        adx_val = adx[i]
         
-        # Volume confirmation: current volume > 1.5x average (moderate filter)
-        volume_confirmed = volume_now > 1.5 * vol_avg
-        # Regime filter: ADX > 25 indicates trending market
-        trending_market = adx_val > 25
+        # Volume confirmation: current volume > 2.0x average (strict filter)
+        volume_confirmed = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Only enter in trending markets with volume confirmation
-            long_condition = (price > r1) and (price > ema_trend) and volume_confirmed and trending_market
-            short_condition = (price < s1) and (price < ema_trend) and volume_confirmed and trending_market
+            # Only enter in trending markets (price > EMA50_1d for long, < for short)
+            # Volume confirmation required to avoid false breakouts
+            long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
+            short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
             
             if long_condition:
                 signals[i] = 0.25
@@ -120,8 +107,8 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.5x ATR)
-            if price < entry_price - 2.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trend reversal exit
@@ -136,8 +123,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (2.5x ATR)
-            if price > entry_price + 2.5 * atr[i]:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Trend reversal exit
@@ -153,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_RegimeFilter_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
