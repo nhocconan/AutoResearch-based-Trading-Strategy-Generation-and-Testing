@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_1d_RVOL_Reversal_LongOnly
-Hypothesis: RVOL-based reversal strategy on 12h timeframe using 1d ATR for context.
-Long when price drops >1.5*ATR(1d) below 1d close AND RVOL > 1.8 (panic dip with volume).
-Exit when price recovers to midpoint of the dip range or 5 bars pass.
-Designed for 12h to capture mean-reversion bounces in volatile markets.
-Works in both bull (buy dips) and bear (sell relief rallies via symmetry).
-RVOL filter ensures we trade only high-volume exhaustion moves.
+6h_1d_ADX_Alligator_Triangle
+Hypothesis: Use 1d ADX trend filter with Williams Alligator on 6h for entry timing.
+- ADX > 25 on 1d indicates trending market (trend follow)
+- Williams Alligator (Jaw=13, Teeth=8, Lips=5) on 6h: 
+  Long when Lips > Teeth > Jaw (bullish alignment)
+  Short when Lips < Teeth < Jaw (bearish alignment)
+- Exit when Alligator lines re-cross (loss of alignment)
+- Works in both bull/bear by only taking trades in trending regimes (ADX filter)
+- Targets 20-40 trades/year with disciplined entries
 """
 
 import numpy as np
@@ -18,79 +20,114 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for ATR and close reference
+    # Load 1d data for ADX (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate ADX on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on 1d
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, tr2)
-    tr = np.concatenate([[np.nan], tr])  # align length
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    atr_1d = np.full_like(close_1d, np.nan)
-    for i in range(14, len(tr)):
-        atr_1d[i] = np.nanmean(tr[i-13:i+1])  # simple ATR
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Shift ATR to use previous day's value (available at open)
-    atr_1d = np.roll(atr_1d, 1)
-    atr_1d[0] = np.nan
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(values[1:period]) 
+        # Subsequent values: smoothed = prev - (prev/period) + current
+        for i in range(period, len(values)):
+            if not np.isnan(result[i-1]) and not np.isnan(values[i]):
+                result[i] = result[i-1] - (result[i-1]/period) + values[i]
+        return result
     
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    period = 14
+    atr = wilders_smoothing(tr, period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, period)
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Williams Alligator on 6h (Jaw=13, Teeth=8, Lips=5)
+    close = prices['close'].values
+    
+    def sma(values, window):
+        result = np.full_like(values, np.nan)
+        for i in range(window-1, len(values)):
+            result[i] = np.mean(values[i-window+1:i+1])
+        return result
+    
+    jaw = sma(close, 13)  # Jaw (Blue)
+    teeth = sma(close, 8)  # Teeth (Red)
+    lips = sma(close, 5)   # Lips (Green)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
-    bars_since_entry = 0
-    entry_price = 0.0
-    atr_at_entry = 0.0
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(close_1d_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
+        # Trend filter: ADX > 25 indicates trending market
+        is_trending = adx_aligned[i] > 25
         
-        # RVOL: current volume / 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            rvol = volume / vol_ma if vol_ma > 0 else 0
-        else:
-            rvol = 0
-        
-        if position == 0:
-            # Long condition: price > 1.5*ATR below 1d close AND RVOL > 1.8
-            if price < (close_1d_aligned[i] - 1.5 * atr_1d_aligned[i]) and rvol > 1.8:
+        if position == 0 and is_trending:
+            # Long: Lips > Teeth > Jaw (bullish alignment)
+            if lips[i] > teeth[i] and teeth[i] > jaw[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-                entry_price = price
-                atr_at_entry = atr_1d_aligned[i]
+            # Short: Lips < Teeth < Jaw (bearish alignment)
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            bars_since_entry += 1
-            # Exit conditions: price recovers to midpoint OR 5 bars elapsed
-            recovery_level = entry_price + 0.5 * (close_1d_aligned[i] - entry_price)
-            if price >= recovery_level or bars_since_entry >= 5:
+            # Exit long: loss of bullish alignment
+            if not (lips[i] > teeth[i] and teeth[i] > jaw[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short: loss of bearish alignment
+            if not (lips[i] < teeth[i] and teeth[i] < jaw[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_1d_RVOL_Reversal_LongOnly"
-timeframe = "12h"
+name = "6h_1d_ADX_Alligator_Triangle"
+timeframe = "6h"
 leverage = 1.0
