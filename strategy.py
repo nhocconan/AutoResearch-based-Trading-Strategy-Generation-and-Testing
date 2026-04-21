@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_HighLowBreakout_Volume
-Hypothesis: Use 4h trend (price > 4h EMA50) and 1d momentum (close > open) for bias.
-On 1h, enter long when price breaks above 4h high of prior day with volume spike.
-Enter short when price breaks below 4h low of prior day with volume spike.
-Exit on trend reversal or volume drop.
-Designed for 1h timeframe with 4h/1d filters to limit trades to ~15-30/year.
+4h_1d_1w_Camarilla_R1S1_Breakout_Volume_TrendFilter_V1
+Hypothesis: Use 1d Camarilla pivot levels (R1/S1) and 1w trend (price > 1w EMA34) for bias.
+On 4h, enter long when price breaks above S1 with volume spike and 1w uptrend.
+Enter short when price breaks below R1 with volume spike and 1w downtrend.
+Exit on trend reversal or price crossing the pivot point (PP).
+Designed for 4h timeframe with 1d/1w filters to limit trades to ~20-50/year.
 Works in bull markets by buying strength and in bear markets by selling weakness.
 """
 
@@ -23,63 +23,60 @@ def calculate_ema(close, period):
             ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
     return ema
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    range_val = high - low
+    pp = (high + low + close) / 3
+    r1 = close + range_val * 1.1 / 12
+    s1 = close - range_val * 1.1 / 12
+    return pp, r1, s1
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 4h data once for trend and daily high/low
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # 4h EMA50 for trend filter
-    ema50_4h = calculate_ema(close_4h, 50)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # 4h previous day high and low (using 4h bars)
-    # Each day = 6 bars of 4h (24h / 4h = 6)
-    prev_day_high = np.full_like(high_4h, np.nan)
-    prev_day_low = np.full_like(low_4h, np.nan)
-    
-    for i in range(6, len(high_4h)):
-        prev_day_high[i] = np.max(high_4h[i-6:i])
-        prev_day_low[i] = np.min(low_4h[i-6:i])
-    
-    prev_day_high_aligned = align_htf_to_ltf(prices, df_4h, prev_day_high)
-    prev_day_low_aligned = align_htf_to_ltf(prices, df_4h, prev_day_low)
-    
-    # Load 1d data for daily momentum (close > open)
+    # Load 1d data once for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    open_1d = df_1d['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    daily_momentum = close_1d > open_1d  # bullish day
-    daily_momentum_aligned = align_htf_to_ltf(prices, df_1d, daily_momentum.astype(float))
+    
+    # Calculate Camarilla levels for each day
+    pp_1d = np.zeros_like(high_1d)
+    r1_1d = np.zeros_like(high_1d)
+    s1_1d = np.zeros_like(high_1d)
+    
+    for i in range(len(high_1d)):
+        pp, r1, s1 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
+        pp_1d[i] = pp
+        r1_1d[i] = r1
+        s1_1d[i] = s1
+    
+    # Align 1d levels to 4h
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema34_1w = calculate_ema(close_1w, 34)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(prev_day_high_aligned[i]) or 
-            np.isnan(prev_day_low_aligned[i]) or np.isnan(daily_momentum_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: 08-20 UTC only
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
+        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -96,39 +93,37 @@ def generate_signals(prices):
             volume_ok = False
         
         if position == 0:
-            # Long conditions: uptrend + bullish day + break above prior day high + volume
-            if (price > ema50_4h_aligned[i] and 
-                daily_momentum_aligned[i] > 0.5 and  # bullish day
-                price > prev_day_high_aligned[i] and 
+            # Long conditions: uptrend + break above S1 + volume
+            if (price > ema34_1w_aligned[i] and 
+                price > s1_1d_aligned[i] and 
                 volume_ok):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: downtrend + bearish day + break below prior day low + volume
-            elif (price < ema50_4h_aligned[i] and 
-                  daily_momentum_aligned[i] < 0.5 and  # bearish day
-                  price < prev_day_low_aligned[i] and 
+            # Short conditions: downtrend + break below R1 + volume
+            elif (price < ema34_1w_aligned[i] and 
+                  price < r1_1d_aligned[i] and 
                   volume_ok):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: trend reversal or bearish day
-            if price < ema50_4h_aligned[i] or daily_momentum_aligned[i] < 0.5:
+            # Long exit: trend reversal or price crosses below PP
+            if price < ema34_1w_aligned[i] or price < pp_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: trend reversal or bullish day
-            if price > ema50_4h_aligned[i] or daily_momentum_aligned[i] > 0.5:
+            # Short exit: trend reversal or price crosses above PP
+            if price > ema34_1w_aligned[i] or price > pp_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_1d_HighLowBreakout_Volume"
-timeframe = "1h"
+name = "4h_1d_1w_Camarilla_R1S1_Breakout_Volume_TrendFilter_V1"
+timeframe = "4h"
 leverage = 1.0
