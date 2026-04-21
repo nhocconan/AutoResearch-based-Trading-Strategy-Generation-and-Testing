@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_Regime_ChopFilter_VolumeSpike_v1
-Hypothesis: KAMA adapts to market regime (trending/choppy) reducing whipsaw in bear markets. Combined with 1d trend filter, volume spike (>2x 20-bar avg), and choppiness filter (CHOP > 61.8 = choppy -> mean reversion at Camarilla S1/R1). Discrete sizing 0.25, min holding 4 bars. Target 60-120 trades over 4 years (15-30/year). Works in bull via trend-following KAMA breaks, in bear via mean reversion in chop at pivot levels.
+6h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: 6h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 20-period average). Uses discrete sizing (0.25) and ATR-based stop (2.0x). Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag. Works in bull/bear via 1d trend filter: long only in uptrend (price > EMA50), short only in downtrend (price < EMA50). Avoids overtrading by requiring volume spike and strict trend alignment.
 """
 
 import numpy as np
@@ -23,21 +23,10 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h close, KAMA (ER=10) for adaptive trend ===
+    # === 6h close ===
     close = prices['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, 1)), axis=0) if len(close) > 1 else 0
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === 6h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     
@@ -47,20 +36,12 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
+    # === 6h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 4h Choppiness Index (CHOP) regime filter ===
-    # CHOP > 61.8 = choppy (mean revert), CHOP < 38.2 = trending
-    atr_14 = tr.rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_14 / (highest_high - lowest_low)) / np.log10(14)
-    chop_regime = chop > 61.8  # True = choppy, False = trending
-    
-    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    # === 6h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -77,9 +58,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(kama[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i]) or 
-            np.isnan(chop_regime[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,26 +68,19 @@ def generate_signals(prices):
         
         price = close[i]
         ema_50_1d_val = ema_50_1d_aligned[i]
-        kama_val = kama[i]
         r1_val = r1[i]
         s1_val = s1[i]
         vol_conf = volume_confirmed[i]
-        choppy = chop_regime[i]
+        
+        # Trend alignment: price above EMA50 for long, below for short
+        uptrend = price > ema_50_1d_val
+        downtrend = price < ema_50_1d_val
         
         if position == 0:
-            # In choppy regime: mean reversion at Camarilla levels
-            # Long: price closes below S1 (oversold) in chop
-            # Short: price closes above R1 (overbought) in chop
-            long_condition = choppy and (price < s1_val) and vol_conf
-            short_condition = choppy and (price > r1_val) and vol_conf
-            
-            # In trending regime: follow KAMA break with 1d trend filter
-            # Long: price > KAMA and price > 1d EMA50 (uptrend)
-            # Short: price < KAMA and price < 1d EMA50 (downtrend)
-            uptrend = price > ema_50_1d_val
-            downtrend = price < ema_50_1d_val
-            long_condition |= (not choppy) and (price > kama_val) and uptrend and vol_conf
-            short_condition |= (not choppy) and (price < kama_val) and downtrend and vol_conf
+            # Long: price closes above R1, uptrend, volume confirmed
+            long_condition = (price > r1_val) and uptrend and vol_conf
+            # Short: price closes below S1, downtrend, volume confirmed
+            short_condition = (price < s1_val) and downtrend and vol_conf
             
             if long_condition:
                 signals[i] = 0.25
@@ -123,23 +96,9 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 4 bars to reduce churn
-            if bars_since_entry < 4:
-                signals[i] = 0.25 if position == 1 else -0.25
-                continue
-            
             # Check stoploss (2.0x ATR)
             if position == 1:
                 if price < entry_price - 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
-                # Exit conditions based on regime
-                elif choppy and (price > pivot[i]):  # exit mean reversion at pivot
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
-                elif not choppy and (price < kama_val or price < ema_50_1d_val):  # exit trend break
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -150,20 +109,11 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit conditions based on regime
-                elif choppy and (price < pivot[i]):  # exit mean reversion at pivot
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
-                elif not choppy and (price > kama_val or price > ema_50_1d_val):  # exit trend break
-                    signals[i] = 0.0
-                    position = 0
-                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
     return signals
 
-name = "4h_KAMA_Trend_Regime_ChopFilter_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
