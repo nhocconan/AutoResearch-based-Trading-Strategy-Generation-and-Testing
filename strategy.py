@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_Volume_ATRFilter_v1
-Hypothesis: Breakout of Camarilla R1/S1 levels on 12h timeframe with volume confirmation and ATR-based trend filter.
-Works in bull/bear: In uptrend, buy R1 breakout; in downtrend, sell S1 breakout. Uses 1w EMA20 for trend filter.
-Target: 12-37 trades/year per symbol (50-150 over 4 years).
+4h_1d_Camarilla_R1S1_Breakout_VolumeFilter_Tight_v1
+Hypothesis: Fade extreme Camarilla levels (R1/S1) on 4h timeframe with 1d trend filter (EMA34) and volume confirmation.
+Works in bull/bear: In uptrend, fade R1 for short; in downtrend, fade S1 for long. Uses 1d EMA for trend filter.
+Target: 20-50 trades/year per symbol (80-200 over 4 years).
 """
 
 import numpy as np
@@ -12,10 +12,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels
+    # Load 1d data once for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -32,43 +32,26 @@ def generate_signals(prices):
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Camarilla levels: R1, S1 (primary breakout levels)
+    # Camarilla levels: R1, S1 (primary fade levels)
     rang = prev_high - prev_low
     r1 = prev_close + rang * 1.0 / 12
     s1 = prev_close - rang * 1.0 / 12
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Load 1w data for EMA20 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # ATR for volatility filter (14-period on 1d)
-    if len(df_1d) < 14:
-        atr_1d = np.full(len(df_1d), np.nan)
-    else:
-        high_low = high_1d - low_1d
-        high_close = np.abs(high_1d - np.roll(close_1d, 1))
-        low_close = np.abs(low_1d - np.roll(close_1d, 1))
-        tr = np.maximum(high_low, np.maximum(high_close, low_close))
-        tr[0] = np.nan
-        atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,35 +67,31 @@ def generate_signals(prices):
         else:
             volume_ok = False
         
-        # Trend filter: price > 1w EMA20 = uptrend, price < 1w EMA20 = downtrend
-        uptrend = price > ema_20_1w_aligned[i]
-        downtrend = price < ema_20_1w_aligned[i]
-        
         if position == 0:
-            # Long conditions: price > R1 AND uptrend AND volume
-            if (price > r1_aligned[i] and 
-                uptrend and 
+            # Long conditions: price < S1 (oversold) AND 1d uptrend AND volume
+            if (price < s1_aligned[i] and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and  # 1d EMA rising
                 volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < S1 AND downtrend AND volume
-            elif (price < s1_aligned[i] and 
-                  downtrend and 
+            # Short conditions: price > R1 (overbought) AND 1d downtrend AND volume
+            elif (price > r1_aligned[i] and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and  # 1d EMA falling
                   volume_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price < 1w EMA20 (trend reversal) or ATR-based stop
-            if price < ema_20_1w_aligned[i]:
+            # Long exit: price > 1d EMA34 (trend exhaustion) or price > R1 (mean reversion fail)
+            if price > ema_34_1d_aligned[i] or price > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price > 1w EMA20 (trend reversal) or ATR-based stop
-            if price > ema_20_1w_aligned[i]:
+            # Short exit: price < 1d EMA34 (trend exhaustion) or price < S1 (mean reversion fail)
+            if price < ema_34_1d_aligned[i] or price < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume_ATRFilter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_VolumeFilter_Tight_v1"
+timeframe = "4h"
 leverage = 1.0
