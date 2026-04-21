@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: 12h Camarilla R1/S1 breakouts in direction of daily trend (price > daily EMA34) with volume confirmation (>2.0x 20-bar MA). 
-In bull daily regime (price > daily EMA34), take longs on R1 breakouts; in bear daily regime (price < daily EMA34), take shorts on S1 breakouts. 
-Daily EMA34 provides stable trend filter; Camarilla breakouts capture institutional levels; volume filter ensures participation. 
-Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year) by requiring confluence of breakout, daily trend, and volume.
-ATR-based stoploss (2.5x) and time-based exit (max 8 bars) control risk. Discrete sizing (0.25) minimizes fee churn.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v2
+Hypothesis: 4h Camarilla R3/S3 breakouts with daily EMA34 trend filter and volume confirmation (>2.0x 20-bar MA) work in both bull and bear markets. 
+R3/S3 levels represent stronger intraday support/resistance than R1/S1, reducing false breakouts. 
+In bull regime (price > daily EMA34), favor longs on R3 breakouts; in bear regime (price < daily EMA34), favor shorts on S3 breakouts. 
+Volume spike ensures institutional participation. ATR-based stoploss (2.5x) and max hold (12 bars = 2 days) control risk. 
+Discrete sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 12h ATR (14-period) for stoploss ===
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -38,33 +38,33 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
+    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 12h Camarilla levels (based on previous bar's OHLC) ===
+    # === 4h Camarilla levels (based on previous bar's OHLC) ===
     prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_open = np.roll(prices['open'].values, 1)
     prev_close[0] = prev_high[0] = prev_low[0] = prev_open[0] = np.nan  # first bar invalid
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
     camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
+    r3 = prev_close + camarilla_range * 1.1 / 4
+    s3 = prev_close - camarilla_range * 1.1 / 4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
-    max_hold_bars = 8  # max 4 days (8 * 12h = 96h)
+    max_hold_bars = 12  # max 2 days (12 * 4h = 48h)
     
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or 
+            np.isnan(r3[i]) or np.isnan(s3[i]) or 
             np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,8 +74,8 @@ def generate_signals(prices):
         
         price = close[i]
         ema_34_1d_val = ema_34_1d_aligned[i]
-        r1_val = r1[i]
-        s1_val = s1[i]
+        r3_val = r3[i]
+        s3_val = s3[i]
         vol_conf = volume_confirmed[i]
         
         # Daily trend regime
@@ -84,13 +84,13 @@ def generate_signals(prices):
         
         if position == 0:
             if is_bull:
-                # Bull regime: long R1 breakouts favored
-                long_condition = (price > r1_val) and vol_conf
-                short_condition = (price < s1_val) and vol_conf and (price < ema_34_1d_val * 0.99)  # stricter for shorts
+                # Bull regime: long R3 breakouts favored
+                long_condition = (price > r3_val) and vol_conf
+                short_condition = (price < s3_val) and vol_conf and (price < ema_34_1d_val * 0.99)  # stricter for shorts
             else:  # bear regime
-                # Bear regime: short S1 breakouts favored
-                short_condition = (price < s1_val) and vol_conf
-                long_condition = (price > r1_val) and vol_conf and (price > ema_34_1d_val * 1.01)  # stricter for longs
+                # Bear regime: short S3 breakouts favored
+                short_condition = (price < s3_val) and vol_conf
+                long_condition = (price > r3_val) and vol_conf and (price > ema_34_1d_val * 1.01)  # stricter for longs
             
             if long_condition:
                 signals[i] = 0.25
@@ -134,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
