@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_FundingRateMeanReversion_Zscore_ATRFilter
-Hypothesis: Funding rate mean-reversion using 30-day z-score works as a structural edge for BTC/ETH in both bull and bear markets. Extreme positive funding (> +2σ) indicates overleveraged longs → short. Extreme negative funding (< -2σ) indicates oversold shorts → long. Uses 1d timeframe for entries, ATR-based stoploss for risk control, and volume confirmation to reduce false signals. Target: 20-50 trades/year per symbol (80-200 over 4 years).
+6h_1d_IchiCloud_TK_Cross_TrendFilter
+Hypothesis: Ichimoku cloud with TK cross on 6h timeframe, filtered by 1d cloud color (bull/bear regime), works in both bull and bear markets by only taking trades aligned with the higher timeframe trend. Uses discrete position sizing (0.25) to limit fee drag and target 12-37 trades/year per symbol.
 """
 
 import numpy as np
@@ -13,46 +13,63 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load funding rate data (assuming available in data/funding/ directory)
-    # Note: In actual implementation, funding data would be loaded separately
-    # For this strategy, we simulate funding rate calculation from price action
-    # as proxy: funding ≈ (price - ma) / ma * scaling (simplified)
-    close = prices['close'].values
+    # Load 1d data once for HTF Ichimoku cloud (regime filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # need 26*2 for Senkou Span B
+        return np.zeros(n)
+    
+    # Calculate Ichimoku components on 1d timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align 1d Ichimoku components to 6h timeframe (cloud for regime filter)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Calculate Ichimoku on 6h timeframe for entry signals (TK cross)
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Calculate 30-day moving average of close (1d timeframe)
-    ma_30 = pd.Series(close).rolling(window=30, min_periods=30).mean().values
+    # Tenkan-sen (9-period) on 6h
+    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen_6h = (period9_high_6h + period9_low_6h) / 2
     
-    # Calculate funding rate proxy: deviation from 30-day MA, scaled
-    # In reality: funding rate = (mark_price - index_price) / index_price
-    # Here we use: (close - ma_30) / ma_30 as proxy for funding rate deviation
-    funding_proxy = (close - ma_30) / ma_30
-    
-    # Calculate 30-day rolling z-score of funding proxy
-    funding_mean = pd.Series(funding_proxy).rolling(window=30, min_periods=30).mean().values
-    funding_std = pd.Series(funding_proxy).rolling(window=30, min_periods=30).std().values
-    funding_zscore = np.where(funding_std > 0, (funding_proxy - funding_mean) / funding_std, 0)
-    
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for stoploss (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Kijun-sen (26-period) on 6h
+    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen_6h = (period26_high_6h + period26_low_6h) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(funding_zscore[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i]) or np.isnan(ma_30[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,30 +77,35 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Volume confirmation (>1.3x average to reduce trades)
-        volume_ok = volume[i] > 1.3 * vol_ma[i]
+        # 1d Cloud color (regime filter): bullish if Senkou Span A > Senkou Span B
+        bullish_regime = senkou_span_a_aligned[i] > senkou_span_b_aligned[i]
+        bearish_regime = senkou_span_a_aligned[i] < senkou_span_b_aligned[i]
+        
+        # 6h TK Cross
+        tk_cross_bull = tenkan_sen_6h[i] > kijun_sen_6h[i]
+        tk_cross_bear = tenkan_sen_6h[i] < kijun_sen_6h[i]
         
         if position == 0:
-            # Long: funding extremely negative (< -2) + volume confirmation
-            if funding_zscore[i] < -2.0 and volume_ok:
+            # Long: bullish regime + bullish TK cross
+            if bullish_regime and tk_cross_bull:
                 signals[i] = 0.25
                 position = 1
-            # Short: funding extremely positive (> +2) + volume confirmation
-            elif funding_zscore[i] > 2.0 and volume_ok:
+            # Short: bearish regime + bearish TK cross
+            elif bearish_regime and tk_cross_bear:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: funding reverts to neutral (> -0.5) or ATR stoploss
-            if funding_zscore[i] > -0.5 or price < prices['close'].iloc[i-1] - 2.5 * atr[i]:
+            # Exit: bearish TK cross or price breaks below cloud
+            if tk_cross_bear or price < senkou_span_a_aligned[i] or price < senkou_span_b_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: funding reverts to neutral (< +0.5) or ATR stoploss
-            if funding_zscore[i] < 0.5 or price > prices['close'].iloc[i-1] + 2.5 * atr[i]:
+            # Exit: bullish TK cross or price breaks above cloud
+            if tk_cross_bull or price > senkou_span_a_aligned[i] or price > senkou_span_b_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_FundingRateMeanReversion_Zscore_ATRFilter"
-timeframe = "1d"
+name = "6h_1d_IchiCloud_TK_Cross_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
