@@ -3,77 +3,53 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ADX + 1d Williams Alligator combo.
-# ADX(14) > 25 signals trend presence (avoids chop). 
-# Williams Alligator: Jaw(13), Teeth(8), Lips(5) SMAs on median price.
-# Long when price > Teeth and Teeth > Lips and ADX rising.
-# Short when price < Teeth and Teeth < Lips and ADX rising.
-# Uses 1d Alligator for higher timeframe trend filter, ADX on 6h for entry timing.
-# Target: 25-40 trades/year by requiring strong trend + alignment.
+# Hypothesis: 12h Donchian breakout with weekly volume confirmation and 1w trend filter.
+# Uses weekly Donchian channels to establish long-term trend direction.
+# Enters long when price breaks above 12h Donchian upper (20) and weekly trend is up.
+# Enters short when price breaks below 12h Donchian lower (20) and weekly trend is down.
+# Volume confirmation requires current 12h volume > 1.5x 20-period weekly average volume.
+# Designed for low trade frequency (10-30/year) to minimize fee drag on 12h timeframe.
+# Works in both bull and bear markets by following the weekly trend.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d for Williams Alligator
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data for trend filter and volume average
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on 1d
-    median_price_1d = (df_1d['high'].values + df_1d['low'].values) / 2
-    jaw = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().values  # Blue line (13)
-    teeth = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().values    # Red line (8)
-    lips = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().values     # Green line (5)
+    # Calculate weekly Donchian channels (20-period)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    donchian_high_20_w = pd.Series(high_w).rolling(window=20, min_periods=20).max().values
+    donchian_low_20_w = pd.Series(low_w).rolling(window=20, min_periods=20).min().values
     
-    # Align Alligator lines to 6h
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Weekly trend: price above/below midpoint of weekly Donchian
+    donchian_mid_w = (donchian_high_20_w + donchian_low_20_w) / 2
+    close_w = df_1w['close'].values
+    weekly_uptrend = close_w > donchian_mid_w
+    weekly_downtrend = close_w < donchian_mid_w
     
-    # Calculate ADX on 6h
+    # Weekly volume average for confirmation
+    vol_w = df_1w['volume'].values
+    vol_ma_20_w = pd.Series(vol_w).rolling(window=20, min_periods=20).mean().values
+    
+    # Align weekly indicators to 12h
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
+    vol_ma_20_w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_w)
+    
+    # Calculate 12h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smooth TR, DM+, DM- (Wilder smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Adx rising: current > previous
-    adx_rising = adx > np.roll(adx, 1)
-    adx_rising[0] = False
-    
-    # Alligator alignment signals
-    # Bullish: price > teeth and teeth > lips
-    bullish_align = (close > teeth_1d_aligned) & (teeth_1d_aligned > lips_1d_aligned)
-    # Bearish: price < teeth and teeth < lips
-    bearish_align = (close < teeth_1d_aligned) & (teeth_1d_aligned < lips_1d_aligned)
+    # Align weekly volume average to 12h
+    vol_ma_20_w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_w)
     
     # Pre-compute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -81,10 +57,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after ADX warmup
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
-            np.isnan(lips_1d_aligned[i]) or np.isnan(adx[i])):
+        if (np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or
+            np.isnan(vol_ma_20_w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -100,13 +77,24 @@ def generate_signals(prices):
                 position = 0
             continue
         
+        # Current values
+        close = prices['close'].iloc[i]
+        vol_current = prices['volume'].iloc[i]
+        
+        # Trend filters
+        is_uptrend = weekly_uptrend_aligned[i] > 0.5
+        is_downtrend = weekly_downtrend_aligned[i] > 0.5
+        
+        # Volume confirmation: current 12h volume > 1.5x 20-week average volume
+        volume_confirm = vol_current > 1.5 * vol_ma_20_w_aligned[i]
+        
         if position == 0:
-            # Enter long: bullish alignment + ADX > 25 + ADX rising
-            if bullish_align[i] and adx[i] > 25 and adx_rising[i]:
+            # Enter long: price breaks above 12h Donchian high + weekly uptrend + volume
+            if close > donchian_high_20[i] and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish alignment + ADX > 25 + ADX rising
-            elif bearish_align[i] and adx[i] > 25 and adx_rising[i]:
+            # Enter short: price breaks below 12h Donchian low + weekly downtrend + volume
+            elif close < donchian_low_20[i] and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
@@ -115,12 +103,16 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: loss of bullish alignment OR ADX < 20
-                if not bullish_align[i] or adx[i] < 20:
+                # Exit long: price breaks below 12h Donchian low OR weekly trend turns down
+                if close < donchian_low_20[i]:
+                    exit_signal = True
+                elif not is_uptrend:
                     exit_signal = True
             elif position == -1:
-                # Exit short: loss of bearish alignment OR ADX < 20
-                if not bearish_align[i] or adx[i] < 20:
+                # Exit short: price breaks above 12h Donchian high OR weekly trend turns up
+                if close > donchian_high_20[i]:
+                    exit_signal = True
+                elif not is_downtrend:
                     exit_signal = True
             
             if exit_signal:
@@ -132,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_WilliamsAlligator"
-timeframe = "6h"
+name = "12h_Donchian_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
