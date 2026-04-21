@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeATRFilter_Tight_V1
-Hypothesis: 4h Donchian(20) breakouts with volume confirmation (1.5x 20-bar avg volume) and ATR-based stoploss (2.0x ATR) will capture medium-term trends in BTC and ETH across bull and bear markets. Uses 1d EMA200 for regime filter (only long when price > EMA200, short when price < EMA200) to avoid counter-trend whipsaws. Target: 20-50 trades/year per symbol (80-200 over 4 years).
+6h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1
+Hypothesis: Camarilla R1/S1 breakouts with volume confirmation and ATR-based stoploss work on 6h timeframe for BTC and ETH in both bull and bear markets. The strategy uses 1d timeframe for Camarilla pivot calculation and 6h EMA50 for trend filter. Target: 12-37 trades/year per symbol (50-150 over 4 years).
 """
 
 import numpy as np
@@ -13,30 +13,50 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for EMA200 regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Load 6h data once for trend filter
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA200
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Load daily data once for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 4h data
+    # Previous day's OHLC for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla pivot point and R1/S1 levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align daily levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 6h EMA50 for trend filter
+    close_6h = df_6h['close'].values
+    ema_50_6h = pd.Series(close_6h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h_aligned = align_htf_to_ltf(prices, df_6h, ema_50_6h)
+    
+    # Volume filter: 20-period average (approx 5 days on 6h)
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # Donchian upper (20-period high)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Donchian lower (20-period low)
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: 20-period average volume
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for stoploss (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -49,8 +69,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_6h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,40 +82,40 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume > 1.5 * vol_ma[i]
         
-        # Regime filter: 1d EMA200
-        uptrend_regime = price > ema_200_1d_aligned[i]
-        downtrend_regime = price < ema_200_1d_aligned[i]
+        # 6h trend filter
+        uptrend = close[i] > ema_50_6h_aligned[i]
+        downtrend = close[i] < ema_50_6h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high in uptrend regime with volume
-            if uptrend_regime and volume_ok:
-                if price > donch_high[i]:
-                    signals[i] = 0.25
+            # Long: price breaks above R1 in uptrend with volume
+            if uptrend and volume_ok:
+                if price > r1_aligned[i]:
+                    signals[i] = 0.30
                     position = 1
-            # Short: price breaks below Donchian low in downtrend regime with volume
-            elif downtrend_regime and volume_ok:
-                if price < donch_low[i]:
-                    signals[i] = -0.25
+            # Short: price breaks below S1 in downtrend with volume
+            elif downtrend and volume_ok:
+                if price < s1_aligned[i]:
+                    signals[i] = -0.30
                     position = -1
         
         elif position == 1:
-            # Exit: price reaches Donchian low or stoploss
-            if price <= donch_low[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
+            # Exit: price reaches S1 or stoploss
+            if price <= s1_aligned[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit: price reaches Donchian high or stoploss
-            if price >= donch_high[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
+            # Exit: price reaches R1 or stoploss
+            if price >= r1_aligned[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeATRFilter_Tight_V1"
-timeframe = "4h"
+name = "6h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1"
+timeframe = "6h"
 leverage = 1.0
