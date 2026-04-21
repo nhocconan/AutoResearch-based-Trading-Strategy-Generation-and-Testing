@@ -3,100 +3,88 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 1D CCI Trend + Volume + 1D ATR Volatility Filter
-# Uses daily CCI (20) for trend direction (long when CCI > 0, short when CCI < 0),
-# confirmed by 4h price closing above/below 20-period EMA and volume > 1.5x 20-period average.
-# Filters out low-volatility environments using 1D ATR ratio (current ATR / 20-period ATR < 0.5).
-# Designed for 15-25 trades/year to minimize fee drag while capturing sustained trends.
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
+# The Alligator (Jaw/Teeth/Lips) identifies trend absence/presence: when lines are intertwined (no trend), 
+# we avoid trades; when aligned (teeth > lips for uptrend, teeth < lips for downtrend), we follow the trend.
+# Uses 1d EMA34 for higher timeframe trend alignment and volume > 1.5x 20-period average for confirmation.
+# Designed for low trade frequency (12-37/year) to avoid fee drag while capturing sustained moves.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Get 1D data ONCE before loop
+    # Williams Alligator: Smoothed Moving Average (SMA with specific periods)
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    # SMMA is EMA with alpha = 1/period (equivalent to span=2*period-1 in pandas ewm)
+    close = prices['close'].values
+    
+    # Jaw (13-period SMMA -> span=25)
+    jaw = pd.Series(close).ewm(span=25, adjust=False, min_periods=25).mean().values
+    # Teeth (8-period SMMA -> span=15)
+    teeth = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # Lips (5-period SMMA -> span=9)
+    lips = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    
+    # 1d EMA34 for trend filter (updated only on 1d close)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1D CCI (20-period)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    sma_tp = typical_price.rolling(window=20, min_periods=20).mean()
-    mad = typical_price.rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    cci_1d = (typical_price - sma_tp) / (0.015 * mad)
-    cci_1d = cci_1d.fillna(0).values
-    
-    # Calculate 1D ATR (14-period) and its 20-period average for volatility filter
-    high_low = df_1d['high'] - df_1d['low']
-    high_close = np.abs(df_1d['high'] - df_1d['close'].shift())
-    low_close = np.abs(df_1d['low'] - df_1d['close'].shift())
-    tr_1d = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean()
-    atr_ma_1d = atr_1d.rolling(window=20, min_periods=20).mean()
-    atr_ratio_1d = (atr_1d / atr_ma_1d).fillna(1.0).values  # Avoid division by zero
-    
-    # Align 1D indicators to 4H timeframe
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    
-    # Pre-compute 4H indicators
-    ema_20 = prices['close'].ewm(span=20, min_periods=20, adjust=False).mean().values
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20, adjust=False).mean().values
+    # Volume confirmation: 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(35, n):  # Start after Alligator and EMA warmup
         # Skip if data not ready
-        if (np.isnan(cci_1d_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
-            np.isnan(ema_20[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current price and volume
+        # Price and volume
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Volatility filter: only trade when volatility is elevated (ATR ratio > 0.5)
-        volatility_filter = atr_ratio_1d_aligned[i] > 0.5
+        # Alligator alignment: Teeth > Lips = uptrend, Teeth < Lips = downtrend
+        # When intertwined (Teeth ~ Lips), no trend -> avoid trades
+        teeth_lips_diff = teeth[i] - lips[i]
+        is_uptrend_aligned = teeth_lips_diff > 0.001 * price  # Small threshold to avoid noise
+        is_downtrend_aligned = teeth_lips_diff < -0.001 * price
         
-        # Trend direction from 1D CCI
-        trend_long = cci_1d_aligned[i] > 0
-        trend_short = cci_1d_aligned[i] < 0
-        
-        # Price position relative to 4H EMA
-        price_above_ema = price > ema_20[i]
-        price_below_ema = price < ema_20[i]
+        # 1d trend filter: price above/below EMA34
+        price_above_1d_ema = price > ema_34_1d_aligned[i]
+        price_below_1d_ema = price < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Enter long: daily uptrend + price above 4H EMA + volume + volatility
-            if trend_long and price_above_ema and volume_confirm and volatility_filter:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: daily downtrend + price below 4H EMA + volume + volatility
-            elif trend_short and price_below_ema and volume_confirm and volatility_filter:
-                signals[i] = -0.25
-                position = -1
+            if volume_confirm:
+                # Long: Alligator uptrend aligned + price above 1d EMA
+                if is_uptrend_aligned and price_above_1d_ema:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Alligator downtrend aligned + price below 1d EMA
+                elif is_downtrend_aligned and price_below_1d_ema:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: Alligator lines cross (trend weakening) or 1d trend fails
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when daily trend turns down OR price breaks below 4H EMA
-                if not trend_long or price_below_ema:
+                # Exit if teeth cross below lips (trend weakening) OR price breaks below 1d EMA
+                if teeth_lips_diff < 0 or price_below_1d_ema:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when daily trend turns up OR price breaks above 4H EMA
-                if not trend_short or price_above_ema:
+                # Exit if teeth cross above lips (trend weakening) OR price breaks above 1d EMA
+                if teeth_lips_diff > 0 or price_above_1d_ema:
                     exit_signal = True
             
             if exit_signal:
@@ -108,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1D_CCI_Trend_Volume_VolatilityFilter"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
