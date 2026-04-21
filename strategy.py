@@ -1,105 +1,103 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_R1S1_Breakout_V1
-Hypothesis: Keltner channels on 1d (ATR-based) capture volatility breakouts while R1/S1 pivots from 1w provide key support/resistance levels. Long when price breaks above Keltner upper band and above weekly R1; short when breaks below Keltner lower band and below weekly S1. Uses volume confirmation and ATR stop. Designed to work in both bull and bear by following volatility expansion with institutional pivot levels as filters.
+6h_Pivot_R1S1_Breakout_VolumeConfirmation_V1
+Hypothesis: Daily pivot points (R1/S1) act as strong intraday support/resistance on 6h timeframe.
+Breakouts above R1 or below S1 with volume confirmation (volume > 1.5x 20-period average) indicate
+institutional interest and trend continuation. Works in bull/bear by only taking breakouts in
+direction of price relative to central pivot (above PP = long bias, below PP = short bias).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_pivot_points(high, low, close):
+    """Calculate daily pivot points: P, R1, S1, R2, S2"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    return pivot, r1, s1, r2, s2
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
-    # Load weekly data once for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Load 1d data once for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (R1, S1)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate pivot points on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
+    pivot_1d, r1_1d, s1_1d, r2_1d, s2_1d = calculate_pivot_points(high_1d, low_1d, close_1d)
     
-    # Align weekly pivots to daily timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Align pivot levels to 6h timeframe (only use completed daily bars)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate Keltner Channel on daily data (20-period EMA, 2x ATR)
+    # 6h data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # EMA(20) for middle band
-    alpha = 2 / (20 + 1)
-    ema = np.full_like(close, np.nan)
-    ema[0] = close[0]
-    for i in range(1, len(close)):
-        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
-    
-    # ATR(20) for band width
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full_like(close, np.nan)
-    for i in range(20, len(tr)):
-        if not np.isnan(tr[i]):
-            atr[i] = np.mean(tr[i-19:i+1])
-    
-    # Keltner bands
-    keltner_upper = ema + 2 * atr
-    keltner_lower = ema - 2 * atr
+    volume = prices['volume'].values
     
     # Volume confirmation: volume > 1.5x 20-period average
-    volume = prices['volume'].values
     vol_ma = np.full_like(volume, np.nan)
-    for i in range(20, len(volume)):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > 1.5 * vol_ma
+    for i in range(len(volume)):
+        if i >= 19:
+            vol_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if NaN in critical values
-        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]):
+        # Skip if any pivot level is NaN
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        vol_ok = volume_filter[i] if not np.isnan(volume_filter[i]) else False
+        vol = volume[i]
+        vol_average = vol_ma[i]
+        
+        # Skip if volume data not ready
+        if np.isnan(vol_average):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = vol > (1.5 * vol_average)
         
         if position == 0:
-            # Long: price breaks above Keltner upper AND above weekly R1 with volume
-            if price > keltner_upper[i] and price > r1_1w_aligned[i] and vol_ok:
+            # Long: price breaks above R1 with volume confirmation AND price above daily pivot (bullish bias)
+            if price > r1_aligned[i] and volume_confirmed and price > pivot_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Keltner lower AND below weekly S1 with volume
-            elif price < keltner_lower[i] and price < s1_1w_aligned[i] and vol_ok:
+            # Short: price breaks below S1 with volume confirmation AND price below daily pivot (bearish bias)
+            elif price < s1_aligned[i] and volume_confirmed and price < pivot_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price closes below Keltner middle or below weekly S1
-            if price < ema[i] or price < s1_1w_aligned[i]:
+            # Long exit: price returns below R1 or loses volume confirmation
+            if price < r1_aligned[i] or not volume_confirmed:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price closes above Keltner middle or above weekly R1
-            if price > ema[i] or price > r1_1w_aligned[i]:
+            # Short exit: price returns above S1 or loses volume confirmation
+            if price > s1_aligned[i] or not volume_confirmed:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_R1S1_Breakout_V1"
-timeframe = "1d"
+name = "6h_Pivot_R1S1_Breakout_VolumeConfirmation_V1"
+timeframe = "6h"
 leverage = 1.0
