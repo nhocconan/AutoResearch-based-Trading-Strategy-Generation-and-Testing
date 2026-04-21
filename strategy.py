@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX trend filter.
-Long when price breaks above Donchian upper with volume > 1.5x average and daily ADX > 25.
-Short when price breaks below Donchian lower with volume > 1.5x average and daily ADX > 25.
-Exit when price returns to Donchian midpoint or volume drops below average.
-This combines price channel breakout with volume and trend filters to reduce false signals
-while maintaining low trade frequency (target: 20-30 trades/year) for robust performance
-in both bull and bear markets.
+Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation and 1d RSI trend filter.
+Long when price breaks above R1 with volume > 1.3x average and daily RSI > 50.
+Short when price breaks below S1 with volume > 1.3x average and daily RSI < 50.
+Exit when price returns to daily pivot or volume drops below average.
+Camarilla levels provide intraday support/resistance, volume confirms breakout strength,
+and RSI filters for trend alignment to avoid counter-trend trades in chop.
+Target: 20-30 trades/year for low fee drag and robust performance.
 """
 
 import numpy as np
@@ -18,73 +18,55 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for ADX trend filter and volume
+    # Load daily data ONCE before loop for Camarilla levels, RSI, and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Donchian upper and lower
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    mid_20 = (upper_20 + lower_20) / 2
-    
-    # Align Donchian levels to 4h
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    mid_20_aligned = align_htf_to_ltf(prices, df_1d, mid_20)
-    
-    # Calculate daily ADX(14)
+    # Calculate daily pivot and Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Camarilla levels: R1 = close + 1.1*range/12, S1 = close - 1.1*range/12
+    r1 = close_1d + 1.1 * range_1d / 12
+    s1 = close_1d - 1.1 * range_1d / 12
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # DI values
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
+    # Calculate daily RSI(14)
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align daily ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([[np.nan], rsi])  # prepend NaN for first element
     
-    # Calculate daily volume average (20-period)
+    # Align daily RSI to 4h
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Calculate daily volume average (14-period)
     vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    vol_ma_14 = pd.Series(vol_1d).rolling(window=14, min_periods=14).mean().values
+    vol_ma_14_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(mid_20_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,32 +77,32 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)[i]
         
         if position == 0:
-            # Enter long: price breaks above upper Donchian, volume surge, daily ADX > 25
-            if (price_close > upper_20_aligned[i] and 
-                vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
-                adx_aligned[i] > 25):
+            # Enter long: price breaks above R1, volume surge, daily RSI > 50 (uptrend)
+            if (price_close > r1_aligned[i] and 
+                vol_1d_current > 1.3 * vol_ma_14_aligned[i] and
+                rsi_aligned[i] > 50):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Donchian, volume surge, daily ADX > 25
-            elif (price_close < lower_20_aligned[i] and 
-                  vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
-                  adx_aligned[i] > 25):
+            # Enter short: price breaks below S1, volume surge, daily RSI < 50 (downtrend)
+            elif (price_close < s1_aligned[i] and 
+                  vol_1d_current > 1.3 * vol_ma_14_aligned[i] and
+                  rsi_aligned[i] < 50):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price returns to Donchian midpoint or volume drops below average
+            # Exit: price returns to daily pivot or volume drops below average
             exit_signal = False
             
             if position == 1:
-                # Exit long: price <= midpoint or volume < average
-                if (price_close <= mid_20_aligned[i] or
-                    vol_1d_current < vol_ma_20_aligned[i]):
+                # Exit long: price <= pivot or volume < average
+                if (price_close <= pivot_aligned[i] or
+                    vol_1d_current < vol_ma_14_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: price >= midpoint or volume < average
-                if (price_close >= mid_20_aligned[i] or
-                    vol_1d_current < vol_ma_20_aligned[i]):
+                # Exit short: price >= pivot or volume < average
+                if (price_close >= pivot_aligned[i] or
+                    vol_1d_current < vol_ma_14_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -132,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume1.5x_DailyADX25"
+name = "4h_Camarilla_R1_S1_Volume1.3x_DailyRSI50"
 timeframe = "4h"
 leverage = 1.0
