@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_ATRStop_v1
-Hypothesis: On 12h timeframe, price breaking above Camarilla R1 or below S1 from the prior day, with 1-day EMA34 trend filter and ATR-based stoploss, captures momentum breakouts with low trade frequency. Designed for 12h TF to target 50-150 total trades over 4 years (12-37/year) to minimize fee drag and improve generalization to bear markets (2025+).
+1d_Camarilla_R1_S1_Breakout_WeeklyTrend_ATRStop_v1
+Hypothesis: On daily timeframe, price breaking above Camarilla R1 or below S1 from the prior day, with 1-week EMA34 trend filter and ATR-based stoploss, captures momentum breakouts with low trade frequency. Designed for 1d TF to target 30-100 total trades over 4 years (7-25/year) to minimize fee drag and improve generalization to bear markets (2025+). Uses weekly trend filter to avoid counter-trend trades in bear markets.
 """
 
 import numpy as np
@@ -13,15 +13,11 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA trend filter and Camarilla levels)
+    # Load HTF data ONCE before loop (1d for Camarilla levels, 1w for EMA trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 2 or len(df_1w) < 34:
         return np.zeros(n)
-    
-    # === 1-day EMA34 for trend filter ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === Previous day's OHLC for Camarilla levels ===
     prev_high = df_1d['high'].shift(1).values
@@ -33,9 +29,14 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + prev_range * 1.1 / 12
     camarilla_s1 = prev_close - prev_range * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 1d timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # === 1-week EMA34 for trend filter ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # === ATR for volatility filtering and stoploss ===
     high = prices['high'].values
@@ -55,7 +56,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(atr[i])):
             if position != 0:
@@ -66,18 +67,18 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         price_high = prices['high'].iloc[i]
         price_low = prices['low'].iloc[i]
-        ema_34 = ema_34_1d_aligned[i]
+        ema_34 = ema_34_1w_aligned[i]
         r1_level = camarilla_r1_aligned[i]
         s1_level = camarilla_s1_aligned[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above R1 + above daily EMA34
+            # Long: price breaks above R1 + above weekly EMA34
             if price_high > r1_level and price_close > ema_34:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price_close
-            # Short: price breaks below S1 + below daily EMA34
+            # Short: price breaks below S1 + below weekly EMA34
             elif price_low < s1_level and price_close < ema_34:
                 signals[i] = -0.25
                 position = -1
@@ -106,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_ATRStop_v1"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
