@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using weekly pivot points (R1/S1) with 1d EMA34 trend filter and volume confirmation.
-In uptrend (price > EMA34), buy breakouts above weekly R1; in downtrend (price < EMA34), sell breakdowns below weekly S1.
-Weekly P1/S1 provide stronger institutional support/resistance than daily pivots, reducing false breakouts.
+Hypothesis: 1d strategy using weekly pivot points (R2/S2) with 1w EMA34 trend filter and volume confirmation.
+In uptrend (price > EMA34), buy breakouts above weekly R2; in downtrend (price < EMA34), sell breakdowns below weekly S2.
+Weekly R2/S2 provide stronger institutional support/resistance than R1/S1, reducing false breakouts.
 EMA34 filters for stronger trend alignment; volume confirms breakout strength.
-Works in bull markets (buy R1 breaks) and bear markets (sell S1 breaks). Target: 20-50 trades/year for 4h timeframe.
+Works in bull markets (buy R2 breaks) and bear markets (sell S2 breaks). Target: 7-25 trades/year for 1d timeframe.
 """
 
 import numpy as np
@@ -28,35 +28,31 @@ def generate_signals(prices):
     
     # Pivot = (H + L + C) / 3
     pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # R1 = 2*Pivot - Low
-    r1_1w = 2 * pivot_1w - low_1w
-    # S1 = 2*Pivot - High
-    s1_1w = 2 * pivot_1w - high_1w
+    # R2 = Pivot + (High - Low)
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    # S2 = Pivot - (High - Low)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Align weekly R1/S1 to 4h timeframe (wait for weekly bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Align weekly R2/S2 to 1d timeframe (wait for weekly bar to close)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Load 1d data ONCE before loop for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
-        return np.zeros(n)
+    # Load weekly data ONCE before loop for EMA trend filter
+    # Weekly EMA34 for trend filter (slower, more reliable)
+    close_1w = df_1w['close'].values
+    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
     
-    # 1d EMA34 for trend filter (slower, more reliable)
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # 4h volume confirmation (volume spike > 1.8x 20-period average)
+    # 1d volume confirmation (volume spike > 1.8x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,14 +65,14 @@ def generate_signals(prices):
         vol_threshold = 1.8  # Higher volume spike filter for quality
         
         if position == 0:
-            # Enter long: price breaks above weekly R1 + uptrend (price > EMA34) + volume spike
-            if (price_close > r1_aligned[i] and 
+            # Enter long: price breaks above weekly R2 + uptrend (price > EMA34) + volume spike
+            if (price_close > r2_aligned[i] and 
                 price_close > ema_trend and 
                 vol_ratio_val > vol_threshold):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly S1 + downtrend (price < EMA34) + volume spike
-            elif (price_close < s1_aligned[i] and 
+            # Enter short: price breaks below weekly S2 + downtrend (price < EMA34) + volume spike
+            elif (price_close < s2_aligned[i] and 
                   price_close < ema_trend and 
                   vol_ratio_val > vol_threshold):
                 signals[i] = -0.25
@@ -96,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyPivot_R1S1_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R2S2_1wEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
