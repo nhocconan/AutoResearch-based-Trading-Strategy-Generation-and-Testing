@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 1d Camarilla pivot levels (R1/S1) with 1d EMA34 trend filter and volume confirmation.
-In uptrend (price > 1d EMA34), buy touches of 1d Camarilla S1 level with rejection; in downtrend (price < 1d EMA34), sell touches of 1d Camarilla R1 level with rejection.
-Volume must exceed 1.5x 20-period average to confirm rejection strength. Exit on trend reversal or 2x ATR stop.
-Designed for 20-50 trades/year (80-200 total over 4 years) to minimize fee fade while capturing mean-reversion bounces at institutional levels.
-Works in bull markets via S1 bounces and in bear markets via R1 rejections with trend filter.
+Hypothesis: 12h strategy using 1d Bollinger Bands (20,2) for mean reversion in ranging markets.
+In ranging (Choppiness Index > 61.8), buy touches of lower band with bullish rejection,
+sell touches of upper band with bearish rejection. Trend filter: price must be between
+1d EMA50 and EMA200 to avoid strong trends. Volume must exceed 1.3x 20-period average.
+Exit on Bollinger middle band cross or 1.5x ATR stop. Designed for 15-40 trades/year
+(60-160 total over 4 years) to minimize fee drag while capturing mean reversion in chop.
+Works in bull markets via lower band bounces and in bear markets via upper band rejections.
 """
 
 import numpy as np
@@ -13,41 +15,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for Camarilla and EMA
+    # Load 1d data ONCE before loop for Bollinger Bands, EMAs, and Choppiness
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla levels (based on previous day)
-    # Camarilla: H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    # First day: use same values
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Calculate 1d Bollinger Bands (20,2)
+    bb_length = 20
+    bb_mult = 2.0
+    basis = pd.Series(close_1d).rolling(window=bb_length, min_periods=bb_length).mean().values
+    dev = bb_mult * pd.Series(close_1d).rolling(window=bb_length, min_periods=bb_length).std().values
+    upper_band = basis + dev
+    lower_band = basis - dev
     
-    cam_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    cam_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Calculate 1d EMAs for trend filter (EMA50 and EMA200)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d Choppiness Index (14) for regime filter
+    chop_length = 14
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr).rolling(window=chop_length, min_periods=chop_length).sum().values
+    hh = pd.Series(high_1d).rolling(window=chop_length, min_periods=chop_length).max().values
+    ll = pd.Series(low_1d).rolling(window=chop_length, min_periods=chop_length).min().values
+    # Avoid division by zero
+    range_max_min = hh - ll
+    range_max_min = np.where(range_max_min == 0, 1e-10, range_max_min)
+    chop = 100 * np.log10(atr_sum / range_max_min) / np.log10(chop_length)
     
-    # Align 1d indicators to 4h timeframe (wait for 1d bar to close)
-    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
-    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align 1d indicators to 12h timeframe (wait for 1d bar to close)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    basis_aligned = align_htf_to_ltf(prices, df_1d, basis)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Volume confirmation (volume spike > 1.5x 20-period average)
+    # Volume confirmation (volume spike > 1.3x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
@@ -63,10 +79,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if indicators not ready
-        if (np.isnan(cam_r1_aligned[i]) or np.isnan(cam_s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+            np.isnan(basis_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(ema_200_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,46 +93,55 @@ def generate_signals(prices):
         price_close = prices['close'].iloc[i]
         price_low = prices['low'].iloc[i]
         price_high = prices['high'].iloc[i]
-        r1_level = cam_r1_aligned[i]
-        s1_level = cam_s1_aligned[i]
-        ema_trend = ema_34_aligned[i]
+        price_open = prices['open'].iloc[i]
+        upper = upper_band_aligned[i]
+        lower = lower_band_aligned[i]
+        basis_val = basis_aligned[i]
+        ema_50_val = ema_50_aligned[i]
+        ema_200_val = ema_200_aligned[i]
+        chop_val = chop_aligned[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr[i]
         
-        if position == 0:
-            # Enter long: price touches S1 and shows rejection (close > open) in uptrend
-            if (price_low <= s1_level * 1.002 and  # Allow 0.2% tolerance for touch
-                price_close > prices['open'].iloc[i] and  # Bullish candle
-                price_close > ema_trend and 
-                vol_ratio_val > 1.5):
+        # Range regime: Choppiness > 61.8 indicates ranging market
+        is_ranging = chop_val > 61.8
+        
+        if position == 0 and is_ranging:
+            # Enter long: price touches lower band with bullish rejection, price between EMAs
+            if (price_low <= lower * 1.001 and  # Allow 0.1% tolerance for touch
+                price_close > price_open and  # Bullish candle
+                price_close > ema_50_val and 
+                price_close < ema_200_val and 
+                vol_ratio_val > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price touches R1 and shows rejection (close < open) in downtrend
-            elif (price_high >= r1_level * 0.998 and  # Allow 0.2% tolerance for touch
-                  price_close < prices['open'].iloc[i] and  # Bearish candle
-                  price_close < ema_trend and 
-                  vol_ratio_val > 1.5):
+            # Enter short: price touches upper band with bearish rejection, price between EMAs
+            elif (price_high >= upper * 0.999 and  # Allow 0.1% tolerance for touch
+                  price_close < price_open and  # Bearish candle
+                  price_close < ema_50_val and 
+                  price_close > ema_200_val and 
+                  vol_ratio_val > 1.3):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: trend reversal OR ATR-based stoploss
+            # Exit: Bollinger middle band cross OR ATR-based stoploss
             exit_signal = False
             
-            # Trend reversal exit
-            if position == 1 and price_close < ema_trend:
+            # Bollinger middle band exit
+            if position == 1 and price_close < basis_val:
                 exit_signal = True
-            elif position == -1 and price_close > ema_trend:
+            elif position == -1 and price_close > basis_val:
                 exit_signal = True
             
-            # ATR-based stoploss (2x ATR from entry level)
+            # ATR-based stoploss (1.5x ATR from entry level)
             if position == 1:
-                entry_approx = s1_level  # Entered near S1
-                if price_close < entry_approx - 2.0 * atr_val:
+                entry_approx = lower  # Entered near lower band
+                if price_close < entry_approx - 1.5 * atr_val:
                     exit_signal = True
             elif position == -1:
-                entry_approx = r1_level  # Entered near R1
-                if price_close > entry_approx + 2.0 * atr_val:
+                entry_approx = upper  # Entered near upper band
+                if price_close > entry_approx + 1.5 * atr_val:
                     exit_signal = True
             
             if exit_signal:
@@ -126,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Rejection_1dEMA34_Volume_ATR"
-timeframe = "4h"
+name = "12h_BollingerBands_Reversion_1dEMA50_200_Chop_Volume_ATR"
+timeframe = "12h"
 leverage = 1.0
