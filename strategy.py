@@ -3,101 +3,97 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ADX trend filter
-# Long when price breaks above Donchian(20) high and volume > 2x 20-period average and ADX > 25
-# Short when price breaks below Donchian(20) low and volume > 2x 20-period average and ADX > 25
-# Exit when price crosses Donchian(20) midpoint or ADX falls below 20
-# Donchian channels provide clear breakout levels, volume confirms conviction, ADX filters trending markets
-# Target: 20-35 trades/year by requiring volume spike + trend alignment
+# Hypothesis: 1d KAMA + RSI + Chop regime + Volume spike
+# Long when KAMA rising, RSI > 50, Chop > 61.8 (trending), Volume > 1.5x 20-day avg
+# Short when KAMA falling, RSI < 50, Chop > 61.8, Volume > 1.5x 20-day avg
+# Exit when KAMA direction reverses or Chop < 38.2 (range)
+# Uses daily timeframe for signals, reduces trade frequency to avoid fee drag
+# KAMA adapts to market efficiency, RSI filters momentum, Chop confirms trend strength
+# Volume spike confirms institutional participation
+# Target: 15-25 trades/year by requiring multiple confluence factors
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian(20) on 4h data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 1d volume moving average (20-period)
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ADX(14) on 1d data
+    # Calculate Choppy Index(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    atr = np.zeros_like(close_1d)
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_atr14 / (max_high - min_low)) / np.log10(14)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 20-day volume average
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])
-    down_move = np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d
+    # Align all indicators to daily timeframe (no alignment needed for 1d->1d)
+    kama_aligned = kama
+    rsi_aligned = rsi
+    chop_aligned = chop
+    vol_ma_aligned = vol_ma_1d
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    plus_di_14 = 100 * plus_dm_14 / tr_14
-    minus_di_14 = 100 * minus_dm_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align all 1d indicators to 4h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate daily price change for KAMA direction
+    kama_dir = np.diff(kama_aligned, prepend=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(14, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Current values
-        price = close[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
-        donch_mid_val = donchian_mid[i]
-        vol_ma = vol_ma_1d_aligned[i]
-        adx_val = adx_aligned[i]
-        volume = df_1d['volume'].iloc[i // 6] if i >= 6 else df_1d['volume'].iloc[0]  # 6 bars per day (24h/4h)
+        kama_dir_val = kama_dir[i]
+        rsi_val = rsi_aligned[i]
+        chop_val = chop_aligned[i]
+        vol_ma = vol_ma_aligned[i]
         
-        # Volume confirmation: current 1d volume > 2x 20-day average
-        volume_confirm = volume > 2.0 * vol_ma if i >= 6 else df_1d['volume'].iloc[0] > 2.0 * vol_ma
+        # Volume confirmation: current daily volume > 1.5x 20-day average
+        volume_confirm = df_1d['volume'].iloc[i] > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above Donchian high, volume confirmation, ADX > 25
-            if price > donch_high and volume_confirm and adx_val > 25:
-                signals[i] = 0.30
+            # Long: KAMA rising, RSI > 50, Chop > 61.8 (trending), volume confirmation
+            if kama_dir_val > 0 and rsi_val > 50 and chop_val > 61.8 and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low, volume confirmation, ADX > 25
-            elif price < donch_low and volume_confirm and adx_val > 25:
-                signals[i] = -0.30
+            # Short: KAMA falling, RSI < 50, Chop > 61.8 (trending), volume confirmation
+            elif kama_dir_val < 0 and rsi_val < 50 and chop_val > 61.8 and volume_confirm:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
@@ -105,13 +101,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price crosses below Donchian midpoint or ADX < 20
-                if price < donch_mid_val or adx_val < 20:
+                # Exit if KAMA falls or Chop < 38.2 (range)
+                if kama_dir_val <= 0 or chop_val < 38.2:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price crosses above Donchian midpoint or ADX < 20
-                if price > donch_mid_val or adx_val < 20:
+                # Exit if KAMA rises or Chop < 38.2 (range)
+                if kama_dir_val >= 0 or chop_val < 38.2:
                     exit_signal = True
             
             if exit_signal:
@@ -119,10 +115,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dVolumeSpike_ADXTrend"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Volume"
+timeframe = "1d"
 leverage = 1.0
