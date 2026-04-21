@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and 1w ADX trend filter.
-Long when price breaks above Donchian(20) high with volume > 1.5x average and weekly ADX > 25.
-Short when price breaks below Donchian(20) low with volume > 1.5x average and weekly ADX > 25.
-Exit when price returns to Donchian midpoint or volume drops below average.
-This combines price channel breakout (proven on SOL/ETH) with volume confirmation and trend filter
-to reduce false signals. Target: 20-30 trades/year to minimize fee drag while capturing strong moves.
+Hypothesis: 4h Camarilla Pivot R1/S1 breakout with 1d volume confirmation and 1w ADX trend filter.
+Long when price breaks above R1 with volume > 1.5x average and weekly ADX > 25.
+Short when price breaks below S1 with volume > 1.5x average and weekly ADX > 25.
+Exit when price returns to pivot point or volume drops below average.
+This uses proven Camarilla pivot structure from top performers, adding volume and trend filters
+to reduce false signals while maintaining low trade frequency (target: 20-30 trades/year).
 """
 
 import numpy as np
@@ -22,26 +22,32 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for volume confirmation
+    # Load daily data ONCE before loop for Camarilla pivot and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Donchian channel (20-period) on 4h data
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    lookback = 20
+    # Calculate Camarilla pivot levels from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Initialize arrays
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    donch_mid = np.full(n, np.nan)
+    # Pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
     
-    # Calculate Donchian bands
-    for i in range(lookback - 1, n):
-        donch_high[i] = np.max(high_4h[i - lookback + 1:i + 1])
-        donch_low[i] = np.min(low_4h[i - lookback + 1:i + 1])
-        donch_mid[i] = (donch_high[i] + donch_low[i]) / 2
+    # Camarilla levels
+    r1 = close_1d + range_hl * 1.1 / 12
+    s1 = close_1d - range_hl * 1.1 / 12
+    r2 = close_1d + range_hl * 1.1 / 6
+    s2 = close_1d - range_hl * 1.1 / 6
+    
+    # Align Camarilla levels to 4h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # Calculate weekly ADX(14)
     high_1w = df_1w['high'].values
@@ -89,7 +95,8 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if data not ready
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or np.isnan(adx_aligned[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -100,31 +107,31 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, volume surge, weekly ADX > 25
-            if (price_close > donch_high[i] and 
+            # Enter long: price breaks above R1, volume surge, weekly ADX > 25
+            if (price_close > r1_aligned[i] and 
                 vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
                 adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low, volume surge, weekly ADX > 25
-            elif (price_close < donch_low[i] and 
+            # Enter short: price breaks below S1, volume surge, weekly ADX > 25
+            elif (price_close < s1_aligned[i] and 
                   vol_1d_current > 1.5 * vol_ma_20_aligned[i] and
                   adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price returns to Donchian midpoint or volume drops below average
+            # Exit: price returns to pivot point or volume drops below average
             exit_signal = False
             
             if position == 1:
-                # Exit long: price <= midpoint or volume < average
-                if (price_close <= donch_mid[i] or
+                # Exit long: price <= pivot or volume < average
+                if (price_close <= pivot_aligned[i] or
                     vol_1d_current < vol_ma_20_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: price >= midpoint or volume < average
-                if (price_close >= donch_mid[i] or
+                # Exit short: price >= pivot or volume < average
+                if (price_close >= pivot_aligned[i] or
                     vol_1d_current < vol_ma_20_aligned[i]):
                     exit_signal = True
             
@@ -137,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume1.5x_WeeklyADX25"
+name = "4h_Camarilla_R1_S1_Volume1.5x_WeeklyADX25"
 timeframe = "4h"
 leverage = 1.0
