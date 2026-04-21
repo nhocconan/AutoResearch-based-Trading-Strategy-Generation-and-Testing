@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_HTF_1d_Camarilla_R1S1_Breakout_Volume_ChopRegime_ATRStop_V1
-Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation (>1.3x 20-period volume MA) and choppiness regime filter (CHOP > 61.8 for mean reversion, CHOP < 38.2 for trend following). Uses 1d HTF for trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.0*ATR. Designed for low trade frequency (<400 total 4h trades) to minimize fee drag and work in both bull/bear markets via regime adaptation.
+12h_Camarilla_R1S1_Breakout_VolumeSpike_RegimeFilter_ATRStop_V1
+Hypothesis: 12h Camarilla pivot breakout (R1 for longs, S1 for shorts) with volume confirmation (>1.5x 20-period volume MA) and choppiness regime filter (CHOP > 61.8 for mean reversion, CHOP < 38.2 for trend following). Uses 1d HTF for trend filter (price > EMA50 for longs, < EMA50 for shorts). ATR-based stoploss via signal=0 when price moves against position by 2.5*ATR. Designed for low trade frequency (<200 total 12h trades) to minimize fee drag and work in both bull/bear markets via regime adaptation. Focus on BTC/ETH as primary targets.
 """
 
 import numpy as np
@@ -23,43 +23,40 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h Indicators (primary timeframe) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # === 12h Indicators (primary timeframe) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Camarilla pivot levels (based on previous day's OHLC)
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    # Need previous day's data - using 4h data approximation
-    # For 4h, we use the previous 4h bar's high/low/close
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
+    # Calculate Camarilla pivot levels from previous 12h bar
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close = np.roll(close_12h, 1)
     
-    # Calculate Camarilla levels
+    # For first bar, use current values (will be NaN until min_periods satisfied)
     camarilla_high = prev_close + 1.1 * (prev_high - prev_low) / 12
     camarilla_low = prev_close - 1.1 * (prev_high - prev_low) / 12
     
     # Volume MA (20-period) for spike detection
-    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     # ATR (14-period) for stoploss
-    tr1 = pd.Series(high_4h - low_4h)
-    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
-    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
+    tr1 = pd.Series(high_12h - low_12h)
+    tr2 = pd.Series(np.abs(high_12h - np.roll(close_12h, 1)))
+    tr3 = pd.Series(np.abs(low_12h - np.roll(close_12h, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
     # Choppiness Index (14-period)
     chop_sum = tr.rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
     chop = 100 * np.log10(chop_sum / (highest_high - lowest_low)) / np.log10(14)
     
     signals = np.zeros(n)
@@ -76,9 +73,9 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        price = close_4h[i]
-        vol = volume_4h[i]
-        vol_ok = vol > 1.3 * vol_ma[i]  # volume confirmation
+        price = close_12h[i]
+        vol = volume_12h[i]
+        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
         
         # Regime detection
         is_choppy = chop[i] > 61.8  # mean reversion regime
@@ -98,7 +95,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Exit conditions: Camarilla S1 breakdown or loss of volume/momentum
@@ -110,7 +107,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             # Exit conditions: Camarilla R1 breakout or loss of volume/momentum
@@ -122,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_1d_Camarilla_R1S1_Breakout_Volume_ChopRegime_ATRStop_V1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_VolumeSpike_RegimeFilter_ATRStop_V1"
+timeframe = "12h"
 leverage = 1.0
