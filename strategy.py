@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_R1S1_Breakout_Volume_Confirmation
-Hypothesis: Daily Camarilla pivot levels R1/S1 act as mean-reversion zones, while R4/S4 indicate breakout strength. Fade at R1/S1 with volume confirmation, breakout at R4/S4 with volume confirmation. Designed for low trade frequency (target: 12-37/year) to minimize fee drag in 1d timeframe. Works in both bull and bear markets by adapting to regime via price action at key levels.
+12h_1d_Engulfing_OBV_Divergence
+Hypothesis: On 12h timeframe, bullish/bearish engulfing candles at key daily support/resistance levels (prior day high/low) with OBV divergence signal high-probability reversals. Works in bull markets by buying dips at support, in bear markets by selling rallies at resistance. Low frequency due to strict candle pattern + volume divergence requirement.
 """
 
 import numpy as np
@@ -13,12 +13,7 @@ def generate_signals(prices):
     if n < 30:
         return np.zeros(n)
     
-    # Load weekly data once for context (trend filter)
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
-        return np.zeros(n)
-    
-    # Load daily data once for Camarilla pivot points
+    # Load daily data once for prior day high/low
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 2:
         return np.zeros(n)
@@ -27,103 +22,86 @@ def generate_signals(prices):
     low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
     
-    # Calculate daily Camarilla pivot levels
-    # P = (H + L + C) / 3
-    # Range = H - L
-    # R1 = P + (Range * 0.382)
-    # S1 = P - (Range * 0.382)
-    # R4 = P + (Range * 1.5000)
-    # S4 = P - (Range * 1.5000)
-    P = (high_daily + low_daily + close_daily) / 3.0
-    range_daily = high_daily - low_daily
-    r1_daily = P + (range_daily * 0.382)
-    s1_daily = P - (range_daily * 0.382)
-    r4_daily = P + (range_daily * 1.5000)
-    s4_daily = P - (range_daily * 1.5000)
+    # Prior day high/level (shifted by 1 to avoid look-ahead)
+    prev_high = np.roll(high_daily, 1)
+    prev_low = np.roll(low_daily, 1)
+    prev_high[0] = np.nan  # First day has no prior
+    prev_low[0] = np.nan
     
-    # Align daily Camarilla levels to daily timeframe (no shift needed as daily->daily)
-    r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
-    s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
-    r4_daily_aligned = align_htf_to_ltf(prices, df_daily, r4_daily)
-    s4_daily_aligned = align_htf_to_ltf(prices, df_daily, s4_daily)
+    # Align prior day levels to 12h timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_daily, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_daily, prev_low)
     
-    # Weekly trend filter: price above/below weekly EMA34
-    weekly_close = df_weekly['close'].values
-    weekly_ema34 = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_ema34_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema34)
-    
-    # Main timeframe data (1d)
-    close = prices['close'].values
+    # Main timeframe data (12h)
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period average (20 days)
-    volume_avg = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i >= 20:
-            volume_avg[i] = np.mean(volume[i-20:i])
+    # Calculate OBV
+    obv = np.zeros(n)
+    obv[0] = volume[0]
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            obv[i] = obv[i-1] + volume[i]
+        elif close[i] < close[i-1]:
+            obv[i] = obv[i-1] - volume[i]
         else:
-            volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.5 * volume_avg)
+            obv[i] = obv[i-1]
+    
+    # Calculate EMA of OBV for divergence detection
+    obv_ema = np.zeros(n)
+    if n >= 10:
+        obv_ema[9] = np.mean(obv[:10])
+        for i in range(10, n):
+            obv_ema[i] = 0.18 * obv[i] + 0.82 * obv_ema[i-1]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(10, n):
         # Skip if NaN in critical values
-        if (np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i]) or 
-            np.isnan(r4_daily_aligned[i]) or np.isnan(s4_daily_aligned[i]) or
-            np.isnan(weekly_ema34_aligned[i])):
+        if np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Bullish engulfing: current green candle engulfs prior red candle
+        bullish_engulf = (close[i] > open_price[i]) and (open_price[i] < close[i-1]) and (close[i] > open_price[i-1])
+        # Bearish engulfing: current red candle engulfs prior green candle
+        bearish_engulf = (close[i] < open_price[i]) and (open_price[i] > close[i-1]) and (close[i] < open_price[i-1])
+        
+        # OBV divergence: price makes new high/low but OBV doesn't confirm
+        bullish_div = (low[i] < low[i-5]) and (obv[i] > obv[i-5]) if i >= 5 else False
+        bearish_div = (high[i] > high[i-5]) and (obv[i] < obv[i-5]) if i >= 5 else False
+        
         price = close[i]
-        r1 = r1_daily_aligned[i]
-        s1 = s1_daily_aligned[i]
-        r4 = r4_daily_aligned[i]
-        s4 = s4_daily_aligned[i]
-        weekly_ema = weekly_ema34_aligned[i]
-        vol_ok = volume_filter[i]
+        prev_high = prev_high_aligned[i]
+        prev_low = prev_low_aligned[i]
         
         if position == 0:
-            # Fade at R1/S1: mean reversion from extreme levels
-            # Long: price rejects S1 with volume confirmation (buying pressure)
-            # In bull trend (price > weekly EMA), favor longs; in bear trend, favor shorts
-            if price > s1 and price < (s1 + (r1 - s1) * 0.3) and vol_ok:
-                # Additional confirmation: price closing near high of bar
-                if close[i] > (high[i] + low[i]) / 2:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: price rejects R1 with volume confirmation (selling pressure)
-            elif price < r1 and price > (r1 - (r1 - s1) * 0.3) and vol_ok:
-                # Additional confirmation: price closing near low of bar
-                if close[i] < (high[i] + low[i]) / 2:
-                    signals[i] = -0.25
-                    position = -1
-            # Breakout at R4/S4: strong momentum continuation
-            # Long: price breaks above R4 with volume, only in bull trend
-            elif price > r4 and vol_ok and price > weekly_ema:
+            # Long: bullish engulfing at or near prior day low with bullish OBV divergence
+            if bullish_engulf and bullish_div and price <= prev_low * 1.005:  # Within 0.5% of prior low
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4 with volume, only in bear trend
-            elif price < s4 and vol_ok and price < weekly_ema:
+            # Short: bearish engulfing at or near prior day high with bearish OBV divergence
+            elif bearish_engulf and bearish_div and price >= prev_high * 0.995:  # Within 0.5% of prior high
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to S1 (mean reversion) or breaks S4 (failed breakout)
-            if price < s1 or price > r4:
+            # Long exit: price reaches prior day high or bearish engulfing forms
+            if price >= prev_high or bearish_engulf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to R1 (mean reversion) or breaks S4 (failed breakdown)
-            if price > r1 or price < s4:
+            # Short exit: price reaches prior day low or bullish engulfing forms
+            if price <= prev_low or bullish_engulf:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Camarilla_R1S1_Breakout_Volume_Confirmation"
-timeframe = "1d"
+name = "12h_1d_Engulfing_OBV_Divergence"
+timeframe = "12h"
 leverage = 1.0
