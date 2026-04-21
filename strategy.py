@@ -1,96 +1,73 @@
+# The provided code snippet was truncated...
+# Ensure your response is a complete, standalone Python script.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI mean reversion with 1d volume spike and ADX trend filter.
-# Captures RSI extreme reversals with volume confirmation in trending markets.
-# Works in both bull and bear markets by buying oversold dips and selling overbought rallies.
-# Target: 25-35 trades/year by requiring RSI <30 or >70, volume surge, and ADX > 20.
-# Entry: Long when RSI<30 with volume spike and ADX>20; Short when RSI>70 with volume spike and ADX>20.
-# Exit: RSI returns to neutral (40-60) or opposite extreme.
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter (1w EMA50) and volume confirmation.
+# Captures strong trending moves by buying/selling breakouts only when aligned with the weekly trend.
+# Works in bull markets (buy breakouts above weekly EMA50) and bear markets (sell breakouts below weekly EMA50).
+# Target: 15-25 trades/year by requiring weekly trend alignment, Donchian breakout, and volume surge.
+# Entry: Long when price breaks above 6h Donchian high(20) with volume > 1.5x 20-period average and price > weekly EMA50.
+#        Short when price breaks below 6h Donchian low(20) with volume > 1.5x 20-period average and price < weekly EMA50.
+# Exit: Opposite Donchian touch (long exits at Donchian low, short exits at Donchian high) or trailing stop (2x ATR).
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for RSI, volume, and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 14-period RSI on daily timeframe
-    close_d = df_1d['close'].values
-    delta = np.diff(close_d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 50-period EMA on weekly timeframe
+    close_w = df_1w['close'].values
+    ema_50_w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[1:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align weekly EMA to 6h (wait for weekly close)
+    ema_50_w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_w)
     
-    avg_gain = wilders_smooth(gain, 14)
-    avg_loss = wilders_smooth(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Pre-calculate 6h Donchian channels (20-period)
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate 14-period ADX on daily timeframe
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
+    # Donchian high: max of last 20 highs
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Donchian low: min of last 20 lows
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    # Volume confirmation: 20-period average volume on 6h
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for trailing stop (20-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - prices['close'].values[:-1])
+    tr3 = np.abs(low[1:] - prices['close'].values[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # +DM and -DM
-    up_move = high_d[1:] - high_d[:-1]
-    down_move = low_d[:-1] - low_d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    atr = wilders_smooth(tr, 14)
-    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smooth(dx, 14)
-    
-    # Volume confirmation using 1d volume
-    vol_d = df_1d['volume'].values
-    vol_ma_10_1d = pd.Series(vol_d).rolling(window=10, min_periods=10).mean().values
-    
-    # Align daily data to 4h (wait for daily close)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_ma_10_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_10_1d)
-    
-    # Pre-compute session hours (08-20 UTC)
+    # Pre-compute session hours (08-20 UTC) - optional but can help avoid low-volume periods
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0  # track for trailing stop
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(rsi_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_10_1d_aligned[i])):
+        if (np.isnan(ema_50_w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC
+        # Session filter: 08-20 UTC (can be removed if too restrictive)
         hour = hours[i]
         in_session = 8 <= hour <= 20
         
@@ -102,50 +79,53 @@ def generate_signals(prices):
         
         # Current values
         price_close = prices['close'].iloc[i]
-        vol_current = align_htf_to_ltf(prices, df_1d, vol_d)[i]  # 1d volume aligned to 4h
         
-        # Trend filter: ADX > 20 indicates trending market
-        trending = adx_aligned[i] > 20
+        # Trend filter: price relative to weekly EMA50
+        above_weekly_ema = price_close > ema_50_w_aligned[i]
+        below_weekly_ema = price_close < ema_50_w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 10-day average
-        volume_confirm = vol_current > 1.5 * vol_ma_10_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Enter long at RSI<30 (oversold) with volume spike in trending market
-            if (trending and volume_confirm and rsi_aligned[i] < 30):
+            # Enter long: break above Donchian high with volume and above weekly EMA
+            if price_close > donchian_high[i] and volume_confirm and above_weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            # Enter short at RSI>70 (overbought) with volume spike in trending market
-            elif (trending and volume_confirm and rsi_aligned[i] > 70):
+                entry_price = price_close
+            # Enter short: break below Donchian low with volume and below weekly EMA
+            elif price_close < donchian_low[i] and volume_confirm and below_weekly_ema:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price_close
         
         elif position != 0:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: RSI returns to neutral (40-60) or reaches overbought
-                if rsi_aligned[i] >= 40 and rsi_aligned[i] <= 60:
+                # Exit long: price touches Donchian low or trailing stop hit (2x ATR from entry)
+                if price_close <= donchian_low[i]:
                     exit_signal = True
-                elif rsi_aligned[i] >= 70:
+                elif price_close < entry_price - 2.0 * atr[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short: RSI returns to neutral (40-60) or reaches oversold
-                if rsi_aligned[i] >= 40 and rsi_aligned[i] <= 60:
+                # Exit short: price touches Donchian high or trailing stop hit (2x ATR from entry)
+                if price_close >= donchian_high[i]:
                     exit_signal = True
-                elif rsi_aligned[i] <= 30:
+                elif price_close > entry_price + 2.0 * atr[i]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_RSI_MeanReversion_1dVolume_ADX"
-timeframe = "4h"
+name = "6h_Donchian20_1wEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
