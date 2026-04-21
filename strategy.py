@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1d_Pivot_R1S1_Breakout_Volume_Trend_Tight
-Hypothesis: Use 1d Camarilla R1/S1 breakouts with volume confirmation and 4h EMA50 trend filter.
-Long when price breaks above R1 with volume > 2x 20-bar avg AND price > EMA50.
-Short when price breaks below S1 with volume > 2x 20-bar avg AND price < EMA50.
-Exit when price crosses back through the pivot point (PP).
-Reduced trade frequency by increasing volume threshold to 2x and adding EMA filter for trend.
-Designed for 4h timeframe to capture multi-day moves with ~15-30 trades/year.
-Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
-Volume and trend filters reduce false breakouts and whipsaws.
+1d_1W_Weekly_Trend_Following
+Hypothesis: Capture weekly trends using 1D close above/below weekly EMA20 with volume confirmation.
+Long when daily close > weekly EMA20 and volume > 1.5x 20-day average.
+Short when daily close < weekly EMA20 and volume > 1.5x 20-day average.
+Exit when price crosses back through weekly EMA20.
+Designed for 1d timeframe to capture multi-week trends with ~10-25 trades/year.
+Works in bull markets by buying strength and in bear markets by selling weakness.
+Volume filter reduces false signals and whipsaws.
 """
 
 import numpy as np
@@ -20,51 +19,27 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data once for EMA20
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_weekly = df_weekly['close'].values
+    # Calculate weekly EMA20
+    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Camarilla pivot levels (based on previous day)
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pp = np.full_like(close_1d, np.nan)
-    r1 = np.full_like(close_1d, np.nan)
-    s1 = np.full_like(close_1d, np.nan)
+    # Align weekly EMA20 to daily timeframe
+    ema20_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
     
-    for i in range(1, len(high_1d)):
-        pp[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
-        r1[i] = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
-        s1[i] = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
-    
-    # Shift to align with current day (levels are based on previous day)
-    pp = np.roll(pp, 1)
-    r1 = np.roll(r1, 1)
-    s1 = np.roll(s1, 1)
-    pp[0] = np.nan
-    r1[0] = np.nan
-    s1[0] = np.nan
-    
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 4h EMA50 for trend filter
-    close_s = prices['close']
-    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume filter: 20-day average volume
+    volume_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if indicators not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50[i])):
+        # Skip if weekly EMA not ready
+        if np.isnan(ema20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,34 +48,33 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2 * 20-period average (more strict)
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
-        else:
+        # Volume filter: current volume > 1.5 * 20-day average
+        if np.isnan(volume_ma[i]):
             volume_ok = False
+        else:
+            volume_ok = volume > 1.5 * volume_ma[i]
         
         if position == 0:
-            # Long conditions: break above R1 + volume confirmation + price above EMA50
-            if price > r1_aligned[i] and volume_ok and price > ema_50[i]:
+            # Long conditions: price above weekly EMA20 + volume confirmation
+            if price > ema20_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S1 + volume confirmation + price below EMA50
-            elif price < s1_aligned[i] and volume_ok and price < ema_50[i]:
+            # Short conditions: price below weekly EMA20 + volume confirmation
+            elif price < ema20_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses back below pivot point
-            if price < pp_aligned[i]:
+            # Long exit: price crosses back below weekly EMA20
+            if price < ema20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses back above pivot point
-            if price > pp_aligned[i]:
+            # Short exit: price crosses back above weekly EMA20
+            if price > ema20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend_Tight"
-timeframe = "4h"
+name = "1d_1W_Weekly_Trend_Following"
+timeframe = "1d"
 leverage = 1.0
