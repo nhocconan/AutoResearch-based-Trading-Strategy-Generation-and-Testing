@@ -31,10 +31,6 @@ def generate_signals(prices):
     atr_ratio = atr_14 / atr_ma_50
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # 1d ATR-based volatility threshold
-    atr_14_current = pd.Series(atr_14).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_current)
-    
     # Volume confirmation: volume / 30-period average volume (1d)
     vol_ma_30 = pd.Series(df_1d['volume'].values).rolling(window=30, min_periods=30).mean().values
     vol_ratio_1d = df_1d['volume'].values / vol_ma_30
@@ -46,7 +42,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
+            np.isnan(vol_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,38 +50,38 @@ def generate_signals(prices):
         
         price_close = prices['close'].iloc[i]
         ema_trend = ema_34_1d_aligned[i]
-        atr_current = atr_14_aligned[i]
         vol_ratio = vol_ratio_aligned[i]
+        vol_threshold = 1.4  # Volume must be above average
         atr_ratio_val = atr_ratio_aligned[i]
         
         if position == 0:
-            # Enter long: price > EMA34 (uptrend), volatility contraction then expansion, volume spike
+            # Enter long: price above EMA, volume spike, moderate volatility
             if (price_close > ema_trend and 
-                atr_ratio_val < 0.8 and  # Volatility contraction
-                vol_ratio > 1.5):        # Volume spike
-                signals[i] = 0.25
+                vol_ratio > vol_threshold and 
+                atr_ratio_val > 0.7 and atr_ratio_val < 2.5):
+                signals[i] = 0.30
                 position = 1
-            # Enter short: price < EMA34 (downtrend), volatility contraction then expansion, volume spike
+            # Enter short: price below EMA, volume spike, moderate volatility
             elif (price_close < ema_trend and 
-                  atr_ratio_val < 0.8 and 
-                  vol_ratio > 1.5):
-                signals[i] = -0.25
+                  vol_ratio > vol_threshold and 
+                  atr_ratio_val > 0.7 and atr_ratio_val < 2.5):
+                signals[i] = -0.30
                 position = -1
         
         elif position != 0:
-            # Exit: volatility expansion beyond threshold or trend reversal
-            if position == 1 and (atr_ratio_val > 1.5 or price_close < ema_trend):
+            # Exit: reverse EMA cross or volatility extremes
+            if position == 1 and (price_close < ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.4):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (atr_ratio_val > 1.5 or price_close > ema_trend):
+            elif position == -1 and (price_close > ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.4):
                 signals[i] = 0.0
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "4h_VolatilityContraction_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_EMA34_Volume_ATR_Filter"
+timeframe = "12h"
 leverage = 1.0
