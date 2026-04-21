@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_1d_Camarilla_R3S3_Fade_R4S4_Breakout_Volume_Filter
-Hypothesis: Daily Camarilla pivot levels R3/S3 act as mean-reversion zones, while R4/S4 indicate breakout strength. Fade at R3/S3 with volume divergence, breakout at R4/S4 with volume confirmation. Designed for low trade frequency (target: 12-37/year) to minimize fee drag in 6h timeframe. Works in both bull and bear markets by adapting to regime via price action at key levels.
+12h_1d_ChaikinMoneyFlow_VolumeBreakout
+Hypothesis: Chaikin Money Flow (CMF) > 0.25 indicates strong accumulation, CMF < -0.25 indicates distribution.
+Combine with 12-hour price breaking above/below 20-period high/low with volume confirmation.
+Works in bull markets via accumulation breakouts and bear markets via distribution breakdowns.
+Target: 15-35 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -13,121 +16,113 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for Camarilla pivot points
+    # Load daily data once for CMF calculation
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
+    volume_daily = df_daily['volume'].values
     
-    # Calculate daily Camarilla pivot levels
-    # P = (H + L + C) / 3
-    # Range = H - L
-    # R3 = P + (Range * 1.1000)
-    # S3 = P - (Range * 1.1000)
-    # R4 = P + (Range * 1.5000)
-    # S4 = P - (Range * 1.5000)
-    P = (high_daily + low_daily + close_daily) / 3.0
-    range_daily = high_daily - low_daily
-    r3_daily = P + (range_daily * 1.1000)
-    s3_daily = P - (range_daily * 1.1000)
-    r4_daily = P + (range_daily * 1.5000)
-    s4_daily = P - (range_daily * 1.5000)
+    # Calculate Chaikin Money Flow (20-period)
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Money Flow Volume = Money Flow Multiplier * Volume
+    # CMF = 20-period sum of Money Flow Volume / 20-period sum of Volume
+    high_low = high_daily - low_daily
+    # Avoid division by zero
+    high_low_safe = np.where(high_low == 0, 1e-10, high_low)
+    mfm = ((close_daily - low_daily) - (high_daily - close_daily)) / high_low_safe
+    mfv = mfm * volume_daily
     
-    # Align daily Camarilla levels to 6h timeframe
-    r3_daily_aligned = align_htf_to_ltf(prices, df_daily, r3_daily)
-    s3_daily_aligned = align_htf_to_ltf(prices, df_daily, s3_daily)
-    r4_daily_aligned = align_htf_to_ltf(prices, df_daily, r4_daily)
-    s4_daily_aligned = align_htf_to_ltf(prices, df_daily, s4_daily)
+    # 20-period sums
+    mfv_sum = np.zeros_like(mfv)
+    vol_sum = np.zeros_like(volume_daily)
+    for i in range(len(mfv)):
+        if i >= 19:
+            mfv_sum[i] = np.sum(mfv[i-19:i+1])
+            vol_sum[i] = np.sum(volume_daily[i-19:i+1])
+        else:
+            mfv_sum[i] = np.sum(mfv[:i+1]) if i > 0 else mfv[i]
+            vol_sum[i] = np.sum(volume_daily[:i+1]) if i > 0 else volume_daily[i]
     
-    # Main timeframe data (6h)
+    # Avoid division by zero
+    vol_sum_safe = np.where(vol_sum == 0, 1e-10, vol_sum)
+    cmf = mfv_sum / vol_sum_safe
+    
+    # Align daily CMF to 12h timeframe
+    cmf_aligned = align_htf_to_ltf(prices, df_daily, cmf)
+    
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 24-period average
+    # 20-period high/low for breakout detection
+    high_20 = np.full_like(high, np.nan)
+    low_20 = np.full_like(low, np.nan)
+    for i in range(len(high)):
+        if i >= 19:
+            high_20[i] = np.max(high[i-19:i+1])
+            low_20[i] = np.min(low[i-19:i+1])
+        else:
+            high_20[i] = np.max(high[:i+1]) if i > 0 else high[i]
+            low_20[i] = np.min(low[:i+1]) if i > 0 else low[i]
+    
+    # Volume filter: current volume > 1.3x 20-period average
     volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i >= 24:
-            volume_avg[i] = np.mean(volume[i-24:i])
+        if i >= 19:
+            volume_avg[i] = np.mean(volume[i-19:i+1])
         else:
             volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.5 * volume_avg)
+    volume_filter = volume > (1.3 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
+    for i in range(20, n):
         # Skip if NaN in critical values
-        if (np.isnan(r3_daily_aligned[i]) or np.isnan(s3_daily_aligned[i]) or 
-            np.isnan(r4_daily_aligned[i]) or np.isnan(s4_daily_aligned[i])):
+        if np.isnan(cmf_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r3 = r3_daily_aligned[i]
-        s3 = s3_daily_aligned[i]
-        r4 = r4_daily_aligned[i]
-        s4 = s4_daily_aligned[i]
+        cmf_val = cmf_aligned[i]
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Fade at R3/S3: mean reversion from extreme levels
-            # Long: price rejects S3 with volume confirmation (buying pressure)
-            if price > s3 and price < (s3 + (r3 - s3) * 0.2) and vol_ok:
-                # Additional confirmation: price closing near high of bar
-                if close[i] > (high[i] + low[i]) / 2:
-                    signals[i] = 0.25
-                    position = 1
-            # Short: price rejects R3 with volume confirmation (selling pressure)
-            elif price < r3 and price > (r3 - (r3 - s3) * 0.2) and vol_ok:
-                # Additional confirmation: price closing near low of bar
-                if close[i] < (high[i] + low[i]) / 2:
-                    signals[i] = -0.25
-                    position = -1
-            # Breakout at R4/S4: strong momentum continuation
-            # Long: price breaks above R4 with volume
-            elif price > r4 and vol_ok:
+            # Long: CMF > 0.25 (accumulation) + price breaks above 20-period high + volume
+            if cmf_val > 0.25 and price > high_20[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4 with volume
-            elif price < s4 and vol_ok:
+            # Short: CMF < -0.25 (distribution) + price breaks below 20-period low + volume
+            elif cmf_val < -0.25 and price < low_20[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to P (mean reversion) or breaks S4 (failed breakout)
-            P_daily = (high_daily + low_daily + close_daily) / 3.0
-            P_aligned = align_htf_to_ltf(prices, df_daily, P_daily)
-            if not np.isnan(P_aligned[i]):
-                if price < P_aligned[i] or price < s4:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: CMF turns negative OR price returns to 20-period low
+            if cmf_val < 0 or price < low_20[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to P (mean reversion) or breaks R4 (failed breakdown)
-            P_daily = (high_daily + low_daily + close_daily) / 3.0
-            P_aligned = align_htf_to_ltf(prices, df_daily, P_daily)
-            if not np.isnan(P_aligned[i]):
-                if price > P_aligned[i] or price > r4:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: CMF turns positive OR price returns to 20-period high
+            if cmf_val > 0 or price > high_20[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_1d_Camarilla_R3S3_Fade_R4S4_Breakout_Volume_Filter"
-timeframe = "6h"
+name = "12h_1d_ChaikinMoneyFlow_VolumeBreakout"
+timeframe = "12h"
 leverage = 1.0
