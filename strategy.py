@@ -3,71 +3,72 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index (14) regime filter + 4h TRIX (12,20,9) crossover with volume spike.
-# Uses TRIX for momentum in trending regimes and mean reversion in choppy regimes.
-# Works in both bull and bear markets by adapting to market regime.
-# Target: 20-40 trades/year by requiring regime alignment and volume confirmation.
-# Entry: Long when TRIX crosses above signal AND CHOP > 61.8 (choppy) with volume spike.
-#        Short when TRIX crosses below signal AND CHOP > 61.8 (choppy) with volume spike.
-#        In trending regime (CHOP < 38.2), follow TRIX crossovers without volume filter.
-# Exit: Opposite TRIX crossover or regime change.
+# Hypothesis: 1h RSI mean reversion with 4h ADX trend filter and volume confirmation.
+# In bull markets: buy pullbacks to RSI<30 when 4h ADX>25 (strong uptrend).
+# In bear markets: sell rallies to RSI>70 when 4h ADX>25 (strong downtrend).
+# Uses volume spike to confirm institutional interest at extremes.
+# Target: 20-40 trades/year by requiring RSI extreme + ADX trend + volume spike.
+# Entry: Long when RSI(14)<30, 4h ADX>25, volume>1.5x average; Short when RSI(14)>70, 4h ADX>25, volume>1.5x average.
+# Exit: RSI returns to neutral (40-60) or opposite extreme.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for TRIX and Choppiness calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 4h data for ADX and volume
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate TRIX (12,20,9) on daily close
-    close = df_1d['close'].values
-    # First EMA 12
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # Second EMA 20 of first EMA
-    ema2 = pd.Series(ema1).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Third EMA 20 of second EMA
-    ema3 = pd.Series(ema2).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # TRIX = 100 * (ema3_today - ema3_yesterday) / ema3_yesterday
-    trix_raw = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
-    trix = np.concatenate([np.array([np.nan]), trix_raw])
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Calculate 14-period RSI on 1h
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Choppiness Index (14) on daily high/low/close
-    high = df_1d['high'].values
-    low = df_1d['low'].values
-    close_d = df_1d['close'].values
+    # Calculate 4h ADX (14-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
     # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close_d[:-1])
-    tr3 = np.abs(low[1:] - close_d[:-1])
-    tr = np.concatenate([np.array([np.nan]), np.maximum(tr1, np.maximum(tr2, tr3))])
-    # ATR(14) of TR
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # Sum of ATR over 14 periods
-    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Chop = 100 * log10(sum(ATR14) / (HH - LL)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh - ll
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = 100 * np.log10(sum_atr14 / range_hl) / np.log10(14)
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Volume confirmation: daily volume > 1.5x 20-day average
-    volume = df_1d['volume'].values
+    # Directional Movement
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_14 != 0, 100 * dm_plus_14 / tr_14, 0)
+    di_minus = np.where(tr_14 != 0, 100 * dm_minus_14 / tr_14, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 4h indicators to 1h
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    
+    # Volume confirmation: 1h volume > 1.5x 20-period average
+    volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * vol_ma_20
-    
-    # Align daily indicators to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
     # Pre-compute session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -75,10 +76,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(trix_signal_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_confirm_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(adx_4h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,35 +96,22 @@ def generate_signals(prices):
             continue
         
         # Current values
-        trix_val = trix_aligned[i]
-        trix_sig_val = trix_signal_aligned[i]
-        chop_val = chop_aligned[i]
-        vol_confirm = volume_confirm_aligned[i]
+        rsi_val = rsi[i]
+        adx_val = adx_4h_aligned[i]
+        vol_current = volume[i]
+        vol_average = vol_ma_20[i]
         
-        # TRIX crossover signals
-        trix_cross_up = trix_val > trix_sig_val and (i == 50 or trix_aligned[i-1] <= trix_signal_aligned[i-1])
-        trix_cross_down = trix_val < trix_sig_val and (i == 50 or trix_aligned[i-1] >= trix_signal_aligned[i-1])
-        
-        # Regime filters
-        choppy = chop_val > 61.8  # Choppy regime - mean reversion
-        trending = chop_val < 38.2  # Trending regime - trend follow
+        # Volume confirmation
+        volume_confirm = vol_current > 1.5 * vol_average
         
         if position == 0:
-            # Enter long in choppy regime with TRIX cross up and volume confirmation
-            if choppy and trix_cross_up and vol_confirm:
-                signals[i] = 0.25
+            # Enter long when RSI oversold, strong uptrend, volume spike
+            if (rsi_val < 30 and adx_val > 25 and volume_confirm):
+                signals[i] = 0.20
                 position = 1
-            # Enter short in choppy regime with TRIX cross down and volume confirmation
-            elif choppy and trix_cross_down and vol_confirm:
-                signals[i] = -0.25
-                position = -1
-            # Enter long in trending regime with TRIX cross up (no volume filter needed)
-            elif trending and trix_cross_up:
-                signals[i] = 0.25
-                position = 1
-            # Enter short in trending regime with TRIX cross down (no volume filter needed)
-            elif trending and trix_cross_down:
-                signals[i] = -0.25
+            # Enter short when RSI overbought, strong downtrend, volume spike
+            elif (rsi_val > 70 and adx_val > 25 and volume_confirm):
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
@@ -131,16 +119,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: TRIX cross down or regime change to choppy without confirmation
-                if trix_cross_down:
-                    exit_signal = True
-                elif choppy and not vol_confirm:  # In choppy, need volume to hold
+                # Exit long: RSI returns to neutral or becomes overbought
+                if rsi_val >= 40:
                     exit_signal = True
             elif position == -1:
-                # Exit short: TRIX cross up or regime change to choppy without confirmation
-                if trix_cross_up:
-                    exit_signal = True
-                elif choppy and not vol_confirm:  # In choppy, need volume to hold
+                # Exit short: RSI returns to neutral or becomes oversold
+                if rsi_val <= 60:
                     exit_signal = True
             
             if exit_signal:
@@ -148,10 +132,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_TRIX_Chop_Regime_Volume"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hADX_Volume"
+timeframe = "1h"
 leverage = 1.0
