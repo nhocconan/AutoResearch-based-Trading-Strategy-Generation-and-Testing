@@ -1,11 +1,14 @@
-# 4h_1d_Camarilla_R1S1_Breakout_Volume_Filtered
-# Hypothesis: Use Camarilla pivot levels (R1, S1) from 1d timeframe with volume confirmation and ADX filter.
-# Long when price breaks above R1 with volume > 1.5x average volume and ADX > 25 (trending market).
-# Short when price breaks below S1 with volume > 1.5x average volume and ADX > 25.
-# Exit when price crosses back through the pivot point (PP).
-# Designed for 4h timeframe to capture multi-day moves with ~20-50 trades/year.
-# Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
-# Volume confirmation filters false breakouts. ADX filter ensures we only trade in trending conditions.
+#!/usr/bin/env python3
+"""
+4h_1d_Pivot_R1S1_Breakout_Volume_Trend
+Hypothesis: Use 1d Camarilla R1/S1 breakouts with volume confirmation and 4h EMA50 trend filter.
+Long when price breaks above R1 with volume > 1.5x 20-bar avg AND price > EMA50.
+Short when price breaks below S1 with volume > 1.5x 20-bar avg AND price < EMA50.
+Exit when price crosses back through the pivot point (PP).
+Designed for 4h timeframe to capture multi-day moves with ~20-40 trades/year.
+Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
+Volume and trend filters reduce false breakouts and whipsaws.
+"""
 
 import numpy as np
 import pandas as pd
@@ -50,72 +53,17 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate ADX on 4h data for trend filter
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values (Wilder's smoothing)
-    period = 14
-    atr = np.zeros(n)
-    dm_plus_smooth = np.zeros(n)
-    dm_minus_smooth = np.zeros(n)
-    
-    # Initial values
-    atr[period-1] = np.mean(tr[:period])
-    dm_plus_smooth[period-1] = np.mean(dm_plus[:period])
-    dm_minus_smooth[period-1] = np.mean(dm_minus[:period])
-    
-    # Wilder's smoothing
-    for i in range(period, n):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
-    
-    # Directional Indicators
-    di_plus = np.zeros(n)
-    di_minus = np.zeros(n)
-    dx = np.zeros(n)
-    
-    # Avoid division by zero
-    valid_atr = atr != 0
-    di_plus[valid_atr] = 100 * dm_plus_smooth[valid_atr] / atr[valid_atr]
-    di_minus[valid_atr] = 100 * dm_minus_smooth[valid_atr] / atr[valid_atr]
-    
-    # DX and ADX
-    dx_sum = di_plus + di_minus
-    valid_dx = dx_sum != 0
-    dx[valid_dx] = 100 * np.abs(di_plus[valid_dx] - di_minus[valid_dx]) / dx_sum[valid_dx]
-    
-    # ADX (smoothed DX)
-    adx = np.zeros(n)
-    if n >= 2*period-1:
-        adx[2*period-2] = np.mean(dx[period-1:2*period-1])
-        for i in range(2*period-1, n):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    # 4h EMA50 for trend filter
+    close_s = prices['close']
+    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
-            or np.isnan(adx[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -131,16 +79,13 @@ def generate_signals(prices):
         else:
             volume_ok = False
         
-        # ADX filter: trending market (ADX > 25)
-        adx_ok = adx[i] > 25
-        
         if position == 0:
-            # Long conditions: break above R1 + volume confirmation + ADX filter
-            if price > r1_aligned[i] and volume_ok and adx_ok:
+            # Long conditions: break above R1 + volume confirmation + price above EMA50
+            if price > r1_aligned[i] and volume_ok and price > ema_50[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S1 + volume confirmation + ADX filter
-            elif price < s1_aligned[i] and volume_ok and adx_ok:
+            # Short conditions: break below S1 + volume confirmation + price below EMA50
+            elif price < s1_aligned[i] and volume_ok and price < ema_50[i]:
                 signals[i] = -0.25
                 position = -1
         
@@ -162,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Filtered"
+name = "4h_1d_Pivot_R1S1_Breakout_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
