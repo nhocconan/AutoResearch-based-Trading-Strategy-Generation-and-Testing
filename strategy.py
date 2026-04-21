@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-1d Daily Pivot R1/S1 Breakout with Volume Confirmation and ATR Stop
+12h/1d Daily Pivot R1/S1 Breakout with Volume Confirmation and ATR Stop
 Hypothesis: Daily pivot points R1/S1 provide reliable support/resistance levels.
 Breakouts with volume confirmation capture institutional moves, while ATR-based stops limit losses.
 Works in both bull and bear markets by using daily levels and avoiding overtrading.
@@ -39,12 +39,12 @@ def generate_signals(prices):
     r1_daily = 2 * pivot_daily - low_daily
     s1_daily = 2 * pivot_daily - high_daily
     
-    # Align daily indicators to daily timeframe (same timeframe)
+    # Align daily indicators to 12h timeframe
     atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
     r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
     s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
     
-    # Main timeframe data (1d)
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -67,9 +67,9 @@ def generate_signals(prices):
         s1 = s1_daily_aligned[i]
         vol_current = volume[i]
         
-        # Volume filter: current volume > 1.8x 30-period average (balanced)
+        # Volume filter: current volume > 2.0x 30-period average (reduced frequency)
         vol_ma = np.mean(volume[max(0, i-30):i]) if i >= 30 else volume[i]
-        vol_ok = vol_current > 1.8 * vol_ma
+        vol_ok = vol_current > 2.0 * vol_ma
         
         if position == 0:
             # Long breakout: price breaks above R1 with volume confirmation
@@ -99,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_PivotR1S1_Breakout_Volume_ATRFilter"
-timeframe = "1d"
+name = "12h_1d_PivotR1S1_Breakout_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
