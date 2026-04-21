@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_1d_Camarilla_R1S1_Breakout_Volume_Control_v1
-Hypothesis: Breakout of daily Camarilla R1/S1 levels with volume confirmation and ATR filter on 6h timeframe.
-Long when price > daily R1 + volume spike + ATR(14) > 0.02 * price.
-Short when price < daily S1 + volume spike + ATR(14) > 0.02 * price.
+12h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1
+Hypothesis: Breakout of daily Camarilla R1/S1 levels with weekly trend filter (EMA34) and volume confirmation (1.5x 20-bar avg).
+Long when price > daily R1 + weekly EMA34 up + volume spike.
+Short when price < daily S1 + weekly EMA34 down + volume spike.
 Exit when price crosses daily pivot point (PP).
-Uses 6h as primary timeframe for signal generation, with 1d for levels.
-Designed to work in both bull and bear markets by requiring volatility and volume confirmation.
-Target: 12-37 trades per year per symbol (50-150 total over 4 years).
+Uses 12h as primary timeframe for signal generation, with 1d for levels and 1w for trend.
+Target: 12-37 trades/year per symbol. Works in bull/bear by following weekly trend.
 """
 
 import numpy as np
@@ -42,28 +41,21 @@ def generate_signals(prices):
     s1 = prev_close - 1.1 * rang / 12
     pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
-    # Calculate ATR(14) on 6h data for volatility filter
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    atr = np.zeros_like(tr)
-    for i in range(len(tr)):
-        if i < 14:
-            atr[i] = np.nan
-        else:
-            atr[i] = np.mean(tr[i-13:i+1])
+    close_1w = df_1w['close'].values
+    # Calculate EMA34 on weekly
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align to 12h timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,7 +63,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(pp_aligned[i]) or np.isnan(ema34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,16 +79,23 @@ def generate_signals(prices):
         else:
             volume_ok = False
         
-        # ATR filter: volatility > 2% of price
-        atr_ok = atr[i] > 0.02 * price
+        # Weekly trend filter: EMA34 slope
+        if i >= 51:
+            ema34_prev = ema34_1w_aligned[i-1]
+            ema34_curr = ema34_1w_aligned[i]
+            weekly_uptrend = ema34_curr > ema34_prev
+            weekly_downtrend = ema34_curr < ema34_prev
+        else:
+            weekly_uptrend = False
+            weekly_downtrend = False
         
         if position == 0:
-            # Long conditions: break above R1 + volume + ATR
-            if price > r1_aligned[i] and volume_ok and atr_ok:
+            # Long conditions: break above R1 + volume + weekly uptrend
+            if price > r1_aligned[i] and volume_ok and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below S1 + volume + ATR
-            elif price < s1_aligned[i] and volume_ok and atr_ok:
+            # Short conditions: break below S1 + volume + weekly downtrend
+            elif price < s1_aligned[i] and volume_ok and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         
@@ -118,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_R1S1_Breakout_Volume_Control_v1"
-timeframe = "6h"
+name = "12h_1d_1w_Camarilla_R1S1_Breakout_Volume_Regime_Filtered_v1"
+timeframe = "12h"
 leverage = 1.0
