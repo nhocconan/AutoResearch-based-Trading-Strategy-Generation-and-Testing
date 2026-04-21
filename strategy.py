@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot R2/S2 Breakout with Volume and Momentum Confirmation
-Hypothesis: Weekly pivot points R2/S2 act as significant institutional support/resistance.
-Breakouts above R2 or below S2 with volume and momentum capture sustained moves in both bull and bear markets.
-Volume confirms institutional participation, momentum filters out weak breakouts. Designed for low trade frequency
-(~12-37/year) to minimize fee drag. Uses 6h timeframe for balance between signal quality and trade frequency.
+4h Donchian Breakout with Volume and ADX Trend Filter
+Hypothesis: Donchian(20) breakouts capture momentum bursts. Volume and ADX ensure strong trends, reducing false signals. Designed for low trade frequency (~20-50/year) to minimize fee drag and improve generalization in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,90 +10,109 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Load daily data for ADX and ATR
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R2 = P + (H-L), S2 = P - (H-L)
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    r2_weekly = pivot_weekly + (high_weekly - low_weekly)
-    s2_weekly = pivot_weekly - (high_weekly - low_weekly)
+    # Calculate True Range for ATR
+    tr1 = np.abs(high_daily - low_daily)
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    tr1[0] = high_daily[0] - low_daily[0]
+    tr2[0] = np.abs(high_daily[0] - close_daily[0])
+    tr3[0] = np.abs(low_daily[0] - close_daily[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align weekly pivot points to 6h timeframe
-    r2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r2_weekly)
-    s2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s2_weekly)
+    # ADX calculation
+    plus_dm = np.where((high_daily - np.roll(high_daily, 1)) > (np.roll(low_daily, 1) - low_daily), 
+                       np.maximum(high_daily - np.roll(high_daily, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_daily, 1) - low_daily) > (high_daily - np.roll(high_daily, 1)), 
+                        np.maximum(np.roll(low_daily, 1) - low_daily, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # Main timeframe data (6h)
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align daily indicators to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    tr_ma_aligned = align_htf_to_ltf(prices, df_daily, tr_ma)
+    
+    # Main timeframe data (4h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Momentum: 12-period ROC (rate of change)
-    roc = np.zeros_like(close)
-    for i in range(12, n):
-        roc[i] = (close[i] - close[i-12]) / close[i-12] * 100
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if NaN in critical values
-        if (np.isnan(r2_weekly_aligned[i]) or np.isnan(s2_weekly_aligned[i]) or np.isnan(roc[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(tr_ma_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r2 = r2_weekly_aligned[i]
-        s2 = s2_weekly_aligned[i]
+        atr = tr_ma_aligned[i]
+        adx_val = adx_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         vol_current = volume[i]
         
-        # Volume filter: current volume > 2.0x 24-period average (4 days)
-        vol_ma = np.mean(volume[max(0, i-24):i]) if i >= 24 else volume[i]
-        vol_ok = vol_current > 2.0 * vol_ma
+        # Volume filter: current volume > 1.5x 20-period average
+        vol_ma = np.mean(volume[max(0, i-20):i]) if i >= 20 else volume[i]
+        vol_ok = vol_current > 1.5 * vol_ma
         
-        # Momentum filter: ROC > 0 for long, ROC < 0 for short
-        mom_long = roc[i] > 0
-        mom_short = roc[i] < 0
+        # Trend filter: ADX > 25
+        trend_ok = adx_val > 25
         
         if position == 0:
-            # Long breakout: price breaks above R2 with volume and momentum confirmation
-            if price > r2 and vol_ok and mom_long:
-                signals[i] = 0.25
+            # Long breakout: price breaks above upper Donchian with volume and trend
+            if price > upper and vol_ok and trend_ok:
+                signals[i] = 0.30
                 position = 1
-            # Short breakdown: price breaks below S2 with volume and momentum confirmation
-            elif price < s2 and vol_ok and mom_short:
-                signals[i] = -0.25
+            # Short breakdown: price breaks below lower Donchian with volume and trend
+            elif price < lower and vol_ok and trend_ok:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S2 (failed breakout) or momentum reversal
-            if price < s2 or roc[i] < -1.0:  # momentum turns negative
+            # Long exit: price breaks below lower Donchian or ATR-based stop
+            if price < lower or (i > 0 and close[i-1] > lower and price < close[i-1] - 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Short exit: price breaks above R2 (failed breakdown) or momentum reversal
-            if price > r2 or roc[i] > 1.0:  # momentum turns positive
+            # Short exit: price breaks above upper Donchian or ATR-based stop
+            if price > upper or (i > 0 and close[i-1] < upper and price > close[i-1] + 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_WeeklyPivot_R2S2_Breakout_Volume_Momentum"
-timeframe = "6h"
+name = "4h_Donchian20_Volume_ADXTrendFilter"
+timeframe = "4h"
 leverage = 1.0
