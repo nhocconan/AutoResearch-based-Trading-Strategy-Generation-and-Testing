@@ -1,65 +1,52 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrendRegime_VolumeSpike_v1
-Hypothesis: 1d Camarilla R1/S1 breakouts with 1w HMA(21) trend filter, volume confirmation, and ATR stoploss. Target 30-100 trades over 4 years for BTC/ETH/SOL. Uses discrete sizing (0.30) to minimize fee drag.
+6h_Donchian20_Breakout_1dTrendRegime_VolumeSpike_v1
+Hypothesis: 6h Donchian(20) breakouts with 1d EMA34 trend filter and volume confirmation. 
+Donchian provides structure, 1d EMA34 filters regime (bull/bear), volume confirms conviction.
+Designed for low trade count (~100 total over 4 years) to minimize fee drag while capturing 
+strong breakouts in both bull and bear markets via regime-adaptive logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_hma(series, period):
-    """Calculate Hull Moving Average"""
-    if len(series) < period:
-        return np.full_like(series, np.nan, dtype=float)
-    half = period // 2
-    sqrt = int(np.sqrt(period))
-    wma2 = pd.Series(series).ewm(span=half, adjust=False).mean()
-    wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
-    raw_hma = 2 * wma2 - wma1
-    hma = pd.Series(raw_hma).ewm(span=sqrt, adjust=False).mean()
-    return hma.values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for trend regime)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop (1d for trend regime)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1w HMA21 for trend regime ===
-    close_1w = df_1w['close'].values
-    hma_21_1w = calculate_hma(close_1w, 21)
-    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    # === 1d EMA34 for trend regime ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 1d ATR (14-period) for stoploss ===
+    # === 6h Donchian channels (20-period) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    # Donchian high: highest high over last 20 bars (including current)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Donchian low: lowest low over last 20 bars (including current)
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 6h ATR (14-period) for stoploss ===
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 1d volume confirmation (volume > 2.0x 20-period average) ===
+    # === 6h volume confirmation (volume > 1.5x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma_20)
-    
-    # === 1d Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+    volume_confirmed = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(hma_21_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or np.isnan(atr[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,32 +64,32 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        hma_21_1w_val = hma_21_1w_aligned[i]
-        r1_val = r1[i]
-        s1_val = s1[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
         vol_conf = volume_confirmed[i]
         
-        # Trend regime
-        is_bull = price > hma_21_1w_val
-        is_bear = price < hma_21_1w_val
+        # Trend regime from 1d EMA34
+        is_bull = price > ema_34_1d_val
+        is_bear = price < ema_34_1d_val
         
         if position == 0:
             if is_bull:
                 # Bull regime: long breakouts favored
-                long_condition = (price > r1_val) and vol_conf
-                short_condition = (price < s1_val) and vol_conf and (price < hma_21_1w_val * 0.99)  # stricter for shorts
+                long_condition = (price > donch_high_val) and vol_conf
+                short_condition = (price < donch_low_val) and vol_conf and (price < ema_34_1d_val * 0.995)  # stricter for shorts
             else:  # bear regime
                 # Bear regime: short breakdowns favored
-                short_condition = (price < s1_val) and vol_conf
-                long_condition = (price > r1_val) and vol_conf and (price > hma_21_1w_val * 1.01)  # stricter for longs
+                short_condition = (price < donch_low_val) and vol_conf
+                long_condition = (price > donch_high_val) and vol_conf and (price > ema_34_1d_val * 1.005)  # stricter for longs
             
             if long_condition:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
                 bars_since_entry = 0
             elif short_condition:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
                 bars_since_entry = 0
@@ -110,39 +97,39 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 6 bars to reduce churn
-            if bars_since_entry < 6:
-                signals[i] = 0.30 if position == 1 else -0.30
+            # Minimum holding period of 8 bars to reduce churn
+            if bars_since_entry < 8:
+                signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                if price < entry_price - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks below S1 (failed breakout)
-                elif price < s1_val:
+                # Exit if price breaks below Donchian low (failed breakout)
+                elif price < donch_low_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                if price > entry_price + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks above R1 (failed breakdown)
-                elif price > r1_val:
+                # Exit if price breaks above Donchian high (failed breakdown)
+                elif price > donch_high_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrendRegime_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_1dTrendRegime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
