@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1
-Hypothesis: Use 1d Camarilla R1/S1 breakout with volume spike (>2x 20-bar MA) and ATR(14) stop (1.5x). 1h timeframe for entry timing, 1d for signal direction. Volume confirms breakout legitimacy, ATR stop manages risk. Session filter (08-20 UTC) reduces noise. Designed for 15-30 trades/year per symbol with discrete sizing (0.20) to control fee drag and drawdown in both bull and bear markets.
+12h_Camarilla_R1_S1_Breakout_VolumeATRFilter_V1
+Hypothesis: Use 1d Camarilla R1/S1 levels from prior day + 12h breakout with volume spike (>1.5x 20-bar MA) and ATR(14) stoploss (1.5x). 12h timeframe reduces noise, Camarilla levels provide institutional support/resistance, volume confirms legitimacy, ATR stop manages risk. Designed for ranging/low-volatility markets like 2025 BTC/ETH.
 """
 
 import numpy as np
@@ -14,26 +14,31 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1d = get_htf_data(prices, '1d')  # for Camarilla levels
     
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Points (based on prior day) ===
+    # === 1d Camarilla Levels (from prior day) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and levels using prior day's OHLC
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = pivot + (high_1d - low_1d) * 1.1 / 12.0
-    s1 = pivot - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate Camarilla levels for today using yesterday's OHLC
+    camarilla_r1 = np.zeros(len(close_1d))
+    camarilla_s1 = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        # Yesterday's values
+        h = high_1d[i-1]
+        l = low_1d[i-1]
+        c = close_1d[i-1]
+        camarilla_r1[i] = c + (h - l) * 1.1 / 12
+        camarilla_s1[i] = c - (h - l) * 1.1 / 12
     
-    # Align to 1h: each 1d value applies to the following 24 bars (1h)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 1h Indicators ===
+    # === 12h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -50,57 +55,50 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Session filter: 08-20 UTC (precomputed for speed)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         price = close[i]
         vol = volume[i]
-        vol_ok = vol > 2.0 * vol_ma[i]  # volume spike confirmation
+        vol_ok = vol > 1.5 * vol_ma[i]  # volume spike confirmation
         
-        if position == 0 and in_session:
-            # Long: break above R1 with volume spike
-            if price > r1_aligned[i-1] and vol_ok:
-                signals[i] = 0.20
+        if position == 0:
+            # Long: break above Camarilla R1 with volume spike
+            if price > camarilla_r1_aligned[i-1] and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with volume spike
-            elif price < s1_aligned[i-1] and vol_ok:
-                signals[i] = -0.20
+            # Short: break below Camarilla S1 with volume spike
+            elif price < camarilla_s1_aligned[i-1] and vol_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: ATR stoploss or opposite signal
-            if price < r1_aligned[i-1] - 1.5 * atr[i] or (price < s1_aligned[i-1] and vol_ok):
+            if price < camarilla_r1_aligned[i-1] - 1.5 * atr[i] or (price < camarilla_s1_aligned[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit: ATR stoploss or opposite signal
-            if price > s1_aligned[i-1] + 1.5 * atr[i] or (price > r1_aligned[i-1] and vol_ok):
+            if price > camarilla_s1_aligned[i-1] + 1.5 * atr[i] or (price > camarilla_r1_aligned[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_VolumeATRFilter_V1"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_VolumeATRFilter_V1"
+timeframe = "12h"
 leverage = 1.0
