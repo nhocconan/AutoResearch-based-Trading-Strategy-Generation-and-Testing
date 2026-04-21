@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v1
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1d EMA trend filter, volume confirmation (>1.5x 20-period MA), and chop regime filter (<61.8) capture institutional moves with low trade frequency (~12-30/year) to minimize fee drag. ATR-based trailing stop (2.5x) manages risk. Designed to work in both bull and bear markets by requiring trending conditions (chop < 61.8) and volume confirmation to avoid false breakouts.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v3
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA trend filter, volume confirmation, and chop regime filter reduces false breakouts while capturing institutional moves in both bull and bear markets. ATR-based trailing stop manages risk. Designed for low trade frequency (~30-60/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -139,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v3"
+timeframe = "4h"
 leverage = 1.0
