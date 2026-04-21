@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1
-Hypothesis: Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume spike (2.0x 20-period average) capture momentum in both bull and bear regimes. Uses ATR-based stoploss (2.0x) and minimum holding period (3 bars) to reduce churn. Discrete sizing (0.25) targets ~15-25 trades/year for BTC/ETH/SOL to minimize fee drag and improve generalization across market conditions.
+4h_Camarilla_R1_S1_Breakout_4hEMA50_Trend_VolumeSpike_ATRStop_v1
+Hypothesis: Camarilla R1/S1 breakouts on 4h with 4h EMA50 trend filter and volume spike (1.8x 20-period average) capture momentum in both bull and bear regimes. Uses ATR-based stoploss (2.0x) and minimum holding period (4 bars) to reduce churn. Discrete sizing (0.25) targets ~20-40 trades/year for BTC/ETH/SOL to minimize fee drag and improve generalization across market conditions.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 12h ATR (14-period) for stoploss ===
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -34,12 +34,12 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
+    # === 4h volume confirmation (volume > 1.8x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma_20)
+    volume_confirmed = volume > (1.8 * vol_ma_20)
     
-    # === 12h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -98,8 +98,8 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 4 bars to reduce churn
+            if bars_since_entry < 4:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
@@ -131,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_4hEMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
