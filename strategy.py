@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_Donchian20_Breakout_Volume_Confirmation
-Hypothesis: Breakout of 4h Donchian(20) channel with volume confirmation and 1d trend filter.
-Long when price breaks above upper band + volume > 1.5x avg + 1d close > 1d open (bullish day).
-Short when price breaks below lower band + volume > 1.5x avg + 1d close < 1d open (bearish day).
-Exit when price returns to 4h 20-period EMA. Designed for low trade frequency (~20-50/year)
-to minimize fee drag. Works in bull/bear markets via 1d trend filter aligning with breakout direction.
+6h_1d_LiquidityVoid_BullBearBalance
+Hypothesis: Combines liquidity voids (fair value gaps) with bull/bear power to identify high-probability mean reversion and continuation setups. Voids act as magnets for price, while bull/bear power confirms institutional participation. Designed for low trade frequency (target: 12-37/year) with strong risk control. Works in bull/bear regimes by adapting to market structure via imbalance detection.
 """
 
 import numpy as np
@@ -17,93 +13,106 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for trend filter
+    # Load daily data for bull/bear power and liquidity voids
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 2:
         return np.zeros(n)
     
-    daily_close = df_daily['close'].values
-    daily_open = df_daily['open'].values
-    daily_bullish = daily_close > daily_open  # bullish day
-    daily_bearish = daily_close < daily_open  # bearish day
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
+    volume_daily = df_daily['volume'].values
     
-    # Align daily trend to 4h
-    daily_bullish_aligned = align_htf_to_ltf(prices, df_daily, daily_bullish.astype(float))
-    daily_bearish_aligned = align_htf_to_ltf(prices, df_daily, daily_bearish.astype(float))
+    # Calculate daily EMA13 for bull/bear power
+    close_series = pd.Series(close_daily)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 4h data
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high_daily - ema13
+    bear_power = ema13 - low_daily
+    
+    # Align daily indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_daily, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_daily, bear_power)
+    
+    # Identify liquidity voids (Fair Value Gaps) on daily timeframe
+    # Bullish FVG: gap between low[i-1] and high[i+1] where low[i-1] > high[i+1]
+    # Bearish FVG: gap between high[i-1] and low[i+1> where high[i-1] < low[i+1]
+    fvg_bull = np.zeros(len(high_daily), dtype=bool)
+    fvg_bear = np.zeros(len(high_daily), dtype=bool)
+    
+    for i in range(1, len(high_daily) - 1):
+        # Bullish FVG: previous low > next high
+        if low_daily[i-1] > high_daily[i+1]:
+            fvg_bull[i] = True
+        # Bearish FVG: previous high < next low
+        if high_daily[i-1] < low_daily[i+1]:
+            fvg_bear[i] = True
+    
+    # Align FVG signals to 6h timeframe
+    fvg_bull_aligned = align_htf_to_ltf(prices, df_daily, fvg_bull.astype(float))
+    fvg_bear_aligned = align_htf_to_ltf(prices, df_daily, fvg_bear.astype(float))
+    
+    # Main timeframe data (6h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian(20) channels
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                res[i] = np.max(arr[i - window + 1:i + 1])
-        return res
-    
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                res[i] = np.min(arr[i - window + 1:i + 1])
-        return res
-    
-    upper = rolling_max(high, 20)
-    lower = rolling_min(low, 20)
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma = np.zeros_like(volume)
+    # Volume filter: current volume > 1.3x 20-period average (less strict to avoid over-filtering)
+    volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
         if i >= 20:
-            vol_ma[i] = np.mean(volume[i-20:i])
+            volume_avg[i] = np.mean(volume[i-20:i])
         else:
-            vol_ma[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.5 * vol_ma)
-    
-    # 4h 20-period EMA for exit
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+            volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+    volume_filter = volume > (1.3 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if NaN in critical values
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(fvg_bull_aligned[i]) or np.isnan(fvg_bear_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
+        bp = bull_power_aligned[i]
+        be = bear_power_aligned[i]
+        fvg_bull_signal = fvg_bull_aligned[i] > 0.5
+        fvg_bear_signal = fvg_bear_aligned[i] > 0.5
         vol_ok = volume_filter[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume + bullish day
-            if price > upper[i] and vol_ok and daily_bullish_aligned[i] > 0.5:
-                signals[i] = 0.25
-                position = 1
-            # Short: breakout below lower band + volume + bearish day
-            elif price < lower[i] and vol_ok and daily_bearish_aligned[i] > 0.5:
-                signals[i] = -0.25
-                position = -1
+            # Long setup: bullish FVG with bullish power and volume
+            # Price should be in or above the bullish FVG zone
+            if fvg_bull_signal and bp > 0 and vol_ok:
+                # Additional confirmation: bullish candle (close > open)
+                if close[i] > prices['open'].values[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Short setup: bearish FVG with bearish power and volume
+            elif fvg_bear_signal and be > 0 and vol_ok:
+                # Additional confirmation: bearish candle (close < open)
+                if close[i] < prices['open'].values[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Long exit: price returns to EMA20
-            if price < ema20[i]:
+            # Long exit: bearish FVG appears or bullish power fails
+            if fvg_bear_signal or bp <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to EMA20
-            if price > ema20[i]:
+            # Short exit: bullish FVG appears or bearish power fails
+            if fvg_bull_signal or be <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -111,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian20_Breakout_Volume_Confirmation"
-timeframe = "4h"
+name = "6h_1d_LiquidityVoid_BullBearBalance"
+timeframe = "6h"
 leverage = 1.0
