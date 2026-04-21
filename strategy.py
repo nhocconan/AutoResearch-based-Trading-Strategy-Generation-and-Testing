@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Camarilla_R1S1_Breakout_VolumeSpike_Session_V1
-Hypothesis: Use 1d Camarilla R1/S1 breakouts with volume confirmation and session filter (08-20 UTC) on 1h timeframe.
-HTF (4h/1d) provides signal direction, 1h provides precise entry timing.
-Fixed position size 0.20 to control drawdown. Target 15-35 trades/year per symbol.
-Works in bull/bear via breakout logic with volume confirmation filtering low-quality signals.
+12h_HTF_1d_Camarilla_R1S1_Breakout_ATR_Trail_V1
+Hypothesis: Use 12h timeframe with 1d Camarilla R1/S1 breakouts, volume confirmation, and ATR trailing stop.
+The 12h timeframe reduces trade frequency vs 4h while capturing multi-day trends. Camarilla levels from daily
+charts provide significant support/resistance. Volume confirmation filters false breakouts. ATR trailing stop
+adapts to volatility, reducing whipsaw in ranging markets and locking in profits during strong trends.
+Target: 12-30 trades/year per symbol (50-120 total over 4 years).
 """
 
 import numpy as np
@@ -33,11 +34,11 @@ def generate_signals(prices):
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Align to 1h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 1h Indicators ===
+    # === 12h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -46,16 +47,23 @@ def generate_signals(prices):
     # Volume MA (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # already datetime64[ms], .hour works
+    # ATR (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high = 0.0  # for long trailing stop
+    lowest_low = 0.0    # for short trailing stop
     
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
-            or np.isnan(vol_ma[i])):
+            or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,38 +71,44 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        hour = hours[i]
-        vol_ok = vol > 2.0 * vol_ma[i]  # volume spike confirmation
-        in_session = (8 <= hour <= 20)  # UTC 08-20
+        vol_ok = vol > 1.8 * vol_ma[i]  # volume spike confirmation
         
         if position == 0:
-            # Long: break above 1d Camarilla R1 with volume spike and in session
-            if price > r1_aligned[i-1] and vol_ok and in_session:
-                signals[i] = 0.20
+            # Long: break above 1d Camarilla R1 with volume spike
+            if price > r1_aligned[i-1] and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below 1d Camarilla S1 with volume spike and in session
-            elif price < s1_aligned[i-1] and vol_ok and in_session:
-                signals[i] = -0.20
+                highest_high = price
+            # Short: break below 1d Camarilla S1 with volume spike
+            elif price < s1_aligned[i-1] and vol_ok:
+                signals[i] = -0.25
                 position = -1
+                lowest_low = price
         
         elif position == 1:
-            # Exit on break below S1 (mean reversion) or end of session
-            if price < s1_aligned[i] or not in_session:
+            # Update highest high for trailing stop
+            if price > highest_high:
+                highest_high = price
+            # ATR trailing stop: exit if price drops 2.0*ATR from highest high
+            if price < highest_high - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit on break above R1 (mean reversion) or end of session
-            if price > r1_aligned[i] or not in_session:
+            # Update lowest low for trailing stop
+            if price < lowest_low:
+                lowest_low = price
+            # ATR trailing stop: exit if price rises 2.0*ATR from lowest low
+            if price > lowest_low + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4h_1d_Camarilla_R1S1_Breakout_VolumeSpike_Session_V1"
-timeframe = "1h"
+name = "12h_HTF_1d_Camarilla_R1S1_Breakout_ATR_Trail_V1"
+timeframe = "12h"
 leverage = 1.0
