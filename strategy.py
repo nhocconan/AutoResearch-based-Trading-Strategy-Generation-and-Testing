@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeSpike_ATRStop_v3
-Hypothesis: 4h Camarilla R1/S1 breakouts filtered by 1d EMA50 trend and volume spike (>2x average).
-Uses discrete position sizing (0.0, ±0.25) to minimize fee churn and overtrading.
-ATR-based trailing stop with 2.0x ATR distance. Designed for <50 trades/year per symbol.
-Works in bull/bear via 1d trend alignment and volume confirmation to avoid false breakouts.
+12h_Camarilla_Pivot_Breakout_1dTrend_VolumeSpike_ATRStop_v3
+Hypothesis: 12h Camarilla pivot (R4/S4) breakouts filtered by 1d EMA200 trend and volume spike (>1.5x average).
+Uses tighter timeframe (12h) to reduce trade frequency, EMA200 for strong trend filter, and volume confirmation to avoid false breakouts.
+ATR trailing stop with 2.5x ATR distance. Designed for 12-30 trades/year per symbol.
+Works in bull/bear via 1d trend alignment (EMA200) and volume confirmation to avoid whipsaws.
 """
 
 import numpy as np
@@ -16,32 +16,32 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (4h for Camarilla, 1d for trend)
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop (12h for Camarilla, 1d for trend)
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 5 or len(df_1d) < 50:
+    if len(df_12h) < 5 or len(df_1d) < 200:
         return np.zeros(n)
     
-    # === 4h OHLC for Camarilla calculation ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === 12h OHLC for Camarilla calculation ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels using previous completed 4h bar
-    # R1 = Close + (High - Low) * 1.1 / 12
-    # S1 = Close - (High - Low) * 1.1 / 12
-    camarilla_range = (high_4h - low_4h) * 1.1 / 12
-    r1 = close_4h + camarilla_range
-    s1 = close_4h - camarilla_range
+    # Calculate Camarilla levels (R4/S4) using previous completed 12h bar
+    # R4 = Close + (High - Low) * 1.1 / 2
+    # S4 = Close - (High - Low) * 1.1 / 2
+    camarilla_range = (high_12h - low_12h) * 1.1 / 2
+    r4 = close_12h + camarilla_range
+    s4 = close_12h - camarilla_range
     
-    # Align to 4h timeframe (use previous completed 4h bar)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    # Align to 12h timeframe (use previous completed 12h bar)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
     
-    # === 1d EMA50 for HTF trend filter ===
+    # === 1d EMA200 for HTF trend filter ===
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # === ATR (14-period) for stoploss ===
     high = prices['high'].values
@@ -58,10 +58,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) 
+            or np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,18 +70,18 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume spike: current volume > 2x 20-period average
+            # Volume spike: current volume > 1.5x 20-period average
             volume = prices['volume'].values
             vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-            vol_spike = volume[i] > 2.0 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
+            vol_spike = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
             
-            # Long conditions: price > 4h R1, 1d uptrend, volume spike
-            long_breakout = price > r1_aligned[i]
-            long_trend = price > ema_50_1d_aligned[i]
+            # Long conditions: price > 12h R4, 1d uptrend (price > EMA200), volume spike
+            long_breakout = price > r4_aligned[i]
+            long_trend = price > ema_200_1d_aligned[i]
             
-            # Short conditions: price < 4h S1, 1d downtrend, volume spike
-            short_breakout = price < s1_aligned[i]
-            short_trend = price < ema_50_1d_aligned[i]
+            # Short conditions: price < 12h S4, 1d downtrend (price < EMA200), volume spike
+            short_breakout = price < s4_aligned[i]
+            short_trend = price < ema_200_1d_aligned[i]
             
             # Entry logic - ONLY enter on volume spike + trend alignment
             if long_breakout and long_trend and vol_spike:
@@ -95,11 +95,11 @@ def generate_signals(prices):
         
         elif position == 1:
             # Check stoploss
-            if price < entry_price - 2.0 * atr[i]:
+            if price < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below 4h S1 (support broken)
-            elif price < s1_aligned[i]:
+            # Trailing exit: price closes below 12h S4 (support broken)
+            elif price < s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,11 +107,11 @@ def generate_signals(prices):
         
         elif position == -1:
             # Check stoploss
-            if price > entry_price + 2.0 * atr[i]:
+            if price > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above 4h R1 (resistance broken)
-            elif price > r1_aligned[i]:
+            # Trailing exit: price closes above 12h R4 (resistance broken)
+            elif price > r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_HTFTrend_VolumeSpike_ATRStop_v3"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_Breakout_1dTrend_VolumeSpike_ATRStop_v3"
+timeframe = "12h"
 leverage = 1.0
