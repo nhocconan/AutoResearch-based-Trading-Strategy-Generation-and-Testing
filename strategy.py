@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
-Hypothesis: Use 1d Camarilla pivot levels (R1, S1) + volume spike (>2x 20-bar MA) for breakout entry + ATR(14) stoploss (2.0x). 
-Add regime filter: only trade when 12h ADX(14) > 25 (strong trend filter) to reduce whipsaw in ranging markets. 
-Uses discrete position sizing (0.25) to balance return and drawdown. Target 12-30 trades/year per symbol. 
+4h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1
+Hypothesis: Use 1d Camarilla R1/S1 levels + 4h volume spike (>2x 20-bar MA) for breakout entry + ATR(14) stoploss (2.0x). 
+Add regime filter: only trade when 4h ADX(14) > 25 (strong trend filter) to reduce whipsaw in ranging markets. 
+Uses discrete position sizing (0.30) to balance return and drawdown. Target 20-40 trades/year per symbol. 
 Works in bull (breakouts capture momentum) and bear (tight stops limit losses during reversals).
 """
 
@@ -27,17 +27,17 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point
+    # Pivot point
     pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla R1 and S1
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Camarilla levels
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Align to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # === 12h Indicators ===
+    # === 4h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -69,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -83,32 +83,32 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: break above 1d Camarilla R1 with volume spike and ADX > 25
-            if price > camarilla_r1_aligned[i-1] and vol_ok and adx_ok:
-                signals[i] = 0.25
+            if price > r1_aligned[i-1] and vol_ok and adx_ok:
+                signals[i] = 0.30
                 position = 1
             # Short: break below 1d Camarilla S1 with volume spike and ADX > 25
-            elif price < camarilla_s1_aligned[i-1] and vol_ok and adx_ok:
-                signals[i] = -0.25
+            elif price < s1_aligned[i-1] and vol_ok and adx_ok:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
             # Exit: ATR stoploss or opposite signal
-            if price < camarilla_r1_aligned[i-1] - 2.0 * atr[i] or price < camarilla_s1_aligned[i-1]:
+            if price < r1_aligned[i-1] - 2.0 * atr[i] or price < s1_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit: ATR stoploss or opposite signal
-            if price > camarilla_s1_aligned[i-1] + 2.0 * atr[i] or price > camarilla_r1_aligned[i-1]:
+            if price > s1_aligned[i-1] + 2.0 * atr[i] or price > r1_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
-timeframe = "12h"
+name = "4h_HTF_1d_Camarilla_R1S1_Breakout_VolumeSpike_ATRStop_V1"
+timeframe = "4h"
 leverage = 1.0
