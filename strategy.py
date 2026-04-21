@@ -1,40 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_Trend
-Hypothesis: Use Ichimoku cloud from 1d timeframe for trend direction and 6h for entry timing.
-Long when price breaks above Kumo cloud (Senkou Span B) with Tenkan > Kijun.
-Short when price breaks below Kumo cloud with Tenkan < Kijun.
-Requires volume > 1.5x 20-period average for confirmation.
-Uses ADX > 20 on 1d to filter for trending conditions only.
-Ichimoku works in all markets as it combines momentum, trend, and support/resistance.
-Target: 20-50 trades/year by requiring multiple confirmations.
-Works in bull/bear markets by only taking trades in direction of higher timeframe trend.
+12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter
+Hypothesis: Breakouts above daily R1 or below daily S1 on 12h timeframe with volume confirmation (1.5x 20-period average) and ADX > 20 on 1d (trending market) yield high-probability trades. Uses ADX to filter for trending conditions only, avoiding whipsaws in ranging markets. Targets 12-37 trades/year by requiring both volume and trend strength confirmation. Works in bull/bear markets by only taking breakouts in direction of trend (ADX confirms trend strength regardless of direction).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
-    """Calculate Ichimoku components"""
-    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 for past 9 periods
-    tenkan_sen = (pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max() + 
-                  pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min()) / 2
-    
-    # Kijun-sen (Base Line): (highest high + lowest low)/2 for past 26 periods
-    kijun_sen = (pd.Series(high).rolling(window=kijun, min_periods=kijun).max() + 
-                 pd.Series(low).rolling(window=kijun, min_periods=kijun).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 for past 52 periods shifted 26 ahead
-    senkou_span_b = (pd.Series(high).rolling(window=senkou, min_periods=senkou).max() + 
-                     pd.Series(low).rolling(window=senkou, min_periods=senkou).min()) / 2
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for signals)
-    
-    return tenkan_sen.values, kijun_sen.values, senkou_span_a.values, senkou_span_b.values
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)"""
@@ -77,53 +49,65 @@ def calculate_adx(high, low, close, period=14):
     adx = np.zeros_like(dx)
     if len(dx) >= period:
         adx[period-1] = np.mean(dx[:period])  # First ADX value
-        
-        for i in range(period, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    for i in range(period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
     return adx
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close"""
+    range_val = high - low
+    if range_val == 0:
+        return close, close
+    r1 = close + range_val * 1.1 / 12
+    s1 = close - range_val * 1.1 / 12
+    return r1, s1
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for Ichimoku and ADX
+    # Load daily data once for pivot calculation and ADX filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Ichimoku
+    # Calculate daily OHLC arrays
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high_1d, low_1d, close_1d)
-    
-    # Kumo cloud top and bottom (Senkou Span B is the slower one)
-    kumo_top = np.maximum(senkou_a, senkou_b)
-    kumo_bottom = np.minimum(senkou_a, senkou_b)
-    
     # Calculate daily ADX for trend filter
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align all indicators to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    kumo_top_6h = align_htf_to_ltf(prices, df_1d, kumo_top)
-    kumo_bottom_6h = align_htf_to_ltf(prices, df_1d, kumo_bottom)
-    adx_1d_6h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if indicators not ready
-        if np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(kumo_top_6h[i]) or np.isnan(kumo_bottom_6h[i]) or np.isnan(adx_1d_6h[i]):
+    for i in range(50, n):
+        # Skip if ADX not ready
+        if np.isnan(adx_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
+        
+        # Calculate daily Camarilla levels from previous day's OHLC
+        # Align daily OHLC to 12h timeframe
+        high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+        low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        
+        # Use prior bar's aligned daily values (previous completed day)
+        prev_high = high_1d_aligned[i-1]
+        prev_low = low_1d_aligned[i-1]
+        prev_close = close_1d_aligned[i-1]
+        
+        r1, s1 = calculate_camarilla(prev_high, prev_low, prev_close)
         
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
@@ -136,29 +120,29 @@ def generate_signals(prices):
             volume_ok = False
         
         # Trend filter: ADX > 20 indicates trending market
-        trending = adx_1d_6h[i] > 20
+        trending = adx_1d_aligned[i] > 20
         
         if position == 0:
-            # Long: price above cloud AND Tenkan > Kijun AND volume + trend confirmation
-            if price > kumo_top_6h[i] and tenkan_6h[i] > kijun_6h[i] and volume_ok and trending:
+            # Long: price breaks above R1 + volume confirmation + trending market
+            if price > r1 and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below cloud AND Tenkan < Kijun AND volume + trend confirmation
-            elif price < kumo_bottom_6h[i] and tenkan_6h[i] < kijun_6h[i] and volume_ok and trending:
+            # Short: price breaks below S1 + volume confirmation + trending market
+            elif price < s1 and volume_ok and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price drops below cloud base OR Tenkan < Kijun (momentum loss)
-            if price < kumo_bottom_6h[i] or tenkan_6h[i] < kijun_6h[i]:
+            # Long exit: price breaks below S1 or ADX drops below 15 (losing trend)
+            if price < s1 or adx_1d_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises above cloud top OR Tenkan > Kijun (momentum loss)
-            if price > kumo_top_6h[i] or tenkan_6h[i] > kijun_6h[i]:
+            # Short exit: price breaks above R1 or ADX drops below 15 (losing trend)
+            if price > r1 or adx_1d_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -166,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Breakout_Trend"
-timeframe = "6h"
+name = "12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
