@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and ADX trend filter.
-Longs when price breaks above 20-period high with ADX>25 and volume>1.5x average;
-shorts when price breaks below 20-period low with ADX>25 and volume>1.5x average.
-Exit on opposite Donchian band touch or 2x ATR stop.
-Designed for 12-30 trades/year to minimize fee dust while capturing strong trends.
+Hypothesis: 4h Donchian breakout with 1d volume spike and ADX trend filter.
+Longs when price breaks above 20-period high with ADX>25 and volume>1.5x average; shorts when price breaks below 20-period low with ADX>25 and volume>1.5x average.
+Exit on price crossing back through 20-period midpoint or 2x ATR stop.
+Designed for 20-40 trades/year to minimize fee drag while capturing high-probability breakouts.
 """
 
 import numpy as np
@@ -46,8 +45,13 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Donchian channels (20-period)
+    high_20 = pd.Series(prices['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(prices['low'].values).rolling(window=20, min_periods=20).min().values
+    mid_20 = (high_20 + low_20) / 2
     
     # Volume confirmation: volume spike > 1.5x 20-period average
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -62,17 +66,13 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # 20-period Donchian channels
-    donchian_high = pd.Series(prices['high'].values).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(prices['low'].values).rolling(window=20, min_periods=20).min().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(mid_20[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,41 +84,39 @@ def generate_signals(prices):
         adx_val = adx_aligned[i]
         vol_ratio_val = vol_ratio[i]
         atr_val = atr[i]
-        upper_band = donchian_high[i]
-        lower_band = donchian_low[i]
         
         if position == 0:
-            # Enter long: break above upper band with volume and trend
-            if (price_high > upper_band and 
+            # Enter long: break above 20-period high with volume and trend
+            if (price_high > high_20[i] and 
                 adx_val > 25 and 
                 vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower band with volume and trend
-            elif (price_low < lower_band and 
+            # Enter short: break below 20-period low with volume and trend
+            elif (price_low < low_20[i] and 
                   adx_val > 25 and 
                   vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: opposite band touch OR ATR-based stoploss
+            # Exit: midpoint cross OR ATR-based stoploss
             exit_signal = False
             
-            # Opposite band exit
-            if position == 1 and price_low < lower_band:
+            # Midpoint exit
+            if position == 1 and price_close < mid_20[i]:
                 exit_signal = True
-            elif position == -1 and price_high > upper_band:
+            elif position == -1 and price_close > mid_20[i]:
                 exit_signal = True
             
-            # ATR-based stoploss (2x ATR from entry level)
+            # ATR-based stoploss (2x ATR from breakout level)
             if position == 1:
-                # For longs, stop below entry - 2*ATR (using lower band as reference)
-                if price_close < lower_band - 2.0 * atr_val:
+                # For longs, stop below breakout level minus 2x ATR
+                if price_close < high_20[i] - 2.0 * atr_val:
                     exit_signal = True
             elif position == -1:
-                # For shorts, stop above entry + 2*ATR (using upper band as reference)
-                if price_close > upper_band + 2.0 * atr_val:
+                # For shorts, stop above breakout level plus 2x ATR
+                if price_close > low_20[i] + 2.0 * atr_val:
                     exit_signal = True
             
             if exit_signal:
@@ -130,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_1dADX25_Volume1.5x_ATR2x"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_ADX_Trend_Volume1.5x_ATR2x"
+timeframe = "4h"
 leverage = 1.0
