@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
-Hypothesis: Camarilla R1/S1 breakout with volume confirmation (>1.5x 20-bar MA) and ATR-based stoploss works on 12h timeframe for BTC and ETH in both bull and bear markets. Uses 1d timeframe for Camarilla calculation (proven pattern: tight entries, volume confirmation, price channel structure). Target: 12-37 trades/year per symbol (50-150 over 4 years).
+4h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1
+Hypothesis: Camarilla R1/S1 breakout with volume confirmation (>1.8x 20-bar MA) and ATR-based stoploss works on 4h timeframe for BTC/ETH in both bull and bear markets. Uses 1d timeframe for Camarilla calculation (proven pattern: tight entries, volume confirmation, price channel structure). Target: 15-40 trades/year per symbol (60-160 over 4 years) to avoid fee drag.
 """
 
 import numpy as np
@@ -39,11 +39,11 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + range_1d * 1.1 / 12
     camarilla_s1 = prev_close - range_1d * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume filter: 20-period average on 12h timeframe
+    # Volume filter: 20-period average on 4h timeframe
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
     # ATR for stoploss and position sizing
@@ -73,8 +73,8 @@ def generate_signals(prices):
         price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation (>1.5x average to reduce trades)
-        volume_ok = volume > 1.5 * vol_ma[i]
+        # Volume confirmation (>1.8x average to reduce trades and avoid fee drag)
+        volume_ok = volume > 1.8 * vol_ma[i]
         
         if position == 0:
             # Long: price breaks above Camarilla R1 with volume
@@ -90,7 +90,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Exit: price closes below Camarilla S1 (mean reversion) or ATR stoploss
-            if price < camarilla_s1_aligned[i] or price < prices['close'].iloc[i-1] - 2.0 * atr[i]:
+            if price < camarilla_s1_aligned[i] or price < prices['close'].iloc[i-1] - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,7 +98,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: price closes above Camarilla R1 (mean reversion) or ATR stoploss
-            if price > camarilla_r1_aligned[i] or price > prices['close'].iloc[i-1] + 2.0 * atr[i]:
+            if price > camarilla_r1_aligned[i] or price > prices['close'].iloc[i-1] + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_Volume_ATRFilter_V1"
+timeframe = "4h"
 leverage = 1.0
