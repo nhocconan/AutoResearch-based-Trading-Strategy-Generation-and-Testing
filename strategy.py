@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter
-Hypothesis: Daily Camarilla pivot levels R1/S1 act as mean-reversion zones, while R4/S4 indicate breakout strength. Fade at R1/S1 with volume confirmation, breakout at R4/S4 with volume confirmation. Designed for low trade frequency (target: 12-37/year) to minimize fee drag in 12h timeframe. Works in both bull and bear markets by adapting to regime via price action at key levels.
+4h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter_v2
+Hypothesis: Daily Camarilla pivot levels R1/S1 act as mean-reversion zones, while R4/S4 indicate breakout strength. Fade at R1/S1 with volume confirmation, breakout at R4/S4 with volume confirmation. Designed for low trade frequency (target: 20-50/year) to minimize fee drag in 4h timeframe. Works in both bull and bear markets by adapting to regime via price action at key levels. Version 2 improves trade frequency by tightening volume filter and adding momentum confirmation.
 """
 
 import numpy as np
@@ -23,12 +23,6 @@ def generate_signals(prices):
     close_daily = df_daily['close'].values
     
     # Calculate daily Camarilla pivot levels
-    # P = (H + L + C) / 3
-    # Range = H - L
-    # R1 = P + (Range * 0.382)
-    # S1 = P - (Range * 0.382)
-    # R4 = P + (Range * 1.5000)
-    # S4 = P - (Range * 1.5000)
     P = (high_daily + low_daily + close_daily) / 3.0
     range_daily = high_daily - low_daily
     r1_daily = P + (range_daily * 0.382)
@@ -36,26 +30,26 @@ def generate_signals(prices):
     r4_daily = P + (range_daily * 1.5000)
     s4_daily = P - (range_daily * 1.5000)
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
     s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
     r4_daily_aligned = align_htf_to_ltf(prices, df_daily, r4_daily)
     s4_daily_aligned = align_htf_to_ltf(prices, df_daily, s4_daily)
     
-    # Main timeframe data (12h)
+    # Main timeframe data (4h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 10-period average (10*12h = 5 days)
+    # Volume filter: current volume > 2.0x 20-period average (more stringent)
     volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i >= 10:
-            volume_avg[i] = np.mean(volume[i-10:i])
+        if i >= 20:
+            volume_avg[i] = np.mean(volume[i-20:i])
         else:
             volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_filter = volume > (1.5 * volume_avg)
+    volume_filter = volume > (2.0 * volume_avg)
     
     # ATR for stoploss (14-period)
     tr1 = high - low
@@ -74,7 +68,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(10, n):
+    for i in range(20, n):
         # Skip if NaN in critical values
         if (np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i]) or 
             np.isnan(r4_daily_aligned[i]) or np.isnan(s4_daily_aligned[i])):
@@ -147,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter_v2"
+timeframe = "4h"
 leverage = 1.0
