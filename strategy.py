@@ -1,12 +1,37 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_Volume_ADXFilter
-Hypothesis: Breakouts above daily R1 or below daily S1 on 12h timeframe with volume confirmation (2x average) and ADX > 25 (trending market) yield high-probability trades. Uses ADX to filter for trending conditions only, avoiding whipsaws in ranging markets. Targets 12-37 trades/year by requiring both volume and trend strength confirmation. Works in bull/bear markets by only taking breakouts in direction of trend (ADX confirms trend strength regardless of direction).
+12h_KAMA_Trend_Filter_V1
+Hypothesis: Kaufman's Adaptive Moving Average (KAMA) on 12h timeframe with 
+volume confirmation (>1.5x average) and ADX > 25 (trending market) filters 
+captures trending moves while avoiding whipsaws. KAMA adapts to volatility, 
+making it effective in both bull and bear markets. Targets 15-25 trades/year 
+by requiring KAMA crossover, volume confirmation, and trend strength.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_kama(close, er_period=10, fast_ema=2, slow_ema=30):
+    """Calculate Kaufman's Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
+    
+    # Efficiency Ratio
+    er = np.zeros_like(close)
+    for i in range(er_period, len(close)):
+        er[i] = np.abs(close[i] - close[i-er_period]) / np.sum(volatility[i-er_period+1:i+1])
+    
+    # Smoothing Constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def calculate_adx(high, low, close, period=14):
     """Calculate Average Directional Index (ADX)"""
@@ -54,35 +79,28 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close
-    r1 = close + range_val * 1.1 / 12
-    s1 = close - range_val * 1.1 / 12
-    return r1, s1
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for pivot calculation and ADX filter
+    # Load daily data once for ADX filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily OHLC arrays
+    # Calculate daily ADX for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate daily ADX for trend filter
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
     # Align ADX to 12h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate KAMA on 12h price data
+    close_12h = prices['close'].values
+    kama_12h = calculate_kama(close_12h, er_period=10, fast_ema=2, slow_ema=30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -95,26 +113,14 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Calculate daily Camarilla levels from previous day's OHLC
-        # Align daily OHLC to 12h timeframe
-        high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-        low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        
-        # Use prior bar's aligned daily values (previous completed day)
-        prev_high = high_1d_aligned[i-1]
-        prev_low = low_1d_aligned[i-1]
-        prev_close = close_1d_aligned[i-1]
-        
-        r1, s1 = calculate_camarilla(prev_high, prev_low, prev_close)
-        
         price = prices['close'].iloc[i]
+        kama = kama_12h[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
+        # Volume confirmation: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
@@ -122,26 +128,26 @@ def generate_signals(prices):
         trending = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above R1 + volume confirmation + trending market
-            if price > r1 and volume_ok and trending:
+            # Long: price above KAMA + volume confirmation + trending market
+            if price > kama and volume_ok and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume confirmation + trending market
-            elif price < s1 and volume_ok and trending:
+            # Short: price below KAMA + volume confirmation + trending market
+            elif price < kama and volume_ok and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or ADX drops below 20 (losing trend)
-            if price < s1 or adx_1d_aligned[i] < 20:
+            # Long exit: price crosses below KAMA or ADX drops below 20
+            if price < kama or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or ADX drops below 20 (losing trend)
-            if price > r1 or adx_1d_aligned[i] < 20:
+            # Short exit: price crosses above KAMA or ADX drops below 20
+            if price > kama or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -149,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_Volume_ADXFilter"
+name = "12h_KAMA_Trend_Filter_V1"
 timeframe = "12h"
 leverage = 1.0
