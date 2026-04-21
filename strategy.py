@@ -5,39 +5,35 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for Donchian channel and ATR
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === Daily Donchian Channel (20-period) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Daily RSI (14) ===
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
+    rs = gain_ma / loss_ma
+    rs = np.where(loss_ma == 0, 0, rs)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14 = rsi_14.values
     
-    # Donchian upper and lower bands
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # === Daily SMA (50) ===
+    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
     # Align to 4h timeframe (use previous day's values)
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)
     
-    # === Daily ATR for volatility filter ===
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR ratio: current ATR / 50-period average ATR
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_14 / atr_ma_50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # === 4h Price ===
+    close_4h = prices['close'].values
     
     # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -46,41 +42,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(rsi_14_aligned[i]) or np.isnan(sma_50_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = prices['close'].iloc[i]
-        upper = upper_20_aligned[i]
-        lower = lower_20_aligned[i]
-        atr_ratio_val = atr_ratio_aligned[i]
+        price_close = close_4h[i]
+        rsi_val = rsi_14_aligned[i]
+        sma_val = sma_50_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long: price breaks above upper Donchian with volume and moderate volatility
-            if (price_close > upper and 
-                vol_ratio_val > 1.5 and 
-                atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+            # Enter long: price above SMA50, RSI oversold (<30) with volume
+            if (price_close > sma_val and 
+                rsi_val < 30 and 
+                vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Donchian with volume and moderate volatility
-            elif (price_close < lower and 
-                  vol_ratio_val > 1.5 and 
-                  atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+            # Enter short: price below SMA50, RSI overbought (>70) with volume
+            elif (price_close < sma_val and 
+                  rsi_val > 70 and 
+                  vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: reverse breakout or volatility expansion/contraction
-            if position == 1 and (price_close < lower or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
+            # Exit: reverse conditions or volume drops
+            if position == 1 and (price_close < sma_val or rsi_val > 70 or vol_ratio_val < 0.5):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > upper or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
+            elif position == -1 and (price_close > sma_val or rsi_val < 30 or vol_ratio_val < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ATR_Filter"
+name = "4h_RSI_SMA50_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
