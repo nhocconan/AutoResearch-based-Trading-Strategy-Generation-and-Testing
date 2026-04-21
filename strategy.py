@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_HTF_KAMA_Direction_Volume_ATRFilter_V1
-Hypothesis: Use 1d KAMA direction as trend filter, enter on 4h break of prior 4-bar high/low with volume confirmation (>1.5x 20-bar MA), exit on ATR stoploss (2.0x) or opposite signal. KAMA adapts to market noise, reducing whipsaw in sideways markets. Volume confirmation ensures breakout legitimacy. Target 20-50 trades/year per symbol.
+6h_ElderRay_RegimeFilter_V1
+Hypothesis: Use 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter. 
+- Bull Power = High - EMA13, Bear Power = EMA13 - Low
+- Enter long when Bull Power > 0 and rising + ADX > 25 (trending)
+- Enter short when Bear Power > 0 and rising + ADX > 25 (trending)
+- Exit when power falls below zero or ADX < 20 (range)
+- Uses 1d EMA13 and ADX for multi-timeframe alignment to reduce whipsaw.
+- Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -14,100 +20,106 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')  # for KAMA trend filter
+    df_1d = get_htf_data(prices, '1d')  # for EMA13 and ADX
     
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d KAMA for Trend Filter ===
+    # === 1d EMA13 for Elder Ray Power ===
     close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
-    # Recompute volatility properly: sum of abs changes over ER period
-    er_period = 10
-    volatility_sum = np.zeros_like(close_1d)
-    for i in range(er_period, len(close_1d)):
-        volatility_sum[i] = np.sum(np.abs(np.diff(close_1d[i-er_period:i+1])))
-    # Avoid division by zero
-    volatility_sum[volatility_sum == 0] = 1e-10
-    er = np.zeros_like(close_1d)
-    er[er_period:] = change[er_period:] / volatility_sum[er_period:]
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
     
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # === 1d ADX for Regime Filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 4h Indicators ===
-    close = prices['close'].values
-    volume = prices['volume'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # Volume MA (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = dm_minus[0] = 0
+    
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 6h Indicators ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Elder Ray Power: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13_aligned
+    bear_power = ema13_aligned - low
+    
+    # Rising power condition (current > previous)
+    bull_power_rising = bull_power > np.roll(bull_power, 1)
+    bear_power_rising = bear_power > np.roll(bear_power, 1)
+    bull_power_rising[0] = False
+    bear_power_rising[0] = False
+    
+    # Volume filter (optional confirmation)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ok = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema13_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        vol_ok = vol > 1.5 * vol_ma[i]  # volume confirmation
-        trend_up = kama_aligned[i] < price  # price above 1d KAMA = uptrend
-        trend_down = kama_aligned[i] > price  # price below 1d KAMA = downtrend
-        
-        # Entry conditions: break of prior 4-bar high/low
-        if i >= 4:
-            prior_high = np.max(high[i-4:i])
-            prior_low = np.min(low[i-4:i])
-        else:
-            prior_high = high[i]
-            prior_low = low[i]
+        # Regime: ADX > 25 = trending, ADX < 20 = range (hysteresis)
+        is_trending = adx_aligned[i] > 25
+        is_range = adx_aligned[i] < 20
         
         if position == 0:
-            # Long: break above prior 4-bar high with volume and uptrend
-            if price > prior_high and vol_ok and trend_up:
+            # Enter long: Bull Power > 0 and rising + trending regime
+            if bull_power[i] > 0 and bull_power_rising[i] and is_trending and vol_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below prior 4-bar low with volume and downtrend
-            elif price < prior_low and vol_ok and trend_down:
+            # Enter short: Bear Power > 0 and rising + trending regime
+            elif bear_power[i] > 0 and bear_power_rising[i] and is_trending and vol_ok[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: ATR stoploss or opposite signal
-            if price < close[i-1] - 2.0 * atr[i] or (price < prior_low and vol_ok and trend_down):
+            # Exit: Bull Power <= 0 or regime turns range
+            if bull_power[i] <= 0 or is_range:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: ATR stoploss or opposite signal
-            if price > close[i-1] + 2.0 * atr[i] or (price > prior_high and vol_ok and trend_up):
+            # Exit: Bear Power <= 0 or regime turns range
+            if bear_power[i] <= 0 or is_range:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_KAMA_Direction_Volume_ATRFilter_V1"
-timeframe = "4h"
+name = "6h_ElderRay_RegimeFilter_V1"
+timeframe = "6h"
 leverage = 1.0
