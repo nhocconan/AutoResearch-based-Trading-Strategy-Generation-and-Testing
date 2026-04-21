@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R4S4_Breakout_Volume_TrendFilter
-Hypothesis: Use 12h primary timeframe with 1d Camarilla R4/S4 breakout for strong momentum capture.
-Add volume confirmation (>2.0x 100-bar volume MA) and 1d EMA50 trend filter to reduce false breakouts.
-Position size 0.25 balances risk/return. Target 12-37 trades/year per symbol.
-Works in bull/bear via breakout logic and EMA filter reducing whipsaw in ranging markets.
-Only long when price > 1d EMA50, only short when price < 1d EMA50.
+4h_Donchian20_VolumeSpike_HTFTrend_ATRStop
+Hypothesis: 4h Donchian(20) breakout with volume confirmation (>2.0x 20-bar volume MA) and 12h EMA50 trend filter.
+ATR-based trailing stop (3x ATR) to manage risk. Works in bull via breakouts, in bear via short breakdowns.
+Position size 0.25 balances risk/return. Target 20-50 trades/year per symbol.
 """
 
 import numpy as np
@@ -14,47 +12,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 50:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Levels (R4, S4) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h EMA50 for trend filter ===
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r4_1d = close_1d + (high_1d - low_1d) * 1.1 / 2.0  # R4 = Close + 1.1*(High-Low)/2
-    s4_1d = close_1d - (high_1d - low_1d) * 1.1 / 2.0  # S4 = Close - 1.1*(High-Low)/2
-    
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # === 1d EMA50 for trend filter ===
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === 12h Indicators ===
+    # === 4h Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume MA (100-period) for spike detection
-    vol_ma = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume MA (20-period) for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(highest_high[i]) 
+            or np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,36 +66,34 @@ def generate_signals(prices):
         vol_ok = vol > 2.0 * vol_ma[i]  # volume confirmation
         
         if position == 0:
-            # Long: price breaks above 1d R4 + volume confirmation + price > 1d EMA50
-            if price > r4_1d_aligned[i-1] and vol_ok and price > ema_50_1d_aligned[i]:
+            # Long: price breaks above Donchian high + volume confirmation + price > 12h EMA50
+            if price > highest_high[i-1] and vol_ok and price > ema_50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1d S4 + volume confirmation + price < 1d EMA50
-            elif price < s4_1d_aligned[i-1] and vol_ok and price < ema_50_1d_aligned[i]:
+                entry_price = price
+                highest_since_entry = price
+            # Short: price breaks below Donchian low + volume confirmation + price < 12h EMA50
+            elif price < lowest_low[i-1] and vol_ok and price < ema_50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
+                lowest_since_entry = price
         
         elif position == 1:
-            # Exit: price closes below 1d pivot (mean reversion) or trend changes
-            pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-            pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-            if not np.isnan(pivot_1d_aligned[i]) and price < pivot_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            elif price < ema_50_1d_aligned[i]:  # trend filter exit
+            # Update highest since entry
+            highest_since_entry = max(highest_since_entry, price)
+            # ATR trailing stop: exit if price drops 3*ATR from highest since entry
+            if price < highest_since_entry - 3.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above 1d pivot (mean reversion) or trend changes
-            pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-            pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-            if not np.isnan(pivot_1d_aligned[i]) and price > pivot_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            elif price > ema_50_1d_aligned[i]:  # trend filter exit
+            # Update lowest since entry
+            lowest_since_entry = min(lowest_since_entry, price)
+            # ATR trailing stop: exit if price rises 3*ATR from lowest since entry
+            if price > lowest_since_entry + 3.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R4S4_Breakout_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_HTFTrend_ATRStop"
+timeframe = "4h"
 leverage = 1.0
