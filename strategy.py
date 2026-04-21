@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_IBS_Regime_Filter_ATR_Volume
-Hypothesis: Combine Intraday Bar Strength (IBS) with volatility regime (ATR ratio) and volume confirmation on 6h timeframe.
-Long when IBS < 0.3 (oversold) in low volatility regime (ATR(7)/ATR(30) < 0.8) with volume > 1.5x MA.
-Short when IBS > 0.7 (overbought) in low volatility regime with volume > 1.5x MA.
-Uses 1d HTF for trend filter: only long when price > 1d EMA50, short when price < 1d EMA50.
-ATR-based stoploss (2.5x) and discrete sizing (0.25). Targets 80-160 total trades over 4 years (20-40/year).
-Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets by combining mean reversion with trend filter.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts aligned with 1d EMA50 trend and volume spikes capture sustained moves in both bull and bear markets. The 12h TF reduces noise and overtrading vs lower TFs, while 1d HTF ensures trend alignment. Volume confirmation avoids false breakouts. Discrete sizing (0.25) and ATR stoploss control risk. Target: 12-30 trades/year to stay within fee-efficient range.
 """
 
 import numpy as np
@@ -18,40 +13,44 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA trend filter)
+    # Load HTF data ONCE before loop (1d for EMA trend and Camarilla)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
+    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
+    df_1d_open = df_1d['open'].values
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    range_1d = df_1d_high - df_1d_low
+    r1_1d = df_1d_close + 0.275 * range_1d
+    s1_1d = df_1d_close - 0.275 * range_1d
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
     # === 1d EMA50 for trend filter ===
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 6h indicators ===
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Intraday Bar Strength (IBS) = (close - low) / (high - low)
-    ibs = (close - low) / (high - low)
-    ibs = np.where((high - low) == 0, 0.5, ibs)  # avoid division by zero
-    
-    # ATR ratio for volatility regime: ATR(7) / ATR(30)
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr7 = tr.rolling(window=7, min_periods=7).mean().values
-    atr30 = tr.rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr7 / atr30
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: volume > 1.5x 20-period MA
+    # === Volume spike filter (2.0x 20-period MA) ===
+    volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for stoploss (14-period)
-    atr14 = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ibs[i]) or np.isnan(atr_ratio[i]) or np.isnan(vol_ma[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr14[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,22 +67,18 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        ibs_val = ibs[i]
-        vol_ratio = atr_ratio[i]
-        vol_avg = vol_ma[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
         ema_50 = ema_50_1d_aligned[i]
-        atr = atr14[i]
+        vol_avg = vol_ma[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirm = volume_now > 1.5 * vol_avg
-        
-        # Low volatility regime: ATR ratio < 0.8 (volatile markets have ratio > 1.2)
-        low_vol_regime = vol_ratio < 0.8
+        # Volume spike: current volume > 2.0x average (avoid low-volume breakouts)
+        volume_spike = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Enter only in low volatility with volume confirmation and trend alignment
-            long_condition = (ibs_val < 0.3) and low_vol_regime and volume_confirm and (price > ema_50)
-            short_condition = (ibs_val > 0.7) and low_vol_regime and volume_confirm and (price < ema_50)
+            # Enter only with volume spike and trend alignment
+            long_condition = (price > r1) and (price > ema_50) and volume_spike
+            short_condition = (price < s1) and (price < ema_50) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -95,11 +90,11 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.5x ATR) or trend reversal
-            if price < entry_price - 2.5 * atr:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit long if price falls below EMA50 (trend reversal)
+            # Trend reversal exit (price below EMA)
             elif price < ema_50:
                 signals[i] = 0.0
                 position = 0
@@ -107,11 +102,11 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (2.5x ATR) or trend reversal
-            if price > entry_price + 2.5 * atr:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit short if price rises above EMA50 (trend reversal)
+            # Trend reversal exit (price above EMA)
             elif price > ema_50:
                 signals[i] = 0.0
                 position = 0
@@ -120,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IBS_Regime_Filter_ATR_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
