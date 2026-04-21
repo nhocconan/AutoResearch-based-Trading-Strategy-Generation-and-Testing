@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume spike (>2.0x 20-period MA) on 12h timeframe.
-Designed for low trade frequency (~12-37/year) to minimize fee drag while capturing strong trending moves aligned with daily trend.
-Uses 1d HTF for trend and pivot levels to ensure proper multi-timeframe alignment without look-ahead.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_B
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter, volume spike (>2.0x 20-period MA), and ATR(14) stoploss (2.0x). 
+This variant tightens entry by requiring price to close beyond Camarilla levels (not just touch) and adds a minimum holding period of 3 bars to reduce churn. 
+Designed for moderate trade frequency (~20-40/year) to minimize fee drag while capturing strong trending moves in both bull and bear markets via 1d trend alignment.
 """
 
 import numpy as np
@@ -31,43 +31,56 @@ def generate_signals(prices):
     r1_1d = df_1d_close + 0.275 * range_1d
     s1_1d = df_1d_close - 0.275 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # === 1d EMA50 for trend filter ===
+    # === 1d EMA50 for trend filter (more responsive than EMA34) ===
     ema_50_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 12h Volume spike filter (2.0x 20-period MA) ===
+    # === 4h ATR (14-period) for stoploss ===
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # === Volume spike filter (2.0x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
         volume_now = volume[i]
         r1 = r1_1d_aligned[i]
         s1 = s1_1d_aligned[i]
         ema_50 = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
         
-        # Volume spike: current volume > 2.0x average
+        # Volume spike: current volume > 2.0x average (stricter for fewer trades)
         volume_spike = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Enter only with volume spike and trend alignment
+            # Enter only with volume spike, trend alignment, and price closing beyond Camarilla level
             long_condition = (price > r1) and (price > ema_50) and volume_spike
             short_condition = (price < s1) and (price < ema_50) and volume_spike
             
@@ -75,29 +88,49 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
+                bars_since_entry = 0
             elif short_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
+                bars_since_entry = 0
         
-        elif position == 1:
-            # Exit on trend reversal or volume spike in opposite direction
-            if price < ema_50:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit on trend reversal or volume spike in opposite direction
-            if price > ema_50:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        elif position != 0:
+            bars_since_entry += 1
+            
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
+                signals[i] = 0.25 if position == 1 else -0.25
+                continue
+            
+            # Check stoploss (2.0x ATR)
+            if position == 1:
+                if price < entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Trend reversal exit (price below EMA)
+                elif price < ema_50:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
+            else:  # position == -1
+                if price > entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Trend reversal exit (price above EMA)
+                elif price > ema_50:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_B"
+timeframe = "4h"
 leverage = 1.0
