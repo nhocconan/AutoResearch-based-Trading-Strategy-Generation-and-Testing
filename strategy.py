@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_RegimeFilter_v1
-Hypothesis: 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) combined with 1d ADX regime filter.
-In strong trends (ADX_1d > 25): trade in direction of Elder Ray (long if Bull Power > 0, short if Bear Power < 0).
-In ranging markets (ADX_1d < 20): fade extreme Elder Ray readings (long if Bull Power < -std, short if Bear Power > +std).
-Uses discrete sizing (0.25) and ATR(14) stoploss (2.5x). Designed for 6h timeframe to target 50-150 trades over 4 years (12-37/year).
-Works in bull/bear via regime adaptation - trend following in trends, mean reversion in ranges.
+12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
+Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1w EMA34 trend and volume spike.
+In trending markets (price > EMA34_1w for long, < for short): breakout continuation (long above R1, short below S1).
+Volume confirmation (1.8x average) filters false breakouts. ATR(14) stoploss (2.0x) and discrete sizing (0.25).
+Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year). Works in bull/bear via 1w trend alignment.
 """
 
 import numpy as np
@@ -14,93 +13,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for ADX regime)
+    # Load HTF data ONCE before loop (1w for EMA34 trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
+        return np.zeros(n)
+    
+    # === 1w OHLC for EMA34 trend ===
+    df_1w_close = df_1w['close'].values
+    ema_34_1w = pd.Series(df_1w_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # === 1d OHLC for Camarilla pivot calculation (based on previous 1d bar) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # === 1d OHLC for ADX regime filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    df_1d_open = df_1d['open'].values
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
     
-    # True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla levels for each 1d bar
+    range_1d = df_1d_high - df_1d_low
+    r1_1d = df_1d_close + 0.275 * range_1d
+    s1_1d = df_1d_close - 0.275 * range_1d
+    h3_1d = df_1d_close + 1.1 * range_1d
+    l3_1d = df_1d_close - 1.1 * range_1d
+    h4_1d = df_1d_close + 1.382 * range_1d
+    l4_1d = df_1d_close - 1.382 * range_1d
     
-    # Directional Movement
-    dm_plus = pd.Series(np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                                 np.maximum(high_1d - np.roll(high_1d, 1), 0), 0))
-    dm_minus = pd.Series(np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                                  np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0))
+    # Align 1d Camarilla levels to 12h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
-    # Smoothed values
-    tr_14 = tr_1d.rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = dm_plus.rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = dm_minus.rolling(window=14, min_periods=14).sum().values
+    # === Volume confirmation (20-period average) ===
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # === 6h EMA13 for Elder Ray calculation ===
-    close = prices['close'].values
+    # === ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Volatility normalization for mean reversion thresholds
-    atr_6h = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean().values
-    bull_power_std = pd.Series(bull_power).rolling(window=50, min_periods=20).std().values
-    bear_power_std = pd.Series(bear_power).rolling(window=50, min_periods=20).std().values
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(ema_13[i]) or np.isnan(atr_6h[i]) 
-            or np.isnan(bull_power_std[i]) or np.isnan(bear_power_std[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
+            or np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        adx_regime = adx_1d_aligned[i]
-        bp = bull_power[i]
-        br = bear_power[i]
-        bp_std = bull_power_std[i]
-        br_std = bear_power_std[i]
+        volume_now = volume[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        h3 = h3_1d_aligned[i]
+        l3 = l3_1d_aligned[i]
+        h4 = h4_1d_aligned[i]
+        l4 = l4_1d_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
+        vol_avg = vol_ma[i]
+        
+        # Volume confirmation: current volume > 1.8x average (strict filter)
+        volume_confirmed = volume_now > 1.8 * vol_avg
         
         if position == 0:
-            # Regime-based entry logic
-            if adx_regime > 25:  # Strong trend - trend following
-                long_condition = bp > 0  # Bull power positive
-                short_condition = br < 0  # Bear power negative
-            elif adx_regime < 20:  # Ranging market - mean reversion
-                long_condition = bp < -0.5 * bp_std  # Extremely weak bull power
-                short_condition = br > 0.5 * br_std  # Extremely strong bear power
-            else:  # Transition regime - no entries
-                long_condition = False
-                short_condition = False
+            # Only enter in trending markets (price > EMA34_1w for long, < for short)
+            # Volume confirmation required to avoid false breakouts
+            long_condition = (price > r1) and (price > ema_trend) and volume_confirmed
+            short_condition = (price < s1) and (price < ema_trend) and volume_confirmed
             
             if long_condition:
                 signals[i] = 0.25
@@ -112,30 +111,32 @@ def generate_signals(prices):
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss (2.5x ATR)
-            if price < entry_price - 2.5 * atr_6h[i]:
+            # Check stoploss (2.0x ATR)
+            if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit (for trend regime) or mean reversion exit (for range regime)
-            elif adx_regime > 25 and bp < 0:  # Trend regime: exit when bull power turns negative
+            # Trend reversal exit
+            elif price < ema_trend:
                 signals[i] = 0.0
                 position = 0
-            elif adx_regime < 20 and bp > 0.5 * bp_std:  # Range regime: exit when bull power recovers
+            # Mean reversion exit at H4 (extreme overbought)
+            elif price > h4:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss (2.5x ATR)
-            if price > entry_price + 2.5 * atr_6h[i]:
+            # Check stoploss (2.0x ATR)
+            if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trend reversal exit (for trend regime) or mean reversion exit (for range regime)
-            elif adx_regime > 25 and br > 0:  # Trend regime: exit when bear power turns positive
+            # Trend reversal exit
+            elif price > ema_trend:
                 signals[i] = 0.0
                 position = 0
-            elif adx_regime < 20 and br < -0.5 * br_std:  # Range regime: exit when bear power recovers
+            # Mean reversion exit at L4 (extreme oversold)
+            elif price < l4:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -143,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_RegimeFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
