@@ -1,95 +1,90 @@
-# 4h_Camarilla_Pivot_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-# Hypothesis: Breakout above daily R1 or below S1 with 12h EMA50 trend filter and volume confirmation.
-# Works in bull (R1 breakout) and bear (S1 breakdown) regimes.
-# Uses 12h EMA50 for trend direction and 4h volume spike for confirmation.
-# Target: 20-35 trades/year by requiring confluence of pivot breakout, trend, and volume.
-
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load daily data for Camarilla pivot points
+    # Load daily data for ATR and moving averages
     df_1d = get_htf_data(prices, '1d')
-    # Load 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla pivot levels (R1, S1) from daily OHLC
+    # Calculate ATR(14) from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla R1 and S1
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # True Range components
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Set first TR to high-low since no previous close
+    tr[0] = tr1[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA50 and EMA200 from daily close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align all indicators to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Calculate 4h volume moving average (20-period)
-    vol_ma_4h = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Align indicators to 12h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Price arrays
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Calculate 12h volume moving average (20-period)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA50 warmup
+    for i in range(60, n):  # Start after EMA200 warmup
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_4h[i])):
+        if (np.isnan(atr_aligned[i]) or np.isnan(ema50_aligned[i]) or 
+            np.isnan(ema200_aligned[i]) or np.isnan(vol_ma_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Current values
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema50_val = ema50_12h_aligned[i]
-        vol_ma = vol_ma_4h[i]
-        volume = prices['volume'].iloc[i]
+        atr_val = atr_aligned[i]
+        ema50_val = ema50_aligned[i]
+        ema200_val = ema200_aligned[i]
+        vol_ma = vol_ma_12h[i]
+        vol = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume > 1.5 * vol_ma
+        # Volume confirmation: current volume > 1.8x 20-period average
+        volume_confirm = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: Close breaks above R1, price > EMA50 (uptrend), volume confirmation
-            if close[i] > r1_val and close[i] > ema50_val and volume_confirm:
+            # Long: Price > EMA50 > EMA200 (strong uptrend) + volume confirmation
+            if close[i] > ema50_val and ema50_val > ema200_val and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S1, price < EMA50 (downtrend), volume confirmation
-            elif close[i] < s1_val and close[i] < ema50_val and volume_confirm:
+            # Short: Price < EMA50 < EMA200 (strong downtrend) + volume confirmation
+            elif close[i] < ema50_val and ema50_val < ema200_val and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions based on ATR-based trailing stop
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price breaks below S1 (reversal signal)
-                if close[i] < s1_val:
+                # Exit if price drops below EMA50 - 1.5 * ATR
+                if close[i] < ema50_val - 1.5 * atr_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price breaks above R1 (reversal signal)
-                if close[i] > r1_val:
+                # Exit if price rises above EMA50 + 1.5 * ATR
+                if close[i] > ema50_val + 1.5 * atr_val:
                     exit_signal = True
             
             if exit_signal:
@@ -101,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Pivot_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "12h_EMA50_EMA200_ATR_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
