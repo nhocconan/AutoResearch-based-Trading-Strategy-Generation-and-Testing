@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_Regime_v1
-Hypothesis: 12h Camarilla R1/S1 breakout with 1w EMA trend filter, volume confirmation, and chop regime filter reduces false breakouts while capturing institutional moves in both bull and bear markets. Designed for low trade frequency (~12-37/year) to minimize fee drag on 12h timeframe. Uses weekly trend to capture major moves and avoid counter-trend whipsaws.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v4
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA trend filter, volume confirmation, and chop regime filter reduces false breakouts while capturing institutional moves in both bull and bear markets. ATR-based trailing stop manages risk. Tightened volume threshold (2.0) and chop threshold (55.0) to reduce trade frequency and avoid fee drag. Designed for ~20-40 trades/year.
 """
 
 import numpy as np
@@ -16,8 +16,7 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_4h) < 2 or len(df_1d) < 34 or len(df_1w) < 34:
+    if len(df_4h) < 2 or len(df_1d) < 34:
         return np.zeros(n)
     
     # === Camarilla levels from prior 4-hour session (HLC of previous 4h bar) ===
@@ -32,10 +31,10 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
     
-    # === 1w trend filter: 34-period EMA on 1w ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 1d trend filter: 34-period EMA on 1d ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === Volume spike filter (20-period on 4h) ===
     volume_4h = df_4h['volume'].values
@@ -69,6 +68,15 @@ def generate_signals(prices):
     chop = np.where(range_14 > 0, 100 * np.log10(sum_tr_14 / range_14) / np.log10(14), 50)
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
+    # === ATR for dynamic stoploss (14-period on 4h) ===
+    tr1_4h = high_4h - low_4h
+    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = tr1_4h[0]
+    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -79,7 +87,8 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if (np.isnan(vol_ratio_4h_aligned[i]) or
             np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(chop_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(atr_14_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,34 +100,45 @@ def generate_signals(prices):
         vol_spike = vol_ratio_4h_aligned[i]
         r1 = camarilla_r1_aligned[i]
         s1 = camarilla_s1_aligned[i]
-        trend_1w = ema_34_1w_aligned[i]
+        trend_1d = ema_34_1d_aligned[i]
         chop_val = chop_aligned[i]
+        atr_val = atr_14_4h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1 + volume spike > 1.5 + price above 1w EMA + chop < 61.8 (trending market)
-            if price_close > r1 and vol_spike > 1.5 and price_close > trend_1w and chop_val < 61.8:
+            # Long: price breaks above R1 + volume spike > 2.0 + price above 1d EMA + chop < 55.0 (strongly trending market)
+            if price_close > r1 and vol_spike > 2.0 and price_close > trend_1d and chop_val < 55.0:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price_close
                 highest_since_entry = price_close
-            # Short: price breaks below S1 + volume spike > 1.5 + price below 1w EMA + chop < 61.8 (trending market)
-            elif price_close < s1 and vol_spike > 1.5 and price_close < trend_1w and chop_val < 61.8:
+            # Short: price breaks below S1 + volume spike > 2.0 + price below 1d EMA + chop < 55.0 (strongly trending market)
+            elif price_close < s1 and vol_spike > 2.0 and price_close < trend_1d and chop_val < 55.0:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price_close
                 lowest_since_entry = price_close
         
         elif position != 0:
-            # Update highest/lowest since entry for time-based exit (no trailing stop to reduce churn)
+            # Update highest/lowest since entry for trailing stop
             if position == 1:
                 highest_since_entry = max(highest_since_entry, price_high)
-                signals[i] = 0.25
+                # Trailing stop: 2.5 * ATR below highest since entry
+                if price_close < highest_since_entry - 2.5 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:  # position == -1
                 lowest_since_entry = min(lowest_since_entry, price_low)
-                signals[i] = -0.25
+                # Trailing stop: 2.5 * ATR above lowest since entry
+                if price_close > lowest_since_entry + 2.5 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_Regime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_Regime_v4"
+timeframe = "4h"
 leverage = 1.0
