@@ -3,102 +3,99 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot (R1/S1) breakout with 1d volume spike and 1w EMA50 trend filter.
-# Long when price breaks above R1 in uptrend (1w EMA50 rising), short when breaks below S1 in downtrend.
-# Volume > 2x 24-period average confirms breakout strength. Uses EMA trend to filter weak trends and avoid chop.
-# Target: 20-40 trades/year by requiring strong trend + volume + pivot breakout alignment.
-# Works in bull/bear: EMA filter ensures only strong trends are traded, avoiding whipsaws in ranging markets.
+# Hypothesis: 4h KAMA (10-period ER) direction + RSI(14) + 12h chop filter (Choppiness Index > 61.8)
+# Long when KAMA rising, RSI > 50, and market is choppy (mean-reversion prone)
+# Short when KAMA falling, RSI < 50, and market is choppy
+# Uses KAMA for adaptive trend, RSI for momentum, chop filter to avoid trending markets
+# Designed for range-bound markets (2025-2026) while avoiding whipsaws in strong trends
+# Target: 20-40 trades/year by requiring all three conditions to align
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for chop filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d Camarilla pivot levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate KAMA (10-period ER) on close prices
+    close = prices['close'].values
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0])).rolling(window=10, min_periods=1).sum()
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (0.66 - 0.06) + 0.06) ** 2
+    kama = np.full_like(close, np.nan, dtype=float)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    r1 = pivot + range_hl * 1.1 / 12
-    s1 = pivot - range_hl * 1.1 / 12
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
     
-    # Load 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate Choppiness Index on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w EMA50
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # True Range
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Align indicators to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # ATR(14)
+    atr_12h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Pre-compute volume moving average (24-period)
-    vol_ma = prices['volume'].rolling(window=24, min_periods=24).mean().values
+    # Highest high and lowest low over 14 periods
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    range_14 = highest_high - lowest_low
+    chop = np.where(range_14 != 0, 100 * np.log10(sum_tr14 / range_14) / np.log10(14), 50)
+    
+    # Align KAMA, RSI, Chop to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, prices, kama)  # already LTF
+    rsi_aligned = align_htf_to_ltf(prices, prices, rsi.values)  # already LTF
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
+    for i in range(14, n):
         # Skip if data not ready
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]):
             continue
         
-        # Current price and volume
-        price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
+        # KAMA direction: rising if current > previous
+        kama_rising = kama_aligned[i] > kama_aligned[i-1]
+        kama_falling = kama_aligned[i] < kama_aligned[i-1]
         
-        # Volume confirmation: current volume > 2x 24-period average
-        volume_confirm = volume > 2.0 * vol_ma[i]
+        # Chop filter: choppy market (mean-reversion prone)
+        choppy = chop_aligned[i] > 61.8
         
-        # Trend filter: EMA50 rising (bullish) or falling (bearish)
-        ema_rising = ema_50_aligned[i] > ema_50_aligned[i-1] if i > 0 else False
-        ema_falling = ema_50_aligned[i] < ema_50_aligned[i-1] if i > 0 else False
-        
-        if position == 0:
-            if volume_confirm:
-                # Long: price breaks above R1 with rising EMA50 (uptrend)
-                if price > r1_aligned[i] and ema_rising:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below S1 with falling EMA50 (downtrend)
-                elif price < s1_aligned[i] and ema_falling:
-                    signals[i] = -0.25
-                    position = -1
-        
-        elif position != 0:
-            # Exit conditions
-            exit_signal = False
-            
-            if position == 1:  # long position
-                # Exit if price breaks below S1 (failed breakout) or EMA50 turns down
-                if price < s1_aligned[i] or not ema_rising:
-                    exit_signal = True
-            
-            elif position == -1:  # short position
-                # Exit if price breaks above R1 (failed breakdown) or EMA50 turns up
-                if price > r1_aligned[i] or not ema_falling:
-                    exit_signal = True
-            
-            if exit_signal:
-                signals[i] = 0.0
-                position = 0
+        if choppy:
+            # Long: KAMA rising and RSI > 50
+            if kama_rising and rsi_aligned[i] > 50:
+                signals[i] = 0.25
+            # Short: KAMA falling and RSI < 50
+            elif kama_falling and rsi_aligned[i] < 50:
+                signals[i] = -0.25
             else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.0
+        else:
+            # Not choppy - stay flat to avoid trend whipsaws
+            signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wEMA50_Trend_Volume"
-timeframe = "12h"
+name = "4h_KAMA10_RSI14_12hChop618"
+timeframe = "4h"
 leverage = 1.0
