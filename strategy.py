@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1_S1_Breakout_WeeklyPivotDirection_VolumeSpike
-Hypothesis: 6h Camarilla R1/S1 breakout with weekly pivot direction filter (1w high/low) and volume confirmation.
-Long when price breaks above R1, above weekly pivot (weekly close > weekly open), and volume > 2.0x 20-period MA.
-Short when price breaks below S1, below weekly pivot (weekly close < weekly open), and volume > 2.0x 20-period MA.
-Uses ATR-based stop (2.0x) and minimum holding period of 3 bars to reduce churn.
-Designed for low trade frequency (~12-30/year) to work in both bull and bear markets via weekly directional bias.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA100 trend filter and volume confirmation.
+Long when price breaks above R1, above 1d EMA100, and volume > 2.0x 20-period MA.
+Short when price breaks below S1, below 1d EMA100, and volume > 2.0x 20-period MA.
+Uses ATR-based stop (2.5x) and minimum holding period of 6 bars.
+Designed for low trade frequency (~15-25/year) to work in both bull and bear markets via 1d trend alignment.
 """
 
 import numpy as np
@@ -14,23 +14,20 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 150:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for weekly pivot direction)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load HTF data ONCE before loop (1d for EMA trend)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 110:
         return np.zeros(n)
     
-    # === Weekly pivot direction (1 if bullish week, -1 if bearish week) ===
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True if bullish week
-    weekly_bearish = weekly_close < weekly_open  # True if bearish week
-    weekly_direction = np.where(weekly_bullish, 1, np.where(weekly_bearish, -1, 0))
-    weekly_direction_aligned = align_htf_to_ltf(prices, df_1w, weekly_direction)
+    # === 1d EMA100 for trend regime ===
+    close_1d = df_1d['close'].values
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # === 6h ATR (14-period) for stoploss ===
+    # === 12h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -45,7 +42,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 6h Camarilla pivot levels (R1, S1) ===
+    # === 12h Camarilla pivot levels (R1, S1) ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -60,9 +57,9 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
-        if (np.isnan(weekly_direction_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(ema_100_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(r1[i]) or np.isnan(s1[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -72,7 +69,7 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        weekly_dir = weekly_direction_aligned[i]
+        ema_100_1d_val = ema_100_1d_aligned[i]
         vol_avg = vol_ma[i]
         r1_val = r1[i]
         s1_val = s1[i]
@@ -81,10 +78,10 @@ def generate_signals(prices):
         volume_confirm = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: price breaks above R1, weekly bullish, volume confirm
-            long_condition = (price > r1_val) and (weekly_dir == 1) and volume_confirm
-            # Short: price breaks below S1, weekly bearish, volume confirm
-            short_condition = (price < s1_val) and (weekly_dir == -1) and volume_confirm
+            # Long: price breaks above R1, above 1d EMA100, volume confirm
+            long_condition = (price > r1_val) and (price > ema_100_1d_val) and volume_confirm
+            # Short: price breaks below S1, below 1d EMA100, volume confirm
+            short_condition = (price < s1_val) and (price < ema_100_1d_val) and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -100,21 +97,31 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 6 bars to reduce churn
+            if bars_since_entry < 6:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                if price < entry_price - 2.5 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Trend reversal exit (price below 1d EMA100)
+                elif price < ema_100_1d_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                if price > entry_price + 2.5 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                # Trend reversal exit (price above 1d EMA100)
+                elif price > ema_100_1d_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -123,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1_S1_Breakout_WeeklyPivotDirection_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
