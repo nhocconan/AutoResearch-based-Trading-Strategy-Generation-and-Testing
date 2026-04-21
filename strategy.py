@@ -1,12 +1,37 @@
 #!/usr/bin/env python3
 """
-12h_1w_Camarilla_R1_S1_Breakout_Volume_TrendFilter
-Hypothesis: Weekly trend filter + 12h price breaking above R1 or below S1 with volume confirmation captures institutional breakouts. Works in bull/bear markets by aligning with weekly trend. Target 15-25 trades/year to minimize fee drag.
+1d_1w_TRIX_VolumeSpike_TrendFilter
+Hypothesis: TRIX (TRIple Exponential Average) on daily charts identifies momentum shifts. Combined with weekly trend filter (EMA34) and volume spikes (>2x 20-day avg), it captures institutional momentum bursts. Works in bull/bear by aligning with weekly trend. Target 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def ema(series, period):
+    """Exponential Moving Average with proper initialization."""
+    if len(series) < period:
+        return np.full(len(series), np.nan)
+    result = np.zeros(len(series))
+    alpha = 2.0 / (period + 1)
+    result[0] = series[0]
+    for i in range(1, len(series)):
+        result[i] = alpha * series[i] + (1 - alpha) * result[i-1]
+    return result
+
+def trix(close, period=12):
+    """TRIX indicator: percentage change of triple-smoothed EMA."""
+    if len(close) < period:
+        return np.full(len(close), np.nan)
+    e1 = ema(close, period)
+    e2 = ema(e1, period)
+    e3 = ema(e2, period)
+    # Calculate percentage change
+    result = np.full(len(close), np.nan)
+    for i in range(1, len(e3)):
+        if e3[i-1] != 0:
+            result[i] = (e3[i] - e3[i-1]) / e3[i-1] * 100
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,83 +45,55 @@ def generate_signals(prices):
     
     # Calculate weekly EMA34 for trend filter
     close_1w = df_1w['close'].values
-    ema34_1w = np.zeros_like(close_1w)
-    ema34_1w[0] = close_1w[0]
-    alpha = 2.0 / (34 + 1)
-    for i in range(1, len(close_1w)):
-        ema34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema34_1w[i-1]
+    ema34_1w = ema(close_1w, 34)
     
-    # Align weekly EMA34 to 12h timeframe
+    # Align weekly EMA34 to daily timeframe
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Daily data for Camarilla calculation (using 1d data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily Camarilla levels (R1, S1) from previous day's OHLC
-    R1_1d = np.full(len(df_1d), np.nan)
-    S1_1d = np.full(len(df_1d), np.nan)
-    
-    for i in range(1, len(df_1d)):
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        
-        range_val = phigh - plow
-        R1_1d[i] = pclose + (range_val * 1.1 / 12)
-        S1_1d[i] = pclose - (range_val * 1.1 / 12)
-    
-    # Align daily Camarilla levels to 12h timeframe
-    R1_12h = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_12h = align_htf_to_ltf(prices, df_1d, S1_1d)
-    
-    # 12h price and volume
+    # Daily data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Calculate TRIX(12) on daily closes
+    trix_val = trix(close, 12)
+    
+    # Volume filter: volume > 2.0x 20-day average (institutional participation)
     volume_avg = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
             volume_avg[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else volume[i]
         else:
             volume_avg[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (1.5 * volume_avg)
+    volume_spike = volume > (2.0 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if NaN in critical values
-        if np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or np.isnan(ema34_1w_aligned[i]):
+        if np.isnan(trix_val[i]) or np.isnan(ema34_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r1 = R1_12h[i]
-        s1 = S1_12h[i]
+        trix_now = trix_val[i]
         ema34 = ema34_1w_aligned[i]
-        vol_confirm = volume_filter[i]
+        vol_confirm = volume_spike[i]
         
-        # Calculate ATR for stoploss (20-period)
+        # Simple ATR-based stoploss (20-period)
         if i >= 20:
-            tr_values = []
+            tr_sum = 0
             for j in range(1, 21):
                 idx = i - j
                 if idx >= 0:
                     tr = max(high[idx] - low[idx], abs(high[idx] - close[idx-1]), abs(low[idx] - close[idx-1]))
-                    tr_values.append(tr)
-            atr = np.mean(tr_values) if tr_values else 0
+                    tr_sum += tr
+            atr = tr_sum / 20
         else:
             atr = 0
         
@@ -111,28 +108,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume confirmation in uptrend (price > weekly EMA34)
-            if price > r1 and vol_confirm and price > ema34:
+            # Long: TRIX turns positive with volume spike in uptrend (price > weekly EMA34)
+            if trix_now > 0 and trix_val[i-1] <= 0 and vol_confirm and price > ema34:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S1 with volume confirmation in downtrend (price < weekly EMA34)
-            elif price < s1 and vol_confirm and price < ema34:
+            # Short: TRIX turns negative with volume spike in downtrend (price < weekly EMA34)
+            elif trix_now < 0 and trix_val[i-1] >= 0 and vol_confirm and price < ema34:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price returns below weekly EMA34 (trend change)
-            if price < ema34:
+            # Long exit: TRIX turns negative or trend breaks
+            if trix_now < 0 or price < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns above weekly EMA34 (trend change)
-            if price > ema34:
+            # Short exit: TRIX turns positive or trend breaks
+            if trix_now > 0 or price > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -140,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_Camarilla_R1_S1_Breakout_Volume_TrendFilter"
-timeframe = "12h"
+name = "1d_1w_TRIX_VolumeSpike_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
