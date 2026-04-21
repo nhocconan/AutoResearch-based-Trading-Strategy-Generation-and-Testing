@@ -33,11 +33,12 @@ def generate_signals(prices):
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     
-    # Align ATR percentile to 12h timeframe
+    # Align ATR percentile to 4h timeframe
     atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    # === Daily close for trend filter ===
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    # === Daily SMA50 for trend filter ===
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
     # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -49,7 +50,7 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Skip if indicators not ready
         if (np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(close_1d_aligned[i]) or 
+            np.isnan(sma_50_1d_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -58,29 +59,29 @@ def generate_signals(prices):
         
         price_close = prices['close'].iloc[i]
         atr_percentile_val = atr_percentile_aligned[i]
-        trend_close = close_1d_aligned[i]
+        sma_trend = sma_50_1d_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
             # Enter long in low volatility (range) + uptrend + volume
             if (atr_percentile_val < 30 and  # Low volatility regime
-                price_close > trend_close and
+                price_close > sma_trend and
                 vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
             # Enter short in low volatility (range) + downtrend + volume
             elif (atr_percentile_val < 30 and   # Low volatility regime
-                  price_close < trend_close and
+                  price_close < sma_trend and
                   vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
             # Exit when volatility increases (trending regime) or opposite condition
-            if position == 1 and (atr_percentile_val > 70 or price_close < trend_close):
+            if position == 1 and (atr_percentile_val > 70 or price_close < sma_trend):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (atr_percentile_val > 70 or price_close > trend_close):
+            elif position == -1 and (atr_percentile_val > 70 or price_close > sma_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ATR_Volatility_Regime_Close_Trend_Volume"
-timeframe = "12h"
+name = "4h_ATR_Volatility_Regime_SMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
