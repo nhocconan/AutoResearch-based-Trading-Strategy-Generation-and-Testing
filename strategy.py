@@ -3,48 +3,85 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with volume confirmation and 1w EMA40 trend filter.
-# Go long when price breaks above Donchian(20) high and volume > 1.5x 20-period average.
-# Go short when price breaks below Donchian(20) low and volume > 1.5x 20-period average.
-# Only take trades in direction of 1w EMA40 trend (long when price > EMA40, short when price < EMA40).
-# Uses weekly EMA40 for trend filter to avoid counter-trend trades.
-# Target: 7-25 trades/year by requiring trend alignment + breakout + volume confirmation.
+# Hypothesis: 4h Camarilla pivot R3/S3 breakout with volume confirmation and 1d trend filter.
+# Go long when price breaks above Camarilla R3 and volume > 1.5x 20-period average.
+# Go short when price breaks below Camarilla S3 and volume > 1.5x 20-period average.
+# Only take trades in direction of 1d EMA50 trend (long when price > EMA50, short when price < EMA50).
+# Uses 1d EMA50 for trend filter to avoid counter-trend trades.
+# Target: 20-150 total trades over 4 years by requiring trend alignment + breakout + volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1w for EMA40 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Load 1d for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA40 for trend filter
-    close_w = df_1w['close'].values
-    ema40_w = pd.Series(close_w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    # Calculate daily EMA50 for trend filter
+    close_d = df_1d['close'].values
+    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA40 to 1d
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_w)
+    # Align 1d EMA50 to 4h
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_d)
+    
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if np.isnan(ema40_1w_aligned[i]):
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate Donchian channels (20-period)
-        lookback_start = max(0, i - 19)
-        high_window = prices['high'].iloc[lookback_start:i+1].values
-        low_window = prices['low'].iloc[lookback_start:i+1].values
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
-        donchian_high = np.max(high_window)
-        donchian_low = np.min(low_window)
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Calculate Camarilla levels from previous day
+        # Need previous day's high, low, close
+        if i < 96:  # Need at least 96 4h bars (4 days) to get previous day
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        # Get previous day's OHLC (assuming 24*4 = 96 bars per day)
+        prev_day_start = i - 96
+        prev_day_end = i - 24  # Previous day's close is 24 bars ago
+        if prev_day_start < 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        prev_high = np.max(prices['high'].iloc[prev_day_start:prev_day_end+1].values)
+        prev_low = np.min(prices['low'].iloc[prev_day_start:prev_day_end+1].values)
+        prev_close = prices['close'].iloc[prev_day_end]
+        
+        # Calculate Camarilla levels
+        range_val = prev_high - prev_low
+        if range_val <= 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        camarilla_r3 = prev_close + (range_val * 1.1 / 4)
+        camarilla_s3 = prev_close - (range_val * 1.1 / 4)
         
         # Current price and volume
         price = prices['close'].iloc[i]
@@ -58,31 +95,31 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume > 1.5 * vol_ma_20
         
-        # Trend filter: price vs weekly EMA40
-        bull_trend = price > ema40_1w_aligned[i]
-        bear_trend = price < ema40_1w_aligned[i]
+        # Trend filter: price vs daily EMA50
+        bull_trend = price > ema50_1d_aligned[i]
+        bear_trend = price < ema50_1d_aligned[i]
         
         if position == 0:
-            # Enter long on breakout above Donchian high with volume and bullish trend
-            if price > donchian_high and volume_confirm and bull_trend:
+            # Enter long on breakout above Camarilla R3 with volume and bullish trend
+            if price > camarilla_r3 and volume_confirm and bull_trend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short on breakout below Donchian low with volume and bearish trend
-            elif price < donchian_low and volume_confirm and bear_trend:
+            # Enter short on breakout below Camarilla S3 with volume and bearish trend
+            elif price < camarilla_s3 and volume_confirm and bear_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses back through Donchian opposite level
+            # Exit conditions: price crosses back through Camarilla opposite level
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below Donchian low
-                if price < donchian_low:
+                # Exit long: price breaks below Camarilla S3
+                if price < camarilla_s3:
                     exit_signal = True
             elif position == -1:
-                # Exit short: price breaks above Donchian high
-                if price > donchian_high:
+                # Exit short: price breaks above Camarilla R3
+                if price > camarilla_r3:
                     exit_signal = True
             
             if exit_signal:
@@ -94,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_Breakout_Volume_WeeklyTrend"
-timeframe = "1d"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
