@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Use weekly EMA50 for trend regime on 12h timeframe with Camarilla R1/S1 breakouts, volume confirmation (>2x 20-period average), and ATR-based stoploss. Designed for fewer trades (target 50-150 over 4 years) to minimize fee drag while capturing major trend moves in both bull and bear markets via weekly trend filter.
+4h_Camarilla_R1_S1_Breakout_HTFVolumeRegime_Align_v1
+Hypothesis: Use 1d volume regime (high/low volume days) to filter Camarilla breakouts on 4h. 
+In high-volume 1d regimes, breakouts are more likely to sustain; in low-volume regimes, 
+fade or avoid. Combines with 4h EMA20 trend filter and discrete sizing (0.25) to reduce 
+trade frequency and fee drag. Target: 60-120 trades over 4 years (15-30/year). 
+Works in bull/bear via volume regime adaptation.
 """
 
 import numpy as np
@@ -13,21 +17,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA50 trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop (1d for volume regime and EMA trend)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1w EMA50 for HTF trend regime ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === 1d volume regime: classify as high/low volume based on 20-day median ===
+    vol_1d = df_1d['volume'].values
+    vol_median_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).median().values
+    vol_median_20_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
+    high_vol_regime = vol_1d > vol_median_20  # raw 1d signal
+    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime.astype(float))
     
-    # === 12h close, EMA20 for trend alignment ===
+    # === 1d EMA34 for HTF trend regime ===
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # === 4h close, EMA20 for trend alignment ===
     close = prices['close'].values
-    ema_20_12h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # === 12h ATR (14-period) for stoploss ===
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     
@@ -37,12 +48,12 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
+    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 12h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -59,8 +70,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_20_12h[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_20_4h[i]) or np.isnan(atr[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i]) or 
+            np.isnan(high_vol_regime_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,21 +80,28 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_50_1w_val = ema_50_1w_aligned[i]
-        ema_20_12h_val = ema_20_12h[i]
+        ema_34_1d_val = ema_34_1d_aligned[i]
+        ema_20_4h_val = ema_20_4h[i]
         r1_val = r1[i]
         s1_val = s1[i]
         vol_conf = volume_confirmed[i]
+        high_vol = high_vol_regime_aligned[i] > 0.5  # boolean from aligned float
         
         # Trend alignment: price above both indicators for long, below both for short
-        uptrend = price > ema_50_1w_val and price > ema_20_12h_val
-        downtrend = price < ema_50_1w_val and price < ema_20_12h_val
+        uptrend = price > ema_34_1d_val and price > ema_20_4h_val
+        downtrend = price < ema_34_1d_val and price < ema_20_4h_val
         
         if position == 0:
-            # Long: price closes above R1, uptrend alignment, volume confirmed
-            long_condition = (price > r1_val) and uptrend and vol_conf
-            # Short: price closes below S1, downtrend alignment, volume confirmed
-            short_condition = (price < s1_val) and downtrend and vol_conf
+            # In high volume regimes: trade breakouts
+            # In low volume regimes: require stronger alignment (both EMAs) and avoid fading
+            if high_vol:
+                # High volume: breakout strategy
+                long_condition = (price > r1_val) and uptrend and vol_conf
+                short_condition = (price < s1_val) and downtrend and vol_conf
+            else:
+                # Low volume: only trade with strong trend alignment, avoid false breakouts
+                long_condition = (price > r1_val) and uptrend and vol_conf and (price > ema_34_1d_val * 1.005)
+                short_condition = (price < s1_val) and downtrend and vol_conf and (price < ema_34_1d_val * 0.995)
             
             if long_condition:
                 signals[i] = 0.25
@@ -98,31 +117,31 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 6 bars to reduce churn
-            if bars_since_entry < 6:
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.5x ATR)
+            # Check stoploss (2.0x ATR)
             if position == 1:
-                if price < entry_price - 2.5 * atr[i]:
+                if price < entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price below either indicator)
-                elif price < ema_50_1w_val or price < ema_20_12h_val:
+                # Exit if price breaks below S1 (failed breakout) or trend deteriorates
+                elif price < s1_val or price < ema_20_4h_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.5 * atr[i]:
+                if price > entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price above either indicator)
-                elif price > ema_50_1w_val or price > ema_20_12h_val:
+                # Exit if price breaks above R1 (failed breakdown) or trend deteriorates
+                elif price > r1_val or price > ema_20_4h_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -131,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_HTFVolumeRegime_Align_v1"
+timeframe = "4h"
 leverage = 1.0
