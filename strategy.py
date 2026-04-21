@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_ChopFilter_v1
-Hypothesis: Daily KAMA trend direction + RSI(14) extremes + Choppiness Index regime filter.
-KAMA adapts to market noise, reducing whipsaw in sideways markets. RSI>70 or <30 with trend alignment captures momentum extremes. Choppiness Index > 61.8 avoids trend-following in strong ranges. Works in both bull/bear by requiring trend alignment and avoiding false signals in chop.
-Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag on 1d timeframe.
+6h_ADX_Alligator_ElderRay_Combo
+Hypothesis: Combine ADX trend strength (>25) with Williams Alligator (jaw/teeth/lips alignment) and Elder Ray (bull/bear power) to filter false breakouts.
+Alligator confirms trend direction, ADX confirms trend strength, Elder Ray provides entry timing on pullbacks.
+Works in both bull and bear markets by requiring alignment across all three indicators.
+Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -12,108 +13,142 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
+    # Load HTF data ONCE before loop (1d for higher timeframe context)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # === 1d Williams Alligator (jaw/teeth/lips) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Alligator lines: SMAs of median price with different periods
+    median_1d = (high_1d + low_1d) / 2.0
+    jaw = pd.Series(median_1d).rolling(window=13, min_periods=13).mean().shift(8).values  # blue line
+    teeth = pd.Series(median_1d).rolling(window=8, min_periods=8).mean().shift(5).values   # red line
+    lips = pd.Series(median_1d).rolling(window=5, min_periods=5).mean().shift(3).values    # green line
+    
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # === 1d ADX for trend strength ===
+    # Calculate +DM, -DM, TR
+    high_diff = np.diff(high_1d, prepend=high_1d[0])
+    low_diff = -np.diff(low_1d, prepend=low_1d[0])
+    
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+    
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # first bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Smoothed values (Wilder's smoothing)
+    atr_period = 14
+    atr = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values / atr
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 6h Elder Ray (Bull/Bear Power) ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # === KAMA (10, 2, 30) for trend direction ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
-    # Pad arrays to match length
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(1, np.nan), volatility])
-    volatility = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # 13-period EMA for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # === RSI(14) ===
-    delta = np.diff(close)
-    delta = np.concatenate([np.full(1, np.nan), delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # === Choppiness Index (14) ===
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
-    # Avoid division by zero
-    chop = np.where((hh - ll) != 0, chop, 50)
+    # Smooth the power signals
+    bull_power_smooth = pd.Series(bull_power).ewm(span=8, adjust=False, min_periods=8).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=8, adjust=False, min_periods=8).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
-    for i in range(14, n):
+    for i in range(30, n):
         # Skip if indicators not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
+        # Alligator alignment: lips > teeth > jaw = bullish, lips < teeth < jaw = bearish
+        bullish_alligator = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+        bearish_alligator = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+        
+        # ADX trend strength filter
+        strong_trend = adx_aligned[i] > 25
+        
+        # Elder Ray signals
+        bullish_elder = bull_power_smooth[i] > 0 and bull_power_smooth[i] > bear_power_smooth[i]
+        bearish_elder = bear_power_smooth[i] < 0 and bear_power_smooth[i] < bull_power_smooth[i]
+        
         price = close[i]
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        chop_val = chop[i]
         
         if position == 0:
-            # Long: price above KAMA (uptrend), RSI > 70 (overbought but momentum), chop < 61.8 (trending market)
-            long_condition = (price > kama_val) and (rsi_val > 70) and (chop_val < 61.8)
-            # Short: price below KAMA (downtrend), RSI < 30 (oversold but momentum), chop < 61.8 (trending market)
-            short_condition = (price < kama_val) and (rsi_val < 30) and (chop_val < 61.8)
-            
-            if long_condition:
+            # Long: bullish Alligator + strong trend + bullish Elder Ray
+            if bullish_alligator and strong_trend and bullish_elder:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_condition:
+                bars_since_entry = 0
+            # Short: bearish Alligator + strong trend + bearish Elder Ray
+            elif bearish_alligator and strong_trend and bearish_elder:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
+                bars_since_entry = 0
         
         elif position != 0:
+            bars_since_entry += 1
+            
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
+                signals[i] = 0.25 if position == 1 else -0.25
+                continue
+            
             # Exit conditions
             if position == 1:
-                # Exit long: price below KAMA (trend change) or RSI < 50 (momentum loss)
-                if price < kama_val or rsi_val < 50:
+                # Exit long: bearish Alligator flip OR weak trend OR bearish Elder Ray
+                if (not bullish_alligator) or (adx_aligned[i] < 20) or bearish_elder:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: price above KAMA (trend change) or RSI > 50 (momentum loss)
-                if price > kama_val or rsi_val > 50:
+                # Exit short: bullish Alligator flip OR weak trend OR bullish Elder Ray
+                if (not bearish_alligator) or (adx_aligned[i] < 20) or bullish_elder:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_ADX_Alligator_ElderRay_Combo"
+timeframe = "6h"
 leverage = 1.0
