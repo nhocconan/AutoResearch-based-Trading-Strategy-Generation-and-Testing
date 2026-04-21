@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_WeeklyEMA_VolumeSpike_ATRStop
-Hypothesis: Daily Camarilla pivot (R1/S1) breakouts filtered by weekly EMA50 trend and volume spike (>1.5x 20-bar average).
-Enter long when price breaks above daily R1 with weekly uptrend (price > weekly EMA50) and volume confirmation.
-Enter short when price breaks below daily S1 with weekly downtrend (price < weekly EMA50) and volume confirmation.
-Exit on ATR(14) trailing stop (2.5*ATR) or opposite level break.
-Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drift.
-Uses discrete position sizing (0.25) and weekly trend alignment to work in both bull and bear markets.
+6h_RSI2_Contrast_Stochastic_VolumeFilter
+Hypothesis: Contrarian mean reversion on 6h using 2-period RSI (RSI2) combined with Stochastic(14,3,3) for oversold/overbought confirmation, filtered by volume spike and 12h EMA50 trend. 
+Enters long when RSI2 < 10, Stochastic %K < 20, volume > 1.5x average, and price > 12h EMA50 (uptrend filter). 
+Enters short when RSI2 > 90, Stochastic %K > 80, volume > 1.5x average, and price < 12h EMA50 (downtrend filter). 
+Exits on RSI2 > 50 (long) or RSI2 < 50 (short) or opposite Stochastic extreme. 
+Designed for low trade frequency (target: 12-25 trades/year) to minimize fee drift. 
+Works in bull/bear via 12h EMA50 trend filter and volume confirmation as regime filter.
 """
 
 import numpy as np
@@ -18,45 +18,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (daily for pivots, weekly for trend)
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 20:
+    # Load HTF data ONCE before loop (12h for EMA50 trend filter)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h EMA50 for HTF trend filter ===
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_range = (high_1d - low_1d) * 1.1 / 12.0
-    r1_1d = close_1d + camarilla_range
-    s1_1d = close_1d - camarilla_range
-    
-    # Align to 1d timeframe (use previous completed daily bar)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # === Weekly EMA50 for HTF trend filter ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # === Volume spike filter (1.5x 20-period average) ===
+    # === Volume spike filter (20-period average) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === ATR (14-period) for stoploss ===
-    high = prices['high'].values
-    low = prices['low'].values
+    # === RSI(2) on 6h close ===
     close = prices['close'].values
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_2 = 100 - (100 / (1 + rs))
     
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # === Stochastic(14,3,3) on 6h high/low/close ===
+    lookback = 14
+    highest_high = pd.Series(prices['high'].values).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(prices['low'].values).rolling(window=lookback, min_periods=lookback).min().values
+    stoch_k_raw = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    # Smooth %K with 3-period SMA
+    stoch_k = pd.Series(stoch_k_raw).rolling(window=3, min_periods=3).mean().values
+    # Smooth %D with 3-period SMA (not used directly but for completeness)
+    stoch_d = pd.Series(stoch_k).rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,9 +58,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) 
-            or np.isnan(atr[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) 
+            or np.isnan(rsi_2[i]) or np.isnan(stoch_k[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,45 +69,39 @@ def generate_signals(prices):
         
         if position == 0:
             # Volume confirmation: current volume > 1.5x 20-period average
-            vol_confirm = volume[i] > (1.5 * vol_ma[i])
+            vol_confirm = volume[i] > 1.5 * vol_ma[i]
             
-            # Long conditions: price > daily R1, weekly uptrend, volume spike
-            long_breakout = price > r1_1d_aligned[i]
-            long_trend = price > ema_50_1w_aligned[i]
+            # Long conditions: RSI2 < 10 (extreme oversold), Stoch %K < 20, volume spike, 12h uptrend
+            long_rsi2 = rsi_2[i] < 10
+            long_stoch = stoch_k[i] < 20
+            long_trend = price > ema_50_12h_aligned[i]
             
-            # Short conditions: price < daily S1, weekly downtrend, volume spike
-            short_breakout = price < s1_1d_aligned[i]
-            short_trend = price < ema_50_1w_aligned[i]
+            # Short conditions: RSI2 > 90 (extreme overbought), Stoch %K > 80, volume spike, 12h downtrend
+            short_rsi2 = rsi_2[i] > 90
+            short_stoch = stoch_k[i] > 80
+            short_trend = price < ema_50_12h_aligned[i]
             
             # Entry logic
-            if long_breakout and long_trend and vol_confirm:
+            if long_rsi2 and long_stoch and vol_confirm and long_trend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and vol_confirm:
+            elif short_rsi2 and short_stoch and vol_confirm and short_trend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Check stoploss
-            if price < entry_price - 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Trailing exit: price closes below daily S1 (support broken)
-            elif price < s1_1d_aligned[i]:
+            # Exit conditions: RSI2 > 50 (recovered from oversold) or Stoch %K > 80 (overbought)
+            if rsi_2[i] > 50 or stoch_k[i] > 80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Check stoploss
-            if price > entry_price + 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Trailing exit: price closes above daily R1 (resistance broken)
-            elif price > r1_1d_aligned[i]:
+            # Exit conditions: RSI2 < 50 (recovered from overbought) or Stoch %K < 20 (oversold)
+            if rsi_2[i] < 50 or stoch_k[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyEMA_VolumeSpike_ATRStop"
-timeframe = "1d"
+name = "6h_RSI2_Contrast_Stochastic_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
