@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Bollinger_Band_Breakout_Volume_TrendFilter
-Hypothesis: Breakouts beyond Bollinger Bands (20,2) with volume confirmation and aligned daily trend (EMA50) yield high-probability trades. Uses Bollinger Band squeeze as a volatility filter to avoid chop. Works in bull/bear markets by only taking breakouts in direction of daily trend. Target: 20-50 trades/year on 4h.
+4h_Donchian20_VolumeSpike_SqueezeBreakout
+Hypothesis: On 4h timeframe, breakouts above Donchian(20) high or below Donchian(20) low with volume spikes and volatility squeeze (low ATR) capture high-probability moves. Works in bull/bear by requiring volume confirmation and squeeze filter to avoid whipsaws. Target: 20-50 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -10,82 +10,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Load daily data once for trend filter
+    # Load 1d data for volatility regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily ATR for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Bollinger Bands on 4h close
-    close = prices['close'].values
-    bb_length = 20
-    bb_mult = 2.0
-    basis = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
-    dev = bb_mult * pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
-    upper_band = basis + dev
-    lower_band = basis - dev
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First TR is undefined
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Bollinger Band width for squeeze detection (avoid chop)
-    bb_width = (upper_band - lower_band) / basis
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_squeeze = bb_width < bb_width_ma  # True when volatility is low
+    # Donchian(20) on 4h
+    high_20 = pd.Series(prices['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(prices['low'].values).rolling(window=20, min_periods=20).min().values
+    
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_spike = prices['volume'].values > (2.0 * vol_ma)
+    
+    # Volatility squeeze: daily ATR below its 50-period median (low volatility regime)
+    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=50).median().values
+    volatility_squeeze = atr_1d_aligned < atr_median
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if EMA not ready
-        if np.isnan(ema_50_1d_aligned[i]):
+    for i in range(20, n):
+        # Skip if indicators not ready
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(atr_median[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        if i >= 20:
-            vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
-        else:
-            volume_ok = False
-        
-        # Trend filter: price > EMA50 for long, price < EMA50 for short
-        trend_long = price > ema_50_1d_aligned[i]
-        trend_short = price < ema_50_1d_aligned[i]
-        
-        # Volatility filter: only trade when not in squeeze (avoid chop)
-        vol_filter = not bb_squeeze[i] if i < len(bb_squeeze) else True
+        vol_spike = volume_spike[i]
+        squeeze = volatility_squeeze[i]
         
         if position == 0:
-            # Long: price breaks above upper BB + volume confirmation + uptrend + volatility filter
-            if price > upper_band[i] and volume_ok and trend_long and vol_filter:
+            # Long: breakout above Donchian high + volume spike + volatility squeeze
+            if price > high_20[i] and vol_spike and squeeze:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower BB + volume confirmation + downtrend + volatility filter
-            elif price < lower_band[i] and volume_ok and trend_short and vol_filter:
+            # Short: breakout below Donchian low + volume spike + volatility squeeze
+            elif price < low_20[i] and vol_spike and squeeze:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price returns to middle band or trend turns bearish
-            if price < basis[i] or not trend_long:
+            # Long exit: price retouches Donchian mid-point or volatility expands
+            mid_point = (high_20[i] + low_20[i]) / 2
+            if price < mid_point or not squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to middle band or trend turns bullish
-            if price > basis[i] or not trend_short:
+            # Short exit: price retouches Donchian mid-point or volatility expands
+            mid_point = (high_20[i] + low_20[i]) / 2
+            if price > mid_point or not squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Bollinger_Band_Breakout_Volume_TrendFilter"
+name = "4h_Donchian20_VolumeSpike_SqueezeBreakout"
 timeframe = "4h"
 leverage = 1.0
