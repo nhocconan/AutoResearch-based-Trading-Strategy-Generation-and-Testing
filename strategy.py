@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1
-Hypothesis: On 4h timeframe, price breaking above Camarilla R1 level with 1d EMA34 trend confirmation and volume spike (>2x 20-period average) captures strong bullish momentum. Conversely, price breaking below Camarilla S1 level with bearish 1d EMA34 trend and volume spike captures strong bearish momentum. This strategy focuses on clear breakouts with institutional participation (volume) and trend alignment to minimize whipsaw. Discrete sizing (0.25) reduces fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+1d_Camarilla_R3_S3_Breakout_WeeklyTrend_Regime_v1
+Hypothesis: On 1d timeframe, Camarilla R3/S3 breakouts aligned with weekly trend regime (price > weekly EMA34 for longs, < for shorts) capture institutional moves with reduced whipsaw. Weekly trend filter ensures trading with higher timeframe momentum, while Camarilla levels provide precise entry/exit points. Volume confirmation (>1.5x 20-day average) filters low-quality breakouts. Discrete sizing (0.25) and ATR-based stoploss (2.5x) manage risk. Target: 30-100 trades over 4 years.
 """
 
 import numpy as np
@@ -13,44 +13,58 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA34 trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load HTF data ONCE before loop (1w for weekly trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 1d EMA34 for daily trend regime ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 1w EMA34 for weekly trend regime ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 4h Camarilla pivot levels (based on previous day) ===
+    # === Daily Camarilla levels (based on previous day) ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Camarilla levels: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    # Use previous day's OHLC (from 1d data)
-    camarilla_R1 = np.zeros(n)
-    camarilla_S1 = np.zeros(n)
+    # Calculate Camarilla levels for today using yesterday's OHLC
+    camarilla_r3 = np.zeros(n)
+    camarilla_s3 = np.zeros(n)
+    camarilla_r4 = np.zeros(n)
+    camarilla_s4 = np.zeros(n)
+    camarilla_r3[:] = np.nan
+    camarilla_s3[:] = np.nan
+    camarilla_r4[:] = np.nan
+    camarilla_s4[:] = np.nan
     
-    # Map 1d close to each 4h bar for calculation
-    # We need the previous completed 1d bar's OHLC
-    # align_htf_to_ltf with additional_delay_bars=1 ensures we use completed 1d bar
-    prev_close_1d = align_htf_to_ltf(prices, df_1d, close_1d, additional_delay_bars=1)
-    # For high/low, we need to calculate from 1d data similarly
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    prev_high_1d = align_htf_to_ltf(prices, df_1d, high_1d, additional_delay_bars=1)
-    prev_low_1d = align_htf_to_ltf(prices, df_1d, low_1d, additional_delay_bars=1)
+    for i in range(1, n):
+        # Use previous day's OHLC to calculate today's levels
+        high_1 = high[i-1]
+        low_1 = low[i-1]
+        close_1 = close[i-1]
+        
+        if np.isnan(high_1) or np.isnan(low_1) or np.isnan(close_1):
+            continue
+            
+        range_1 = high_1 - low_1
+        camarilla_r3[i] = close_1 + range_1 * 1.1 / 4
+        camarilla_s3[i] = close_1 - range_1 * 1.1 / 4
+        camarilla_r4[i] = close_1 + range_1 * 1.1 / 2
+        camarilla_s4[i] = close_1 - range_1 * 1.1 / 2
     
-    # Calculate Camarilla levels using previous 1d bar's OHLC
-    camarilla_R1 = prev_close_1d + (1.1 * (prev_high_1d - prev_low_1d) / 12)
-    camarilla_S1 = prev_close_1d - (1.1 * (prev_high_1d - prev_low_1d) / 12)
-    
-    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
+    # === Daily volume confirmation (>1.5x 20-day average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma_20)
+    volume_confirmed = volume > (1.5 * vol_ma_20)
+    
+    # === ATR for stoploss ===
+    # True Range
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,52 +72,55 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_R1[i]) or 
-            np.isnan(camarilla_S1[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or np.isnan(atr[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        daily_ema = ema_34_1d_aligned[i]
-        r1_level = camarilla_R1[i]
-        s1_level = camarilla_S1[i]
+        weekly_ema = ema_34_1w_aligned[i]
         vol_conf = volume_confirmed[i]
+        atr_val = atr[i]
         
-        # Daily trend regime
-        is_bull = price > daily_ema
-        is_bear = price < daily_ema
+        # Weekly trend regime
+        is_bull = price > weekly_ema
+        is_bear = price < weekly_ema
         
         if position == 0:
-            if is_bull:
-                # Bull regime: long when price breaks above R1 with volume
-                long_condition = (price > r1_level) and vol_conf
-            else:  # bear regime
-                # Bear regime: short when price breaks below S1 with volume
-                short_condition = (price < s1_level) and vol_conf
-            
-            if is_bull and long_condition:
-                signals[i] = 0.25
-                position = 1
-                entry_price = price
-            elif is_bear and short_condition:
-                signals[i] = -0.25
-                position = -1
-                entry_price = price
+            # Look for breakout signals
+            if is_bull and vol_conf:
+                # Bull regime: long on break above R3 or R4
+                if price > camarilla_r3[i] or price > camarilla_r4[i]:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+            elif is_bear and vol_conf:
+                # Bear regime: short on break below S3 or S4
+                if price < camarilla_s3[i] or price < camarilla_s4[i]:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
         
         elif position != 0:
-            # Exit conditions: reverse signal or loss of volume confirmation
+            # Check stoploss (2.5x ATR) and time-based exit (max 10 days)
             if position == 1:
-                # Exit long: price breaks below S1 or volume confirmation lost
-                if (price < s1_level) or (not vol_conf):
+                # Long: exit if price drops below entry - 2.5*ATR or reverse signal
+                if price < entry_price - 2.5 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                elif price < camarilla_s3[i]:  # Reverse to bearish level
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: price breaks above R1 or volume confirmation lost
-                if (price > r1_level) or (not vol_conf):
+                # Short: exit if price rises above entry + 2.5*ATR or reverse signal
+                if price > entry_price + 2.5 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                elif price > camarilla_r3[i]:  # Reverse to bullish level
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -111,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_WeeklyTrend_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
