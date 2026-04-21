@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_v3
-Hypothesis: Daily Camarilla R1/S1 breakouts with 1-week EMA34 trend filter. In bull regime (price > 1w EMA34), favor longs on R1 breakouts; in bear regime (price < 1w EMA34), favor shorts on S1 breakdowns. Uses discrete sizing (0.25) and ATR-based stoploss (2.0x) to minimize churn. Target: 30-100 total trades over 4 years by requiring confluence of breakout, trend, and volume confirmation on the daily timeframe.
+6h_ElderRay_ZeroLine_12hTrend_Regime_v1
+Hypothesis: 6h Elder Ray (Bull Power/Bear Power) zero-line cross with 12h trend regime (price vs EMA50) and volume confirmation (>1.5x 20-bar MA). 
+In bull regime (price > 12h EMA50), favor longs when Bull Power crosses above zero; in bear regime (price < 12h EMA50), favor shorts when Bear Power crosses below zero. 
+Discrete sizing (0.25) and ATR-based stop (2.0x) reduce churn. Target: 50-150 total trades over 4 years by requiring confluence of Elder Ray signal, trend, and volume.
+Designed to work in bull (strong buying pressure) and bear (strong selling pressure) markets via Elder Ray's measurement of bull/bear power relative to EMA13.
 """
 
 import numpy as np
@@ -13,17 +16,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for trend regime)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop (12h for trend regime)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # === 1w EMA34 for trend regime ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 12h EMA50 for trend regime ===
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # === Daily ATR (14-period) for stoploss ===
+    # === 6h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -34,20 +37,16 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === Daily volume confirmation (volume > 1.5x 20-period average) ===
+    # === 6h volume confirmation (volume > 1.5x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (1.5 * vol_ma_20)
     
-    # === Daily Camarilla pivot levels (R1, S1) based on PREVIOUS day's OHLC ===
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first day invalid
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+    # === 6h Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 ===
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # measures bull power above EMA13
+    bear_power = low - ema13   # measures bear power below EMA13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,24 +64,26 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_34_1w_val = ema_34_1w_aligned[i]
-        r1_val = r1[i]
-        s1_val = s1[i]
+        ema_50_12h_val = ema_50_12h_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         vol_conf = volume_confirmed[i]
         
         # Trend regime
-        is_bull = price > ema_34_1w_val
-        is_bear = price < ema_34_1w_val
+        is_bull_regime = price > ema_50_12h_val
+        is_bear_regime = price < ema_50_12h_val
         
         if position == 0:
-            if is_bull:
-                # Bull regime: long breakouts favored
-                long_condition = (price > r1_val) and vol_conf
-                short_condition = (price < s1_val) and vol_conf and (price < ema_34_1w_val * 0.99)  # stricter for shorts
+            if is_bull_regime:
+                # Bull regime: long when Bull Power crosses above zero (bulls gaining control)
+                long_condition = (bull_val > 0) and (bull_power[i-1] <= 0) and vol_conf
+                # Avoid shorts in bull regime unless strong bear power
+                short_condition = (bear_val < 0) and (bear_power[i-1] >= 0) and vol_conf and (bull_val < -0.5)  # only if weak bull power
             else:  # bear regime
-                # Bear regime: short breakdowns favored
-                short_condition = (price < s1_val) and vol_conf
-                long_condition = (price > r1_val) and vol_conf and (price > ema_34_1w_val * 1.01)  # stricter for longs
+                # Bear regime: short when Bear Power crosses below zero (bears gaining control)
+                short_condition = (bear_val < 0) and (bear_power[i-1] >= 0) and vol_conf
+                # Avoid longs in bear regime unless strong bull power
+                long_condition = (bull_val > 0) and (bull_power[i-1] <= 0) and vol_conf and (bear_val > 0.5)  # only if weak bear power
             
             if long_condition:
                 signals[i] = 0.25
@@ -104,8 +105,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks below S1 (failed breakout)
-                elif price < s1_val:
+                # Exit if Bull Power turns negative (bulls losing control)
+                elif bull_val <= 0:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -116,8 +117,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks above R1 (failed breakdown)
-                elif price > r1_val:
+                # Exit if Bear Power turns positive (bears losing control)
+                elif bear_val >= 0:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -126,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_v3"
-timeframe = "1d"
+name = "6h_ElderRay_ZeroLine_12hTrend_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
