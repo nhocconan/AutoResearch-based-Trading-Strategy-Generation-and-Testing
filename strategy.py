@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 1w Donchian breakout with 1d ADX trend filter and volume confirmation.
-Breakouts above 1w Donchian upper channel (20-period) trigger longs when 1d ADX > 25 (trending).
-Breakouts below 1w Donchian lower channel trigger shorts when 1d ADX > 25.
-Volume must exceed 2x 20-period average to confirm breakout strength.
-Exit on Donchian middle band cross or 1.5x ATR stop.
-Designed for 15-30 trades/year (60-120 total over 4 years) to minimize fee fade while capturing strong trends.
-Works in bull markets via upward breakouts and in bear markets via downward breakouts.
+Hypothesis: 1d strategy using 1w Williams Alligator for trend direction and 1d Williams %R for mean-reversion entries.
+Long when price is above Alligator teeth (green line) and %R crosses above -50 from below.
+Short when price is below Alligator teeth and %R crosses below -50 from above.
+Requires volume > 1.5x 20-period average to confirm momentum.
+Exit when price crosses Alligator lips (red line) or %R reaches extreme (> -10 or < -90).
+Designed for 15-25 trades/year (60-100 total over 4 years) to minimize fee drag while capturing swings in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,21 +17,22 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for Donchian channels
+    # Load weekly data for Williams Alligator (13,8,5 SMAs of median price)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 13:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    median_1w = (high_1w + low_1w) / 2
     
-    # Calculate 1w Donchian channels (20-period)
-    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Alligator lines: Jaw (13), Teeth (8), Lips (5) - all SMAs of median price
+    jaw = pd.Series(median_1w).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(median_1w).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(median_1w).rolling(window=5, min_periods=5).mean().values
     
-    # Load daily data for ADX trend filter
+    # Load daily data for Williams %R and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
@@ -41,99 +41,73 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period ADX
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    plus_dm[1:] = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                           np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm[1:] = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                            np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly Alligator and daily Williams %R to 1d timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1w Donchian and 1d ADX to 4h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1w, donch_mid)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation (volume spike > 2x 20-period average)
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
-    
-    # ATR for stoploss (20-period)
-    tr1 = prices['high'].values - prices['low'].values
-    tr2 = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
-    tr3 = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after warmup for indicators
         # Skip if indicators not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(donch_mid_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        price_high = prices['high'].iloc[i]
-        price_low = prices['low'].iloc[i]
-        upper = donch_high_aligned[i]
-        lower = donch_low_aligned[i]
-        mid = donch_mid_aligned[i]
-        adx_val = adx_aligned[i]
+        price_open = prices['open'].iloc[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        wr_val = williams_r_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        atr_val = atr[i]
         
         if position == 0:
-            # Enter long: break above upper Donchian with volume and trend
-            if (price_high > upper and 
-                adx_val > 25 and 
-                vol_ratio_val > 2.0):
-                signals[i] = 0.30
+            # Enter long: price above teeth (bullish alignment) and WR crosses above -50 from below
+            if (price_close > teeth_val and 
+                wr_val > -50 and 
+                # Check if previous WR was below -50 (crossing up)
+                i > 0 and not np.isnan(williams_r_aligned[i-1]) and williams_r_aligned[i-1] <= -50 and
+                vol_ratio_val > 1.5):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower Donchian with volume and trend
-            elif (price_low < lower and 
-                  adx_val > 25 and 
-                  vol_ratio_val > 2.0):
-                signals[i] = -0.30
+            # Enter short: price below teeth (bearish alignment) and WR crosses below -50 from above
+            elif (price_close < teeth_val and 
+                  wr_val < -50 and 
+                  # Check if previous WR was above -50 (crossing down)
+                  i > 0 and not np.isnan(williams_r_aligned[i-1]) and williams_r_aligned[i-1] >= -50 and
+                  vol_ratio_val > 1.5):
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: middle band cross OR ATR-based stoploss
+            # Exit: price crosses lips OR WR reaches extreme
             exit_signal = False
             
-            # Middle band exit
-            if position == 1 and price_close < mid:
-                exit_signal = True
-            elif position == -1 and price_close > mid:
-                exit_signal = True
-            
-            # ATR-based stoploss (1.5x ATR from extreme)
             if position == 1:
-                if price_close < upper - 1.5 * atr_val:
+                # Long exit: price below lips OR WR < -10 (overbought)
+                if price_close < lips_val or wr_val < -10:
                     exit_signal = True
             elif position == -1:
-                if price_close > lower + 1.5 * atr_val:
+                # Short exit: price above lips OR WR > -90 (oversold)
+                if price_close > lips_val or wr_val > -90:
                     exit_signal = True
             
             if exit_signal:
@@ -141,10 +115,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_1wDonchian_Breakout_1dADX25_Volume2x_ATR1.5"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_TR_WilliamsR_MR_Volume1.5"
+timeframe = "1d"
 leverage = 1.0
