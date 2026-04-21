@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter
-Hypothesis: Price breaking above/below Camarilla R1/S1 levels on 12h with volume confirmation and 1d EMA trend filter works in both bull and bear markets. Pivot levels act as support/resistance, volume confirms breakout strength, and EMA filter ensures alignment with daily trend. Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+6h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter
+Hypothesis: Combines 1d Camarilla pivot levels (R1/S1) with 6h price breakouts and volume confirmation (>1.5x 20-bar average). ATR-based stops manage risk. Designed for low trade frequency (target: 15-30/year) to minimize fee drag in 6h timeframe. Uses discrete position sizing (0.25) to reduce churn. Works in both bull and bear markets by trading breakouts in the direction of the pivot level (break above R1 = long, break below S1 = short).
 """
 
 import numpy as np
@@ -13,34 +13,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for EMA34 and Camarilla pivot calculation
+    # Load 1d data once for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = np.zeros_like(close_1d)
-    ema34_1d[0] = close_1d[0]
-    alpha = 2.0 / (34 + 1)
-    for i in range(1, len(close_1d)):
-        ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
-    
-    # Calculate Camarilla pivot levels from previous 1d bar
+    # Calculate 1d Camarilla pivot levels (R1, S1)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    r1 = close_1d_prev + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d_prev - (high_1d - low_1d) * 1.1 / 12
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = pivot + 1.1 * (high_1d - low_1d) / 12.0
+    s1 = pivot - 1.1 * (high_1d - low_1d) / 12.0
     
-    # Align 1d indicators to 12h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1d R1/S1 to 6h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Main timeframe data (12h)
+    # Main timeframe data (6h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -60,7 +51,7 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First period
     atr = np.zeros_like(close)
     for i in range(len(tr)):
         if i < 14:
@@ -72,54 +63,53 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(34, n):  # Start after EMA warmup
+    for i in range(20, n):  # Start after volume warmup
         # Skip if NaN in critical values
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema34 = ema34_1d_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         vol_ok = volume_filter[i]
         atr_val = atr[i]
         
-        # Stoploss: 2.0 * ATR from entry
-        if position == 1 and price < entry_price - 2.0 * atr_val:
+        # Stoploss: 2.5 * ATR from entry
+        if position == 1 and price < entry_price - 2.5 * atr_val:
             signals[i] = 0.0
             position = 0
             continue
-        elif position == -1 and price > entry_price + 2.0 * atr_val:
+        elif position == -1 and price > entry_price + 2.5 * atr_val:
             signals[i] = 0.0
             position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume and 1d uptrend (price > 1d EMA34)
-            if price > r1_level and vol_ok and price > ema34:
+            # Long: price breaks above R1 with volume
+            if price > r1_val and vol_ok:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S1 with volume and 1d downtrend (price < 1d EMA34)
-            elif price < s1_level and vol_ok and price < ema34:
+            # Short: price breaks below S1 with volume
+            elif price < s1_val and vol_ok:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price falls back below R1 (failed breakout) or breaks below 1d EMA34 (trend change)
-            if price < r1_level or price < ema34:
+            # Long exit: price falls back below R1
+            if price < r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price rises back above S1 (failed breakdown) or breaks above 1d EMA34 (trend change)
-            if price > s1_level or price > ema34:
+            # Short exit: price rises back above S1
+            if price > s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter"
-timeframe = "12h"
+name = "6h_1d_Pivot_R1S1_Breakout_Volume_ATRFilter"
+timeframe = "6h"
 leverage = 1.0
