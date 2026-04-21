@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_4d_Trend_Pullback_EMA_RSI
-Hypothesis: In strong 4h trends (price > EMA50), pullbacks to EMA20 on 1h with RSI < 40 offer high-probability long entries. 
-For shorts: 4h downtrend (price < EMA50), pullback to EMA20 with RSI > 60. Uses 1d volatility filter (ATR ratio) to avoid choppy markets.
-Designed for low trade frequency (15-30/year) by requiring 4h trend alignment and 1h pullback confirmation. Works in bull markets via longs and bear markets via shorts.
+6h_1d_MultiTimeframe_Candlestick_Pattern_Strategy
+Hypothesis: Use daily candle structure to identify institutional supply/demand zones, combined with 6h price action and volume confirmation. In bull markets: buy pullbacks to demand zones with bullish engulfing patterns. In bear markets: sell rallies to supply zones with bearish engulfing patterns. Low frequency (target: 12-37/year) to minimize fee drag. Works in both regimes by adapting to trend direction via daily close vs open.
 """
 
 import numpy as np
@@ -15,109 +13,110 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data once for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load daily data once for supply/demand zones and trend
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    # Load 1d data once for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    open_daily = df_daily['open'].values
+    close_daily = df_daily['close'].values
     
-    # 4h EMA50 for trend direction
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Identify daily supply and demand zones
+    # Demand zone: bullish candle (close > open) - area where buying occurred
+    # Supply zone: bearish candle (close < open) - area where selling occurred
+    bullish_daily = close_daily > open_daily
+    bearish_daily = close_daily < open_daily
     
-    # 1d ATR(14) and ATR(50) for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Demand zone: low of bullish candles
+    demand_zone = np.where(bullish_daily, low_daily, np.nan)
+    # Supply zone: high of bearish candles
+    supply_zone = np.where(bearish_daily, high_daily, np.nan)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr50_1d = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_ratio = atr14_1d / (atr50_1d + 1e-10)  # avoid division by zero
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Forward fill zones until next opposite zone appears
+    demand_zone_series = pd.Series(demand_zone)
+    demand_zone_filled = demand_zone_series.ffill().bfill().values
+    supply_zone_series = pd.Series(supply_zone)
+    supply_zone_filled = supply_zone_series.ffill().bfill().values
     
-    # 1h EMA20 and RSI(14) for entry timing
+    # Align zones to 6h timeframe
+    demand_zone_aligned = align_htf_to_ltf(prices, df_daily, demand_zone_filled)
+    supply_zone_aligned = align_htf_to_ltf(prices, df_daily, supply_zone_filled)
+    
+    # Daily trend: close vs open (bullish/bearish bias)
+    daily_bias = np.where(bullish_daily, 1, np.where(bearish_daily, -1, 0))
+    daily_bias_aligned = align_htf_to_ltf(prices, df_daily, daily_bias)
+    
+    # Main timeframe data (6h)
     close = prices['close'].values
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    high = prices['high'].values
+    low = prices['low'].values
+    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume filter: current volume > 1.3x 20-period average (less strict for fewer trades)
+    volume_avg = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i >= 20:
+            volume_avg[i] = np.mean(volume[i-20:i])
+        else:
+            volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+    volume_filter = volume > (1.3 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if NaN in critical values
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(ema20[i]) or np.isnan(rsi[i])):
+        if (np.isnan(demand_zone_aligned[i]) or np.isnan(supply_zone_aligned[i]) or 
+            np.isnan(daily_bias_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema50_4h_val = ema50_4h_aligned[i]
-        atr_ratio_val = atr_ratio_aligned[i]
-        ema20_val = ema20[i]
-        rsi_val = rsi[i]
+        demand = demand_zone_aligned[i]
+        supply = supply_zone_aligned[i]
+        bias = daily_bias_aligned[i]
+        vol_ok = volume_filter[i]
         
-        # Volatility filter: only trade when ATR ratio < 1.2 (low volatility)
-        vol_filter = atr_ratio_val < 1.2
+        # 6h bullish engulfing: current bullish candle engulfs previous bearish candle
+        bullish_engulfing = (close[i] > open_price[i]) and (open_price[i-1] > close[i-1]) and \
+                           (close[i] > open_price[i-1]) and (open_price[i] < close[i-1])
+        # 6h bearish engulfing: current bearish candle engulfs previous bullish candle
+        bearish_engulfing = (close[i] < open_price[i]) and (open_price[i-1] < close[i-1]) and \
+                           (close[i] < open_price[i-1]) and (open_price[i] > close[i-1])
         
         if position == 0:
-            # Long: 4h uptrend + pullback to EMA20 + RSI oversold
-            if (price > ema50_4h_val and  # 4h uptrend
-                price > ema20_val and     # above 1h EMA20
-                price < ema20_val * 1.02 and  # within 2% of EMA20 (pullback zone)
-                rsi_val < 40 and          # RSI oversold
-                vol_filter):
-                signals[i] = 0.20
+            # Long: price at demand zone with bullish engulfing in bullish daily bias
+            if bias > 0 and abs(price - demand) < (price * 0.005) and bullish_engulfing and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + pullback to EMA20 + RSI overbought
-            elif (price < ema50_4h_val and  # 4h downtrend
-                  price < ema20_val and     # below 1h EMA20
-                  price > ema20_val * 0.98 and  # within 2% of EMA20 (pullback zone)
-                  rsi_val > 60 and          # RSI overbought
-                  vol_filter):
-                signals[i] = -0.20
+            # Short: price at supply zone with bearish engulfing in bearish daily bias
+            elif bias < 0 and abs(price - supply) < (price * 0.005) and bearish_engulfing and vol_ok:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: 4h trend breaks or RSI overbought
-            if (price < ema50_4h_val or    # 4h trend broken
-                rsi_val > 70):             # RSI overbought
+            # Long exit: price reaches supply zone or bearish engulfing forms
+            if abs(price - supply) < (price * 0.005) or bearish_engulfing:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: 4h trend breaks or RSI oversold
-            if (price > ema50_4h_val or    # 4h trend broken
-                rsi_val < 30):             # RSI oversold
+            # Short exit: price reaches demand zone or bullish engulfing forms
+            if abs(price - demand) < (price * 0.005) or bullish_engulfing:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_4d_Trend_Pullback_EMA_RSI"
-timeframe = "1h"
+name = "6h_1d_MultiTimeframe_Candlestick_Pattern_Strategy"
+timeframe = "6h"
 leverage = 1.0
