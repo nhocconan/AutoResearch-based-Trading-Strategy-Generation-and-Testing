@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>1.8x 20-period MA).
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation (>1.8x 20-period MA).
 Uses ATR-based stop (2.0x) and minimum holding period of 3 bars to reduce churn.
-Designed for 12h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
+Designed for 4h timeframe with 1d HTF trend to work in both bull and bear markets by requiring alignment with higher timeframe trend and strong volume confirmation.
 Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 """
 
@@ -26,7 +26,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 12h ATR (14-period) for stoploss ===
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -41,9 +41,15 @@ def generate_signals(prices):
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 12h Donchian channel (20-period) ===
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 4h Camarilla pivot levels (R1, S1) ===
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,7 +59,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i])):
+            np.isnan(vol_ma[i]) or np.isnan(r1[i]) or np.isnan(s1[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,17 +70,17 @@ def generate_signals(prices):
         volume_now = volume[i]
         ema_50_1d_val = ema_50_1d_aligned[i]
         vol_avg = vol_ma[i]
-        upper_channel = high_roll[i]
-        lower_channel = low_roll[i]
+        r1_val = r1[i]
+        s1_val = s1[i]
         
         # Volume confirmation: current volume > 1.8x average (stricter threshold)
         volume_confirm = volume_now > 1.8 * vol_avg
         
         if position == 0:
-            # Long: price breaks above upper channel, above 1d EMA50, volume confirm
-            long_condition = (price > upper_channel) and (price > ema_50_1d_val) and volume_confirm
-            # Short: price breaks below lower channel, below 1d EMA50, volume confirm
-            short_condition = (price < lower_channel) and (price < ema_50_1d_val) and volume_confirm
+            # Long: price breaks above R1, above 1d EMA50, volume confirm
+            long_condition = (price > r1_val) and (price > ema_50_1d_val) and volume_confirm
+            # Short: price breaks below S1, below 1d EMA50, volume confirm
+            short_condition = (price < s1_val) and (price < ema_50_1d_val) and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -123,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
