@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_Volume_Trend
-Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout signals on 12h timeframe.
-Long when price breaks above R1 with volume > 1.5x average and ADX > 25 (trending).
-Short when price breaks below S1 with volume > 1.5x average and ADX > 25.
+4h_1d_Camarilla_R1S1_Breakout_With_Pullback_Entry
+Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout signals on 4h timeframe.
+Wait for pullback to the breakout level before entering to reduce false breakouts.
+Long when price breaks above R1, then pulls back to touch R1 with volume > 1.5x average.
+Short when price breaks below S1, then pulls back to touch S1 with volume > 1.5x average.
 Exit when price crosses back through the daily pivot point.
-Uses ADX regime filter to avoid whipsaws in ranging markets. Designed for 12h to limit
-trade frequency (target: 12-37/year) and reduce fee drift. Works in bull markets by
-buying breakouts and in bear markets by selling breakdowns.
+Uses ADX > 25 to ensure trending market. Designed for 4h to limit trade frequency.
 """
 
 import numpy as np
@@ -37,15 +36,12 @@ def generate_signals(prices):
     prev_close[0] = np.nan
     
     # Camarilla levels: R1, S1, and pivot point (PP)
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    # PP = (High + Low + Close)/3
     rang = prev_high - prev_low
     r1 = prev_close + 1.1 * rang / 12
     s1 = prev_close - 1.1 * rang / 12
     pp = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
@@ -74,14 +70,12 @@ def generate_signals(prices):
     dm_plus[0] = 0
     dm_minus[0] = 0
     
-    # Smoothed values (Wilder's smoothing)
+    # Wilder's smoothing
     def wilder_smooth(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
-        # First value is simple average
         result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
         for i in range(period, len(data)):
             if not np.isnan(result[i-1]) and not np.isnan(data[i]):
                 result[i] = result[i-1] - (result[i-1]/period) + data[i]
@@ -102,6 +96,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    breakout_high = np.full(n, np.nan)  # Track breakout levels
+    breakout_low = np.full(n, np.nan)
     
     for i in range(50, n):
         # Skip if indicators not ready
@@ -126,14 +122,23 @@ def generate_signals(prices):
         trending = adx[i] > 25
         
         if position == 0:
-            # Long conditions: break above R1 + volume + trending
-            if price > r1_aligned[i] and volume_ok and trending:
-                signals[i] = 0.25
-                position = 1
-            # Short conditions: break below S1 + volume + trending
-            elif price < s1_aligned[i] and volume_ok and trending:
-                signals[i] = -0.25
-                position = -1
+            # Detect new breakouts
+            if i > 50:
+                if price > r1_aligned[i-1] and prices['close'].iloc[i-1] <= r1_aligned[i-1]:
+                    breakout_high[i] = r1_aligned[i]  # Mark breakout level
+                if price < s1_aligned[i-1] and prices['close'].iloc[i-1] >= s1_aligned[i-1]:
+                    breakout_low[i] = s1_aligned[i]   # Mark breakout level
+            
+            # Long: pullback to R1 breakout level
+            if not np.isnan(breakout_high[i]) and abs(price - breakout_high[i]) < 0.001 * price:
+                if volume_ok and trending:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: pullback to S1 breakout level
+            elif not np.isnan(breakout_low[i]) and abs(price - breakout_low[i]) < 0.001 * price:
+                if volume_ok and trending:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
             # Long exit: price crosses back below pivot point
@@ -153,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R1S1_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1S1_Breakout_With_Pullback_Entry"
+timeframe = "4h"
 leverage = 1.0
