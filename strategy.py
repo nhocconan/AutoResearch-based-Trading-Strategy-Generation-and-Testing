@@ -36,44 +36,54 @@ def generate_signals(prices):
     vol_ratio_1d = df_1d['volume'].values / vol_ma_30
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
+    # 4h Donchian channel for entry signals
+    high_4h = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_4h = prices['low'].rolling(window=20, min_periods=20).min().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+            np.isnan(vol_ratio_aligned[i]) or np.isnan(high_4h[i]) or np.isnan(low_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
+        price_high = prices['high'].iloc[i]
+        price_low = prices['low'].iloc[i]
         ema_trend = ema_34_1d_aligned[i]
         vol_ratio = vol_ratio_aligned[i]
         vol_threshold = 1.2  # Volume must be above average
         atr_ratio_val = atr_ratio_aligned[i]
+        upper_channel = high_4h[i]
+        lower_channel = low_4h[i]
         
         if position == 0:
-            # Enter long: price above EMA34, volume spike, moderate volatility
-            if (price_close > ema_trend and 
+            # Enter long: price breaks above Donchian upper channel, uptrend, volume spike
+            if (price_high > upper_channel and 
+                price_close > ema_trend and 
                 vol_ratio > vol_threshold and 
-                atr_ratio_val > 0.6 and atr_ratio_val < 2.5):
+                atr_ratio_val > 0.5 and atr_ratio_val < 2.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below EMA34, volume spike, moderate volatility
-            elif (price_close < ema_trend and 
+            # Enter short: price breaks below Donchian lower channel, downtrend, volume spike
+            elif (price_low < lower_channel and 
+                  price_close < ema_trend and 
                   vol_ratio > vol_threshold and 
-                  atr_ratio_val > 0.6 and atr_ratio_val < 2.5):
+                  atr_ratio_val > 0.5 and atr_ratio_val < 2.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
             # Exit: reverse trend or volatility extremes
-            if position == 1 and (price_close < ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.4):
+            if position == 1 and (price_close < ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.3):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.4):
+            elif position == -1 and (price_close > ema_trend or atr_ratio_val > 3.0 or atr_ratio_val < 0.3):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4d_EMA34_Volume_ATR_Filter"
+name = "4h_DonchianBreakout_EMA34_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
