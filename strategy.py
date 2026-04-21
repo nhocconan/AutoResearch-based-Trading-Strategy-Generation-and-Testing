@@ -18,87 +18,76 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Highest High and Lowest Low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Williams %R = -(HH - Close) / (HH - LL) * 100
+    highest_high = np.maximum.accumulate(high_1d)
+    lowest_low = np.minimum.accumulate(low_1d)
+    williams_r = np.zeros_like(close_1d)
+    hh_minus_ll = highest_high - lowest_low
+    williams_r = np.where(hh_minus_ll != 0, -(highest_high - close_1d) / hh_minus_ll * 100, -50)
     
-    # Williams %R: -100 * (HH - Close) / (HH - LL)
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        -100 * (highest_high - close_1d) / (highest_high - lowest_low),
-        -50  # neutral when range is zero
-    )
+    # Calculate 1d Williams %R EMA (9-period)
+    williams_ema = pd.Series(williams_r).ewm(span=9, adjust=False).values
     
-    # Calculate 1d RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 6h price position relative to 1d VWAP approximation
+    # Approximate VWAP using typical price * volume / cumulative volume
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    vwap_numerator = typical_price * df_1d['volume'].values
+    vwap_denominator = np.cumsum(df_1d['volume'].values)
+    vwap = np.where(vwap_denominator != 0, np.cumsum(vwap_numerator) / vwap_denominator, typical_price)
     
-    # Wilder's smoothing for RSI
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Calculate 6h returns for momentum
+    close_6h = prices['close'].values
+    returns = np.zeros_like(close_6h)
+    returns[1:] = (close_6h[1:] - close_6h[:-1]) / close_6h[:-1]
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1d indicators to lower timeframe
+    # Align 1d indicators to 6h timeframe
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    williams_ema_aligned = align_htf_to_ltf(prices, df_1d, williams_ema)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup period
+    for i in range(20, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(williams_ema_aligned[i]) or
+            np.isnan(vwap_aligned[i]) or np.isnan(returns[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current price and volume
-        price_close = prices['close'].iloc[i]
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)[i]
+        current_price = prices['close'].iloc[i]
         
         if position == 0:
-            # Enter long: Williams %R oversold + RSI rising from oversold + volume surge
-            if (williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80 and
-                rsi_aligned[i] > 30 and rsi_aligned[i-1] <= 30 and
-                vol_1d_current > 2.0 * vol_ma_20_aligned[i]):
+            # Enter long: Williams %R oversold AND price below VWAP AND positive momentum
+            if (williams_r_aligned[i] < -80 and
+                williams_r_aligned[i] > williams_ema_aligned[i] and  # Williams crossing above EMA
+                current_price < vwap_aligned[i] and
+                returns[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R overbought + RSI falling from overbought + volume surge
-            elif (williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20 and
-                  rsi_aligned[i] < 70 and rsi_aligned[i-1] >= 70 and
-                  vol_1d_current > 2.0 * vol_ma_20_aligned[i]):
+            # Enter short: Williams %R overbought AND price above VWAP AND negative momentum
+            elif (williams_r_aligned[i] > -20 and
+                  williams_r_aligned[i] < williams_ema_aligned[i] and  # Williams crossing below EMA
+                  current_price > vwap_aligned[i] and
+                  returns[i] < 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: Williams %R returns to neutral range or volume drops
+            # Exit: Williams %R crosses EMA in opposite direction OR price crosses VWAP
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R returns above -50 or volume < average
-                if (williams_r_aligned[i] > -50 or
-                    vol_1d_current < vol_ma_20_aligned[i]):
+                # Exit long: Williams crosses below EMA OR price crosses above VWAP
+                if (williams_r_aligned[i] < williams_ema_aligned[i] or
+                    current_price > vwap_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: Williams %R returns below -50 or volume < average
-                if (williams_r_aligned[i] < -50 or
-                    vol_1d_current < vol_ma_20_aligned[i]):
+                # Exit short: Williams crosses above EMA OR price crosses below VWAP
+                if (williams_r_aligned[i] > williams_ema_aligned[i] or
+                    current_price < vwap_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_RSI_Volume2x"
-timeframe = "1d"
+name = "6h_WilliamsR_VWAP_Cross"
+timeframe = "6h"
 leverage = 1.0
