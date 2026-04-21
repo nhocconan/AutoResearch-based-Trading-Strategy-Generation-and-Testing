@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 14-day Donchian breakout with 100-day EMA trend filter and volume confirmation.
-In uptrend (price > EMA100), buy breakouts above Donchian high; in downtrend (price < EMA100), sell breakdowns below Donchian low.
-Donchian channels capture breakouts from consolidation, EMA100 filters for strong trend alignment, volume confirms breakout strength.
-Works in bull markets (buy breakouts) and bear markets (sell breakdowns). Target: 20-30 trades/year to minimize fee drag.
+Hypothesis: 4h strategy using daily pivot points (R2/S2) with 4h EMA55 trend filter and volume confirmation.
+In uptrend (price > EMA55), buy breakouts above daily R2; in downtrend (price < EMA55), sell breakdowns below daily S2.
+Daily R2/S2 provide stronger institutional support/resistance than R1/S1, reducing false breakouts.
+EMA55 filters for stronger trend alignment; volume confirms breakout strength.
+Works in bull markets (buy R2 breaks) and bear markets (sell S2 breaks). Target: 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -15,70 +16,74 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 100-day EMA data ONCE before loop for trend filter
-    df_100d = get_htf_data(prices, '1d')
-    if len(df_100d) < 100:
+    # Load daily data ONCE before loop for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # 100-day EMA for trend filter
-    close_1d = df_100d['close'].values
-    ema_100 = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_aligned = align_htf_to_ltf(prices, df_100d, ema_100)
+    # Calculate daily pivot points (using prior day's H/L/C)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Load 14-day Donchian data ONCE before loop
-    df_14d = get_htf_data(prices, '1d')
-    if len(df_14d) < 14:
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # R2 = Pivot + (High - Low)
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    # S2 = Pivot - (High - Low)
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    
+    # Align daily R2/S2 to 4h timeframe (wait for daily bar to close)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    
+    # Load 4h data ONCE before loop for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # 14-day Donchian channel
-    high_1d = df_14d['high'].values
-    low_1d = df_14d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # 4h EMA55 for trend filter (slower, more reliable)
+    close_4h = df_4h['close'].values
+    ema_55 = pd.Series(close_4h).ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema_55_aligned = align_htf_to_ltf(prices, df_4h, ema_55)
     
-    # Align Donchian levels to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_14d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_14d, donchian_low)
-    
-    # 4h volume confirmation (volume spike > 1.5x 20-period average)
+    # 4h volume confirmation (volume spike > 1.8x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_100_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(ema_55_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_100_aligned[i]
-        donch_high = donchian_high_aligned[i]
-        donch_low = donchian_low_aligned[i]
+        ema_trend = ema_55_aligned[i]
         vol_ratio_val = vol_ratio[i]
-        vol_threshold = 1.5  # Volume spike filter
+        vol_threshold = 1.8  # Higher volume spike filter for quality
         
         if position == 0:
-            # Enter long: price breaks above Donchian high + uptrend (price > EMA100) + volume spike
-            if (price_close > donch_high and 
+            # Enter long: price breaks above daily R2 + uptrend (price > EMA55) + volume spike
+            if (price_close > r2_aligned[i] and 
                 price_close > ema_trend and 
                 vol_ratio_val > vol_threshold):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low + downtrend (price < EMA100) + volume spike
-            elif (price_close < donch_low and 
+            # Enter short: price breaks below daily S2 + downtrend (price < EMA55) + volume spike
+            elif (price_close < s2_aligned[i] and 
                   price_close < ema_trend and 
                   vol_ratio_val > vol_threshold):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: trend reversal (price crosses EMA100 in opposite direction)
+            # Exit: trend reversal (price crosses EMA55 in opposite direction)
             if position == 1 and price_close < ema_trend:
                 signals[i] = 0.0
                 position = 0
@@ -91,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian14_100dEMA_Volume"
+name = "4h_DailyPivot_R2S2_4hEMA55_Volume"
 timeframe = "4h"
 leverage = 1.0
