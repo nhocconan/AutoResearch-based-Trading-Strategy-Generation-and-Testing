@@ -1,90 +1,98 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for ATR and moving averages
+    # Load daily data for volatility regime and price channels
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ATR(14) from daily data
+    # Calculate Bollinger Bands width for volatility regime (1d)
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range components
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Set first TR to high-low since no previous close
-    tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20
     
-    # Calculate EMA50 and EMA200 from daily close
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Bollinger Bandwidth percentile (252-day lookback for regime)
+    bb_width_series = pd.Series(bb_width)
+    bb_percentile = bb_width_series.rolling(window=252, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Align indicators to 12h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Donchian channels (20-period) for breakout signals
+    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align 1d indicators to 4h timeframe
+    bb_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_percentile)
+    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
+    
+    # 4h volume confirmation (20-period average)
+    vol_ma_4h = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     
     # Price arrays
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h volume moving average (20-period)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after EMA200 warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(atr_aligned[i]) or np.isnan(ema50_aligned[i]) or 
-            np.isnan(ema200_aligned[i]) or np.isnan(vol_ma_12h[i])):
+        if (np.isclose(bb_percentile_aligned[i], 0) or 
+            np.isnan(highest_20_aligned[i]) or 
+            np.isnan(lowest_20_aligned[i]) or 
+            np.isnan(vol_ma_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current values
-        atr_val = atr_aligned[i]
-        ema50_val = ema50_aligned[i]
-        ema200_val = ema200_aligned[i]
-        vol_ma = vol_ma_12h[i]
+        bb_percentile_val = bb_percentile_aligned[i]
+        upper_channel = highest_20_aligned[i]
+        lower_channel = lowest_20_aligned[i]
+        vol_ma = vol_ma_4h[i]
         vol = volume[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_confirm = vol > 1.8 * vol_ma
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirm = vol > 1.3 * vol_ma
+        
+        # Regime filter: trending when BB percentile < 30 (low volatility breakout favorable)
+        trending_regime = bb_percentile_val < 30
         
         if position == 0:
-            # Long: Price > EMA50 > EMA200 (strong uptrend) + volume confirmation
-            if close[i] > ema50_val and ema50_val > ema200_val and volume_confirm:
+            # Long: Breakout above upper Donchian channel + volume + trending regime
+            if close[i] > upper_channel and volume_confirm and trending_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < EMA50 < EMA200 (strong downtrend) + volume confirmation
-            elif close[i] < ema50_val and ema50_val < ema200_val and volume_confirm:
+            # Short: Breakout below lower Donchian channel + volume + trending regime
+            elif close[i] < lower_channel and volume_confirm and trending_regime:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions based on ATR-based trailing stop
+            # Exit: Opposite breakout or volatility expansion (regime change)
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if price drops below EMA50 - 1.5 * ATR
-                if close[i] < ema50_val - 1.5 * atr_val:
+                # Exit on breakdown below lower channel or volatility expansion
+                if close[i] < lower_channel or bb_percentile_val > 70:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if price rises above EMA50 + 1.5 * ATR
-                if close[i] > ema50_val + 1.5 * atr_val:
+                # Exit on breakout above upper channel or volatility expansion
+                if close[i] > upper_channel or bb_percentile_val > 70:
                     exit_signal = True
             
             if exit_signal:
@@ -96,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA50_EMA200_ATR_Volume_Trend"
-timeframe = "12h"
+name = "4h_Donchian20_BBWidthRegime_Volume"
+timeframe = "4h"
 leverage = 1.0
