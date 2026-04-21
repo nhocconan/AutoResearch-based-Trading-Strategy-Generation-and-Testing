@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_12h_VolumeSpike_CamarillaBreakout
-Hypothesis: On 4h, take long/short when price breaks Camarilla R4/S4 levels from daily timeframe with volume spike (2x 20-period average) and aligned 12h trend confirmation (close > 12h EMA34 for long, close < 12h EMA34 for short). Exit when price returns to R1/S1 or hits 2x ATR stop. Designed for low trade frequency (<50/year) to minimize fee drag. Works in bull/bear markets via trend filter and volatility-based sizing.
+12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter
+Hypothesis: Daily Camarilla pivot levels R1/S1 act as mean-reversion zones, while R4/S4 indicate breakout strength. Fade at R1/S1 with volume confirmation, breakout at R4/S4 with volume confirmation. Designed for low trade frequency (target: 12-37/year) to minimize fee drag in 12h timeframe. Works in both bull and bear markets by adapting to regime via price action at key levels.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Camarilla pivot points
+    # Load daily data once for Camarilla pivot points
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 2:
         return np.zeros(n)
@@ -23,6 +23,12 @@ def generate_signals(prices):
     close_daily = df_daily['close'].values
     
     # Calculate daily Camarilla pivot levels
+    # P = (H + L + C) / 3
+    # Range = H - L
+    # R1 = P + (Range * 0.382)
+    # S1 = P - (Range * 0.382)
+    # R4 = P + (Range * 1.5000)
+    # S4 = P - (Range * 1.5000)
     P = (high_daily + low_daily + close_daily) / 3.0
     range_daily = high_daily - low_daily
     r1_daily = P + (range_daily * 0.382)
@@ -30,42 +36,33 @@ def generate_signals(prices):
     r4_daily = P + (range_daily * 1.5000)
     s4_daily = P - (range_daily * 1.5000)
     
-    # Align daily Camarilla levels to 4h timeframe
+    # Align daily Camarilla levels to 12h timeframe
     r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
     s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
     r4_daily_aligned = align_htf_to_ltf(prices, df_daily, r4_daily)
     s4_daily_aligned = align_htf_to_ltf(prices, df_daily, s4_daily)
     
-    # Load 12h data for trend filter (EMA34)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Main timeframe data (4h)
+    # Main timeframe data (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 2x 20-period average
+    # Volume filter: current volume > 1.5x 10-period average (10*12h = 5 days)
     volume_avg = np.zeros_like(volume)
     for i in range(len(volume)):
-        if i >= 20:
-            volume_avg[i] = np.mean(volume[i-20:i])
+        if i >= 10:
+            volume_avg[i] = np.mean(volume[i-10:i])
         else:
             volume_avg[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-    volume_spike = volume > (2.0 * volume_avg)
+    volume_filter = volume > (1.5 * volume_avg)
     
     # ATR for stoploss (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First period
     atr = np.zeros_like(close)
     for i in range(len(tr)):
         if i < 14:
@@ -77,11 +74,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(34, n):  # Start after EMA warmup
+    for i in range(10, n):
         # Skip if NaN in critical values
         if (np.isnan(r1_daily_aligned[i]) or np.isnan(s1_daily_aligned[i]) or 
-            np.isnan(r4_daily_aligned[i]) or np.isnan(s4_daily_aligned[i]) or
-            np.isnan(ema_34_12h_aligned[i])):
+            np.isnan(r4_daily_aligned[i]) or np.isnan(s4_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,8 +88,7 @@ def generate_signals(prices):
         s1 = s1_daily_aligned[i]
         r4 = r4_daily_aligned[i]
         s4 = s4_daily_aligned[i]
-        ema_12h = ema_34_12h_aligned[i]
-        vol_ok = volume_spike[i]
+        vol_ok = volume_filter[i]
         atr_val = atr[i]
         
         # Stoploss: 2 * ATR from entry
@@ -107,28 +102,44 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R4 with volume spike and 12h uptrend (close > EMA34)
-            if price > r4 and vol_ok and close[i] > ema_12h:
+            # Fade at R1/S1: mean reversion from extreme levels
+            # Long: price rejects S1 with volume confirmation (buying pressure)
+            if price > s1 and price < (s1 + (r1 - s1) * 0.3) and vol_ok:
+                # Additional confirmation: price closing near high of bar
+                if close[i] > (high[i] + low[i]) / 2:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+            # Short: price rejects R1 with volume confirmation (selling pressure)
+            elif price < r1 and price > (r1 - (r1 - s1) * 0.3) and vol_ok:
+                # Additional confirmation: price closing near low of bar
+                if close[i] < (high[i] + low[i]) / 2:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+            # Breakout at R4/S4: strong momentum continuation
+            # Long: price breaks above R4 with volume
+            elif price > r4 and vol_ok:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S4 with volume spike and 12h downtrend (close < EMA34)
-            elif price < s4 and vol_ok and close[i] < ema_12h:
+            # Short: price breaks below S4 with volume
+            elif price < s4 and vol_ok:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price returns to R1 (mean reversion) or hits stop
-            if price < r1:
+            # Long exit: price returns to S1 (mean reversion) or breaks S4 (failed breakout)
+            if price < s1 or price > r4:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price returns to S1 (mean reversion) or hits stop
-            if price > s1:
+            # Short exit: price returns to R1 (mean reversion) or breaks S4 (failed breakdown)
+            if price > r1 or price < s4:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_VolumeSpike_CamarillaBreakout"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Volume_ATRFilter"
+timeframe = "12h"
 leverage = 1.0
