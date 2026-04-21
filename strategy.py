@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: 12h Camarilla pivot (R1/S1) breakout filtered by 1d EMA50 trend and volume spike.
-In trending markets (price > EMA50_1d for long, < for short): breakout continuation (long above R1, short below S1).
-Volume confirmation (2.0x average) filters false breakouts. ATR(14) stoploss (2.0x) and discrete sizing (0.25).
-Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year). Works in bull/bear via trend alignment.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout with 1d EMA50 trend filter, volume confirmation (2.0x), and ATR(14) stoploss (2.0x).
+Only take long when price > R1 and above 1d EMA50; short when price < S1 and below 1d EMA50. Volume spike filters false breakouts.
+Designed for 4h timeframe to target 75-200 trades over 4 years (19-50/year). Works in bull/bear via trend alignment.
+Discrete sizing: 0.25. Uses proven Camarilla pivot structure with volume and trend filters to reduce overtrading.
 """
 
 import numpy as np
@@ -41,7 +41,7 @@ def generate_signals(prices):
     h4_1d = df_1d_close + 1.382 * range_1d
     l4_1d = df_1d_close - 1.382 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
@@ -140,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_ATRStop_v2"
+timeframe = "4h"
 leverage = 1.0
