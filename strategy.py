@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Regime_VolumeFilter_1wTrend
-Hypothesis: Daily KAMA direction with 1-week EMA50 trend filter and volume confirmation (>1.3x 20-period MA).
-Long when KAMA trending up, price above 1w EMA50, and volume > 1.3x average.
-Short when KAMA trending down, price below 1w EMA50, and volume > 1.3x average.
-Uses ATR-based stop (2.5x) and minimum holding period of 2 days to reduce churn.
-Designed for low trade frequency (~10-20/year) to work in both bull and bear markets via 1w trend alignment.
-KAMA adapts to market noise, reducing whipsaw in sideways markets while capturing major trends.
+12h_KAMA_Regime_Chop_VolumeBreakout
+Hypothesis: On 12h timeframe, use KAMA trend direction as primary filter, combined with 1d chop regime and volume breakout for entries.
+Long when: KAMA(12h) rising, 1d chop < 61.8 (trending regime), and volume > 2.0x 20-period MA.
+Short when: KAMA(12h) falling, 1d chop < 61.8 (trending regime), and volume > 2.0x 20-period MA.
+Uses ATR-based stop (2.5x) and discrete position sizing (0.25) to minimize fee churn.
+Designed for low trade frequency (<30/year) to work in both bull and bear markets via regime alignment.
 """
 
 import numpy as np
@@ -18,80 +17,104 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1w for EMA trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load HTF data ONCE before loop (1d for chop regime)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1w EMA50 for trend regime ===
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # === 12h KAMA for trend direction ===
+    close_12h = get_htf_data(prices, '12h')['close'].values
+    # Calculate Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_12h, 10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close_12h, 1)), axis=1)  # 10-period sum of abs changes
+    # Pad arrays to match length
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close_12h, np.nan)
+    kama[9] = close_12h[9]  # Start after 10 periods
+    for i in range(10, len(close_12h)):
+        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    kama_12h_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '12h'), kama)
     
-    # === Daily ATR (14-period) for stoploss ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # === 1d Choppiness Index (CHOP) for regime filter ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Sum of TR over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Chop calculation
+    chop = np.full_like(close_1d, np.nan)
+    mask = (hh - ll) != 0
+    chop[mask] = 100 * np.log10(tr_sum[mask] / (hh[mask] - ll[mask])) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # === 12h ATR (20-period) for stoploss ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_12h = pd.Series(tr_12h).rolling(window=20, min_periods=20).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # === Volume confirmation (1.3x 20-period MA) ===
+    # === Volume confirmation (2.0x 20-period MA) ===
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === Daily KAMA (10, 2, 30) ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)[:len(change)]  # sum of abs changes over 10 periods
-    # Pad arrays to match length
-    change_padded = np.concatenate([np.full(10, np.nan), change])
-    volatility_padded = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility_padded != 0, change_padded / volatility_padded, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
-    for i in range(50, n):  # warmup for indicators
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(kama[i]) or i < 10):
+        if (np.isnan(kama_12h_aligned[i]) or np.isnan(kama_12h_aligned[i-1]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             continue
         
-        price = close[i]
+        price = prices['close'].iloc[i]
         volume_now = volume[i]
-        ema_50_1w_val = ema_50_1w_aligned[i]
         vol_avg = vol_ma[i]
-        kama_val = kama[i]
-        kama_prev = kama[i-1]
+        kama_val = kama_12h_aligned[i]
+        kama_prev = kama_12h_aligned[i-1]
+        chop_val = chop_aligned[i]
+        atr_val = atr_12h_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x average
-        volume_confirm = volume_now > 1.3 * vol_avg
-        # KAMA direction: rising if current > previous
+        # KAMA trend direction: rising if current > previous
         kama_rising = kama_val > kama_prev
         kama_falling = kama_val < kama_prev
+        # Chop regime: trending if CHOP < 61.8
+        chop_trending = chop_val < 61.8
+        # Volume breakout: current volume > 2.0x average
+        volume_breakout = volume_now > 2.0 * vol_avg
         
         if position == 0:
-            # Long: KAMA rising, price above 1w EMA50, volume confirm
-            long_condition = kama_rising and (price > ema_50_1w_val) and volume_confirm
-            # Short: KAMA falling, price below 1w EMA50, volume confirm
-            short_condition = kama_falling and (price < ema_50_1w_val) and volume_confirm
+            # Long: KAMA rising, trending regime, volume breakout
+            long_condition = kama_rising and chop_trending and volume_breakout
+            # Short: KAMA falling, trending regime, volume breakout
+            short_condition = kama_falling and chop_trending and volume_breakout
             
             if long_condition:
                 signals[i] = 0.25
@@ -107,31 +130,26 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 2 days to reduce churn
-            if bars_since_entry < 2:
-                signals[i] = 0.25 if position == 1 else -0.25
-                continue
-            
             # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.5 * atr[i]:
+                if price < entry_price - 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price below 1w EMA50)
-                elif price < ema_50_1w_val:
+                # Trend reversal exit (KAMA falling)
+                elif kama_falling:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.5 * atr[i]:
+                if price > entry_price + 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price above 1w EMA50)
-                elif price > ema_50_1w_val:
+                # Trend reversal exit (KAMA rising)
+                elif kama_rising:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -140,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_Regime_VolumeFilter_1wTrend"
-timeframe = "1d"
+name = "12h_KAMA_Regime_Chop_VolumeBreakout"
+timeframe = "12h"
 leverage = 1.0
