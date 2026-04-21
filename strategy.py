@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v2
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume confirmation (>2.0x 20-period MA), and ATR stop (2.5x). Uses 1d HTF for robust trend regime to work in both bull and bear markets. Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_VolumeSpike_ATRStop_v1
+Hypothesis: 1d Camarilla R1/S1 breakout with 1w EMA34 trend filter, volume confirmation (>2.0x 20-period MA), and ATR stop (2.5x). Uses 1w HTF for robust trend regime to work in both bull and bear markets. Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag on daily timeframe.
 """
 
 import numpy as np
@@ -13,23 +13,20 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA34 trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load HTF data ONCE before loop (1w for EMA34 trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # === 1d EMA34 for HTF trend regime ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === 1w EMA34 for HTF trend regime ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 4h EMA20 for LTF trend alignment ===
-    close = prices['close'].values
-    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # === 4h ATR (14-period) for stoploss ===
+    # === 1d ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
@@ -41,7 +38,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 4h Camarilla pivot levels (R1, S1) ===
+    # === 1d Camarilla pivot levels (R1, S1) ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -58,7 +55,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_20_4h[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(r1[i]) or np.isnan(s1[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,8 +65,7 @@ def generate_signals(prices):
         
         price = close[i]
         volume_now = volume[i]
-        ema_34_1d_val = ema_34_1d_aligned[i]
-        ema_20_4h_val = ema_20_4h[i]
+        ema_34_1w_val = ema_34_1w_aligned[i]
         vol_avg = vol_ma[i]
         r1_val = r1[i]
         s1_val = s1[i]
@@ -77,9 +73,9 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 2.0x average
         volume_confirm = volume_now > 2.0 * vol_avg
         
-        # Trend alignment: price above both indicators for long, below both for short
-        uptrend = price > ema_34_1d_val and price > ema_20_4h_val
-        downtrend = price < ema_34_1d_val and price < ema_20_4h_val
+        # Trend alignment: price above/below 1w EMA34 for trend filter
+        uptrend = price > ema_34_1w_val
+        downtrend = price < ema_34_1w_val
         
         if position == 0:
             # Long: price breaks above R1, uptrend alignment, volume confirm
@@ -101,8 +97,8 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 4 bars to reduce churn
-            if bars_since_entry < 4:
+            # Minimum holding period of 2 days to reduce churn
+            if bars_since_entry < 2:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
@@ -112,8 +108,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price below either indicator)
-                elif price < ema_34_1d_val or price < ema_20_4h_val:
+                # Trend reversal exit (price below 1w EMA34)
+                elif price < ema_34_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -124,8 +120,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Trend reversal exit (price above either indicator)
-                elif price > ema_34_1d_val or price > ema_20_4h_val:
+                # Trend reversal exit (price above 1w EMA34)
+                elif price > ema_34_1w_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -134,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v2"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
