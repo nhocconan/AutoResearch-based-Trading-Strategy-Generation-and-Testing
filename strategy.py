@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_TrendAlign_v4
-Hypothesis: Tighten entry conditions to reduce trade count and fee drag while preserving edge. Requires volume > 2.5x 20-period average (stricter than v3's 2.0x) and adds a 4h ADX > 25 trend filter. Uses discrete position sizing (0.30) and 4-bar minimum holding. Target: 50-100 trades over 4 years (12-25/year) to minimize fee drag. Works in bull/bear via trend-filtered Camarilla breakouts with volume confirmation and ADX regime filter.
+4h_Camarilla_R1_S1_Breakout_1dEMA50_VolumeSpike_ADXTrend_v5
+Hypothesis: Further tighten entry to reduce trade count and fee drag while preserving edge across BTC/ETH/SOL. Uses 1d EMA50 for stronger trend filter, volume > 3.0x 20-period average (very strict), and ADX > 30 for strong trend only. Discrete sizing 0.30, 4-bar minimum holding. Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag and improve test generalization. Works in bull/bear via trend-filtered Camarilla breakouts with extreme volume confirmation and strong trend filter.
 """
 
 import numpy as np
@@ -13,17 +13,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA34 trend)
+    # Load HTF data ONCE before loop (1d for EMA50 trend)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === 1d EMA34 for HTF trend regime ===
+    # === 1d EMA50 for HTF trend regime ===
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h close, EMA20 for trend alignment ===
+    # === 4h close, EMA20 for short-term trend ===
     close = prices['close'].values
     ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
@@ -37,12 +37,12 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 4h volume confirmation (volume > 2.5x 20-period average - STRICTER THRESHOLD) ===
+    # === 4h volume confirmation (volume > 3.0x 20-period average - VERY STRICT) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.5 * vol_ma_20)
+    volume_confirmed = volume > (3.0 * vol_ma_20)
     
-    # === 4h ADX (14-period) for trend strength filter ===
+    # === 4h ADX (14-period) for strong trend filter ===
     plus_dm = pd.Series(np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0.0))
     minus_dm = pd.Series(np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0.0))
     tr_adx = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / atr_adx)
     dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
     adx = dx.rolling(window=14, min_periods=14).mean().values
-    strong_trend = adx > 25
+    strong_trend = adx > 30  # Only strong trends
     
     # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
     prev_high = np.roll(high, 1)
@@ -70,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_20_4h[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_20_4h[i]) or np.isnan(atr[i]) or 
             np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i]) or np.isnan(strong_trend[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -79,7 +79,7 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_34_1d_val = ema_34_1d_aligned[i]
+        ema_50_1d_val = ema_50_1d_aligned[i]
         ema_20_4h_val = ema_20_4h[i]
         r1_val = r1[i]
         s1_val = s1[i]
@@ -87,8 +87,8 @@ def generate_signals(prices):
         trend_ok = strong_trend[i]
         
         # Trend alignment: price above both indicators for long, below both for short
-        uptrend = price > ema_34_1d_val and price > ema_20_4h_val
-        downtrend = price < ema_34_1d_val and price < ema_20_4h_val
+        uptrend = price > ema_50_1d_val and price > ema_20_4h_val
+        downtrend = price < ema_50_1d_val and price < ema_20_4h_val
         
         if position == 0:
             # Long: price closes above R1, uptrend alignment, volume confirmed, strong trend
@@ -122,7 +122,7 @@ def generate_signals(prices):
                     position = 0
                     bars_since_entry = 0
                 # Trend reversal exit (price below either indicator)
-                elif price < ema_34_1d_val or price < ema_20_4h_val:
+                elif price < ema_50_1d_val or price < ema_20_4h_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -134,7 +134,7 @@ def generate_signals(prices):
                     position = 0
                     bars_since_entry = 0
                 # Trend reversal exit (price above either indicator)
-                elif price > ema_34_1d_val or price > ema_20_4h_val:
+                elif price > ema_50_1d_val or price > ema_20_4h_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -143,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_TrendAlign_v4"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_VolumeSpike_ADXTrend_v5"
 timeframe = "4h"
 leverage = 1.0
