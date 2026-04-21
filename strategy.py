@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v2
-Hypothesis: Use 1d Camarilla R1/S1 breakouts with volume confirmation and 4h EMA50 trend filter.
-Adds stricter volume filter (2.0x avg) and minimum holding period (6 bars) to reduce overtrading.
-Long when price breaks above R1 with volume > 2.0x 20-bar avg AND price > EMA50.
-Short when price breaks below S1 with volume > 2.0x 20-bar avg AND price < EMA50.
+1d_1w_Camarilla_Pivot_Breakout_Momentum
+Hypothesis: Use weekly trend filter with daily Camarilla R1/S1 breakouts.
+Long when daily price breaks above R1 with volume > 1.5x 20-bar avg AND weekly close > weekly open.
+Short when daily price breaks below S1 with volume > 1.5x 20-bar avg AND weekly close < weekly open.
 Exit when price crosses back through the pivot point (PP).
-Designed for 4h timeframe to capture multi-day moves with ~20-30 trades/year.
-Works in bull markets by buying breakouts and in bear markets by selling breakdowns.
-Volume and trend filters reduce false breakouts and whipsaws.
+Designed for 1d timeframe to capture multi-day moves with ~10-25 trades/year.
+Weekly trend filter reduces counter-trend trades in choppy markets.
 """
 
 import numpy as np
@@ -20,27 +18,34 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data once for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly trend: bullish if close > open
+    weekly_bullish = df_weekly['close'] > df_weekly['open']
+    weekly_bullish_vals = weekly_bullish.values
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_weekly, weekly_bullish_vals)
+    
+    # Load daily data for Camarilla pivots
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
+        return np.zeros(n)
+    
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
     # Camarilla pivot levels (based on previous day)
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pp = np.full_like(close_1d, np.nan)
-    r1 = np.full_like(close_1d, np.nan)
-    s1 = np.full_like(close_1d, np.nan)
+    pp = np.full_like(close_daily, np.nan)
+    r1 = np.full_like(close_daily, np.nan)
+    s1 = np.full_like(close_daily, np.nan)
     
-    for i in range(1, len(high_1d)):
-        pp[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
-        r1[i] = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
-        s1[i] = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12.0
+    for i in range(1, len(high_daily)):
+        pp[i] = (high_daily[i-1] + low_daily[i-1] + close_daily[i-1]) / 3.0
+        r1[i] = close_daily[i-1] + (high_daily[i-1] - low_daily[i-1]) * 1.1 / 12.0
+        s1[i] = close_daily[i-1] - (high_daily[i-1] - low_daily[i-1]) * 1.1 / 12.0
     
     # Shift to align with current day (levels are based on previous day)
     pp = np.roll(pp, 1)
@@ -50,78 +55,60 @@ def generate_signals(prices):
     r1[0] = np.nan
     s1[0] = np.nan
     
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 4h EMA50 for trend filter
-    close_s = prices['close']
-    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    pp_aligned = align_htf_to_ltf(prices, df_daily, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
     for i in range(50, n):
         # Skip if indicators not ready
         if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50[i])):
+            np.isnan(weekly_bullish_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average (stricter)
+        # Volume filter: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 2.0 * vol_ma
+            volume_ok = volume > 1.5 * vol_ma
         else:
             volume_ok = False
         
         if position == 0:
-            # Long conditions: break above R1 + volume confirmation + price above EMA50
-            if price > r1_aligned[i] and volume_ok and price > ema_50[i]:
+            # Long conditions: break above R1 + volume confirmation + weekly bullish
+            if price > r1_aligned[i] and volume_ok and weekly_bullish_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short conditions: break below S1 + volume confirmation + price below EMA50
-            elif price < s1_aligned[i] and volume_ok and price < ema_50[i]:
+            # Short conditions: break below S1 + volume confirmation + weekly bearish
+            elif price < s1_aligned[i] and volume_ok and not weekly_bullish_aligned[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
-            bars_since_entry += 1
-            # Minimum hold: 6 bars (24 hours)
-            if bars_since_entry < 6:
-                signals[i] = 0.25
             # Long exit: price crosses back below pivot point
-            elif price < pp_aligned[i]:
+            if price < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            bars_since_entry += 1
-            # Minimum hold: 6 bars (24 hours)
-            if bars_since_entry < 6:
-                signals[i] = -0.25
             # Short exit: price crosses back above pivot point
-            elif price > pp_aligned[i]:
+            if price > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_1d_Camarilla_R1S1_Breakout_Volume_Trend_v2"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Pivot_Breakout_Momentum"
+timeframe = "1d"
 leverage = 1.0
