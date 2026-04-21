@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_12h_Pullback_TrendFollow
-Hypothesis: In trending markets, price pulls back to the 12-period EMA on the 4h chart before resuming trend. Using 12h EMA50 as trend filter ensures we only trade in the direction of higher timeframe momentum. Volume confirmation (>1.5x average) filters weak moves. Designed for low trade frequency (~20-40/year) to minimize fee drag. Works in bull markets (buy pullbacks in uptrends) and bear markets (sell rallies in downtrends).
+4h_12h_MomentumBreakout_VolumeRegime
+Hypothesis: Combining 4h momentum (price > SMA20) with 12h trend filter (EMA50) and volume confirmation (>1.5x average) creates robust signals in both bull and bear markets. The 12h EMA50 ensures we trade with the higher timeframe trend, reducing false signals during sideways periods. Volume confirmation ensures momentum is backed by participation. Designed for low trade frequency (target: 25-50/year) to minimize fee drag in 4h timeframe. Uses discrete position sizing (0.25) to reduce churn.
 """
 
 import numpy as np
@@ -35,12 +35,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA12 for pullback entries
-    ema12 = np.zeros_like(close)
-    ema12[0] = close[0]
-    alpha12 = 2.0 / (12 + 1)
-    for i in range(1, len(close)):
-        ema12[i] = alpha12 * close[i] + (1 - alpha12) * ema12[i-1]
+    # 4h SMA20 for momentum filter
+    sma20 = np.zeros_like(close)
+    for i in range(n):
+        if i < 20:
+            sma20[i] = np.mean(close[:i+1])
+        else:
+            sma20[i] = np.mean(close[i-20+1:i+1])
     
     # Volume filter: current volume > 1.5x 20-period average
     volume_avg = np.zeros_like(volume)
@@ -56,7 +57,7 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First period
     atr = np.zeros_like(close)
     for i in range(len(tr)):
         if i < 14:
@@ -78,7 +79,7 @@ def generate_signals(prices):
         
         price = close[i]
         ema50 = ema50_12h_aligned[i]
-        ema12_val = ema12[i]
+        sma20_val = sma20[i]
         vol_ok = volume_filter[i]
         atr_val = atr[i]
         
@@ -93,28 +94,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price pulls back to EMA12 in uptrend (price > 12h EMA50) with volume
-            if price >= ema12_val and price > ema50 and vol_ok:
+            # Long: price above SMA20 (momentum) with volume and 12h uptrend (price > 12h EMA50)
+            if price > sma20_val and vol_ok and price > ema50:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price rallies to EMA12 in downtrend (price < 12h EMA50) with volume
-            elif price <= ema12_val and price < ema50 and vol_ok:
+            # Short: price below SMA20 (momentum) with volume and 12h downtrend (price < 12h EMA50)
+            elif price < sma20_val and vol_ok and price < ema50:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position == 1:
-            # Long exit: price breaks below EMA12 (end of pullback/resume) or trend change
-            if price < ema12_val or price < ema50:
+            # Long exit: price falls below SMA20 (lost momentum) or breaks below 12h EMA50 (trend change)
+            if price < sma20_val or price < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above EMA12 (end of rally/resume) or trend change
-            if price > ema12_val or price > ema50:
+            # Short exit: price rises above SMA20 (lost momentum) or breaks above 12h EMA50 (trend change)
+            if price > sma20_val or price > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Pullback_TrendFollow"
+name = "4h_12h_MomentumBreakout_VolumeRegime"
 timeframe = "4h"
 leverage = 1.0
