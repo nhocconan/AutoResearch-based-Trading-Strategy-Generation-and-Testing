@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_HTF_Camarilla_R3S3_Breakout_VolumeSpike_ATRStop_V2
-Hypothesis: Use 1d Camarilla R3/S3 levels + 4h volume spike (>2x 20-bar MA) for breakout entry + ATR(14) stoploss (2.0x). 
-Adds regime filter: only trade when 4h ADX(14) > 20 to avoid choppy markets. 
-Target 15-25 trades/year per symbol. Works in bull (breakouts) and bear (tight stops limit losses) via volume/ADX confluence.
+1d_HTF_Camarilla_R1S1_Breakout_VolumeATRStop_V1
+Hypothesis: Use 1w Camarilla R1/S1 levels + 1d volume spike (>1.8x 20-bar MA) for breakout entry + ATR(14) stoploss (1.8x). 
+Add regime filter: only trade when 1d ADX(14) > 22 to avoid choppy markets. 
+Target 8-18 trades/year per symbol. Works in bull (breakouts) and bear (tight stops limit losses) via volume/ADX confluence.
+Primary timeframe: 1d, HTF: 1w. Designed for BTC/ETH resilience in ranging/bear markets.
 """
 
 import numpy as np
@@ -16,27 +17,27 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')  # for daily Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')  # for weekly Camarilla pivots
     
-    if len(df_1d) < 2:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # === 1d Camarilla Pivot Levels (R3, S3) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1w Camarilla Pivot Levels (R1, S1) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla levels
-    camarilla_r3 = pivot + 1.1 * (high_1d - low_1d) / 2.0
-    camarilla_s3 = pivot - 1.1 * (high_1d - low_1d) / 2.0
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Camarilla levels (R1, S1)
+    camarilla_r1 = pivot + 1.1 * (high_1w - low_1w) / 4.0
+    camarilla_s1 = pivot - 1.1 * (high_1w - low_1w) / 4.0
     
-    # Align to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align to 1d timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
-    # === 4h Indicators ===
+    # === 1d Indicators ===
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -68,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) 
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) 
             or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -77,22 +78,22 @@ def generate_signals(prices):
         
         price = close[i]
         vol = volume[i]
-        vol_ok = vol > 2.0 * vol_ma[i]  # volume spike confirmation
-        adx_ok = adx[i] > 20.0  # regime filter: only trade when trending
+        vol_ok = vol > 1.8 * vol_ma[i]  # volume spike confirmation
+        adx_ok = adx[i] > 22.0  # regime filter: only trade when trending
         
         if position == 0:
-            # Long: break above Camarilla R3 with volume spike and ADX > 20
-            if price > camarilla_r3_aligned[i-1] and vol_ok and adx_ok:
+            # Long: break above Camarilla R1 with volume spike and ADX > 22
+            if price > camarilla_r1_aligned[i-1] and vol_ok and adx_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Camarilla S3 with volume spike and ADX > 20
-            elif price < camarilla_s3_aligned[i-1] and vol_ok and adx_ok:
+            # Short: break below Camarilla S1 with volume spike and ADX > 22
+            elif price < camarilla_s1_aligned[i-1] and vol_ok and adx_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit: ATR stoploss or opposite signal
-            if price < camarilla_r3_aligned[i-1] - 2.0 * atr[i] or (price < camarilla_s3_aligned[i-1] and vol_ok):
+            if price < camarilla_r1_aligned[i-1] - 1.8 * atr[i] or (price < camarilla_s1_aligned[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,7 +101,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit: ATR stoploss or opposite signal
-            if price > camarilla_s3_aligned[i-1] + 2.0 * atr[i] or (price > camarilla_r3_aligned[i-1] and vol_ok):
+            if price > camarilla_s1_aligned[i-1] + 1.8 * atr[i] or (price > camarilla_r1_aligned[i-1] and vol_ok):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_HTF_Camarilla_R3S3_Breakout_VolumeSpike_ATRStop_V2"
-timeframe = "4h"
+name = "1d_HTF_Camarilla_R1S1_Breakout_VolumeATRStop_V1"
+timeframe = "1d"
 leverage = 1.0
