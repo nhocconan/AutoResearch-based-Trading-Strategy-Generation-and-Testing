@@ -13,10 +13,10 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # 1d Donchian(20) channels for breakout signals
     high_1d = df_1d['high'].values
@@ -47,7 +47,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
             np.isnan(donch_low_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
             np.isnan(vol_ratio_aligned[i])):
             if position != 0:
@@ -56,11 +56,11 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        ema_trend = ema_34_1d_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
         upper_band = donch_high_aligned[i]
         lower_band = donch_low_aligned[i]
         vol_ratio = vol_ratio_aligned[i]
-        vol_threshold = 1.2  # Volume must be above average
+        vol_threshold = 1.3  # Volume must be above average
         atr_ratio_val = atr_ratio_aligned[i]
         
         if position == 0:
@@ -68,23 +68,23 @@ def generate_signals(prices):
             if (price_close > upper_band and 
                 price_close > ema_trend and 
                 vol_ratio > vol_threshold and 
-                atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+                atr_ratio_val > 0.7 and atr_ratio_val < 2.2):
                 signals[i] = 0.25
                 position = 1
             # Enter short: price breaks below Donchian low, downtrend, volume spike, moderate volatility
             elif (price_close < lower_band and 
                   price_close < ema_trend and 
                   vol_ratio > vol_threshold and 
-                  atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
+                  atr_ratio_val > 0.7 and atr_ratio_val < 2.2):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
             # Exit: reverse breakout or volatility extremes
-            if position == 1 and (price_close < lower_band or atr_ratio_val > 2.2 or atr_ratio_val < 0.6):
+            if position == 1 and (price_close < lower_band or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and (price_close > upper_band or atr_ratio_val > 2.2 or atr_ratio_val < 0.6):
+            elif position == -1 and (price_close > upper_band or atr_ratio_val > 2.5 or atr_ratio_val < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_1dTrend_VolumeATR_v2"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dTrend_VolumeATR"
+timeframe = "4h"
 leverage = 1.0
