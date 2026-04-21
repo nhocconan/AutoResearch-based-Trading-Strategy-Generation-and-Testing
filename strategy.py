@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Triple Barrier Method with Volatility-Adjusted Targets and Mean Reversion.
-Long when price touches lower band (mean reversion) with volatility filter; short when touches upper band.
-Uses Bollinger Bands (20,2) for dynamic support/resistance and ATR for volatility scaling.
-Designed for 20-40 trades/year to minimize fee drag while capturing mean-reversion opportunities.
+Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume confirmation.
+Longs when Williams %R < -80 (oversold) with 1d EMA50 uptrend and volume > 1.3x average.
+Shorts when Williams %R > -20 (overbought) with 1d EMA50 downtrend and volume > 1.3x average.
+Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts).
+Williams %R identifies exhaustion points in both trending and ranging markets.
+Designed for 15-25 trades/year to minimize fee fade while capturing high-probability reversals.
 """
 
 import numpy as np
@@ -15,71 +17,70 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands (20,2) on close prices
-    close = prices['close'].values
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
+    # Load daily data ONCE before loop for EMA trend and Williams %R
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # ATR for volatility filter and stoploss (14-period)
-    tr1 = prices['high'].values - prices['low'].values
-    tr2 = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
-    tr3 = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volatility filter: only trade when ATR > 50-period average (avoid low volatility)
-    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr / atr_ma_50
+    # Calculate 50-period EMA for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Align EMA and Williams %R to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Volume confirmation: volume spike > 1.3x 30-period average
+    vol_ma_30 = pd.Series(prices['volume'].values).rolling(window=30, min_periods=30).mean().values
+    vol_ratio = prices['volume'].values / vol_ma_30
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = prices['close'].iloc[i]
-        price_high = prices['high'].iloc[i]
-        price_low = prices['low'].iloc[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        atr_val = atr[i]
-        vol_filter_val = vol_filter[i]
+        williams_r_val = williams_r_aligned[i]
+        ema_50_val = ema_50_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long: touch lower band with sufficient volatility
-            if (price_low <= lower and 
-                vol_filter_val > 1.0):
+            # Enter long: oversold with uptrend and volume
+            if (williams_r_val < -80 and 
+                ema_50_val > 0 and  # EMA slope proxy: current EMA > previous EMA (handled by alignment)
+                vol_ratio_val > 1.3):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: touch upper band with sufficient volatility
-            elif (price_high >= upper and 
-                  vol_filter_val > 1.0):
+            # Enter short: overbought with downtrend and volume
+            elif (williams_r_val > -20 and 
+                  ema_50_val < 0 and  # EMA slope proxy
+                  vol_ratio_val > 1.3):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: mean reversion to middle band OR volatility collapse
+            # Exit: Williams %R crosses back above -50 (long) or below -50 (short)
             exit_signal = False
             
-            # Mean reversion exit: price crosses SMA20
-            if position == 1 and price_close >= sma_20[i]:
+            if position == 1 and williams_r_val > -50:
                 exit_signal = True
-            elif position == -1 and price_close <= sma_20[i]:
-                exit_signal = True
-            
-            # Volatility collapse exit: ATR drops below 30-period average
-            if vol_filter_val < 0.7:
+            elif position == -1 and williams_r_val < -50:
                 exit_signal = True
             
             if exit_signal:
@@ -91,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TripleBarrier_MeanReversion_VolatilityFilter"
-timeframe = "4h"
+name = "12h_WilliamsR_MeanReversion_1dEMA50_Trend_Volume1.3x"
+timeframe = "12h"
 leverage = 1.0
