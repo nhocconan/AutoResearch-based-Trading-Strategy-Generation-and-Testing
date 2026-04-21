@@ -1,111 +1,98 @@
-#!/usr/bin/env python3
-"""
-12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter
-Hypothesis: On 12h timeframe, breakouts above daily R1 or below daily S1 with volume confirmation and aligned 1d trend (EMA50) yield high-probability trades. Uses tight entry criteria to limit trades (12-37/year) and avoid fee drift. Works in bull/bear markets by only taking breakouts in direction of daily trend.
-"""
+# 4h_Angle_of_Attack_V1
+# Hypothesis: On 4h timeframe, measure the angle of price movement over 3 periods as a proxy for momentum strength. 
+# Enter long when angle > 30 degrees (strong upward momentum) with volume confirmation and price above 200 EMA.
+# Enter short when angle < -30 degrees (strong downward momentum) with volume confirmation and price below 200 EMA.
+# Exit when angle returns to neutral range (-10 to 10 degrees) or volume drops.
+# This captures strong momentum moves while avoiding chop. The 200 EMA filter ensures we only trade with the long-term trend.
+# Volume confirmation ensures moves are supported by participation. Designed to work in both bull (catch rallies) and bear (catch crashes) markets.
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
+from math import degrees, atan2
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close
-    r1 = close + range_val * 1.1 / 12
-    s1 = close - range_val * 1.1 / 12
-    return r1, s1, close  # pivot not used directly
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Load daily data once for trend and pivot calculation
+    # Load daily data for 200 EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA200 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Calculate 4-period price change for angle calculation (3 intervals = 4 points)
+    close = prices['close'].values
+    # Price change over 3 periods (4 points: current and 3 periods ago)
+    price_change = close - np.roll(close, 4)
+    # Time constant: 3 periods * 4 hours = 12 hours in price units
+    # We'll use a fixed time value since we're measuring angle in price-time space
+    time_interval = 3  # 3 periods
+    # Avoid division by zero
+    angles = np.zeros_like(close)
+    for i in range(4, n):
+        if time_interval != 0:
+            # Calculate angle in degrees: arctan(price_change / time_interval) * (180/pi)
+            angles[i] = degrees(atan2(price_change[i], time_interval))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if EMA not ready
-        if np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(ema_200_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate daily Camarilla levels from previous day's OHLC
-        # Need to find index of previous completed 1d bar
-        # Since we're on 12h timeframe, we use the prior day's data directly
-        prev_day_idx = len(df_1d) - 1  # This is approximate; better to use actual alignment
-        # Instead, we calculate pivots using the prior completed day's data
-        # We'll use a rolling window approach on the daily data
-        
-        # Get current 12h bar's timestamp to find corresponding prior day
-        # Simpler: use the daily data up to the current point
-        # We need the prior completed day's OHLC
-        # Since we aligned the EMA, we can use the same logic for pivots
-        # Extract daily OHLC series
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d_arr = df_1d['close'].values
-        
-        # Align these to 12h timeframe
-        high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-        low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_arr)
-        
-        # Use prior bar's aligned daily values (previous completed day)
-        prev_high = high_1d_aligned[i-1]
-        prev_low = low_1d_aligned[i-1]
-        prev_close = close_1d_aligned[i-1]
-        
-        r1, s1, _ = calculate_camarilla(prev_high, prev_low, prev_close)
-        
-        price = prices['close'].iloc[i]
+        price = close[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
+        # Volume confirmation: current volume > 1.3 * 20-period average
         if i >= 20:
             vol_ma = prices['volume'].iloc[i-20:i].mean()
-            volume_ok = volume > 1.5 * vol_ma
+            volume_ok = volume > 1.3 * vol_ma
         else:
             volume_ok = False
         
-        # Trend filter: price > EMA50 for long, price < EMA50 for short
-        trend_long = price > ema_50_1d_aligned[i]
-        trend_short = price < ema_50_1d_aligned[i]
+        # Trend filter: price > EMA200 for long, price < EMA200 for short
+        trend_long = price > ema_200_1d_aligned[i]
+        trend_short = price < ema_200_1d_aligned[i]
+        
+        # Momentum conditions
+        angle = angles[i]
+        strong_up = angle > 30.0    # >30 degrees = strong upward momentum
+        strong_down = angle < -30.0  # <-30 degrees = strong downward momentum
+        neutral = abs(angle) <= 10.0  # -10 to 10 degrees = neutral/no strong momentum
         
         if position == 0:
-            # Long: price breaks above R1 + volume confirmation + uptrend
-            if price > r1 and volume_ok and trend_long:
+            # Long: strong upward momentum + volume confirmation + uptrend
+            if strong_up and volume_ok and trend_long:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume confirmation + downtrend
-            elif price < s1 and volume_ok and trend_short:
+            # Short: strong downward momentum + volume confirmation + downtrend
+            elif strong_down and volume_ok and trend_short:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price breaks below S1 or trend turns bearish
-            if price < s1 or not trend_long:
+            # Long exit: momentum turns neutral or down OR trend turns bearish
+            if neutral or strong_down or not trend_long:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price breaks above R1 or trend turns bullish
-            if price > r1 or not trend_short:
+            # Short exit: momentum turns neutral or up OR trend turns bullish
+            if neutral or strong_up or not trend_short:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R1S1_Breakout_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_Angle_of_Attack_V1"
+timeframe = "4h"
 leverage = 1.0
