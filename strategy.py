@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_PivotPoint_Breakout_WeeklyTrend_VolumeFilter
-Hypothesis: Daily Camarilla pivot (R1/S1) breakouts filtered by weekly EMA34 trend and volume spike.
-Enter long when price breaks above daily R1 with weekly uptrend and above-average volume.
-Enter short when price breaks below daily S1 with weekly downtrend and above-average volume.
-Exit on opposite level break or ATR(14) trailing stop (2.0*ATR).
-Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drift.
-Works in bull/bear via weekly trend alignment and volume confirmation as regime filter.
+6h_WilliamsVixFix_MeanReversion
+Hypothesis: The Williams VixFix indicator identifies periods of extreme fear/greed on 6h charts.
+When VixFix > 0.8 (extreme fear) and price is below 6h EMA50, enter long.
+When VixFix < 0.2 (extreme greed/complacency) and price is above 6h EMA50, enter short.
+Uses 1d timeframe for EMA50 trend filter to avoid counter-trend trades.
+Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
+Works in bull/bear via mean reversion from extremes + trend alignment filter.
 """
 
 import numpy as np
@@ -18,36 +18,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (daily for pivots, weekly for trend)
+    # Load HTF data ONCE before loop (daily for EMA50 trend)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # === Daily Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Williams VixFix (6h) ===
+    # VixFix = ((Highest High in 22 periods - Low) / Highest High in 22 periods) * 100
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    highest_high = pd.Series(high).rolling(window=22, min_periods=22).max().values
+    vixfix = ((highest_high - low) / highest_high) * 100
+    # Normalize to 0-1 range (typical VixFix ranges 0-100, extremes >80)
+    vixfix_norm = vixfix / 100.0
+    
+    # === Daily EMA50 for trend filter ===
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_range = (high_1d - low_1d) * 1.1 / 12.0
-    r1_1d = close_1d + camarilla_range
-    s1_1d = close_1d - camarilla_range
-    
-    # Align to 1d timeframe (use previous completed daily bar)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # === Weekly EMA34 for HTF trend filter ===
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # === Volume spike filter (20-period average) ===
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === ATR (14-period) for stoploss ===
+    # === ATR (10-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -56,7 +48,7 @@ def generate_signals(prices):
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr = tr.rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,9 +56,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) 
-            or np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i]) 
-            or np.isnan(atr[i])):
+        if (np.isnan(vixfix_norm[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,23 +65,16 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Volume confirmation: current volume > 20-period average
-            vol_confirm = volume[i] > vol_ma[i]
+            # Long conditions: extreme fear (VixFix > 0.8) + price below daily EMA50 (uptrend filter)
+            long_condition = (vixfix_norm[i] > 0.8) and (price < ema_50_1d_aligned[i])
+            # Short conditions: extreme greed/complacency (VixFix < 0.2) + price above daily EMA50 (downtrend filter)
+            short_condition = (vixfix_norm[i] < 0.2) and (price > ema_50_1d_aligned[i])
             
-            # Long conditions: price > daily R1, weekly uptrend, volume spike
-            long_breakout = price > r1_1d_aligned[i]
-            long_trend = price > ema_34_1w_aligned[i]
-            
-            # Short conditions: price < daily S1, weekly downtrend, volume spike
-            short_breakout = price < s1_1d_aligned[i]
-            short_trend = price < ema_34_1w_aligned[i]
-            
-            # Entry logic
-            if long_breakout and long_trend and vol_confirm:
+            if long_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            elif short_breakout and short_trend and vol_confirm:
+            elif short_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -101,8 +84,8 @@ def generate_signals(prices):
             if price < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes below daily S1 (support broken)
-            elif price < s1_1d_aligned[i]:
+            # Exit when fear subsides (VixFix < 0.5) or price reaches EMA50
+            elif (vixfix_norm[i] < 0.5) or (price >= ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,8 +96,8 @@ def generate_signals(prices):
             if price > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Trailing exit: price closes above daily R1 (resistance broken)
-            elif price > r1_1d_aligned[i]:
+            # Exit when greed subsides (VixFix > 0.5) or price reaches EMA50
+            elif (vixfix_norm[i] > 0.5) or (price <= ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_PivotPoint_Breakout_WeeklyTrend_VolumeFilter"
-timeframe = "1d"
+name = "6h_WilliamsVixFix_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
