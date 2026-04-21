@@ -8,86 +8,114 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Williams %R (14-period)
+    # Calculate 1d ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams %R = -(HH - Close) / (HH - LL) * 100
-    highest_high = np.maximum.accumulate(high_1d)
-    lowest_low = np.minimum.accumulate(low_1d)
-    williams_r = np.zeros_like(close_1d)
-    hh_minus_ll = highest_high - lowest_low
-    williams_r = np.where(hh_minus_ll != 0, -(highest_high - close_1d) / hh_minus_ll * 100, -50)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Calculate 1d Williams %R EMA (9-period)
-    williams_ema = pd.Series(williams_r).ewm(span=9, adjust=False).values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate 6h price position relative to 1d VWAP approximation
-    # Approximate VWAP using typical price * volume / cumulative volume
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    vwap_numerator = typical_price * df_1d['volume'].values
-    vwap_denominator = np.cumsum(df_1d['volume'].values)
-    vwap = np.where(vwap_denominator != 0, np.cumsum(vwap_numerator) / vwap_denominator, typical_price)
+    # Smooth TR and DM with Wilder's smoothing
+    atr = np.zeros_like(tr)
+    dm_plus_smooth = np.zeros_like(dm_plus)
+    dm_minus_smooth = np.zeros_like(dm_minus)
     
-    # Calculate 6h returns for momentum
-    close_6h = prices['close'].values
-    returns = np.zeros_like(close_6h)
-    returns[1:] = (close_6h[1:] - close_6h[:-1]) / close_6h[:-1]
+    # Initial values
+    atr[13] = np.mean(tr[1:14])
+    dm_plus_smooth[13] = np.mean(dm_plus[1:14])
+    dm_minus_smooth[13] = np.mean(dm_minus[1:14])
     
-    # Align 1d indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    williams_ema_aligned = align_htf_to_ltf(prices, df_1d, williams_ema)
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    # Wilder's smoothing
+    for i in range(14, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
+        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
+    
+    # DI and DX
+    di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
+    di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
+    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    
+    # ADX
+    adx = np.zeros_like(dx)
+    adx[27] = np.mean(dx[14:28])  # First ADX after 2*period
+    for i in range(28, len(dx)):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Calculate 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 12h close price momentum (5-period ROC)
+    close_12h = prices['close'].values
+    roc = np.zeros_like(close_12h)
+    roc[5:] = (close_12h[5:] - close_12h[:-5]) / close_12h[:-5] * 100
+    
+    # Align 1d indicators to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(28, n):  # Start after ADX warmup
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(williams_ema_aligned[i]) or
-            np.isnan(vwap_aligned[i]) or np.isnan(returns[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(roc[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        current_price = prices['close'].iloc[i]
+        # Current price and volume (12h close and 1d volume aligned)
+        price_close = prices['close'].iloc[i]
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)[i]
         
         if position == 0:
-            # Enter long: Williams %R oversold AND price below VWAP AND positive momentum
-            if (williams_r_aligned[i] < -80 and
-                williams_r_aligned[i] > williams_ema_aligned[i] and  # Williams crossing above EMA
-                current_price < vwap_aligned[i] and
-                returns[i] > 0):
+            # Enter long: Positive momentum + strong trend + volume surge
+            if (roc[i] > 0.5 and roc[i-1] <= 0.5 and
+                adx_aligned[i] > 25 and
+                vol_1d_current > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R overbought AND price above VWAP AND negative momentum
-            elif (williams_r_aligned[i] > -20 and
-                  williams_r_aligned[i] < williams_ema_aligned[i] and  # Williams crossing below EMA
-                  current_price > vwap_aligned[i] and
-                  returns[i] < 0):
+            # Enter short: Negative momentum + strong trend + volume surge
+            elif (roc[i] < -0.5 and roc[i-1] >= -0.5 and
+                  adx_aligned[i] > 25 and
+                  vol_1d_current > 1.5 * vol_ma_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: Williams %R crosses EMA in opposite direction OR price crosses VWAP
+            # Exit: Momentum reverses or volume drops below average
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams crosses below EMA OR price crosses above VWAP
-                if (williams_r_aligned[i] < williams_ema_aligned[i] or
-                    current_price > vwap_aligned[i]):
+                # Exit long: Momentum turns negative or volume < average
+                if (roc[i] < 0 or
+                    vol_1d_current < vol_ma_20_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: Williams crosses above EMA OR price crosses below VWAP
-                if (williams_r_aligned[i] > williams_ema_aligned[i] or
-                    current_price < vwap_aligned[i]):
+                # Exit short: Momentum turns positive or volume < average
+                if (roc[i] > 0 or
+                    vol_1d_current < vol_ma_20_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_VWAP_Cross"
-timeframe = "6h"
+name = "12h_ROC_ADX25_Volume1.5x"
+timeframe = "12h"
 leverage = 1.0
