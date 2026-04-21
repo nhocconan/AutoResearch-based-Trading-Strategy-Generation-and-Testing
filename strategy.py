@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike_v3
-Hypothesis: Camarilla R1/S1 breakouts on 4h with 12h EMA50 trend filter and volume spike (2.0x 20-period average) capture momentum in both bull and bear regimes. Uses discrete sizing (0.25) and ATR-based stoploss (2.0x) to minimize fee drag. Target: 75-200 total trades over 4 years for BTC/ETH/SOL. Improved from v2 by using 12h EMA50 (more responsive than 1d EMA34) and tightening volume confirmation to reduce churn.
+1d_KAMA_Direction_RSI_Filter_Volume_Chop_Regime_v1
+Hypothesis: On daily timeframe, KAMA direction (trend) combined with RSI extremes (mean reversion within trend) 
+and volume confirmation captures sustainable moves. Choppiness index regime filter avoids sideways markets. 
+ATR-based stoploss manages risk. Designed for low trade frequency (<30/year) to minimize fee drag in bear markets.
 """
 
 import numpy as np
@@ -13,51 +15,83 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (12h for trend regime)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load HTF data ONCE before loop (1w for trend regime)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # === 12h EMA50 for trend regime ===
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === 1w EMA34 for weekly trend regime ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 4h ATR (14-period) for stoploss ===
+    # === Daily indicators ===
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
+    
+    # KAMA (adaptive trend)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period sum of abs changes
+    # Handle first 9 values
+    change = np.concatenate([np.full(9, np.nan), change])
+    volatility = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        if not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = close[i]
+    
+    # RSI(14)
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(loss_ma != 0, gain_ma / loss_ma, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation (volume > 1.5x 20-day average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma_20)
+    volume_confirmed = volume > (1.5 * vol_ma_20)
     
-    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # first bar invalid
+    # Choppiness Index (14-period) for regime filter
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.where((hh - ll) != 0, 
+                    100 * np.log10(tr_sum / (hh - ll)) / np.log10(14), 
+                    50)
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12.0
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12.0
+    # ATR(14) for stoploss
+    tr_atr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr_atr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
-    for i in range(100, n):
+    for i in range(50, n):  # warmup for indicators
         # Skip if indicators not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or np.isnan(volume_confirmed[i]) or 
+            np.isnan(chop[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,24 +99,35 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_50_12h_val = ema_50_12h_aligned[i]
-        r1_val = r1[i]
-        s1_val = s1[i]
+        ema_34_1w_val = ema_34_1w_aligned[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
         vol_conf = volume_confirmed[i]
+        chop_val = chop[i]
+        atr_val = atr[i]
         
-        # Trend regime
-        is_bull = price > ema_50_12h_val
-        is_bear = price < ema_50_12h_val
+        # Trend regime from weekly EMA34
+        is_bull = price > ema_34_1w_val
+        is_bear = price < ema_34_1w_val
+        
+        # Choppiness filter: only trade when CHOP < 61.8 (trending) or > 38.2 (not too choppy)
+        # Actually, we want to avoid extreme chop: CHOP > 61.8 is too choppy
+        not_too_choppy = chop_val <= 61.8
         
         if position == 0:
-            if is_bull:
-                # Bull regime: long breakouts favored
-                long_condition = (price > r1_val) and vol_conf
-                short_condition = (price < s1_val) and vol_conf and (price < ema_50_12h_val * 0.99)  # stricter for shorts
-            else:  # bear regime
-                # Bear regime: short breakdowns favored
-                short_condition = (price < s1_val) and vol_conf
-                long_condition = (price > r1_val) and vol_conf and (price > ema_50_12h_val * 1.01)  # stricter for longs
+            if is_bull and not_too_choppy:
+                # Bull regime: long on pullbacks (RSI < 40) with volume
+                long_condition = (price > kama_val) and (rsi_val < 40) and vol_conf
+                # Short only on extreme overbought
+                short_condition = (rsi_val > 80) and vol_conf and (price < kama_val * 0.98)
+            elif is_bear and not_too_choppy:
+                # Bear regime: short on bounces (RSI > 60) with volume
+                short_condition = (price < kama_val) and (rsi_val > 60) and vol_conf
+                # Long only on extreme oversold
+                long_condition = (rsi_val < 20) and vol_conf and (price > kama_val * 1.02)
+            else:
+                long_condition = False
+                short_condition = False
             
             if long_condition:
                 signals[i] = 0.25
@@ -98,31 +143,31 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 3 bars to reduce churn
+            # Minimum holding period of 3 days to reduce churn
             if bars_since_entry < 3:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
-            # Check stoploss (2.0x ATR)
+            # Check stoploss (2.5x ATR)
             if position == 1:
-                if price < entry_price - 2.0 * atr[i]:
+                if price < entry_price - 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks below S1 (failed breakout)
-                elif price < s1_val:
+                # Exit if RSI shows exhaustion
+                elif rsi_val > 70:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price > entry_price + 2.0 * atr[i]:
+                if price > entry_price + 2.5 * atr_val:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks above R1 (failed breakdown)
-                elif price > r1_val:
+                # Exit if RSI shows exhaustion
+                elif rsi_val < 30:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -131,6 +176,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike_v3"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_Filter_Volume_Chop_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
