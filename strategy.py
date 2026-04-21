@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_VolumeATRStop_v1
-Hypothesis: Breakout at Camarilla R1/S1 levels with volume confirmation and ATR trailing stop on 12h timeframe.
-Works in bull/bear: In uptrend, buy R1 breakouts; in downtrend, sell S1 breakdowns.
-Target: 12-37 trades/year per symbol (50-150 over 4 years) to avoid fee drag.
-Uses 12h primary timeframe with 1d HTF for Camarilla levels.
+4h_Camarilla_R1S1_Breakout_VolumeATRStop_v3
+Hypothesis: Breakout at Camarilla R1/S1 levels with volume confirmation and ATR-based trailing stop.
+Uses 4h timeframe with 12h HTF trend filter to reduce false breakouts. Works in bull/bear: 
+In uptrend (12h close > 12h EMA34), buy R1 breakouts; in downtrend (12h close < 12h EMA34), sell S1 breakdowns.
+Volume confirmation and ATR trailing stop reduce whipsaws. Target: 20-40 trades/year per symbol (80-160 over 4 years).
 """
 
 import numpy as np
@@ -16,16 +16,21 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels (HTF)
+    # Load 1d data once for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Load 12h data once for HTF trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 35:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for Camarilla calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
@@ -33,18 +38,19 @@ def generate_signals(prices):
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Camarilla levels: R1, S1, R3, S3
+    # Camarilla levels: R1, S1
     rang = prev_high - prev_low
     r1 = prev_close + rang * 1.0 / 12
     s1 = prev_close - rang * 1.0 / 12
-    r3 = prev_close + rang * 3.0 / 12
-    s3 = prev_close - rang * 3.0 / 12
     
-    # Align to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 12h EMA34 for trend filter
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     # Volume filter: 20-period average
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -69,8 +75,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if indicators not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,15 +93,19 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume > 1.5 * vol_ma[i]
         
+        # 12h trend filter: uptrend if close > EMA34, downtrend if close < EMA34
+        uptrend = price > ema_34_12h_aligned[i]
+        downtrend = price < ema_34_12h_aligned[i]
+        
         if position == 0:
-            # Long: price breaks above R1 with volume
-            if price > r1_aligned[i] and volume_ok:
+            # Long: price breaks above R1 with volume in uptrend
+            if price > r1_aligned[i] and volume_ok and uptrend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
-            # Short: price breaks below S1 with volume
-            elif price < s1_aligned[i] and volume_ok:
+            # Short: price breaks below S1 with volume in downtrend
+            elif price < s1_aligned[i] and volume_ok and downtrend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -120,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_VolumeATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_VolumeATRStop_v3"
+timeframe = "4h"
 leverage = 1.0
