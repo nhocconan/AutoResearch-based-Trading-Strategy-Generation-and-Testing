@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: On 12h timeframe, trade Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation. 
-Only take longs when price > EMA34 (bullish regime) and shorts when price < EMA34 (bearish regime). 
-Volume must exceed 2.0x 20-period average to confirm participation. 
-Discrete sizing (0.25) and ATR-based stoploss (2.0x) to limit fees and manage risk. 
-Designed for fewer trades (target 12-37/year) to avoid fee drag and work in both bull/bear markets via trend alignment.
+4h_Camarilla_R1_S1_Breakout_1dTrendRegime_VolumeSpike_v2
+Hypothesis: Camarilla R1/S1 breakouts filtered by 1d EMA34 trend regime (bull/bear/range) and 4h volume spikes.
+In bull regime: long breakouts favored; in bear regime: short breakdowns favored; in range: both directions with stricter filters.
+Volume spike confirms participation. Discrete sizing (0.25) targets 20-50 trades/year.
+Works in all markets via regime adaptation: follows trend in strong regimes, mean-reverts in chop.
 """
 
 import numpy as np
@@ -17,9 +16,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA34 trend)
+    # Load HTF data ONCE before loop (1d for trend regime)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     # === 1d EMA34 for trend regime ===
@@ -27,10 +26,24 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === 12h ATR (14-period) for stoploss ===
+    # === 1d EMA34 slope for regime classification (trending vs chop) ===>
+    ema_slope = np.diff(ema_34_1d, prepend=ema_34_1d[0])
+    ema_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_slope)
+    
+    # Regime: trending up if slope > 0.1% of price, trending down if < -0.1%, else chop
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    slope_threshold = 0.001 * close_1d_aligned
+    trending_up = ema_slope_aligned > slope_threshold
+    trending_down = ema_slope_aligned < -slope_threshold
+    ranging = ~(trending_up | trending_down)
+    
+    # === 4h close, EMA20 for dynamic support/resistance ===
+    close = prices['close'].values
+    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # === 4h ATR (14-period) for stoploss ===
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
@@ -38,12 +51,12 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # === 12h volume confirmation (volume > 2.0x 20-period average) ===
+    # === 4h volume confirmation (volume > 2.0x 20-period average) ===
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma_20)
     
-    # === 12h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
+    # === 4h Camarilla pivot levels (R1, S1) based on PREVIOUS bar's OHLC ===
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -60,8 +73,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(ema_20_4h[i]) or np.isnan(atr[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(volume_confirmed[i]) or 
+            np.isnan(trending_up[i]) or np.isnan(trending_down[i]) or np.isnan(ranging[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,20 +83,30 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_34_1d_val = ema_34_1d_aligned[i]
+        ema_20_4h_val = ema_20_4h[i]
         r1_val = r1[i]
         s1_val = s1[i]
         vol_conf = volume_confirmed[i]
         
-        # Trend alignment: price above/below 1d EMA34
-        uptrend = price > ema_34_1d_val
-        downtrend = price < ema_34_1d_val
+        # Regime flags
+        is_trending_up = trending_up[i]
+        is_trending_down = trending_down[i]
+        is_ranging = ranging[i]
         
         if position == 0:
-            # Long: price breaks above R1, in uptrend, with volume confirmation
-            long_condition = (price > r1_val) and uptrend and vol_conf
-            # Short: price breaks below S1, in downtrend, with volume confirmation
-            short_condition = (price < s1_val) and downtrend and vol_conf
+            # Regime-adaptive entry conditions
+            if is_trending_up:
+                # Bull regime: favor longs, require alignment with uptrend
+                long_condition = (price > r1_val) and vol_conf and (price > ema_20_4h_val)
+                short_condition = (price < s1_val) and vol_conf and (price < ema_20_4h_val * 0.995)  # stricter for shorts
+            elif is_trending_down:
+                # Bear regime: favor shorts, require alignment with downtrend
+                long_condition = (price > r1_val) and vol_conf and (price > ema_20_4h_val * 1.005)  # stricter for longs
+                short_condition = (price < s1_val) and vol_conf and (price < ema_20_4h_val)
+            else:  # ranging regime
+                # Chop regime: trade both directions but require stronger volume confirmation
+                long_condition = (price > r1_val) and vol_conf and (price > ema_20_4h_val * 1.002)
+                short_condition = (price < s1_val) and vol_conf and (price < ema_20_4h_val * 0.998)
             
             if long_condition:
                 signals[i] = 0.25
@@ -98,8 +122,8 @@ def generate_signals(prices):
         elif position != 0:
             bars_since_entry += 1
             
-            # Minimum holding period of 2 bars to reduce churn
-            if bars_since_entry < 2:
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
                 signals[i] = 0.25 if position == 1 else -0.25
                 continue
             
@@ -109,8 +133,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks back below S1 (failed breakout) or trend deteriorates
-                elif price < s1_val or price < ema_34_1d_val:
+                # Exit if price breaks below S1 (failed breakout) or strong adverse move
+                elif price < s1_val or price < ema_20_4h_val * 0.99:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -121,8 +145,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
-                # Exit if price breaks back above R1 (failed breakdown) or trend deteriorates
-                elif price > r1_val or price > ema_34_1d_val:
+                # Exit if price breaks above R1 (failed breakdown) or strong adverse move
+                elif price > r1_val or price > ema_20_4h_val * 1.01:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -131,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrendRegime_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
