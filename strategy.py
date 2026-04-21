@@ -5,20 +5,19 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend
+    # Load weekly data ONCE for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Weekly EMA35 for trend filter
     close_1w = df_1w['close'].values
-    ema_35_1w = pd.Series(close_1w).ewm(span=35, adjust=False, min_periods=35).mean().values
-    ema_35_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_35_1w)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Daily data for volatility filter
+    # Load daily data ONCE for volatility and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -27,6 +26,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -46,9 +46,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if indicators not ready
-        if (np.isnan(ema_35_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+    for i in range(30, n):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,18 +55,18 @@ def generate_signals(prices):
             continue
         
         price_close = prices['close'].iloc[i]
-        weekly_ema = ema_35_1w_aligned[i]
+        weekly_ema = ema_34_1w_aligned[i]
         atr_ratio_val = atr_ratio_aligned[i]
         vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # Enter long: price above weekly EMA, moderate volatility, volume spike
+            # Enter long: price above weekly EMA, volume spike, moderate volatility
             if (price_close > weekly_ema and 
                 vol_ratio_val > 1.5 and 
                 atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below weekly EMA, moderate volatility, volume spike
+            # Enter short: price below weekly EMA, volume spike, moderate volatility
             elif (price_close < weekly_ema and 
                   vol_ratio_val > 1.5 and 
                   atr_ratio_val > 0.8 and atr_ratio_val < 2.0):
@@ -88,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyEMA35_Volume_ATR_Filter"
-timeframe = "6h"
+name = "12h_WeeklyEMA34_Volume_ATR_Filter"
+timeframe = "12h"
 leverage = 1.0
