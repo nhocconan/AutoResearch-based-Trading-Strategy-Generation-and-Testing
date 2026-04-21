@@ -3,55 +3,55 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R with weekly trend filter and volume confirmation
-# Long when Williams %R crosses above -20 in weekly uptrend with volume spike
-# Short when Williams %R crosses below -80 in weekly downtrend with volume spike
-# Williams %R identifies overbought/oversold conditions, weekly trend ensures directional bias
-# Volume spike confirms momentum behind the move
-# Target: 15-25 trades/year by requiring confluence of extreme %R, trend alignment, and volume
-# Works in bull/bear: Weekly trend filter avoids counter-trend trades, %R extremes capture reversals within trend
+# Hypothesis: 6h Williams %R from 1d + volume spike + volume imbalance (taker buy ratio)
+# Long when %R < -80 (oversold) with volume spike and buyer dominance
+# Short when %R > -20 (overbought) with volume spike and seller dominance
+# Williams %R: -100 * (Highest High - Close) / (Highest High - Lowest Low) over 14 periods
+# Volume spike: current volume > 1.5x 20-period average
+# Volume imbalance: taker_buy_ratio > 0.6 for long, < 0.4 for short
+# Target: 15-30 trades/year by requiring oversold/overbought + volume confirmation
+# Works in bull/bear: Williams %R identifies extremes, volume filters avoid fakeouts
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA34 for trend direction
-    close_weekly = df_weekly['close'].values
-    ema34_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d Williams %R (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly EMA to daily timeframe
-    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Calculate daily Williams %R (14-period)
-    high_daily = prices['high'].values
-    low_daily = prices['low'].values
-    close_daily = prices['close'].values
+    # Williams %R formula
+    wr = np.full_like(close_1d, np.nan, dtype=float)
+    for i in range(len(close_1d)):
+        if highest_high[i] > lowest_low[i]:  # avoid division by zero
+            wr[i] = -100 * (highest_high[i] - close_1d[i]) / (highest_high[i] - lowest_low[i])
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_daily).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_daily).rolling(window=14, min_periods=14).min().values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close_daily) / (highest_high - lowest_low)) * -100,
-        -50  # neutral when range is zero
-    )
+    # Align Williams %R to 6h timeframe (no extra delay needed for Williams %R)
+    wr_aligned = align_htf_to_ltf(prices, df_1d, wr)
     
     # Pre-compute volume moving average (20-period)
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
+    # Taker buy ratio (already in data)
+    taker_buy_ratio = (prices['taker_buy_volume'] / prices['volume']).values
+    # Handle division by zero
+    taker_buy_ratio = np.where(prices['volume'] == 0, 0.5, taker_buy_ratio)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # start after weekly EMA warmup
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(ema34_weekly_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if np.isnan(wr_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(taker_buy_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,21 +61,21 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         volume = prices['volume'].iloc[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirm = volume > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume > 1.5 * vol_ma[i]
         
-        # Weekly trend: price above/below EMA34
-        weekly_uptrend = price > ema34_weekly_aligned[i]
-        weekly_downtrend = price < ema34_weekly_aligned[i]
+        # Volume imbalance confirmation
+        buy_pressure = taker_buy_ratio[i] > 0.6
+        sell_pressure = taker_buy_ratio[i] < 0.4
         
         if position == 0:
             if volume_confirm:
-                # Long: Williams %R crosses above -20 (exiting oversold) in weekly uptrend
-                if williams_r[i] > -20 and williams_r[i-1] <= -20 and weekly_uptrend:
+                # Long: Williams %R oversold (< -80) with buyer dominance
+                if wr_aligned[i] < -80 and buy_pressure:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R crosses below -80 (exiting overbought) in weekly downtrend
-                elif williams_r[i] < -80 and williams_r[i-1] >= -80 and weekly_downtrend:
+                # Short: Williams %R overbought (> -20) with seller dominance
+                elif wr_aligned[i] > -20 and sell_pressure:
                     signals[i] = -0.25
                     position = -1
         
@@ -84,13 +84,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if Williams %R goes below -80 (overbought) or trend changes
-                if williams_r[i] < -80 or not weekly_uptrend:
+                # Exit if Williams %R returns from oversold (> -50) or loses buyer momentum
+                if wr_aligned[i] > -50 or taker_buy_ratio[i] < 0.5:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if Williams %R goes above -20 (oversold) or trend changes
-                if williams_r[i] > -20 or not weekly_downtrend:
+                # Exit if Williams %R returns from overbought (< -50) or loses seller momentum
+                if wr_aligned[i] < -50 or taker_buy_ratio[i] > 0.5:
                     exit_signal = True
             
             if exit_signal:
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR14_WeeklyEMA34_Trend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR14_1dVolumeImbalance_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
