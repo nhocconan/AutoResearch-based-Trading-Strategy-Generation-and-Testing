@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_VolumeATRStop_v2
-Hypothesis: Breakout at Camarilla R1/S1 levels with volume confirmation and ATR-based trailing stop.
-Works in bull/bear: In uptrend, buy R1 breakouts; in downtrend, sell S3 breakdowns. Uses 4h timeframe for optimal trade frequency.
-Target: 20-40 trades/year per symbol (80-160 over 4 years).
+12h_Camarilla_R1S1_Breakout_VolumeATRFilter_v1
+Hypothesis: Breakout at daily Camarilla R1/S1 levels with volume confirmation on 12h timeframe.
+Uses 12h primary timeframe for lower trade frequency (target: 12-37 trades/year per symbol).
+Volume confirmation and ATR trailing stop reduce whipsaw. Works in bull/bear: buy R1 breakouts in uptrend,
+sell S1 breakdowns in downtrend. Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -39,7 +40,7 @@ def generate_signals(prices):
     r3 = prev_close + rang * 3.0 / 12
     s3 = prev_close - rang * 3.0 / 12
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
@@ -48,7 +49,7 @@ def generate_signals(prices):
     # Volume filter: 20-period average
     vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
     
-    # ATR for stoploss and position sizing
+    # ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -119,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_VolumeATRStop_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_VolumeATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
