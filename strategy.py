@@ -1,138 +1,111 @@
 #!/usr/bin/env python3
 """
-4h_Volume_Weighted_CCI_Trend_Signal
-Hypothesis: On 4h timeframe, use Commodity Channel Index (CCI) with volume-weighted adjustment to detect trend exhaustion and reversal points. Combine with 12h trend filter and volume confirmation to avoid whipsaws. Works in bull markets by buying pullbacks in uptrends and in bear markets by selling rallies in downtrends. Target 25-40 trades/year via strict entry conditions.
+12h_Camarilla_R1S1_Breakout_Volume
+Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 with volume spike and 1d uptrend bias.
+Enter short when price breaks below Camarilla S1 with volume spike and 1d downtrend bias.
+Exit when price reverts to Camarilla pivot or trend reverses.
+Designed for 12h timeframe with 1d Camarilla levels and trend filter to limit trades to ~15-30/year.
+Works in bull markets by buying strength at resistance breaks and in bear markets by selling weakness at support breaks.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_cci(high, low, close, period=20):
-    """Calculate Commodity Channel Index"""
-    typical_price = (high + low + close) / 3.0
-    sma_tp = np.zeros_like(typical_price)
-    mad = np.zeros_like(typical_price)
-    
-    if len(typical_price) < period:
-        return np.full_like(typical_price, np.nan)
-    
-    for i in range(len(typical_price)):
-        if i < period - 1:
-            sma_tp[i] = np.nan
-            mad[i] = np.nan
-        else:
-            sma_tp[i] = np.mean(typical_price[i-period+1:i+1])
-            mad[i] = np.mean(np.abs(typical_price[i-period+1:i+1] - sma_tp[i]))
-    
-    cci = np.full_like(typical_price, np.nan)
-    valid = (~np.isnan(sma_tp)) & (~np.isnan(mad)) & (mad != 0)
-    cci[valid] = (typical_price[valid] - sma_tp[valid]) / (0.015 * mad[valid])
-    return cci
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data once
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 1d data once for Camarilla pivot levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume-weighted CCI: typical price weighted by volume
-    typical_price = (high_4h + low_4h + close_4h) / 3.0
-    vol_tp = typical_price * volume_4h
+    # Calculate Camarilla levels for each day
+    # R1 = close + (high - low) * 1.1 / 12
+    # S1 = close - (high - low) * 1.1 / 12
+    # PP = (high + low + close) / 3
+    diff = high_1d - low_1d
+    R1 = close_1d + diff * 1.1 / 12
+    S1 = close_1d - diff * 1.1 / 12
+    PP = (high_1d + low_1d + close_1d) / 3
     
-    # Calculate VW-CCI (volume-weighted CCI)
-    vw_cci = calculate_cci(high_4h, low_4h, close_4h, 20)  # Standard CCI calculation
-    # Adjust for volume: when volume is high, CCI signal is stronger
-    vol_factor = np.zeros_like(volume_4h)
-    if len(volume_4h) >= 20:
-        vol_ma = np.zeros_like(volume_4h)
-        for i in range(len(volume_4h)):
-            if i < 19:
-                vol_ma[i] = np.nan
-            else:
-                vol_ma[i] = np.mean(volume_4h[i-19:i+1])
-        vol_factor = np.where(volume_4h > vol_ma, 1.2, 0.8)  # Amplify in high volume
-    else:
-        vol_factor = np.ones_like(volume_4h)
-    
-    vw_cci_adjusted = vw_cci * vol_factor
-    vw_cci_adjusted_aligned = align_htf_to_ltf(prices, df_4h, vw_cci_adjusted)
-    
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    # 12h EMA34 for trend
-    ema34_12h = np.zeros_like(close_12h)
-    if len(close_12h) >= 34:
-        ema34_12h[33] = np.mean(close_12h[:34])
+    # 1d EMA34 for trend filter
+    ema34_1d = np.zeros_like(close_1d)
+    if len(close_1d) >= 34:
+        ema34_1d[34-1] = np.mean(close_1d[:34])
         multiplier = 2 / (34 + 1)
-        for i in range(34, len(close_12h)):
-            ema34_12h[i] = (close_12h[i] - ema34_12h[i-1]) * multiplier + ema34_12h[i-1]
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = (close_1d[i] - ema34_1d[i-1]) * multiplier + ema34_1d[i-1]
     
-    # Volume confirmation: 4h volume > 1.5 * 20-period average
-    vol_ma_4h = np.zeros_like(volume_4h)
-    for i in range(len(volume_4h)):
-        if i < 19:
-            vol_ma_4h[i] = np.nan
-        else:
-            vol_ma_4h[i] = np.mean(volume_4h[i-19:i+1])
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    volume_confirmed = volume_4h > (1.5 * vol_ma_4h_aligned)
+    # Align all 1d indicators to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(50, n):
         # Skip if indicators not ready
-        if (np.isnan(vw_cci_adjusted_aligned[i]) or 
-            np.isnan(ema34_12h_aligned[i]) or 
-            np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(PP_aligned[i]) or np.isnan(ema34_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: 08-20 UTC only
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        volume_ok = volume_confirmed[i] if i < len(volume_confirmed) else False
+        volume = prices['volume'].iloc[i]
+        
+        # Volume filter: current volume > 2.0 * 20-period average
+        if i >= 20:
+            vol_ma = prices['volume'].iloc[i-20:i].mean()
+            volume_ok = volume > 2.0 * vol_ma
+        else:
+            volume_ok = False
         
         if position == 0:
-            # Long: VW-CCI oversold (< -100) in uptrend (price > 12h EMA34) with volume
-            if (vw_cci_adjusted_aligned[i] < -100 and 
-                price > ema34_12h_aligned[i] and 
+            # Long conditions: uptrend + break above R1 + volume
+            if (price > ema34_1d_aligned[i] and  # 1d uptrend
+                price > R1_aligned[i] and 
                 volume_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short: VW-CCI overbought (> 100) in downtrend (price < 12h EMA34) with volume
-            elif (vw_cci_adjusted_aligned[i] > 100 and 
-                  price < ema34_12h_aligned[i] and 
+            # Short conditions: downtrend + break below S1 + volume
+            elif (price < ema34_1d_aligned[i] and  # 1d downtrend
+                  price < S1_aligned[i] and 
                   volume_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: VW-CCI returns to neutral (> -50) or trend breakdown
-            if vw_cci_adjusted_aligned[i] > -50 or price < ema34_12h_aligned[i]:
+            # Long exit: price back to pivot or trend reversal
+            if price < PP_aligned[i] or price < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: VW-CCI returns to neutral (< 50) or trend reversal
-            if vw_cci_adjusted_aligned[i] < 50 or price > ema34_12h_aligned[i]:
+            # Short exit: price back to pivot or trend reversal
+            if price > PP_aligned[i] or price > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -140,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Volume_Weighted_CCI_Trend_Signal"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
