@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using 1w Williams Alligator for trend direction and 1d Williams %R for mean-reversion entries.
-Long when price is above Alligator teeth (green line) and %R crosses above -50 from below.
-Short when price is below Alligator teeth and %R crosses below -50 from above.
-Requires volume > 1.5x 20-period average to confirm momentum.
-Exit when price crosses Alligator lips (red line) or %R reaches extreme (> -10 or < -90).
-Designed for 15-25 trades/year (60-100 total over 4 years) to minimize fee drag while capturing swings in both bull and bear markets.
+Hypothesis: 4h strategy using 1d Williams Fractal reversals with 1w EMA trend filter and volume confirmation.
+Bullish fractal (support) triggers longs when price > 1w EMA50; bearish fractal (resistance) triggers shorts when price < 1w EMA50.
+Volume must exceed 1.5x 20-period average to confirm reversal strength.
+Exit on opposite fractal touch or 2x ATR stop.
+Designed for 15-25 trades/year (60-100 total over 4 years) to minimize fee fade while capturing reversal points in ranging markets.
+Works in ranging markets via fade of fakeouts and in trending markets via pullbacks to EMA.
 """
 
 import numpy as np
@@ -17,97 +17,105 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for Williams Alligator (13,8,5 SMAs of median price)
+    # Load weekly data for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    median_1w = (high_1w + low_1w) / 2
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Alligator lines: Jaw (13), Teeth (8), Lips (5) - all SMAs of median price
-    jaw = pd.Series(median_1w).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(median_1w).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(median_1w).rolling(window=5, min_periods=5).mean().values
-    
-    # Load daily data for Williams %R and volume
+    # Load daily data for Williams Fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Williams Fractals (5-bar pattern: high[2] > high[1] and high[2] > high[3] and high[2] > high[0] and high[2] > high[4])
+    # Bearish fractal: high[2] is highest of 5 bars
+    bearish_fractal = np.zeros(len(high_1d))
+    bullish_fractal = np.zeros(len(low_1d))
     
-    # Align weekly Alligator and daily Williams %R to 1d timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    # Volume confirmation: > 1.5x 20-period average
+    # Williams fractals require 2-bar confirmation after the pattern
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
+    # Volume confirmation (volume spike > 1.5x 20-period average)
     vol_ma_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ratio = prices['volume'].values / vol_ma_20
+    
+    # ATR for stoploss (20-period)
+    tr1 = prices['high'].values - prices['low'].values
+    tr2 = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
+    tr3 = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup for indicators
+    for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price_close = prices['close'].iloc[i]
-        price_open = prices['open'].iloc[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        wr_val = williams_r_aligned[i]
+        price_high = prices['high'].iloc[i]
+        price_low = prices['low'].iloc[i]
+        ema_val = ema_50_1w_aligned[i]
+        bearish_fractal_val = bearish_fractal_aligned[i]
+        bullish_fractal_val = bullish_fractal_aligned[i]
         vol_ratio_val = vol_ratio[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Enter long: price above teeth (bullish alignment) and WR crosses above -50 from below
-            if (price_close > teeth_val and 
-                wr_val > -50 and 
-                # Check if previous WR was below -50 (crossing up)
-                i > 0 and not np.isnan(williams_r_aligned[i-1]) and williams_r_aligned[i-1] <= -50 and
+            # Enter long: price touches bullish fractal (support) and above weekly EMA50 with volume
+            if (price_low <= bullish_fractal_val and bullish_fractal_val > 0 and 
+                price_close > ema_val and 
                 vol_ratio_val > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below teeth (bearish alignment) and WR crosses below -50 from above
-            elif (price_close < teeth_val and 
-                  wr_val < -50 and 
-                  # Check if previous WR was above -50 (crossing down)
-                  i > 0 and not np.isnan(williams_r_aligned[i-1]) and williams_r_aligned[i-1] >= -50 and
+            # Enter short: price touches bearish fractal (resistance) and below weekly EMA50 with volume
+            elif (price_high >= bearish_fractal_val and bearish_fractal_val > 0 and 
+                  price_close < ema_val and 
                   vol_ratio_val > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses lips OR WR reaches extreme
+            # Exit: opposite fractal touch OR ATR-based stoploss
             exit_signal = False
             
+            # Opposite fractal exit
+            if position == 1 and price_high >= bearish_fractal_val and bearish_fractal_val > 0:
+                exit_signal = True
+            elif position == -1 and price_low <= bullish_fractal_val and bullish_fractal_val > 0:
+                exit_signal = True
+            
+            # ATR-based stoploss (2x ATR from entry area - using fractal level as reference)
             if position == 1:
-                # Long exit: price below lips OR WR < -10 (overbought)
-                if price_close < lips_val or wr_val < -10:
+                if bullish_fractal_val > 0 and price_close < bullish_fractal_val - 2.0 * atr_val:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price above lips OR WR > -90 (oversold)
-                if price_close > lips_val or wr_val > -90:
+                if bearish_fractal_val > 0 and price_close > bearish_fractal_val + 2.0 * atr_val:
                     exit_signal = True
             
             if exit_signal:
@@ -119,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsAlligator_TR_WilliamsR_MR_Volume1.5"
-timeframe = "1d"
+name = "4h_WilliamsFractal_Reversal_1wEMA50_Volume1.5x_ATR2x"
+timeframe = "4h"
 leverage = 1.0
