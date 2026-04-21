@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: Camarilla pivot R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation. Designed for low trade frequency (~20-40/year) to minimize fee drag. Uses 4h primary with 1d HTF for trend and volume context. Works in bull/bear via trend filter and volatility-based entry.
+1d_WilliamsAlligator_ElderRay_WeeklyTrend_Regime_v1
+Hypothesis: Combine Williams Alligator (trend direction) with Elder Ray Index (bull/bear power) on 1d, filtered by weekly trend and choppiness regime. Designed for low trade frequency (~10-25/year) to minimize fee drag while capturing sustained moves in both bull and bear markets. Uses 1d primary timeframe with 1w HTF for regime and trend context.
 """
 
 import numpy as np
@@ -14,33 +14,69 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 1d trend filter: 34-period EMA ===
+    # === Williams Alligator on 1d (Jaw=13, Teeth=8, Lips=5, all smoothed) ===
+    df_1d = get_htf_data(prices, '1d')  # Need 1d data for Alligator calculation
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate median price (typical price) for Alligator
+    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    
+    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3) - all smoothed
+    jaw = pd.Series(typical_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(typical_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(typical_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # === Elder Ray Index on 1d (Bull Power = High - EMA13, Bear Power = Low - EMA13) ===
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # === 1d volume average (20-period) for spike detection ===
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d[np.isnan(vol_ma_1d)] = 1.0  # avoid division by zero
-    vol_ratio_1d = volume_1d / vol_ma_1d
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power = high_1d - ema_13_1d
+    bear_power = low_1d - ema_13_1d
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # === ATR for stoploss (14-period on 4h) ===
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # === Weekly trend: 34-period EMA on weekly close ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # === Choppiness regime filter on 1d (CHOP > 61.8 = range, CHOP < 38.2 = trend) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chopiness Index: CHOP = 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    range_14 = hh_14 - ll_14
+    # Avoid division by zero
+    range_14[range_14 == 0] = 1e-10
+    chop = 100 * np.log10(sum_atr_14 / range_14) / np.log10(14)
+    chop[np.isnan(chop)] = 50.0  # neutral when undefined
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,74 +84,70 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ratio_1d_aligned[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
-        trend_1d = ema_34_1d_aligned[i]
-        vol_spike = vol_ratio_1d_aligned[i]
-        atr_val = atr_14[i]
+        price_close = prices['close'].iloc[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
+        weekly_ema = ema_34_1w_aligned[i]
+        chop_val = chop_aligned[i]
         
-        # Calculate Camarilla levels from previous day
-        if i >= 1:
-            # Get previous day's OHLC from 1d data
-            prev_day_idx = len(df_1d) - 1  # align to current 4h bar's previous day
-            # Find the 1d index that corresponds to the completed day before current 4h bar
-            # Since we use align_htf_to_ltf, we can use the aligned arrays to get previous day's values
-            # We'll approximate by using the 1d values from the prior aligned point
-            # Simpler: use rolling window on 4h to get daily OHLC (acceptable approximation)
-            pass  # We'll calculate Camarilla directly from 4h rolling window as proxy
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        alligator_long = lips_val > teeth_val > jaw_val
+        alligator_short = lips_val < teeth_val < jaw_val
         
-        # Calculate Camarilla levels using 4h rolling window (24 periods = 1 day)
-        # HLC of previous day: use rolling window of 24 periods (4h * 6 = 24h)
-        if i >= 24:
-            lookback = slice(i-24, i)  # previous 24 bars (1 day)
-            ph = np.max(high[lookback])
-            pl = np.min(low[lookback])
-            pc = close[i-1]  # previous close
-            
-            # Camarilla R1, S1
-            r1 = pc + (1.1/12) * (ph - pl)
-            s1 = pc - (1.1/12) * (ph - pl)
-        else:
-            r1 = s1 = price_close  # fallback
+        # Elder Ray: Bull Power > 0 and Bear Power < 0 confirms trend strength
+        elder_long = bull_power_val > 0 and bear_power_val < 0
+        elder_short = bull_power_val < 0 and bear_power_val > 0
+        
+        # Weekly trend filter: price above/below weekly EMA34
+        weekly_long = price_close > weekly_ema
+        weekly_short = price_close < weekly_ema
+        
+        # Regime filter: only trade in trending markets (CHOP < 38.2) or strong momentum in range
+        trending_regime = chop_val < 38.2
+        strong_momentum = abs(bull_power_val) > 0.5 * price_close or abs(bear_power_val) > 0.5 * price_close
         
         if position == 0:
-            # Long: price breaks above R1 + volume spike > 2.0 + price above 1d EMA34
-            if price_close > r1 and vol_spike > 2.0 and price_close > trend_1d:
+            # Long: Alligator uptrend + Elder Ray bullish + weekly trend up + (trending OR strong momentum)
+            if (alligator_long and elder_long and weekly_long and 
+                (trending_regime or strong_momentum)):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price_close
-            # Short: price breaks below S1 + volume spike > 2.0 + price below 1d EMA34
-            elif price_close < s1 and vol_spike > 2.0 and price_close < trend_1d:
+            # Short: Alligator downtrend + Elder Ray bearish + weekly trend down + (trending OR strong momentum)
+            elif (alligator_short and elder_short and weekly_short and 
+                  (trending_regime or strong_momentum)):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price_close
         
         elif position != 0:
-            # Stoploss: 2.0 * ATR against position
-            if position == 1:
-                if price_close < entry_price - 2.0 * atr_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1
-                if price_close > entry_price + 2.0 * atr_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit conditions: Alligator reversal OR Elder Ray divergence OR weekly trend failure
+            exit_long = (not alligator_long) or (bull_power_val <= 0) or (price_close < weekly_ema)
+            exit_short = (not alligator_short) or (bear_power_val >= 0) or (price_close > weekly_ema)
+            
+            if position == 1 and exit_long:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and exit_short:
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_ElderRay_WeeklyTrend_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
