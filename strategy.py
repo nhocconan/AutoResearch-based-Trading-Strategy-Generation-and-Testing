@@ -33,7 +33,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all to 12h timeframe
+    # Align all to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
@@ -46,8 +46,8 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,12 +55,12 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R1 with volume spike AND above 1d EMA34 (uptrend)
-            if (close[i] > r1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+            if (close[i] > r1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 with volume spike AND below 1d EMA34 (downtrend)
-            elif (close[i] < s1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+            elif (close[i] < s1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
                   close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
@@ -83,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
