@@ -13,93 +13,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ATR calculation
+    # Load 1-day data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on 1-day timeframe
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First value
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 20-day Donchian channels on previous day (to avoid look-ahead)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    atr_period = 14
-    atr = np.zeros_like(tr)
-    atr[atr_period-1] = np.mean(tr[:atr_period])
-    for i in range(atr_period, len(tr)):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Shift by 1 to use previous day's channel (avoid look-ahead)
+    upper_channel = np.roll(high_20, 1)
+    lower_channel = np.roll(low_20, 1)
     
-    # Calculate ATR(14) on 6-hour timeframe
-    tr_6h_1 = high - low
-    tr_6h_2 = np.abs(high - np.roll(close, 1))
-    tr_6h_3 = np.abs(low - np.roll(close, 1))
-    tr_6h_1[0] = high[0] - low[0]
-    tr_6h_2[0] = tr_6h_1[0]
-    tr_6h_3[0] = tr_6h_1[0]
-    tr_6h = np.maximum(tr_6h_1, np.maximum(tr_6h_2, tr_6h_3))
+    # Set first day values to NaN
+    upper_channel[0] = np.nan
+    lower_channel[0] = np.nan
     
-    atr_6h = np.zeros_like(tr_6h)
-    atr_6h[atr_period-1] = np.mean(tr_6h[:atr_period])
-    for i in range(atr_period, len(tr_6h)):
-        atr_6h[i] = (atr_6h[i-1] * (atr_period-1) + tr_6h[i]) / atr_period
+    # Calculate 1-day EMA34 for trend filter
+    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_prev = np.roll(ema34, 1)  # Previous day's EMA
+    ema34_prev[0] = np.nan
     
-    # Calculate ATR ratio: 6h ATR / daily ATR (volatility regime filter)
-    atr_ratio_raw = atr_6h / atr
-    
-    # Align ATR ratio to 6-hour timeframe
-    atr_ratio = align_htf_to_ltf(prices, df_1d, atr_ratio_raw)
-    
-    # Volume spike filter (20-period on 6h)
+    # Volume spike filter (20-period on 12h)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_ma20  # Require 1.5x volume for confirmation
+    vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
+    
+    # Align indicators to 12-hour timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_prev)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):  # Start after warmup
         # Skip if data not ready or outside session
-        if (np.isnan(atr_ratio[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Low volatility regime: ATR ratio < 0.8 (6h vol < 80% of daily vol)
-            # Look for breakouts with volume confirmation
-            if atr_ratio[i] < 0.8:
-                # Donchian breakout (20-period) with volume
-                if i >= 20:
-                    highest_20 = np.max(high[i-20:i])
-                    lowest_20 = np.min(low[i-20:i])
-                    
-                    if close[i] > highest_20 and vol_spike[i]:
-                        signals[i] = 0.25
-                        position = 1
-                    elif close[i] < lowest_20 and vol_spike[i]:
-                        signals[i] = -0.25
-                        position = -1
+            # Long: Price breaks above upper Donchian + price above EMA34 + volume spike
+            if (close[i] > upper_aligned[i] and close[i] > ema34_aligned[i] and vol_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: Price breaks below lower Donchian + price below EMA34 + volume spike
+            elif (close[i] < lower_aligned[i] and close[i] < ema34_aligned[i] and vol_spike[i]):
+                signals[i] = -0.25
+                position = -1
         else:
-            # Exit conditions: volatility expansion or mean reversion
-            if position == 1:  # Long position
-                # Exit if volatility expands (ATR ratio > 1.2) or price drops below entry - 1*ATR
-                if atr_ratio[i] > 1.2 or close[i] < close[i-1] - atr_6h[i]:
+            # Exit: Price crosses EMA34 in opposite direction
+            if position == 1:
+                if close[i] < ema34_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            else:  # Short position
-                # Exit if volatility expands or price rises above entry + 1*ATR
-                if atr_ratio[i] > 1.2 or close[i] > close[i-1] + atr_6h[i]:
+            else:  # position == -1
+                if close[i] > ema34_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -107,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ATR_Ratio_Vol_Spike_Donchian_Breakout"
-timeframe = "6h"
+name = "12h_Donchian20_EMA34_Trend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
