@@ -1,40 +1,73 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R + 1d EMA34 trend filter + volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In trending markets (price > EMA34),
-# we take pullbacks: long when %R crosses above -80 from below, short when %R crosses below -20 from above.
-# In ranging markets, we fade extremes: long when %R crosses above -80, short when %R crosses below -20.
-# Volume confirmation ensures institutional participation. Designed for 12h timeframe to target 12-37 trades/year.
-# Works in both bull (trend following) and bear (mean reversion) markets via regime detection.
+# Hypothesis: 4h TRIX (9,3) with volume confirmation and 1d ADX trend filter.
+# TRIX is a triple-smoothed EMA momentum oscillator that filters noise and
+# identifies trend changes. In trending markets (ADX > 25), we take TRIX
+# crossovers with volume confirmation. In ranging markets (ADX < 20), we
+# fade extreme TRIX readings (>0.1 or <-0.1) with volume confirmation.
+# This adapts to both bull and bear markets by using ADX regime filter.
+# Targets 20-40 trades/year with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for EMA34 (once before loop)
+    # Load daily data for ADX filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on daily close
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Calculate True Range for ADX
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate Williams %R on 12h data (14-period)
-    high = prices['high'].values
-    low = prices['low'].values
+    # Calculate ADX components
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate TRIX on 4h data (triple EMA of 9-period)
     close = prices['close'].values
-    
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Williams %R formula: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Avoid division by zero
+    # First EMA
+    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Second EMA
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Third EMA
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # TRIX = 100 * (EMA3 - previous EMA3) / previous EMA3
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix[0] = 0  # First value is zero
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -45,8 +78,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(trix[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,45 +89,32 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        wr = williams_r[i]
-        ema = ema_34_aligned[i]
+        adx_val = adx_aligned[i]
+        trix_val = trix[i]
+        trix_prev = trix[i-1] if i > 0 else 0
         
-        # Volume filter: current volume > 1.3 * 20-period average
-        vol_spike = vol > 1.3 * vol_ma
-        
-        # Determine market regime based on price vs EMA34
-        is_uptrend = price > ema
-        is_downtrend = price < ema
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Williams %R crossover signals
-            wr_cross_above_80 = (wr > -80) and (i == 0 or williams_r[i-1] <= -80)
-            wr_cross_below_20 = (wr < -20) and (i == 0 or williams_r[i-1] >= -20)
+            # Determine market regime
+            is_trending = adx_val > 25   # Trending market
+            is_ranging = adx_val < 20    # Ranging market
             
-            if is_uptrend:
-                # Uptrend: look for pullbacks to go long
-                if wr_cross_above_80 and vol_spike:
+            if is_trending:
+                # Trending regime: TRIX crossover with volume
+                if trix_val > 0 and trix_prev <= 0 and vol_spike:
                     signals[i] = 0.25
                     position = 1
-                # In strong uptrend, also consider shorting at overbought
-                elif wr_cross_below_20 and vol_spike:
-                    signals[i] = -0.20
-                    position = -1
-            elif is_downtrend:
-                # Downtrend: look for bounces to go short
-                if wr_cross_below_20 and vol_spike:
+                elif trix_val < 0 and trix_prev >= 0 and vol_spike:
                     signals[i] = -0.25
                     position = -1
-                # In strong downtrend, also consider longing at oversold
-                elif wr_cross_above_80 and vol_spike:
-                    signals[i] = 0.20
-                    position = 1
-            else:
-                # Ranging: fade extremes
-                if wr_cross_above_80 and vol_spike:
+            elif is_ranging:
+                # Ranging regime: fade extreme TRIX readings
+                if trix_val < -0.1 and vol_spike:
                     signals[i] = 0.25
                     position = 1
-                elif wr_cross_below_20 and vol_spike:
+                elif trix_val > 0.1 and vol_spike:
                     signals[i] = -0.25
                     position = -1
         
@@ -103,13 +123,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on Williams %R crossing below -50 (momentum loss) or opposite extreme
-                if wr < -50 or wr_cross_below_20:
+                # Exit on TRIX crossing below zero or extreme reading
+                if trix_val < 0 or trix_val > 0.15:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on Williams %R crossing above -50 (momentum loss) or opposite extreme
-                if wr > -50 or wr_cross_above_80:
+                # Exit on TRIX crossing above zero or extreme reading
+                if trix_val > 0 or trix_val < -0.15:
                     exit_signal = True
             
             if exit_signal:
@@ -121,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_EMA34_Volume"
-timeframe = "12h"
+name = "4h_TRIX_ADX_Volume_Regime"
+timeframe = "4h"
 leverage = 1.0
