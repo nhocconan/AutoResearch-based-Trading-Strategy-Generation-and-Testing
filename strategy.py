@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and regime filter
+# Uses 1d trend filter (price above/below EMA34) to avoid counter-trend trades
+# Target: 20-40 trades/year per symbol. Works in bull via breakouts, bear via short breakdowns
+# Volume filter reduces false breakouts. Session filter avoids low-liquidity hours.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -13,10 +18,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Donchian(20) - ONCE before loop
+    # Load daily data for indicators - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 34:
         return np.zeros(n)
+    
+    # Calculate daily EMA34 for trend filter
+    close_daily = df_daily['close'].values
+    ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
     
     # Calculate Donchian(20) channels from daily data
     high_daily = df_daily['high'].values
@@ -40,7 +50,7 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+            np.isnan(ema34_daily_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,14 +67,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above upper Donchian(20) with volume
+            # Long: Price breaks above upper Donchian(20) with volume, above daily EMA34
             if (close[i] > upper_20_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i]):
+                volume[i] > 1.5 * vol_avg_20[i] and
+                close[i] > ema34_daily_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian(20) with volume
+            # Short: Price breaks below lower Donchian(20) with volume, below daily EMA34
             elif (close[i] < lower_20_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
+                  volume[i] > 1.5 * vol_avg_20[i] and
+                  close[i] < ema34_daily_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -84,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Volume_Session"
+name = "4H_Donchian20_Volume_EMA34_Trend"
 timeframe = "4h"
 leverage = 1.0
