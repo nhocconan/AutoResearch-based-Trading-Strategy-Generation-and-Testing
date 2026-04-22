@@ -27,7 +27,7 @@ def generate_signals(prices):
     high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 12h timeframe
+    # Align Donchian levels to 4h timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
@@ -53,11 +53,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Close breaks above Donchian upper + above 1d EMA34 + volume spike
             if close[i] > donchian_upper_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Close breaks below Donchian lower + below 1d EMA34 + volume spike
             elif close[i] < donchian_lower_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit: Price crosses 1d EMA34 in opposite direction
@@ -67,17 +67,17 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
                 # Exit short: Close above 1d EMA34
                 if close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
-name = "12H_Donchian20_Breakout_1D_EMA34_Trend_Volume_Confirmation"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_1D_EMA34_Trend_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
