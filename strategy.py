@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1d pivot direction (from prior day) and volume spike
-    # Donchian channels provide clear breakout levels based on recent price extremes
-    # 1-day pivot direction filters for institutional bias from previous session
-    # Volume spike confirms institutional participation in the breakout
-    # Works in bull/bear: breaks through key levels with trend and volume confirmation
+    # Hypothesis: 4h Choppiness Index regime filter + 4h Donchian(20) breakout + volume spike
+    # Choppiness Index (CHOP) identifies market regime: >61.8 = ranging (mean revert), <38.2 = trending
+    # In trending regimes (CHOP < 38.2), we trade Donchian breakouts with volume confirmation
+    # In ranging regimes (CHOP > 61.8), we fade the extremes (sell at upper band, buy at lower band)
+    # This adaptive approach works in both bull and bear markets by switching strategy based on regime
     
     # Price and volume data
     close = prices['close'].values
@@ -20,67 +20,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot calculation and Donchian reference
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Choppiness Index (14-period)
+    atr = np.zeros(n)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate pivot points from previous day (standard floor trader pivots)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Pivot bias: bullish if close > pivot, bearish if close < pivot
-    pivot_bias = np.where(close_1d > pivot, 1, np.where(close_1d < pivot, -1, 0))
+    # Avoid division by zero
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    range_max_min = hh - ll
+    range_safe = np.where(range_max_min == 0, 1e-10, range_max_min)
     
-    # Align pivot bias to 6h timeframe (using previous day's bias)
-    pivot_bias_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias)
+    # Choppiness Index: 100 * log10(sum(ATR)/range) / log10(period)
+    chop = 100 * np.log10(atr_safe * 14 / range_safe) / np.log10(14)
     
-    # Calculate Donchian channels (20-period) on 6h data
-    # Using rolling window on high/low for breakout levels
+    # Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike filter (20-period)
+    # Volume spike (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
+    vol_spike = volume > 2.0 * vol_ma20
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(pivot_bias_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(chop[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above Donchian high with bullish pivot bias and volume spike
-            if close[i] > donchian_high[i] and pivot_bias_aligned[i] > 0 and vol_spike[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: Break below Donchian low with bearish pivot bias and volume spike
-            elif close[i] < donchian_low[i] and pivot_bias_aligned[i] < 0 and vol_spike[i]:
-                signals[i] = -0.25
-                position = -1
+            # Trending market (CHOP < 38.2): trade breakouts
+            if chop[i] < 38.2:
+                # Long: break above Donchian high with volume spike
+                if close[i] > donchian_high[i] and vol_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: break below Donchian low with volume spike
+                elif close[i] < donchian_low[i] and vol_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Ranging market (CHOP > 61.8): fade extremes
+            elif chop[i] > 61.8:
+                # Short at upper Donchian band (overbought in range)
+                if close[i] > donchian_high[i]:
+                    signals[i] = -0.25
+                    position = -1
+                # Long at lower Donchian band (oversold in range)
+                elif close[i] < donchian_low[i]:
+                    signals[i] = 0.25
+                    position = 1
         else:
-            # Exit: Return to opposite Donchian level or opposite pivot bias
-            if position == 1:
-                if close[i] < donchian_low[i] or pivot_bias_aligned[i] < 0:
+            # Exit conditions
+            if position == 1:  # Long position
+                # Exit trending long: return to Donchian low
+                if chop[i] < 38.2 and close[i] < donchian_low[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit ranging long: return to midpoint or stop loss
+                elif chop[i] > 61.8 and close[i] > (donchian_high[i] + donchian_low[i]) / 2:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            else:  # position == -1
-                if close[i] > donchian_high[i] or pivot_bias_aligned[i] > 0:
+            else:  # position == -1, Short position
+                # Exit trending short: return to Donchian high
+                if chop[i] < 38.2 and close[i] > donchian_high[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit ranging short: return to midpoint
+                elif chop[i] > 61.8 and close[i] < (donchian_high[i] + donchian_low[i]) / 2:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -88,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_20_Breakout_1dPivot_Direction_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Chop_Regime_Donchian20_BreakoutFade_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
