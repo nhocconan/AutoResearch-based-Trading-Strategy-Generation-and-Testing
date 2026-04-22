@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for trend (HTF)
+    # Load weekly data for higher timeframe trend (HTF)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Weekly EMA(34) for trend
+    # Weekly EMA34 for trend (no look-ahead)
     ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
@@ -34,10 +34,6 @@ def generate_signals(prices):
     pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
     r1_1d = 2 * pp_1d - prev_low_1d  # R1 = 2*P - Low
     s1_1d = 2 * pp_1d - prev_high_1d  # S1 = 2*P - High
-    r2_1d = pp_1d + (prev_high_1d - prev_low_1d)  # R2 = P + (High - Low)
-    s2_1d = pp_1d - (prev_high_1d - prev_low_1d)  # S2 = P - (High - Low)
-    r3_1d = pp_1d + 2 * (prev_high_1d - prev_low_1d)  # R3 = P + 2*(High - Low)
-    s3_1d = pp_1d - 2 * (prev_high_1d - prev_low_1d)  # S3 = P - 2*(High - Low)
     
     # Daily ATR for volatility filter
     tr1 = high_1d[1:] - low_1d[1:]
@@ -60,13 +56,10 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all HTF data to 1d timeframe
+    # Align all HTF data to 12h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
@@ -75,16 +68,12 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any data is not ready
-        if (np.isnan(r1_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr[i]) or
-            np.isnan(ema_34_1w_aligned[i])):
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,32 +82,28 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        ema_34_1w = ema_34_1w_aligned[i]
         r1 = r1_aligned[i]
         s1 = s1_aligned[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
         atr_1d = atr_1d_aligned[i]
         atr_val = atr[i]
-        ema_34_1w = ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume + volatility filter + weekly uptrend
-            if price > r3 and vol > 1.5 * vol_ma and atr_1d > 0 and price > ema_34_1w:
+            # Long: price > weekly EMA34 (uptrend) + breaks above R1 with volume + volatility filter
+            if price > ema_34_1w and price > r1 and vol > 1.5 * vol_ma and atr_1d > 0:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S3 with volume + volatility filter + weekly downtrend
-            elif price < s3 and vol > 1.5 * vol_ma and atr_1d > 0 and price < ema_34_1w:
+            # Short: price < weekly EMA34 (downtrend) + breaks below S1 with volume + volatility filter
+            elif price < ema_34_1w and price < s1 and vol > 1.5 * vol_ma and atr_1d > 0:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position != 0:
-            # Exit conditions: mean reversion to R1/S1 or ATR stop
-            # Mean reversion exit: price returns to R1 (for long) or S1 (for short)
-            mean_rev_exit = (position == 1 and price < r1) or (position == -1 and price > s1)
+            # Exit conditions: mean reversion to opposite pivot or ATR stop
+            # Mean reversion exit: price returns to S1 (for long) or R1 (for short)
+            mean_rev_exit = (position == 1 and price < s1) or (position == -1 and price > r1)
             
             # ATR stop loss: 2.0 * ATR from entry
             stop_loss = (position == 1 and price < entry_price - 2.0 * atr_val) or \
@@ -133,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyEMA34_Trend_DailyPivot_R3_S3_Breakout_Volume_ATRStop"
-timeframe = "6h"
+name = "12h_WeeklyEMA34_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
