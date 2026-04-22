@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 150:
         return np.zeros(n)
     
     # Daily data for pivot points
@@ -19,12 +19,12 @@ def generate_signals(prices):
     r1_1d = pivot_1d + (high_1d - low_1d)
     s1_1d = pivot_1d - (high_1d - low_1d)
     
-    # Align daily pivot levels to 4h timeframe
+    # Align daily pivot levels to 1h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 4h ATR for volatility filter (14-period)
+    # 1h ATR for volatility filter (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -39,10 +39,14 @@ def generate_signals(prices):
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_surge = prices['volume'].values > 2.5 * vol_ma20  # Increased threshold
     
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0
     
-    for i in range(200, n):
+    for i in range(150, n):
         # Skip if data not ready
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
@@ -51,32 +55,39 @@ def generate_signals(prices):
                 position = 0
             continue
         
+        # Only trade during session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         if position == 0:
             # Long: Price breaks above S1 with volume surge
             if close[i] > s1_1d_aligned[i] and vol_surge[i]:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: Price breaks below R1 with volume surge
             elif close[i] < r1_1d_aligned[i] and vol_surge[i]:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit: Price returns to pivot level or volatility drops significantly
             if position == 1:
-                if close[i] < pivot_1d_aligned[i] or atr[i] < 0.5 * atr[i-1]:  # Less sensitive exit
+                if close[i] < pivot_1d_aligned[i] or atr[i] < 0.5 * atr[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if close[i] > pivot_1d_aligned[i] or atr[i] < 0.5 * atr[i-1]:  # Less sensitive exit
+                if close[i] > pivot_1d_aligned[i] or atr[i] < 0.5 * atr[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_Pivot_S1_R1_Breakout_1d_Pivot_VolumeSurge_v2"
-timeframe = "4h"
+name = "1h_Pivot_S1_R1_Breakout_1d_Pivot_VolumeSurge_v1"
+timeframe = "1h"
 leverage = 1.0
