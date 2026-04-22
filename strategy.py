@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 1-hour RSI mean reversion with 4h trend filter and volume confirmation.
-In strong trends (4h), price pulls back to RSI(40) in uptrends or RSI(60) in downtrends.
-Volume spike confirms the bounce. This captures counter-trend moves within the trend,
-working in both bull and bear markets by trading with the 4h trend.
-Target: 15-37 trades/year per symbol (60-150 total over 4 years).
+Hypothesis: 6-hour Bollinger Band breakout with 1-week trend filter and volume confirmation.
+This strategy trades mean reversion in strong trends: during weekly uptrends, buy
+BB lower band touches; during weekly downtrends, sell BB upper band touches.
+The 1-week trend filter ensures we only trade with the higher timeframe trend.
+Volume spikes confirm institutional participation.
+Targets 15-35 trades/year per symbol (60-140 total over 4 years) to minimize fee drag.
+Works in both bull and bear markets by aligning with the weekly trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_bollinger_bands(close, length=20, mult=2.0):
+    """Calculate Bollinger Bands: middle, upper, lower"""
+    basis = pd.Series(close).rolling(window=length, min_periods=length).mean()
+    dev = pd.Series(close).rolling(window=length, min_periods=length).std()
+    upper = basis + mult * dev
+    lower = basis - mult * dev
+    return basis.values, upper.values, lower.values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,28 +32,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 6h Bollinger Bands data - ONCE before loop
+    bb_length = 20
+    bb_mult = 2.0
+    basis, upper, lower = calculate_bollinger_bands(close, bb_length, bb_mult)
+    
+    # Load 1w data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1w EMA for trend filter (34-period)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Calculate 1h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h volume average (24-period)
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -51,10 +56,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(basis[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_avg_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,43 +75,40 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Determine 4h trend
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        
         if position == 0:
-            # Long: uptrend + RSI < 40 (pullback) + volume spike
-            if (uptrend and 
-                rsi[i] < 40 and 
-                volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = 0.20
+            # Long: price touches lower BB, weekly uptrend, volume spike
+            if (low[i] <= lower[i] and                    # Price touches lower BB
+                close[i] > ema_34_1w_aligned[i] and       # Weekly uptrend
+                volume[i] > 2.0 * vol_avg_24[i]):         # Volume spike
+                signals[i] = 0.25
                 position = 1
-            # Short: downtrend + RSI > 60 (pullback) + volume spike
-            elif ((not uptrend) and 
-                  rsi[i] > 60 and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = -0.20
+            # Short: price touches upper BB, weekly downtrend, volume spike
+            elif (high[i] >= upper[i] and                 # Price touches upper BB
+                  close[i] < ema_34_1w_aligned[i] and     # Weekly downtrend
+                  volume[i] > 2.0 * vol_avg_24[i]):       # Volume spike
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral (50) or opposite extreme
+            # Exit: price returns to middle Bollinger Band
             exit_signal = False
             
             if position == 1:
-                # Exit long: RSI >= 50
-                if rsi[i] >= 50:
+                # Exit long: price crosses above middle band
+                if close[i] >= basis[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: RSI <= 50
-                if rsi[i] <= 50:
+                # Exit short: price crosses below middle band
+                if close[i] <= basis[i]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_RSI_MeanReversion_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Bollinger_Bands_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
