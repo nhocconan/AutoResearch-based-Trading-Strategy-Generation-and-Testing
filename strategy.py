@@ -3,79 +3,73 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and session filter (08-20 UTC).
-# Donchian channels provide clear breakout levels. Volume > 1.5x 20-period average confirms breakout strength.
-# Session filter reduces noise trades during low-volume hours. Designed for low trade frequency (~20-30/year)
-# to minimize fee decay. Works in bull markets (upward breakouts) and bear markets (downward breakouts).
-# Uses 4h for signal direction, 1h only for entry timing precision.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1w EMA trend filter and volume spike confirmation.
+# Elder Ray measures bull power (high - EMA) and bear power (low - EMA) to show buying/selling pressure.
+# Bull power > 0 indicates buying pressure; bear power < 0 indicates selling pressure.
+# Combined with 1w EMA trend filter and volume spikes (>2x 20-period average),
+# this captures institutional moves while avoiding chop. Designed for low trade frequency (~15-25/year)
+# to minimize fee decay. Works in both bull and bear markets by following higher timeframe trend.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 4h data for Donchian calculation (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Load 1w data for EMA calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 20-period Donchian channels
-    upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 13-period EMA on 1w close for trend filter
+    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 20-period average volume for volume confirmation
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Align 1w EMA to 6h timeframe (waits for 1w bar to close)
+    ema_13_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
     
-    # Align 4h indicators to 1h timeframe (waits for 4h bar to close)
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    # Calculate 13-period EMA on 6h close for Elder Ray
+    close_6h = prices['close'].values
+    ema_13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # already datetime64[ms], .hour works
+    # Calculate Elder Ray components
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    bull_power = high_6h - ema_13_6h  # Bull Power = High - EMA13
+    bear_power = low_6h - ema_13_6h   # Bear Power = Low - EMA13
+    
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(ema_13_aligned[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        ema_val = ema_13_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
         
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        price = prices['close'].iloc[i]
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        vol_ma = vol_ma_aligned[i]
-        vol = prices['volume'].iloc[i]
-        
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        vol_confirm = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 2.0 * 20-period average (strict filter for low frequency)
+        vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume confirmation
-            if price > upper_val and vol_confirm:
-                signals[i] = 0.20
+            # Long conditions: Bull Power > 0 + price above EMA + volume spike
+            if bull > 0 and prices['close'].iloc[i] > ema_val and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with volume confirmation
-            elif price < lower_val and vol_confirm:
-                signals[i] = -0.20
+            # Short conditions: Bear Power < 0 + price below EMA + volume spike
+            elif bear < 0 and prices['close'].iloc[i] < ema_val and vol_spike:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
@@ -83,13 +77,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price breaks below lower Donchian (breakdown)
-                if price < lower_val:
+                # Exit when Bull Power <= 0 or price breaks below EMA
+                if bull <= 0 or prices['close'].iloc[i] < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price breaks above upper Donchian (breakout)
-                if price > upper_val:
+                # Exit when Bear Power >= 0 or price breaks above EMA
+                if bear >= 0 or prices['close'].iloc[i] > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -97,10 +91,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_Donchian20_Volume_Session"
-timeframe = "1h"
+name = "6h_ElderRay_1wEMA13_Volume"
+timeframe = "6h"
 leverage = 1.0
