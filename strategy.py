@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Williams %R with 1-day trend filter.
-Long when %R < -80 (oversold) and 1-day close > 50-EMA (uptrend).
-Short when %R > -20 (overbought) and 1-day close < 50-EMA (downtrend).
-Exit when %R crosses -50 (mean reversion) or trend reverses.
-Williams %R identifies reversal points in overbought/oversold conditions.
-Trend filter ensures trading with the higher timeframe momentum.
-Works in both bull and bear markets by capturing mean reversion within the prevailing trend.
+Hypothesis: 4-hour Camarilla Pivot Point breakout with 12-hour trend filter and volume confirmation.
+Camarilla pivots identify intraday support/resistance levels that work well in ranging markets.
+12-hour EMA50 determines trend direction for bias.
+Volume spike confirms institutional participation at breakout.
+Works in bull/bear markets by combining mean-reversion pivots with trend filtering.
 """
 
 import numpy as np
@@ -15,49 +13,74 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1-day data for trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1-day EMA(50) for trend
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Williams %R calculation (14-period)
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Load 1d data for Camarilla pivots - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels for previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    r2 = close_1d + 1.1 * (high_1d - low_1d) / 6
+    s2 = close_1d - 1.1 * (high_1d - low_1d) / 6
+    
+    # Align Camarilla levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Volume confirmation: 4h volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Williams %R warmup
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Oversold and uptrend on 1D
-            if williams_r[i] < -80 and close[i] > ema_50_1d_aligned[i]:
+            # Long conditions: Price breaks above R1 with volume and uptrend
+            if (close[i] > r1_aligned[i] and 
+                volume[i] > vol_ma[i] and 
+                close[i] > ema_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Overbought and downtrend on 1D
-            elif williams_r[i] > -20 and close[i] < ema_50_1d_aligned[i]:
+            # Short conditions: Price breaks below S1 with volume and downtrend
+            elif (close[i] < s1_aligned[i] and 
+                  volume[i] > vol_ma[i] and 
+                  close[i] < ema_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -65,12 +88,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: %R crosses above -50 (mean reversion) or trend turns down
-                if williams_r[i] > -50 or close[i] < ema_50_1d_aligned[i]:
+                # Exit long: Price falls back to pivot or below S1
+                if close[i] < pivot_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: %R crosses below -50 (mean reversion) or trend turns up
-                if williams_r[i] < -50 or close[i] > ema_50_1d_aligned[i]:
+                # Exit short: Price rises back to pivot or above R1
+                if close[i] > pivot_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -81,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_1dTrend_Filter"
-timeframe = "12h"
+name = "4H_Camarilla_R1S1_Breakout_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
