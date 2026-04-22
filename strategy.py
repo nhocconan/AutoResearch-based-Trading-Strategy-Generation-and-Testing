@@ -31,13 +31,13 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2   # Resistance level 4
     s4 = close_1d - range_ * 1.1 / 2   # Support level 4
     
-    # Align all levels to 6h timeframe
+    # Align all levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: 10-period average (faster for 6h)
+    # Volume confirmation: 10-period average (faster for 12h)
     vol_avg_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     # Trend filter: 1d EMA34 (HTF trend)
@@ -90,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume_Session"
-timeframe = "6h"
+name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
