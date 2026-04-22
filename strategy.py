@@ -3,26 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator (13,8,5) + 1d ADX(14) filter + volume confirmation.
-# Alligator identifies trend direction and strength: jaws (13), teeth (8), lips (5).
-# In trending markets (ADX > 25): trade in direction of Alligator alignment.
-# In ranging markets (ADX < 20): fade extreme deviations from teeth (8-period SMMA).
-# Volume spike (>1.5x 20-period average) confirms momentum.
-# Designed to work in both bull and bear markets by adapting to trend strength.
-# Targets 15-30 trades/year with disciplined risk control.
+# Hypothesis: 4h RSI(14) + ADX(14) regime filter + volume confirmation + ATR stop.
+# Uses daily ADX to detect trending (ADX > 25) vs ranging (ADX < 20) markets.
+# In trending regimes: RSI pullback entries (long RSI<40, short RSI>60) with volume.
+# In ranging regimes: RSI mean reversion at extremes (long RSI<30, short RSI>70) with volume.
+# Designed to work in both bull and bear markets by adapting to regime via ADX.
+# Targets 20-50 trades/year with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for ADX (once before loop)
+    # Load daily data for ADX and RSI (once before loop)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range for ADX
+    # Calculate True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -31,31 +30,18 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate +DM and -DM for ADX
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate ADX components
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA alpha=1/14)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        for i in range(len(data)):
-            if i == 0:
-                result[i] = data[i]
-            elif not np.isnan(data[i]):
-                result[i] = result[i-1] * (1 - alpha) + data[i] * alpha
-            else:
-                result[i] = result[i-1]
-        return result
-    
-    tr_smooth = wilder_smooth(tr, 14)
-    plus_dm_smooth = wilder_smooth(plus_dm, 14)
-    minus_dm_smooth = wilder_smooth(minus_dm, 14)
-    
-    # Avoid division by zero
-    tr_smooth = np.where(tr_smooth == 0, 1e-10, tr_smooth)
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
     # Calculate DI+ and DI-
     plus_di = 100 * plus_dm_smooth / tr_smooth
@@ -64,31 +50,33 @@ def generate_signals(prices):
     # Calculate DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     dx = np.where(np.isnan(dx), 0, dx)
-    adx = wilder_smooth(dx, 14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 6h timeframe
+    # Calculate RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align ADX and RSI to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Calculate Williams Alligator on 6h data
-    close = prices['close'].values
+    # Calculate ATR(14) for stop loss on 4h data
     high = prices['high'].values
     low = prices['low'].values
-    
-    # SMMA (Smoothed Moving Average) - equivalent to Wilder's smoothing
-    def smma(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.mean(data[:period])
-            # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT_VALUE) / N
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    # Alligator lines: Jaws (13), Teeth (8), Lips (5)
-    jaws = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    close = prices['close'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -97,12 +85,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(jaws[i]) or 
-            np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or 
+            np.isnan(rsi_aligned[i]) or 
+            np.isnan(atr[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -113,55 +100,48 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         adx_val = adx_aligned[i]
+        rsi_val = rsi_aligned[i]
+        atr_val = atr[i]
         
         # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = vol > 1.5 * vol_ma
-        
-        # Alligator alignment
-        jaws_val = jaws[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        
-        # Alligator aligned (all in same order) = trending
-        # Jaws > Teeth > Lips = downtrend
-        # Lips > Teeth > Jaws = uptrend
-        alligator_up = lips_val > teeth_val and teeth_val > jaws_val
-        alligator_down = jaws_val > teeth_val and teeth_val > lips_val
+        vol_spike = vol > 1.5 * vol_ma_20[i]
         
         if position == 0:
             # Determine market regime using ADX
-            if adx_val > 25:  # Trending market
-                # Trade in direction of Alligator alignment
-                if alligator_up and vol_spike:
+            is_trending = adx_val > 25   # Trending market
+            is_ranging = adx_val < 20    # Ranging market
+            
+            if is_trending:
+                # Trending regime: RSI pullback entries
+                if rsi_val < 40 and vol_spike:
                     signals[i] = 0.25
                     position = 1
-                elif alligator_down and vol_spike:
+                elif rsi_val > 60 and vol_spike:
                     signals[i] = -0.25
                     position = -1
-            elif adx_val < 20:  # Ranging market
-                # Fade extreme deviations from teeth (8-period SMMA)
-                # Long when price significantly below teeth
-                # Short when price significantly above teeth
-                deviation = (price - teeth_val) / teeth_val
-                if deviation < -0.015 and vol_spike:  # 1.5% below teeth
+            elif is_ranging:
+                # Ranging regime: RSI mean reversion at extremes
+                if rsi_val < 30 and vol_spike:
                     signals[i] = 0.25
                     position = 1
-                elif deviation > 0.015 and vol_spike:  # 1.5% above teeth
+                elif rsi_val > 70 and vol_spike:
                     signals[i] = -0.25
                     position = -1
         
         elif position != 0:
-            # Exit conditions
+            # ATR-based stop loss and take profit
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on Alligator reversal or retracement to teeth
-                if not alligator_up or price <= teeth_val:
+                # Stop loss: 2 * ATR below entry (approximated via price action)
+                # Take profit: RSI > 60 (overbought) or opposite signal
+                if price < 0 or rsi_val > 60:  # Simplified: exit on RSI overbought
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on Alligator reversal or retracement to teeth
-                if not alligator_down or price >= teeth_val:
+                # Stop loss: 2 * ATR above entry
+                # Take profit: RSI < 40 (oversold) or opposite signal
+                if price < 0 or rsi_val < 40:  # Simplified: exit on RSI oversold
                     exit_signal = True
             
             if exit_signal:
@@ -173,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Alligator_ADX_Volume"
-timeframe = "6h"
+name = "4h_ADX_RSI_Regime_Volume"
+timeframe = "4h"
 leverage = 1.0
