@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Donchian(20) breakout with daily trend filter and volume spike.
-Trades breakouts only in the direction of the daily trend to avoid counter-trend moves.
-Volume spikes confirm institutional participation. This should work in both bull and bear
-markets by aligning with the daily trend. Target: 20-30 trades/year per symbol.
+12h Williams Alligator with 1d trend filter and volume confirmation.
+Goes long when price is above Alligator's Jaw (bullish alignment) with 1d EMA50 uptrend and volume spike.
+Goes short when price is below Alligator's Jaw (bearish alignment) with 1d EMA50 downtrend and volume spike.
+Exits when price crosses back below/above Jaw. Williams Alligator identifies trend phases,
+avoiding whipsaws in ranging markets. Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -23,19 +24,38 @@ def generate_signals(prices):
     
     # Load daily data - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 4-period Donchian channels (20-period lookback)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Alligator on 12h timeframe
+    # Jaw (blue): 13-period SMMA, smoothed by 8 periods
+    # Teeth (red): 8-period SMMA, smoothed by 5 periods  
+    # Lips (green): 5-period SMMA, smoothed by 3 periods
+    # SMMA = smoothed moving average (similar to Wilder's smoothing)
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate 4h volume average (20-period)
+    jaw = smma(close, 13)  # 13-period smoothed
+    jaw = smma(jaw, 8)     # further smoothed by 8
+    teeth = smma(close, 8)  # 8-period smoothed
+    teeth = smma(teeth, 5)  # further smoothed by 5
+    lips = smma(close, 5)   # 5-period smoothed
+    lips = smma(lips, 3)    # further smoothed by 3
+    
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -44,10 +64,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema50_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,29 +84,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above 20-period high with bullish daily trend and volume spike
-            if (high[i] > high_max_20[i-1] and 
-                close[i] > ema34_aligned[i] and  # Bullish trend: price above EMA34
-                volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+            # Long: Price above Jaw, teeth above jaw, lips above teeth (bullish alignment)
+            # Plus daily uptrend and volume spike
+            if (close[i] > jaw[i] and 
+                teeth[i] > jaw[i] and 
+                lips[i] > teeth[i] and
+                close[i] > ema50_aligned[i] and  # Daily uptrend
+                volume[i] > 2.0 * vol_avg_20[i]):  # Volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 20-period low with bearish daily trend and volume spike
-            elif (low[i] < low_min_20[i-1] and 
-                  close[i] < ema34_aligned[i] and  # Bearish trend: price below EMA34
-                  volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+            # Short: Price below Jaw, teeth below jaw, lips below teeth (bearish alignment)
+            # Plus daily downtrend and volume spike
+            elif (close[i] < jaw[i] and 
+                  teeth[i] < jaw[i] and 
+                  lips[i] < teeth[i] and
+                  close[i] < ema50_aligned[i] and  # Daily downtrend
+                  volume[i] > 2.0 * vol_avg_20[i]):  # Volume spike
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: opposite Donchian breakout
+            # Exit conditions: price crosses Jaw
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below 20-period low
-                if low[i] < low_min_20[i-1]:
+                # Exit long: price crosses below Jaw
+                if close[i] <= jaw[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above 20-period high
-                if high[i] > high_max_20[i-1]:
+                # Exit short: price crosses above Jaw
+                if close[i] >= jaw[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -97,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
