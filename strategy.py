@@ -3,37 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + volume spike + weekly trend filter
-# Long when price breaks above Donchian upper band (20-period high) + volume spike + price > weekly EMA50
-# Short when price breaks below Donchian lower band (20-period low) + volume spike + price < weekly EMA50
-# Exit when price crosses back through the 20-period middle band or volume dries up
-# Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
-# Target: 15-30 trades/year to avoid fee drag on 12h timeframe
+# Hypothesis: 12h Williams Alligator + volume spike + 1d EMA50 trend filter
+# Williams Alligator uses three SMAs (Jaw=13, Teeth=8, Lips=5) to detect trends
+# Long when Lips > Teeth > Jaw (bullish alignment) + volume spike + price > 1d EMA50
+# Short when Lips < Teeth < Jaw (bearish alignment) + volume spike + price < 1d EMA50
+# Exit when Alligator alignment breaks or volume dries up
+# Target: 15-30 trades/year to avoid fee drag, works in both bull and bear markets
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for EMA50 trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    close_weekly = df_weekly['close'].values
+    # Load 1d data for EMA50
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA50
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 12h Donchian channels (20-period)
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Load 12h data for Williams Alligator (Jaw=13, Teeth=8, Lips=5)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Donchian channels: upper = 20-period high, lower = 20-period low, middle = average
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # Williams Alligator SMAs
+    jaw = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().values  # 13-period SMA
+    teeth = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().values   # 8-period SMA
+    lips = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().values    # 5-period SMA
     
-    # Volume spike filter (20-period average)
+    # Align to main timeframe (12h)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    
+    # Volume spike filter (20-period average on 12h timeframe)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -42,49 +46,53 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or 
-            np.isnan(ema50_weekly_aligned[i]) or 
+        if (np.isnan(ema50_aligned[i]) or 
+            np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        middle = donchian_middle[i]
-        weekly_ema = ema50_weekly_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema50 = ema50_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
-        vol_spike = vol > 2.0 * vol_ma
+        # Williams Alligator alignment
+        bullish_alignment = lips_val > teeth_val > jaw_val
+        bearish_alignment = lips_val < teeth_val < jaw_val
+        
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: price breaks above upper band + volume spike + price > weekly EMA50
-            if price > upper and vol_spike and price > weekly_ema:
+            # Long conditions: bullish alignment + volume spike + price > EMA50
+            if bullish_alignment and vol_spike and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower band + volume spike + price < weekly EMA50
-            elif price < lower and vol_spike and price < weekly_ema:
+            # Short conditions: bearish alignment + volume spike + price < EMA50
+            elif bearish_alignment and vol_spike and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses back through middle band or volume dries up
+            # Exit conditions: Alligator alignment breaks or volume dries up
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price crosses below middle band or volume dries up
-                if price < middle or vol < 0.7 * vol_ma:
+                # Exit when bullish alignment breaks or volume dries up
+                if not bullish_alignment or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price crosses above middle band or volume dries up
-                if price > middle or vol < 0.7 * vol_ma:
+                # Exit when bearish alignment breaks or volume dries up
+                if not bearish_alignment or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -96,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_WeeklyEMA50_Volume_Spike"
+name = "12h_Williams_Alligator_Volume_EMA50"
 timeframe = "12h"
 leverage = 1.0
