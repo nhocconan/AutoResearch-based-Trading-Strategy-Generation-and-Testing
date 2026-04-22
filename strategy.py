@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Buy when price breaks above 20-period high + above daily EMA34 + volume spike.
-# Sell when price breaks below 20-period low + below daily EMA34 + volume spike.
-# Donchian channels provide clear trend-following signals; EMA34 filters counter-trend trades.
-# Volume confirmation ensures breakouts have institutional participation.
-# Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
-# Uses discrete position sizing (0.25) to minimize fee churn.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend + volume confirmation
+# Donchian breakouts capture momentum in both bull and bear markets.
+# 1d EMA34 filter ensures we only trade in direction of higher timeframe trend.
+# Volume > 1.5x 20-period average confirms breakout strength.
+# Discrete position sizing (0.25) minimizes fee churn.
+# Designed for 4h timeframe with 75-200 trades over 4 years (19-50/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -52,32 +51,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above Donchian high + above daily EMA + volume spike
+            # Long: Price breaks above Donchian high + above 1d EMA + volume spike
             if (close[i] > donchian_high[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low + below daily EMA + volume spike
+            # Short: Price breaks below Donchian low + below 1d EMA + volume spike
             elif (close[i] < donchian_low[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Opposite Donchian break or price crosses daily EMA
+            # Exit: Price crosses Donchian midpoint or crosses 1d EMA
+            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
             if position == 1:
-                # Exit long: Break below Donchian low or price below daily EMA
-                if (close[i] < donchian_low[i] or 
-                    close[i] < ema_34_1d_aligned[i]):
+                # Exit long: Price below midpoint or below 1d EMA
+                if close[i] < donchian_mid or close[i] < ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Break above Donchian high or price above daily EMA
-                if (close[i] > donchian_high[i] or 
-                    close[i] > ema_34_1d_aligned[i]):
+                # Exit short: Price above midpoint or above 1d EMA
+                if close[i] > donchian_mid or close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
