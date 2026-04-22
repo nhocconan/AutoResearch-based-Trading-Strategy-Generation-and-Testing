@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Fractal breakout with 1w EMA trend filter and volume confirmation.
-Long when price breaks above bearish fractal with bullish EMA trend and volume spike.
-Short when price breaks below bullish fractal with bearish EMA trend and volume spike.
-Exit when price returns to fractal level or EMA trend weakens.
-Williams Fractals require 2-bar confirmation, so we use additional_delay_bars=2.
-Designed for very low trade frequency (10-25/year) to minimize fee drift.
-Works in both bull (breakouts with trend) and bear (fading false breaks).
+Hypothesis: 4h Camarilla pivot reversal with 1d volume spike and 1w trend filter.
+Long when price rejects S1/S2 with volume spike and 1w uptrend.
+Short when price rejects R1/R2 with volume spike and 1w downtrend.
+Exit when price crosses H/L or volume drops.
+Uses 1w trend to avoid counter-trend trades in strong trends.
+Designed for low trade frequency (20-40/year) to minimize fee drift.
 """
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,40 +21,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for EMA trend filter - ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 35:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA(34) for trend
-    ema_34_weekly = pd.Series(df_weekly['close'].values).ewm(
-        span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align EMA to 12h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_weekly, ema_34_weekly)
-    
-    # Load daily data for Williams Fractals
+    # Load daily data for Camarilla levels and volume
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Compute Williams Fractals (requires 5-bar window: 2 left, 1 center, 2 right)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_daily['high'].values,
-        df_daily['low'].values,
-    )
+    # Load weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
+        return np.zeros(n)
     
-    # Align fractals to 12h with 2-bar additional delay for confirmation
-    # Fractals need 2 future daily bars to confirm, so +2 delay
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_daily, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_daily, bullish_fractal, additional_delay_bars=2
-    )
+    # Calculate Camarilla levels from previous day
+    # H, L, C from previous daily bar
+    ph = df_daily['high'].shift(1).values
+    pl = df_daily['low'].shift(1).values
+    pc = df_daily['close'].shift(1).values
     
-    # Calculate 12h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels
+    r4 = pc + ((ph - pl) * 1.5000)
+    r3 = pc + ((ph - pl) * 1.2500)
+    r2 = pc + ((ph - pl) * 1.1666)
+    r1 = pc + ((ph - pl) * 1.0833)
+    s1 = pc - ((ph - pl) * 1.0833)
+    s2 = pc - ((ph - pl) * 1.1666)
+    s3 = pc - ((ph - pl) * 1.2500)
+    s4 = pc - ((ph - pl) * 1.5000)
+    
+    # Align levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_daily, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_daily, s2)
+    h_align = align_htf_to_ltf(prices, df_daily, (ph + pl) / 2)  # midpoint for exit
+    
+    # Calculate 1d volume average (20-period)
+    vol_daily = df_daily['volume'].values
+    vol_avg_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
+    vol_avg_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_daily)
+    
+    # Calculate 1w EMA34 for trend filter
+    close_w = df_weekly['close'].values
+    ema34_w = pd.Series(close_w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_w_aligned = align_htf_to_ltf(prices, df_weekly, ema34_w)
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -63,12 +70,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(35, n):  # Start after EMA warmup
+    for i in range(30, n):  # warmup for weekly EMA
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(h_align[i]) or np.isnan(vol_avg_aligned[i]) or
+            np.isnan(ema34_w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,29 +92,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above bearish fractal with bullish EMA trend and volume
-            if (close[i] > bearish_fractal_aligned[i] and 
-                close[i] > ema_34_aligned[i] and  # Price above EMA = bullish bias
-                volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+            # Long: Price near S1/S2 with volume spike and 1w uptrend
+            near_support = (low[i] <= s1_aligned[i] * 1.002 and low[i] >= s2_aligned[i] * 0.998) or \
+                          (low[i] <= s2_aligned[i] * 1.002 and low[i] >= s2_aligned[i] * 0.998)
+            volume_spike = volume[i] > 2.0 * vol_avg_aligned[i]
+            uptrend = close[i] > ema34_w_aligned[i]
+            
+            if near_support and volume_spike and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below bullish fractal with bearish EMA trend and volume
-            elif (close[i] < bullish_fractal_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and  # Price below EMA = bearish bias
-                  volume[i] > 2.0 * vol_avg_20[i]):
-                signals[i] = -0.25
-                position = -1
+            # Short: Price near R1/R2 with volume spike and 1w downtrend
+            elif (high[i] >= r1_aligned[i] * 0.998 and high[i] <= r2_aligned[i] * 1.002) or \
+                 (high[i] >= r2_aligned[i] * 0.998 and high[i] <= r2_aligned[i] * 1.002):
+                volume_spike = volume[i] > 2.0 * vol_avg_aligned[i]
+                downtrend = close[i] < ema34_w_aligned[i]
+                if volume_spike and downtrend:
+                    signals[i] = -0.25
+                    position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to fractal level OR price below EMA
-                if close[i] <= bearish_fractal_aligned[i] or close[i] < ema_34_aligned[i]:
+                # Exit long: price crosses H/L midpoint OR volume drops
+                if close[i] > h_align[i] or volume[i] < 0.5 * vol_avg_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to fractal level OR price above EMA
-                if close[i] >= bullish_fractal_aligned[i] or close[i] > ema_34_aligned[i]:
+                # Exit short: price crosses H/L midpoint OR volume drops
+                if close[i] < h_align[i] or volume[i] < 0.5 * vol_avg_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -118,7 +130,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsFractal_EMA34_Volume"
-timeframe = "12h"
+name = "4H_CamarillaReversal_1dVolume_1wTrend"
+timeframe = "4h"
 leverage = 1.0
 #%%
