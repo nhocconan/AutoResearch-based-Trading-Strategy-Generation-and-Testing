@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 6h ADX trend strength combined with 1d Williams %R mean reversion.
-In strong trends (ADX > 25), pullbacks to oversold/overbought levels (Williams %R < -80 or > -20)
-offer high-probability continuation entries. Works in both bull and bear markets by following
-the trend direction from ADX. Low trade frequency achieved by requiring both trend strength
-and extreme momentum readings.
+Hypothesis: 1h 4-hour Donchian breakout with daily volume and ADX trend filter.
+Only trade long when price breaks above 4-hour Donchian upper channel with daily ADX > 25 and volume > 1.5x 20-period average.
+Short when price breaks below 4-hour Donchian lower channel with daily ADX > 25 and volume > 1.5x 20-period average.
+Uses 4-hour timeframe for signal direction and 1-hour for precise entry timing to reduce false breakouts.
+Session filter (08-20 UTC) avoids low-liquidity periods. Designed for low trade frequency (15-37/year).
+Works in trending markets by capturing breakouts and avoids ranging markets via ADX filter.
 """
 
 import numpy as np
@@ -17,86 +18,124 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 6h ADX for trend strength (14-period)
-    plus_dm = np.diff(high, prepend=high[0])
-    minus_dm = np.diff(low, prepend=low[0]) * -1
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    # 4-hour Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    tr = np.maximum(
-        np.maximum(high - low, np.abs(high - np.roll(low, 1))),
-        np.abs(low - np.roll(high, 1))
-    )
-    tr[0] = high[0] - low[0]
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # 1d Williams %R for mean reversion (14-period)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    
+    # Daily ADX for trend strength
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed averages
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_smooth / atr
+    minus_di = 100 * dm_minus_smooth / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
-        if np.isnan(adx[i]) or np.isnan(williams_r_aligned[i]):
+    for i in range(50, n):
+        # Skip if data not ready
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend strength filter
-        strong_trend = adx[i] > 25
+        # Session filter
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: strong trend + Williams %R oversold (< -80)
-            if strong_trend and williams_r_aligned[i] < -80:
-                signals[i] = 0.25
+            # Long: price breaks above 4h Donchian high + ADX > 25 + volume confirmation
+            if close[i] > donchian_high_aligned[i] and adx_aligned[i] > 25 and vol_ok:
+                signals[i] = 0.20
                 position = 1
-            # Short: strong trend + Williams %R overbought (> -20)
-            elif strong_trend and williams_r_aligned[i] > -20:
-                signals[i] = -0.25
+            # Short: price breaks below 4h Donchian low + ADX > 25 + volume confirmation
+            elif close[i] < donchian_low_aligned[i] and adx_aligned[i] > 25 and vol_ok:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: trend weakness or Williams %R returns to neutral range
+            # Exit: price returns to Donchian midpoint or ADX weakens
+            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
             exit_signal = False
             
             if position == 1:
-                # Exit long: trend weakens or Williams %R rises above -50
-                if adx[i] <= 25 or williams_r_aligned[i] > -50:
+                # Exit long: price below midpoint or ADX < 20
+                if close[i] < midpoint or adx_aligned[i] < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: trend weakens or Williams %R falls below -50
-                if adx[i] <= 25 or williams_r_aligned[i] < -50:
+                # Exit short: price above midpoint or ADX < 20
+                if close[i] > midpoint or adx_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "6h_ADX_TrendStrength_1d_WilliamsR_MeanReversion"
-timeframe = "6h"
+name = "1h_4h_Donchian_Breakout_DailyADX_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
