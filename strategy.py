@@ -37,7 +37,7 @@ def generate_signals(prices):
     r4 = r3 + (high_1d - low_1d)
     s4 = s3 - (high_1d - low_1d)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for volatility filter
+    # ATR for volatility filter (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -75,12 +75,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 with volume spike
-            if (close[i] > r3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]):
+            # Long: Price breaks above R3 with volume spike AND volatility filter
+            if (close[i] > r3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and atr[i] > 0.5 * np.mean(atr[max(0, i-20):i+1])):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 with volume spike
-            elif (close[i] < s3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]):
+            # Short: Price breaks below S3 with volume spike AND volatility filter
+            elif (close[i] < s3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and atr[i] > 0.5 * np.mean(atr[max(0, i-20):i+1])):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Pivot_R3_S3_Breakout_Volume"
-timeframe = "6h"
+name = "12H_Pivot_R3_S3_Breakout_Volume_Volatility"
+timeframe = "12h"
 leverage = 1.0
