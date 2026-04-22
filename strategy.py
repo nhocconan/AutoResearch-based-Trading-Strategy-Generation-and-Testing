@@ -8,11 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian breakout (20-period) with 1d EMA34 trend filter and volume spike
-    # Donchian channels capture breakouts from volatility contractions/expansions
-    # EMA34 on daily filters for long-term trend direction (works in bull/bear markets)
-    # Volume spike (2x 20-period MA) confirms institutional participation
-    # Simple, rules-based system with clear entry/exit logic
+    # Hypothesis: 1d Donchian channel breakout with weekly EMA50 trend filter and volume spike
+    # Donchian channels capture volatility breakouts; weekly EMA50 filters trend direction
+    # Volume spike confirms institutional participation; works in bull and bear regimes
+    # 1d timeframe reduces trade frequency to minimize fee drag
     
     # Price and volume data
     close = prices['close'].values
@@ -20,16 +19,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Load weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Donchian Channels (20-period) on 4h
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Daily Donchian Channel (20-day)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike filter (20-period)
+    # Volume spike filter (20-day)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
     
@@ -38,9 +37,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
+        if (np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or 
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -48,24 +47,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above upper Donchian + volume spike + price above EMA34 (uptrend)
-            if close[i] > donchian_upper[i] and vol_spike[i] and close[i] > ema34_1d_aligned[i]:
+            # Long: Break above 20-day high + volume spike + price above weekly EMA50 (uptrend)
+            if close[i] > high_max[i] and vol_spike[i] and close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower Donchian + volume spike + price below EMA34 (downtrend)
-            elif close[i] < donchian_lower[i] and vol_spike[i] and close[i] < ema34_1d_aligned[i]:
+            # Short: Break below 20-day low + volume spike + price below weekly EMA50 (downtrend)
+            elif close[i] < low_min[i] and vol_spike[i] and close[i] < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Return to opposite Donchian band (trend reversal signal)
+            # Exit: Return to opposite Donchian band or trend reversal
             if position == 1:
-                if close[i] < donchian_lower[i]:  # Break below lower band
+                if close[i] < low_min[i]:  # Reverse to opposite side
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donchian_upper[i]:  # Break above upper band
+                if close[i] > high_max[i]:  # Reverse to opposite side
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -73,6 +72,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian_Channel_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
