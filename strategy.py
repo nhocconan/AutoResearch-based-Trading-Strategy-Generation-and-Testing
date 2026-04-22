@@ -1,3 +1,9 @@
+# 12h_DailyPivot_R1_S1_Breakout_Volume_ATRStop
+# Hypothesis: Breakout above/below daily R1/S1 on 12h timeframe with volume confirmation and ATR stop loss.
+# Works in bull (breakouts) and bear (mean reversion to pivot levels) with limited trades via strict conditions.
+# Uses 12h primary timeframe to reduce frequency, daily pivot levels for structure, and volume/ATR filters.
+# Target: 50-150 trades over 4 years to avoid fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -26,8 +32,6 @@ def generate_signals(prices):
     pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
     r1_1d = 2 * pp_1d - prev_low_1d  # R1 = 2*P - Low
     s1_1d = 2 * pp_1d - prev_high_1d  # S1 = 2*P - High
-    r2_1d = pp_1d + (prev_high_1d - prev_low_1d)  # R2 = P + (High - Low)
-    s2_1d = pp_1d - (prev_high_1d - prev_low_1d)  # S2 = P - (High - Low)
     
     # Daily ATR for volatility filter
     tr1 = high_1d[1:] - low_1d[1:]
@@ -50,11 +54,9 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all HTF data to 1d timeframe
+    # Align all HTF data to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
@@ -65,8 +67,6 @@ def generate_signals(prices):
         # Skip if any data is not ready
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i]) or 
             np.isnan(atr[i])):
@@ -80,27 +80,25 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         r1 = r1_aligned[i]
         s1 = s1_aligned[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
         atr_1d = atr_1d_aligned[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume + volatility filter
-            if price > r2 and vol > 1.5 * vol_ma and atr_1d > 0:
+            # Long: price breaks above R1 with volume + volatility filter
+            if price > r1 and vol > 1.5 * vol_ma and atr_1d > 0:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S2 with volume + volatility filter
-            elif price < s2 and vol > 1.5 * vol_ma and atr_1d > 0:
+            # Short: price breaks below S1 with volume + volatility filter
+            elif price < s1 and vol > 1.5 * vol_ma and atr_1d > 0:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position != 0:
-            # Exit conditions: mean reversion to R1/S1 or ATR stop
-            # Mean reversion exit: price returns to R1 (for long) or S1 (for short)
-            mean_rev_exit = (position == 1 and price < r1) or (position == -1 and price > s1)
+            # Exit conditions: mean reversion to opposite level or ATR stop
+            # Mean reversion exit: price returns to S1 (for long) or R1 (for short)
+            mean_rev_exit = (position == 1 and price < s1) or (position == -1 and price > r1)
             
             # ATR stop loss: 2.0 * ATR from entry
             stop_loss = (position == 1 and price < entry_price - 2.0 * atr_val) or \
@@ -115,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
-timeframe = "4h"
+name = "12h_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
