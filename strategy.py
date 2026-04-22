@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Williams Alligator + Volume Spike + 1d Trend Filter
-Long when price > Alligator Jaw with bullish 1d trend (price > EMA34) and volume spike.
-Short when price < Alligator Jaw with bearish 1d trend (price < EMA34) and volume filter.
-Exit when price crosses Alligator Teeth.
-Designed for low trade frequency (12-37/year) with strong trend capture.
+Hypothesis: 1d Williams %R Extreme with 1w trend filter and volume confirmation.
+Long when Williams %R < -80 (oversold) with bullish 1w trend (price > EMA50) and volume spike.
+Short when Williams %R > -20 (overbought) with bearish 1w trend (price < EMA50) and volume spike.
+Exit when Williams %R returns to -50 (mean reversion).
+Uses 1w EMA50 for trend filter to capture long-term trend and avoid whipsaws.
+Designed for low trade frequency (7-25/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -20,33 +21,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Load 1w data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Williams Alligator on 12h data
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        sma = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return sma
-        sma[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            sma[i] = (sma[i-1] * (period-1) + arr[i]) / period
-        return sma
+    # Align EMA50 to 1d timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 12h volume average (20-period)
+    # Calculate 1d volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -55,10 +49,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after lookback
+    for i in range(14, n):  # Start after Williams %R lookback
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,39 +69,40 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above Jaw with bullish 1d trend and volume spike
-            if (close[i] > jaw[i] and 
-                close[i] > ema34_aligned[i] and  # Bullish trend: price above EMA34
-                volume[i] > 2.5 * vol_avg_20[i]):  # Strong volume spike
-                signals[i] = 0.30
+            # Long: Williams %R < -80 (oversold) with bullish 1w trend and volume spike
+            if (williams_r[i] < -80 and 
+                close[i] > ema50_aligned[i] and  # Bullish trend: price above EMA50
+                volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+                signals[i] = 0.25
                 position = 1
-            # Short: Price below Jaw with bearish 1d trend and volume filter
-            elif (close[i] < jaw[i] and 
-                  close[i] < ema34_aligned[i] and  # Bearish trend: price below EMA34
-                  volume[i] > 1.5 * vol_avg_20[i]):  # Moderate volume
-                signals[i] = -0.30
+            # Short: Williams %R > -20 (overbought) with bearish 1w trend and volume spike
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema50_aligned[i] and  # Bearish trend: price below EMA50
+                  volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price crosses Teeth
+            # Exit conditions: Williams %R returns to -50 (mean reversion)
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below Teeth
-                if close[i] < teeth[i]:
+                # Exit long: Williams %R returns to -50 from below
+                if williams_r[i] >= -50:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above Teeth
-                if close[i] > teeth[i]:
+                # Exit short: Williams %R returns to -50 from above
+                if williams_r[i] <= -50:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12H_WilliamsAlligator_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "1D_WilliamsR_Extreme_1wEMA50_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
+#%%
