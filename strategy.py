@@ -39,7 +39,7 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2  # Resistance level 4
     s4 = close_1d - range_ * 1.1 / 2  # Support level 4
     
-    # Align all levels to 6h timeframe
+    # Align all levels to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
@@ -100,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R4_S4_Breakout_12hEMA50_Trend_Volume"
-timeframe = "6h"
+name = "12H_Camarilla_R4_S4_Breakout_12hEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
