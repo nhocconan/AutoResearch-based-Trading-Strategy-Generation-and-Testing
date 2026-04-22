@@ -8,61 +8,35 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Williams Alligator + 1d RSI mean reversion filter
-    # Uses Alligator jaws/teeth/lips to identify trend, enters on pullbacks in trend direction
-    # RSI filter avoids overextended entries. Works in bull/bear via trend alignment.
-    # Target: 15-30 trades/year per symbol to minimize fee drag.
+    # Hypothesis: 1h momentum with 4h trend filter and volume confirmation
+    # Uses 4h EMA20 for trend direction and 1h RSI(14) for entry timing.
+    # Volume spike confirms institutional interest. Session filter (08-20 UTC) reduces noise.
+    # Target: 15-35 trades/year to minimize fee drag while capturing trends in bull/bear.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 12h data for Williams Alligator (SMMA-based)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 4h data for EMA20 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Williams Alligator: three SMMA lines (Jaw=13, Teeth=8, Lips=5)
-    def smma(series, period):
-        sma = np.full_like(series, np.nan, dtype=float)
-        if len(series) < period:
-            return sma
-        sma[period-1] = np.mean(series[:period])
-        for i in range(period, len(series)):
-            sma[i] = (sma[i-1] * (period-1) + series[i]) / period
-        return sma
-    
-    jaw = smma(close_12h, 13)
-    teeth = smma(close_12h, 8)
-    lips = smma(close_12h, 5)
-    
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    
-    # Load 1d data for RSI(14)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # RSI calculation
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(gain, np.nan, dtype=float)
-    avg_loss = np.full_like(loss, np.nan, dtype=float)
-    
-    # Wilder's smoothing
-    avg_gain[13] = np.mean(gain[1:14])  # first 14 periods
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    # 1h RSI(14) for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    rsi = rsi.values
+    
+    # Volume spike filter (20-period)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.5 * vol_ma20
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -71,48 +45,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):
         # Skip if data not ready or outside session
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Bullish alignment: Lips > Teeth > Jaw (uptrend)
-            bullish = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
-            # Bearish alignment: Jaw > Teeth > Lips (downtrend)
-            bearish = jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]
-            
-            # Long: Pullback in uptrend when RSI < 40 (not overbought)
-            if bullish and rsi_aligned[i] < 40:
-                signals[i] = 0.25
+            # Long: RSI > 55 (bullish momentum) + price above 4h EMA20 (uptrend) + volume spike
+            if rsi[i] > 55 and close[i] > ema20_4h_aligned[i] and vol_spike[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Pullback in downtrend when RSI > 60 (not oversold)
-            elif bearish and rsi_aligned[i] > 60:
-                signals[i] = -0.25
+            # Short: RSI < 45 (bearish momentum) + price below 4h EMA20 (downtrend) + volume spike
+            elif rsi[i] < 45 and close[i] < ema20_4h_aligned[i] and vol_spike[i]:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: Trend reversal or RSI extreme
+            # Exit: RSI reverts to neutral (45-55) or trend reversal vs 4h EMA20
             if position == 1:
-                bearish = jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]
-                if bearish or rsi_aligned[i] > 70:  # trend change or overbought
+                if rsi[i] < 45 or close[i] < ema20_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                bullish = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
-                if bullish or rsi_aligned[i] < 30:  # trend change or oversold
+                if rsi[i] > 55 or close[i] > ema20_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "12h_Williams_Alligator_RSI_Pullback_v1"
-timeframe = "12h"
+name = "1h_RSI_EMA20_4h_Trend_Volume_Session_v1"
+timeframe = "1h"
 leverage = 1.0
