@@ -8,39 +8,44 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4-hour Donchian(20) breakout with daily EMA34 trend filter and volume spike confirmation
-    # Targets 20-30 trades/year per symbol to minimize fee drag.
-    # Donchian breakouts capture momentum; daily EMA34 filters long-term trend;
-    # volume spike confirms institutional interest. Works in bull/bear via trend filter.
+    # Hypothesis: 6-hour price action with weekly pivot structure and 1d volume confirmation
+    # Target: 15-25 trades/year per symbol by fading at weekly R3/S3 and breaking through R4/S4
+    # Weekly pivots define institutional support/resistance; volume confirms breakout legitimacy
+    # Works in bull/bear via mean-reversion at extremes and trend-following on breaks
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for Donchian(20) calculation
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Load weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Donchian channels (20-period) for each 4h bar
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly pivot points (standard formula)
+    pp = (high_1w + low_1w + close_1w) / 3
+    r1 = 2 * pp - low_1w
+    s1 = 2 * pp - high_1w
+    r2 = pp + (high_1w - low_1w)
+    s2 = pp - (high_1w - low_1w)
+    r3 = high_1w + 2 * (pp - low_1w)
+    s3 = low_1w - 2 * (high_1w - pp)
+    r4 = r3 + (high_1w - low_1w)
+    s4 = s3 - (high_1w - low_1w)
     
-    # Align Donchian levels to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    # Align weekly pivot levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Load daily data for EMA34 trend filter
+    # Load daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike filter (20-period)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -51,8 +56,9 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready or outside session
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma20_1d_aligned[i]) or
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -60,24 +66,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Breakout above Donchian upper with volume + price above daily EMA34 (uptrend)
-            if close[i] > donchian_upper_aligned[i] and vol_spike[i] and close[i] > ema34_1d_aligned[i]:
-                signals[i] = 0.25
+            # Fade at weekly R3/S3: sell at resistance, buy at support
+            if close[i] >= r3_aligned[i] and volume[i] < vol_ma20_1d_aligned[i]:
+                signals[i] = -0.25  # Short at R3 with low volume (weakness)
+                position = -1
+            elif close[i] <= s3_aligned[i] and volume[i] < vol_ma20_1d_aligned[i]:
+                signals[i] = 0.25   # Long at S3 with low volume (weakness)
                 position = 1
-            # Short: Breakdown below Donchian lower with volume + price below daily EMA34 (downtrend)
-            elif close[i] < donchian_lower_aligned[i] and vol_spike[i] and close[i] < ema34_1d_aligned[i]:
-                signals[i] = -0.25
+            # Breakout continuation at R4/S4: break with volume
+            elif close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_ma20_1d_aligned[i]:
+                signals[i] = 0.25   # Long breakout with volume
+                position = 1
+            elif close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_ma20_1d_aligned[i]:
+                signals[i] = -0.25  # Short breakdown with volume
                 position = -1
         else:
-            # Exit: Price returns to opposite Donchian level or trend reversal vs daily EMA34
+            # Exit conditions
             if position == 1:
-                if close[i] < donchian_lower_aligned[i] or close[i] < ema34_1d_aligned[i]:
+                # Exit long: return to S3 or breakdown below S4
+                if close[i] <= s3_aligned[i] or close[i] < s4_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donchian_upper_aligned[i] or close[i] > ema34_1d_aligned[i]:
+                # Exit short: return to R3 or break above R4
+                if close[i] >= r3_aligned[i] or close[i] > r4_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -85,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_Breakout_1dEMA34_Volume_Session_v1"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_R3S3_R4S4_Volume_FadeBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
