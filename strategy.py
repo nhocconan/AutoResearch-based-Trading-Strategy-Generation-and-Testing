@@ -18,28 +18,22 @@ def generate_signals(prices):
     if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Previous day's pivot points (Camarilla)
+    # Previous day's pivot points (standard)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla pivot levels
     pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = close_1d + range_1d * 1.1 / 2
-    s3 = close_1d - range_1d * 1.1 / 2
-    r4 = close_1d + range_1d * 1.1
-    s4 = close_1d - range_1d * 1.1
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
     # 1d EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 6h timeframe (primary)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 12h timeframe (primary)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Volume confirmation: 20-period average
@@ -50,36 +44,36 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R4 with volume AND above 1d EMA34 (uptrend)
-            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+            # Long: Price breaks above R1 with volume spike AND above 1d EMA34 (uptrend)
+            if (close[i] > r1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S4 with volume AND below 1d EMA34 (downtrend)
-            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+            # Short: Price breaks below S1 with volume spike AND below 1d EMA34 (downtrend)
+            elif (close[i] < s1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
                   close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite S3/R3 level
+            # Exit: Price crosses back to opposite level (S1 for long, R1 for short)
             if position == 1:
-                # Exit long: Price closes below S3
-                if close[i] < s3_aligned[i]:
+                # Exit long: Price closes below S1
+                if close[i] < s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above R3
-                if close[i] > r3_aligned[i]:
+                # Exit short: Price closes above R1
+                if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -87,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "12H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
