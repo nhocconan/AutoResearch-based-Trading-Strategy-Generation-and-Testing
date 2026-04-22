@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,20 +13,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Donchian channel (ONCE before loop)
+    # Load 1d data for pivot points (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's Donchian channel (20-day high/low)
+    # Previous day's pivot points (standard)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    close_1d = df_1d['close'].values
     
-    # Align Donchian levels to 4h timeframe
-    dh_4h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    dl_4h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    prev_high = high_1d
+    prev_low = low_1d
+    prev_close = close_1d
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    
+    # Align pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,38 +55,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(dh_4h[i]) or np.isnan(dl_4h[i]) or 
-            np.isnan(vol_avg_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_avg_20[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above 1d Donchian high + volume spike
-            if (close[i] > dh_4h[i] and 
-                volume[i] > 1.8 * vol_avg_20[i]):
+            # Long: Price breaks above R2 + volume spike + volatility filter
+            if (close[i] > r2_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20[i] and
+                atr[i] > 0.5 * atr[i-1] if i > 0 else True):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 1d Donchian low + volume spike
-            elif (close[i] < dl_4h[i] and 
-                  volume[i] > 1.8 * vol_avg_20[i]):
+            # Short: Price breaks below S2 + volume spike + volatility filter
+            elif (close[i] < s2_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i] and
+                  atr[i] > 0.5 * atr[i-1] if i > 0 else True):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite Donchian level
+            # Exit: Price crosses back to opposite pivot level (full exit)
             if position == 1:
-                # Exit long: Price closes below 1d Donchian low
-                if close[i] < dl_4h[i]:
+                # Exit long: Price closes below S1
+                if close[i] < s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above 1d Donchian high
-                if close[i] > dh_4h[i]:
+                # Exit short: Price closes above R1
+                if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -82,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_1dBreakout_Volume"
+name = "4H_Pivot_R2_S2_Breakout_Volume_Volatility"
 timeframe = "4h"
 leverage = 1.0
