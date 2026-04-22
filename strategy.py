@@ -3,61 +3,43 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud + 1d Trend Filter + Volume Spike
-# Long when price > Kumo cloud, Tenkan > Kijun, and 1d EMA50 uptrend
-# Short when price < Kumo cloud, Tenkan < Kijun, and 1d EMA50 downtrend
-# Exit when price crosses back into Kumo or trend flips
-# Ichimoku works in all regimes: cloud acts as dynamic S/R, TK cross signals momentum
-# Trend filter prevents counter-trend trades; volume spike ensures conviction
-# Target: 15-30 trades/year (60-120 over 4 years) with edge in both bull/bear markets
+# Hypothesis: 4h Williams Alligator + 1d EMA trend + volume confirmation
+# Long when Green > Red > Blue (bullish alignment) and price > 1d EMA34 and volume spike
+# Short when Green < Red < Blue (bearish alignment) and price < 1d EMA34 and volume spike
+# Exit when alignment breaks or volume drops
+# Designed for low trade frequency (~20-40/year) with trend-following edge
+# Works in both bull (strong uptrends) and bear (strong downtrends) markets
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Ichimoku and trend filter
+    # Load 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Williams Alligator components (using median price)
+    median_price = (prices['high'].values + prices['low'].values) / 2
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
-    senkou_a = ((tenkan + kijun) / 2)
+    # Jaw (Blue line) - 13-period SMMA, shifted 8 bars
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)
+    jaw[:8] = np.nan
     
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
+    # Teeth (Red line) - 8-period SMMA, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan
     
-    # Chikou Span (Lagging Span): current close shifted back 26 periods
-    # Not used in signals to avoid look-ahead
-    
-    # Kumo cloud boundaries (future Senkou spans)
-    # Senkou A and B are plotted 26 periods ahead, so we use current values
-    # For cloud calculation at time t, we need Senkou from t-26
-    # We'll handle the shift in alignment
-    
-    # 1d EMA50 for trend filter
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all to 6t
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Lips (Green line) - 5-period SMMA, shifted 3 bars
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
@@ -66,14 +48,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_aligned[i]) or 
-            np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or 
-            np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,49 +60,40 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        tenkan_val = tenkan_aligned[i]
-        kijun_val = kijun_aligned[i]
-        senkou_a_val = senkou_a_aligned[i]
-        senkou_b_val = senkou_b_aligned[i]
-        ema_50_val = ema_50_aligned[i]
+        lips_val = lips[i]
+        teeth_val = teeth[i]
+        jaw_val = jaw[i]
+        ema_34_val = ema_34_1d_aligned[i]
         
-        # Kumo cloud boundaries (Senkou A and B)
-        upper_cloud = max(senkou_a_val, senkou_b_val)
-        lower_cloud = min(senkou_a_val, senkou_b_val)
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
         
-        # Volume filter: current volume > 1.5 * 20-day average
-        vol_spike = vol > 1.5 * vol_ma
+        # Alligator alignment
+        bullish_alignment = lips_val > teeth_val > jaw_val
+        bearish_alignment = lips_val < teeth_val < jaw_val
         
         if position == 0:
-            # Long conditions: price above cloud, Tenkan > Kijun, EMA50 uptrend, volume spike
-            if (price > upper_cloud and 
-                tenkan_val > kijun_val and 
-                ema_50_val > ema_50_aligned[max(0, i-1)] and  # EMA50 rising
-                vol_spike):
+            # Long conditions: Bullish alignment, price > 1d EMA34, volume spike
+            if bullish_alignment and price > ema_34_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price below cloud, Tenkan < Kijun, EMA50 downtrend, volume spike
-            elif (price < lower_cloud and 
-                  tenkan_val < kijun_val and 
-                  ema_50_val < ema_50_aligned[max(0, i-1)] and  # EMA50 falling
-                  vol_spike):
+            # Short conditions: Bearish alignment, price < 1d EMA34, volume spike
+            elif bearish_alignment and price < ema_34_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses into cloud or trend flips
+            # Exit conditions: Alignment breaks or volume drops
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price drops below cloud or trend turns down
-                if (price < upper_cloud or 
-                    ema_50_val < ema_50_aligned[max(0, i-1)]):
+                # Exit when bullish alignment breaks or volume drops
+                if not bullish_alignment or vol < vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price rises above cloud or trend turns up
-                if (price > lower_cloud or 
-                    ema_50_val > ema_50_aligned[max(0, i-1)]):
+                # Exit when bearish alignment breaks or volume drops
+                if not bearish_alignment or vol < vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -136,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Trend_Filter_Volume"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
