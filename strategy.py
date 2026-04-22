@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Donchian Breakout with 12-hour Volume and 1-day Trend Filter.
-Long when price breaks above Donchian(20) high, 12-hour volume > 1.5x average, and 1-day EMA34 rising.
-Short when price breaks below Donchian(20) low, 12-hour volume > 1.5x average, and 1-day EMA34 falling.
-Exit when price crosses Donchian midpoint or volume drops.
-Uses volume confirmation to reduce false breakouts and daily trend filter to align with higher timeframe.
-Designed for low trade frequency by requiring multiple confirmations.
-Works in both bull and bear markets by following daily trend while using 6h Donchian for entries.
+Hypothesis: 4-hour Williams %R with 1-day EMA50 trend filter and volume confirmation.
+Buy when Williams %R crosses above -80 (oversold) with price above daily EMA50 and volume > 1.5x 20-period average.
+Sell when Williams %R crosses below -20 (overbought) or price closes below daily EMA50.
+Williams %R identifies mean-reversion entries; daily EMA50 filters trend direction; volume avoids fakeouts.
+Designed for low trade frequency by requiring multiple confirmations and only trading at extreme %R levels.
+Works in both bull and bear markets by following daily trend while using 4h Williams %R for entries.
 """
 
 import numpy as np
@@ -23,52 +22,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for EMA34 trend filter - ONCE before loop
+    # Load 1-day data for EMA50 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Load 12-hour data for volume average - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Williams %R (14 periods) - momentum oscillator
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Avoid division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    volume_12h = df_12h['volume'].values
-    vol_avg_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_avg_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
-    
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2.0
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(20, n):  # Start after enough data for indicators
         # Skip if data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_12h_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above Donchian high, volume spike, and daily EMA rising
-            if (high[i] > high_20[i-1] and  # Break above previous Donchian high
-                volume[i] > 1.5 * vol_avg_12h_aligned[i] and
-                ema34_1d_aligned[i] > ema34_1d_aligned[i-1]):
+            # Long: Williams %R crosses above -80 (from below), price above daily EMA50, volume confirmation
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and  # Cross above -80
+                close[i] > ema50_1d_aligned[i] and
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low, volume spike, and daily EMA falling
-            elif (low[i] < low_20[i-1] and  # Break below previous Donchian low
-                  volume[i] > 1.5 * vol_avg_12h_aligned[i] and
-                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1]):
+            # Short: Williams %R crosses below -20 (from above), price below daily EMA50, volume confirmation
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and  # Cross below -20
+                  close[i] < ema50_1d_aligned[i] and
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -76,14 +73,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls below Donchian midpoint OR volume drops below average
-                if (close[i] < donchian_mid[i] or 
-                    volume[i] < vol_avg_12h_aligned[i]):
+                # Exit long: Williams %R crosses below -20 OR price closes below daily EMA50
+                if (williams_r[i] < -20 and williams_r[i-1] >= -20 or  # Cross below -20
+                    close[i] < ema50_1d_aligned[i]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises above Donchian midpoint OR volume drops below average
-                if (close[i] > donchian_mid[i] or 
-                    volume[i] < vol_avg_12h_aligned[i]):
+                # Exit short: Williams %R crosses above -80 OR price closes above daily EMA50
+                if (williams_r[i] > -80 and williams_r[i-1] <= -80 or  # Cross above -80
+                    close[i] > ema50_1d_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -94,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Donchian_Breakout_12hVol_1dEMA34_Trend"
-timeframe = "6h"
+name = "4H_WilliamsR_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
