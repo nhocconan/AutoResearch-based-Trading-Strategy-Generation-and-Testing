@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,7 +31,7 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2   # Resistance level 4
     s4 = close_1d - range_ * 1.1 / 2   # Support level 4
     
-    # Align all levels to daily timeframe
+    # Align all levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -44,19 +44,14 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        # Skip if data not ready or outside session
+        # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or
-            not in_session[i]):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Camarilla_R4_S4_Breakout_1dEMA50_Trend_Volume_Session"
-timeframe = "1d"
+name = "12H_Camarilla_R4_S4_Breakout_1dEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
