@@ -3,115 +3,104 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and 1d volume regime filter.
-# Uses 4h EMA50 for trend direction (bull/bear filter) and 1d volume percentile
-# to identify high/low volatility regimes. In high volatility regimes (top 30%),
-# trade momentum (RSI > 60 for long, < 40 for short). In low volatility regimes
-# (bottom 30%), trade mean reversion at Bollinger Bands (2, 20). Volume filter
-# avoids choppy markets. Designed for 15-30 trades/year with disciplined entries.
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
+# Williams Alligator uses three smoothed moving averages (Jaw: 13-period SMA shifted 8 bars forward,
+# Teeth: 8-period SMA shifted 5 bars forward, Lips: 5-period SMA shifted 3 bars forward).
+# In trending markets, these lines are well-separated and ordered.
+# In ranging markets, they intertwine.
+# We use 1d EMA50 for trend direction (bullish if price > EMA50, bearish if price < EMA50).
+# Entry: Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA50 AND volume spike.
+# Entry: Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA50 AND volume spike.
+# Exit: When Alligator lines re-intertwine (Lips crosses Teeth or Jaw) OR volume drops.
+# Designed to catch strong trends while avoiding chop. Targets 15-30 trades/year on 12h.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for EMA trend filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h EMA50
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Load 1d data for volume regime filter
+    # Load daily data for EMA50 trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d volume percentile rank (using 50-day lookback)
-    vol_series = pd.Series(volume_1d)
-    vol_rank = vol_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) == 50 else np.nan,
-        raw=False
-    ).values
-    vol_rank_aligned = align_htf_to_ltf(prices, df_1d, vol_rank)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 1h RSI(14)
+    # Calculate Williams Alligator components on 12h data
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ema = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    loss_ema = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = gain_ema / (loss_ema + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate 1h Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
+    # Jaw: 13-period SMMA shifted 8 bars forward
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)
+    
+    # Teeth: 8-period SMMA shifted 5 bars forward
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)
+    
+    # Lips: 5-period SMMA shifted 3 bars forward
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)
+    
+    # Convert to numpy arrays, filling NaN with 0 for alignment
+    jaw = jaw.fillna(0).values
+    teeth = teeth.fillna(0).values
+    lips = lips.fillna(0).values
+    
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(vol_rank_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(sma_20[i]) or 
-            np.isnan(std_20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        ema_4h_val = ema_4h_aligned[i]
-        vol_rank_val = vol_rank_aligned[i]
-        rsi_val = rsi[i]
-        bb_up = bb_upper[i]
-        bb_low = bb_lower[i]
+        price = prices['close'].iloc[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        ema50 = ema50_1d_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         
-        # Trend filter: price above/below 4h EMA50
-        uptrend = price > ema_4h_val
-        downtrend = price < ema_4h_val
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_spike = vol > 1.5 * vol_ma
         
-        # Volume regime: high volatility (top 30%) or low volatility (bottom 30%)
-        high_vol = vol_rank_val > 0.7
-        low_vol = vol_rank_val < 0.3
+        # Alligator alignment conditions
+        bullish_alignment = lips_val > teeth_val > jaw_val
+        bearish_alignment = lips_val < teeth_val < jaw_val
         
         if position == 0:
-            # Entry logic
-            if high_vol:
-                # High volatility: momentum trading
-                if uptrend and rsi_val > 60:
-                    signals[i] = 0.20
-                    position = 1
-                elif downtrend and rsi_val < 40:
-                    signals[i] = -0.20
-                    position = -1
-            elif low_vol:
-                # Low volatility: mean reversion
-                if price <= bb_low and rsi_val < 40:
-                    signals[i] = 0.20
-                    position = 1
-                elif price >= bb_up and rsi_val > 60:
-                    signals[i] = -0.20
-                    position = -1
+            # Look for new entries
+            if bullish_alignment and price > ema50 and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            elif bearish_alignment and price < ema50 and vol_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Check for exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on RSI reversal or mean reversion signal
-                if rsi_val < 40 or price >= bb_up:
+                # Exit if Alligator lines re-intertwine (Lips crosses below Teeth or Jaw)
+                if lips_val <= teeth_val or lips_val <= jaw_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on RSI reversal or mean reversion signal
-                if rsi_val > 60 or price <= bb_low:
+                # Exit if Alligator lines re-intertwine (Lips crosses above Teeth or Jaw)
+                if lips_val >= teeth_val or lips_val >= jaw_val:
                     exit_signal = True
             
             if exit_signal:
@@ -119,10 +108,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_EMA_VolRegime_MomentumMeanRev"
-timeframe = "1h"
+name = "12h_WilliamsAlligator_TrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
