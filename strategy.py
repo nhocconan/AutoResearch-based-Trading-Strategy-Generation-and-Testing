@@ -3,10 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d filter and volume confirmation.
-# Uses Ichimoku TK Cross (Tenkan/Kijun) as entry signal, filtered by price above/below Kumo (cloud) from 1d timeframe.
-# Volume spike confirms momentum. Works in bull/bear via cloud direction filter.
-# Targets 12-37 trades/year (50-150 total over 4 years) with strict entry conditions.
+# Hypothesis: 1h RSI divergence with 4h EMA trend filter and volume confirmation.
+# Uses 4h EMA(50) for trend direction, 1h RSI(14) for momentum exhaustion,
+# and volume spike for confirmation. Long when RSI < 30 and bullish divergence
+# in uptrend (close > 4h EMA50). Short when RSI > 70 and bearish divergence
+# in downtrend (close < 4h EMA50). Designed for 1h timeframe to target 15-35
+# trades/year per symbol. Works in bull/bear via trend filter and mean reversion
+# entries at extremes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,94 +21,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Ichimoku (cloud) and volume context (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 4h data for trend (ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Ichimoku components on 1d
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # 4h EMA(50) for trend direction
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # 1h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Chikou Span (Lagging Span): close shifted 26 periods back (not used for entry)
-    
-    # Align Ichimoku components to 6h timeframe (waits for 1d bar to close)
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Cloud top and bottom (Senkou Span A and B)
-    cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
-    cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
-    
-    # Volume spike filter (20-period on 6h)
+    # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20  # Higher threshold for fewer trades
+    vol_spike = volume > 2.0 * vol_ma20
+    
+    # RSI divergence detection (bullish: price low, RSI higher low)
+    # Bearish: price high, RSI lower high
+    rsi_low = np.zeros(n)
+    rsi_high = np.zeros(n)
+    price_low = np.zeros(n)
+    price_high = np.zeros(n)
+    
+    # Find local minima and maxima for RSI and price
+    for i in range(2, n-2):
+        # RSI trough
+        if rsi[i] < rsi[i-1] and rsi[i] < rsi[i+1] and rsi[i] < rsi[i-2] and rsi[i] < rsi[i+2]:
+            rsi_low[i] = rsi[i]
+            price_low[i] = close[i]
+        # RSI peak
+        if rsi[i] > rsi[i-1] and rsi[i] > rsi[i+1] and rsi[i] > rsi[i-2] and rsi[i] > rsi[i+2]:
+            rsi_high[i] = rsi[i]
+            price_high[i] = close[i]
+    
+    # Forward fill divergence signals
+    rsi_low_filled = pd.Series(rsi_low).replace(0, np.nan).ffill().bfill().fillna(0).values
+    price_low_filled = pd.Series(price_low).replace(0, np.nan).ffill().bfill().fillna(0).values
+    rsi_high_filled = pd.Series(rsi_high).replace(0, np.nan).ffill().bfill().fillna(0).values
+    price_high_filled = pd.Series(price_high).replace(0, np.nan).ffill().bfill().fillna(0).values
+    
+    bullish_div = (rsi_low_filled > 0) & (price_low_filled > 0) & (rsi_low_filled > np.roll(rsi_low_filled, 1)) & (price_low_filled < np.roll(price_low_filled, 1))
+    bearish_div = (rsi_high_filled > 0) & (price_high_filled > 0) & (rsi_high_filled < np.roll(rsi_high_filled, 1)) & (price_high_filled > np.roll(price_high_filled, 1))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
-            np.isnan(vol_ma20[i])):
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Bullish TK Cross: Tenkan crosses above Kijun
-            tk_cross_bullish = (tenkan_6h[i] > kijun_6h[i]) and (tenkan_6h[i-1] <= kijun_6h[i-1])
-            # Bearish TK Cross: Tenkan crosses below Kijun
-            tk_cross_bearish = (tenkan_6h[i] < kijun_6h[i]) and (tenkan_6h[i-1] >= kijun_6h[i-1])
-            
-            # Long: bullish TK Cross + price above cloud + volume spike
-            if tk_cross_bullish and (close[i] > cloud_top[i]) and vol_spike[i]:
-                signals[i] = 0.25
+            # Long: RSI < 30, bullish divergence, uptrend, volume spike
+            if (rsi[i] < 30 and bullish_div[i] and 
+                close[i] > ema_50_4h_aligned[i] and vol_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: bearish TK Cross + price below cloud + volume spike
-            elif tk_cross_bearish and (close[i] < cloud_bottom[i]) and vol_spike[i]:
-                signals[i] = -0.25
+            # Short: RSI > 70, bearish divergence, downtrend, volume spike
+            elif (rsi[i] > 70 and bearish_div[i] and 
+                  close[i] < ema_50_4h_aligned[i] and vol_spike[i]):
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit conditions
+            # Exit on RSI mean reversion or trend change
             if position == 1:
-                # Exit on bearish TK Cross or price drops below cloud
-                tk_cross_bearish = (tenkan_6h[i] < kijun_6h[i]) and (tenkan_6h[i-1] >= kijun_6h[i-1])
-                if tk_cross_bearish or (close[i] < cloud_bottom[i]):
+                if rsi[i] > 50 or close[i] < ema_50_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                # Exit on bullish TK Cross or price rises above cloud
-                tk_cross_bullish = (tenkan_6h[i] > kijun_6h[i]) and (tenkan_6h[i-1] <= kijun_6h[i-1])
-                if tk_cross_bullish or (close[i] > cloud_top[i]):
+                if rsi[i] < 50 or close[i] > ema_50_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter_VolumeSpike"
-timeframe = "6h"
+name = "1h_RSI_Divergence_4hEMA50_Trend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
