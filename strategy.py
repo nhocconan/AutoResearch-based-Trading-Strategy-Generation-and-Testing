@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Trend Following with 4h Supertrend and 1d Volume Filter
-# Uses 4h Supertrend (ATR=10, mult=3) for trend direction, enters on 1h pullbacks to EMA20
-# Only trades during 08-20 UTC session to avoid low-liquidity hours
-# Volume filter: requires 1h volume > 1.5x 20-period average to confirm conviction
-# Fixed position size of 0.20 to manage risk. Designed for 15-30 trades/year.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
+# Donchian breakouts capture trend continuation. Weekly pivot (from prior week) provides
+# institutional reference: price above weekly pivot = bullish bias, below = bearish bias.
+# Volume > 1.5x average confirms breakout strength. Works in bull/bear by aligning with
+# weekly structure, avoiding counter-trend whipsaws. Target: 15-35 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,120 +19,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data for Supertrend (ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load weekly data for pivot points (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly pivot points from prior week's OHLC
+    # Use shifted values to avoid look-ahead: pivot based on previous week's data
+    weekly_high = df_1w['high'].shift(1).values  # prior week high
+    weekly_low = df_1w['low'].shift(1).values    # prior week low
+    weekly_close = df_1w['close'].shift(1).values # prior week close
     
-    # Calculate 4h ATR(10)
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Standard pivot point calculation
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
     
-    # Calculate 4h Supertrend
-    upper_band = (high_4h + low_4h) / 2 + 3.0 * atr_10
-    lower_band = (high_4h + low_4h) / 2 - 3.0 * atr_10
+    # Align weekly pivot levels to 6h timeframe (already delayed by shift(1))
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    supertrend = np.full_like(close_4h, np.nan, dtype=float)
-    direction = np.full_like(close_4h, 1, dtype=int)  # 1 = uptrend, -1 = downtrend
+    # Donchian channel (20-period) on 6h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    for i in range(10, len(close_4h)):
-        if np.isnan(atr_10[i]):
-            continue
-            
-        if close_4h[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close_4h[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-    
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # Align Supertrend to 1h
-    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_4h, direction.astype(float))
-    
-    # Load 1d data for volume filter (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ratio_1d = volume_1d / avg_volume_1d
-    volume_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio_1d)
-    
-    # 1h EMA(20) for pullback entries
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume confirmation: 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
-            np.isnan(volume_ratio_1d_aligned[i]) or np.isnan(ema_20[i]) or
-            not in_session[i]):
+    for i in range(lookback, n):
+        # Skip if data not ready
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 4h uptrend + 1h price near EMA20 + strong 1d volume
-            if (direction_aligned[i] == 1 and 
-                close[i] > ema_20[i] * 0.995 and 
-                close[i] < ema_20[i] * 1.005 and
-                volume_ratio_1d_aligned[i] > 1.5):
-                signals[i] = 0.20
+            # Long: Donchian breakout above + price above weekly pivot + volume surge
+            if (close[i] > highest_high[i] and 
+                close[i] > weekly_pivot_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + 1h price near EMA20 + strong 1d volume
-            elif (direction_aligned[i] == -1 and 
-                  close[i] < ema_20[i] * 1.005 and 
-                  close[i] > ema_20[i] * 0.995 and
-                  volume_ratio_1d_aligned[i] > 1.5):
-                signals[i] = -0.20
+            # Short: Donchian breakdown below + price below weekly pivot + volume surge
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < weekly_pivot_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i]):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: 4h trend reversal or price moves 1.5% away from EMA20
+            # Exit: Donchian reversal or price crosses weekly pivot
             if position == 1:
-                if (direction_aligned[i] == -1 or 
-                    close[i] < ema_20[i] * 0.985 or
-                    close[i] > ema_20[i] * 1.015):
+                # Exit long: price breaks below Donchian low or crosses below weekly pivot
+                if (close[i] < lowest_low[i] or 
+                    close[i] < weekly_pivot_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if (direction_aligned[i] == 1 or 
-                    close[i] > ema_20[i] * 1.015 or
-                    close[i] < ema_20[i] * 0.985):
+                # Exit short: price breaks above Donchian high or crosses above weekly pivot
+                if (close[i] > highest_high[i] or 
+                    close[i] > weekly_pivot_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_Supertrend4h_EMA20Pullback_Volume1d"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
