@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud with 1d ADX filter and volume confirmation.
-Long when Tenkan-sen crosses above Kijun-sen, price is above Kumo cloud,
-ADX indicates strong trend, and volume is above average.
-Short when Tenkan-sen crosses below Kijun-sen, price is below Kumo cloud,
-ADX indicates strong trend, and volume is above average.
-Exit when Tenkan-sen crosses back in opposite direction or price enters cloud.
-Uses 1d ADX to avoid whipsaws in ranging markets, targeting 20-40 trades/year.
+12h Camarilla Pivot Reversal with 1d Volume Spike and ADX Trend Filter.
+Long when price touches S1/S2 with bullish reversal and volume spike.
+Short when price touches R1/R2 with bearish reversal and volume spike.
+Exit when price crosses the pivot point (PP) or opposite S/R level.
+Uses 1d ADX to filter for trending markets and avoid whipsaws.
+Designed for low trade frequency (10-30/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -14,43 +13,43 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for ADX filter - ONCE before loop
+    # Load daily data for pivot and ADX - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate Camarilla pivot levels (based on previous day)
+    # PP = (H + L + C) / 3
+    # S1 = C - (H - L) * 1.1 / 12
+    # S2 = C - (H - L) * 1.1 / 6
+    # R1 = C + (H - L) * 1.1 / 12
+    # R2 = C + (H - L) * 1.1 / 6
+    prev_high = df_daily['high'].shift(1).values
+    prev_low = df_daily['low'].shift(1).values
+    prev_close = df_daily['close'].shift(1).values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun_sen = (period26_high + period26_low) / 2
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
+    s2 = prev_close - (prev_high - prev_low) * 1.1 / 6.0
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
+    r2 = prev_close + (prev_high - prev_low) * 1.1 / 6.0
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Align pivot levels to 12h timeframe (previous day's levels available at 00:00 UTC)
+    pp_aligned = align_htf_to_ltf(prices, df_daily, pp)
+    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_daily, s2)
+    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_daily, r2)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max()
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_span_b = ((period52_high + period52_low) / 2)
-    
-    # Kumo cloud boundaries (shifted forward by 26 periods)
-    senkou_span_a_shifted = senkou_span_a.shift(26)
-    senkou_span_b_shifted = senkou_span_b.shift(26)
-    
-    # Calculate 1d ADX (14-period)
+    # Calculate 1d ADX (14-period) for trend filter
     high_d = pd.Series(df_daily['high'].values)
     low_d = pd.Series(df_daily['low'].values)
     close_d = pd.Series(df_daily['close'].values)
@@ -74,10 +73,10 @@ def generate_signals(prices):
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     adx_d = dx.rolling(window=14, min_periods=14).mean()
     
-    # Align ADX to 6h timeframe
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_daily, adx_d.values)
     
-    # Calculate 6h volume average (20-period)
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -86,10 +85,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after longest lookback
+    for i in range(1, n):  # Start from 1 to ensure previous day's pivot is available
         # Skip if data not ready
-        if (np.isnan(tenkan_sen.iloc[i]) or np.isnan(kijun_sen.iloc[i]) or 
-            np.isnan(senkou_span_a_shifted.iloc[i]) or np.isnan(senkou_span_b_shifted.iloc[i]) or
+        if (np.isnan(pp_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -107,54 +106,55 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Tenkan crosses above Kijun, price above cloud, strong ADX, volume spike
-            tenkan_cross_above = (tenkan_sen.iloc[i] > kijun_sen.iloc[i] and 
-                                  tenkan_sen.iloc[i-1] <= kijun_sen.iloc[i-1])
-            price_above_cloud = (close[i] > senkou_span_a_shifted.iloc[i] and 
-                                 close[i] > senkou_span_b_shifted.iloc[i])
-            if (tenkan_cross_above and price_above_cloud and 
-                adx_aligned[i] > 25 and volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Tenkan crosses below Kijun, price below cloud, strong ADX, volume spike
-            elif (tenkan_sen.iloc[i] < kijun_sen.iloc[i] and 
-                  tenkan_sen.iloc[i-1] >= kijun_sen.iloc[i-1]):
-                price_below_cloud = (close[i] < senkou_span_a_shifted.iloc[i] and 
-                                     close[i] < senkou_span_b_shifted.iloc[i])
-                if (price_below_cloud and adx_aligned[i] > 25 and 
-                    volume[i] > 1.5 * vol_avg_20[i]):
-                    signals[i] = -0.25
+            # Long: Price touches S1/S2 with bullish reversal and volume spike
+            # Bullish reversal: close > open and close > previous close
+            bullish_reversal = close[i] > prices['open'].iloc[i] and close[i] > close[i-1]
+            volume_spike = volume[i] > 2.0 * vol_avg_20[i]
+            
+            if bullish_reversal and volume_spike:
+                # Touch S2 (stronger signal)
+                if low[i] <= s2_aligned[i] * 1.002:  # Allow 0.2% slippage
+                    signals[i] = 0.30
+                    position = 1
+                # Touch S1
+                elif low[i] <= s1_aligned[i] * 1.002:
+                    signals[i] = 0.20
+                    position = 1
+            # Short: Price touches R1/R2 with bearish reversal and volume spike
+            # Bearish reversal: close < open and close < previous close
+            bearish_reversal = close[i] < prices['open'].iloc[i] and close[i] < close[i-1]
+            
+            if bearish_reversal and volume_spike:
+                # Touch R2 (stronger signal)
+                if high[i] >= r2_aligned[i] * 0.998:  # Allow 0.2% slippage
+                    signals[i] = -0.30
+                    position = -1
+                # Touch R1
+                elif high[i] >= r1_aligned[i] * 0.998:
+                    signals[i] = -0.20
                     position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Tenkan crosses below Kijun OR price enters cloud
-                tenkan_cross_below = (tenkan_sen.iloc[i] < kijun_sen.iloc[i] and 
-                                      tenkan_sen.iloc[i-1] >= kijun_sen.iloc[i-1])
-                price_in_cloud = not (close[i] > senkou_span_a_shifted.iloc[i] and 
-                                      close[i] > senkou_span_b_shifted.iloc[i])
-                if tenkan_cross_below or price_in_cloud or adx_aligned[i] < 20:
+                # Exit long: price crosses above PP or touches R1 (take profit)
+                if close[i] > pp_aligned[i] or high[i] >= r1_aligned[i] * 0.998:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Tenkan crosses above Kijun OR price enters cloud
-                tenkan_cross_above = (tenkan_sen.iloc[i] > kijun_sen.iloc[i] and 
-                                      tenkan_sen.iloc[i-1] <= kijun_sen.iloc[i-1])
-                price_in_cloud = not (close[i] < senkou_span_a_shifted.iloc[i] and 
-                                      close[i] < senkou_span_b_shifted.iloc[i])
-                if tenkan_cross_above or price_in_cloud or adx_aligned[i] < 20:
+                # Exit short: price crosses below PP or touches S1 (take profit)
+                if close[i] < pp_aligned[i] or low[i] <= s1_aligned[i] * 1.002:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "6H_IchimokuCloud_1dADX_Volume"
-timeframe = "6h"
+name = "12H_CamarillaPivotReversal_1dADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 #%%
