@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Donchian breakout with 1-day ATR filter and volume confirmation.
-Long when price breaks above 20-period high with expanding volatility and volume spike.
-Short when price breaks below 20-period low with expanding volatility and volume spike.
-Exit when price returns to midline or volatility contracts.
-Designed for low trade frequency by requiring volatility expansion and volume confirmation.
-Works in both bull and bear markets by capturing breakouts in trending phases.
+Hypothesis: 4-hour KAMA (Kaufman Adaptive Moving Average) with 12-hour trend filter and volume spike.
+Long when KAMA > price and 12h EMA50 rising with volume spike.
+Short when KAMA < price and 12h EMA50 falling with volume spike.
+Exit when price crosses KAMA or 12h EMA50 reverses.
+KAMA adapts to market noise, reducing whipsaws in choppy markets. Combined with 12h trend and volume,
+it filters false signals and captures strong trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,85 +22,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Donchian channels - ONCE before loop
+    # KAMA (Kaufman Adaptive Moving Average)
+    def kama(close, er_length=10, fast=2, slow=30):
+        # Calculate Efficiency Ratio
+        change = np.abs(np.diff(close, n=er_length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        # Handle first er_length elements
+        er = np.full_like(close, np.nan, dtype=float)
+        for i in range(er_length, len(close)):
+            if volatility[i] != 0:
+                er[i] = change[i-er_length] / volatility[i-er_length+1:i+1].sum()
+            else:
+                er[i] = 0
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # Calculate KAMA
+        kama_vals = np.full_like(close, np.nan, dtype=float)
+        kama_vals[er_length] = close[er_length]
+        for i in range(er_length+1, len(close)):
+            if not np.isnan(sc[i]):
+                kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+            else:
+                kama_vals[i] = kama_vals[i-1]
+        return kama_vals
+    
+    kama_vals = kama(close, er_length=10, fast=2, slow=30)
+    
+    # Load 12h data for trend filter - ONCE before loop
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # 50-period EMA on 12h close for trend
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # 20-period Donchian channels on 12h
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
-    
-    # Align to 1h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_12h, donch_mid)
-    
-    # Load 1d data for ATR filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # 14-period ATR on 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ATR to 1h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    
-    # Volume confirmation: current volume > 1.5x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(donch_mid_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(kama_vals[i]) or np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility expansion: current ATR > 1.2x ATR from 5 periods ago
-        vol_expanding = atr_aligned[i] > 1.2 * atr_aligned[i-5] if i >= 5 else False
-        
-        # Volume spike
-        vol_spike = volume[i] > 1.5 * vol_ma_30[i]
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: break above Donchian high with vol expansion and volume spike
-            if close[i] > donch_high_aligned[i] and vol_expanding and vol_spike:
+            # Long: price > KAMA and 12h EMA50 rising with volume spike
+            if (close[i] > kama_vals[i] and 
+                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with vol expansion and volume spike
-            elif close[i] < donch_low_aligned[i] and vol_expanding and vol_spike:
+            # Short: price < KAMA and 12h EMA50 falling with volume spike
+            elif (close[i] < kama_vals[i] and 
+                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: return to midline or volatility contraction
+            # Exit: price crosses KAMA or 12h EMA50 reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to midline or volatility contracts
-                if close[i] <= donch_mid_aligned[i] or (i >= 5 and atr_aligned[i] < 0.8 * atr_aligned[i-5]):
+                # Exit long: price <= KAMA or 12h EMA50 turns down
+                if close[i] <= kama_vals[i] or ema50_12h_aligned[i] < ema50_12h_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to midline or volatility contracts
-                if close[i] >= donch_mid_aligned[i] or (i >= 5 and atr_aligned[i] < 0.8 * atr_aligned[i-5]):
+                # Exit short: price >= KAMA or 12h EMA50 turns up
+                if close[i] >= kama_vals[i] or ema50_12h_aligned[i] > ema50_12h_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -111,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_DonchianBreakout_1dATR_Volume"
-timeframe = "12h"
+name = "4H_KAMA_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
