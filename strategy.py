@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Volume-Weighted MACD with 12-hour Trend Filter and Volume Spike.
-Long when VW-MACD crosses above signal line, 12h EMA50 rising, and volume spike.
-Short when VW-MACD crosses below signal line, 12h EMA50 falling, and volume spike.
-Exit when VW-MACD crosses back or 12h EMA50 reverses.
-Designed for low trade frequency (<30 trades/year) by requiring VW-MACD crossover + trend + volume.
-Uses volume-weighted price to reduce noise in choppy markets.
+Hypothesis: 4-hour Williams %R with 1-day Trend and Volume Confirmation.
+Long when Williams %R < -80 (oversold) and 1-day EMA50 rising with volume spike.
+Short when Williams %R > -20 (overbought) and 1-day EMA50 falling with volume spike.
+Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
+Williams %R identifies reversals in both bull and bear markets, while 1-day trend filter
+ensures we trade with the higher timeframe direction. Volume confirmation reduces false signals.
+Designed for low trade frequency (<400 total) by requiring multiple confirmations.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,72 +23,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume-weighted close: (high + low + close) / 3 * volume, then normalize
-    # Actually, VWAP-like: typical price * volume
-    typical_price = (high + low + close) / 3.0
-    vw_close = typical_price * volume
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate VW-MACD: MACD on volume-weighted close
-    # Fast EMA(12), Slow EMA(26), Signal EMA(9)
-    vw_close_series = pd.Series(vw_close)
-    ema12 = vw_close_series.ewm(span=12, adjust=False, min_periods=12).values
-    ema26 = vw_close_series.ewm(span=26, adjust=False, min_periods=26).values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).values
-    macd_hist = macd_line - signal_line
-    
-    # Load 12h data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1-day data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 50-period EMA on 12h close for trend
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 50-period EMA on 1d close for trend
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(macd_line[i]) or np.isnan(signal_line[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(williams_r[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
-        
-        # MACD crossover signals
-        macd_bullish_cross = (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1])
-        macd_bearish_cross = (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1])
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: VW-MACD bullish cross, 12h EMA50 rising, volume spike
-            if macd_bullish_cross and ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and vol_spike:
+            # Long: Williams %R < -80 (oversold), 1d EMA50 rising, volume spike
+            if (williams_r[i] < -80 and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: VW-MACD bearish cross, 12h EMA50 falling, volume spike
-            elif macd_bearish_cross and ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and vol_spike:
+            # Short: Williams %R > -20 (overbought), 1d EMA50 falling, volume spike
+            elif (williams_r[i] > -20 and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: VW-MACD crosses back or 12h EMA50 reverses
+            # Exit: Williams %R crosses above -50 (for long) or below -50 (for short)
             exit_signal = False
             
             if position == 1:
-                # Exit long: VW-MACD bearish cross or 12h EMA50 turns down
-                if macd_bearish_cross or ema50_12h_aligned[i] < ema50_12h_aligned[i-1]:
+                # Exit long: Williams %R >= -50
+                if williams_r[i] >= -50:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: VW-MACD bullish cross or 12h EMA50 turns up
-                if macd_bullish_cross or ema50_12h_aligned[i] > ema50_12h_aligned[i-1]:
+                # Exit short: Williams %R <= -50
+                if williams_r[i] <= -50:
                     exit_signal = True
             
             if exit_signal:
@@ -98,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_VW_MACD_12hTrend_Volume"
-timeframe = "6h"
+name = "4H_WilliamsR_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
