@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once
+    # Load daily data once
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -25,21 +25,25 @@ def generate_signals(prices):
     pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
     r1_1d = 2 * pp_1d - prev_low_1d
     s1_1d = 2 * pp_1d - prev_high_1d
+    r2_1d = pp_1d + (prev_high_1d - prev_low_1d)
+    s2_1d = pp_1d - (prev_high_1d - prev_low_1d)
     
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe
+    # Align to 6h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike filter (20-period average)
+    # Volume spike filter (20-period average on 6h data)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate daily return for volatility filter
+    # Daily volatility filter (10-day average of absolute returns)
     daily_return = pd.Series(close_1d).pct_change().abs()
     vol_filter = pd.Series(daily_return).rolling(window=10, min_periods=10).mean().values
     vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
@@ -52,6 +56,8 @@ def generate_signals(prices):
         if (np.isnan(pp_aligned[i]) or 
             np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or 
             np.isnan(ema34_aligned[i]) or 
             np.isnan(vol_ma_20[i]) or
             np.isnan(vol_filter_aligned[i])):
@@ -67,6 +73,8 @@ def generate_signals(prices):
         pp = pp_aligned[i]
         r1 = r1_aligned[i]
         s1 = s1_aligned[i]
+        r2 = r2_aligned[i]
+        s2 = s2_aligned[i]
         ema34 = ema34_aligned[i]
         
         # Volatility filter: only trade in normal volatility (avoid chop)
@@ -76,17 +84,17 @@ def generate_signals(prices):
         vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above R1 + volume spike + above EMA34 + normal vol
-            if price > r1 and vol_spike and price > ema34 and vol_condition:
-                signals[i] = 0.30
+            # Long: price breaks above R2 + volume spike + above EMA34 + normal vol
+            if price > r2 and vol_spike and price > ema34 and vol_condition:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume spike + below EMA34 + normal vol
-            elif price < s1 and vol_spike and price < ema34 and vol_condition:
-                signals[i] = -0.30
+            # Short: price breaks below S2 + volume spike + below EMA34 + normal vol
+            elif price < s2 and vol_spike and price < ema34 and vol_condition:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back through PP or volatility increases
+            # Exit: price crosses back through central pivot or volatility increases
             exit_signal = False
             
             if position == 1:  # long
@@ -100,10 +108,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_1dEMA34_Volume_Filter"
-timeframe = "4h"
+name = "6h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
