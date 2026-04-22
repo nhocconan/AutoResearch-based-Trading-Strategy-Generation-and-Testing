@@ -31,7 +31,7 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 12h timeframe (primary timeframe)
+    # Align to 12h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
