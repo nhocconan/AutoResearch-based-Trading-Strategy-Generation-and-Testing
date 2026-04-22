@@ -5,108 +5,83 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data once (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data once
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    # Calculate weekly pivot points using previous week's data
-    # Convert daily to weekly by sampling every 5th day (approximate)
-    # For simplicity, we'll use daily pivots but with longer lookback for stability
-    # Calculate pivot points using previous 5-day range for weekly context
-    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    # Calculate weekly EMA50 for trend filter
+    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Shift to avoid look-ahead: use previous 5-day data
-    prev_high_5d = np.roll(high_5d, 1)
-    prev_low_5d = np.roll(low_5d, 1)
-    prev_close_5d = np.roll(close_5d, 1)
-    prev_high_5d[0] = np.nan
-    prev_low_5d[0] = np.nan
-    prev_close_5d[0] = np.nan
+    # Align to 12h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     
-    # Weekly-style pivot points (using 5-day aggregation)
-    pp_5d = (prev_high_5d + prev_low_5d + prev_close_5d) / 3
-    r1_5d = 2 * pp_5d - prev_low_5d
-    s1_5d = 2 * pp_5d - prev_high_5d
-    r2_5d = pp_5d + (prev_high_5d - prev_low_5d)
-    s2_5d = pp_5d - (prev_high_5d - prev_low_5d)
-    r3_5d = pp_5d + 2 * (prev_high_5d - prev_low_5d)
-    s3_5d = pp_5d - 2 * (prev_high_5d - prev_low_5d)
+    # Load daily data for ATR calculation
+    df_daily = get_htf_data(prices, '1d')
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # 5-day EMA for trend filter (more stable than daily)
-    ema5_5d = pd.Series(close_5d).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Calculate daily ATR(14)
+    high_low = high_daily - low_daily
+    high_close = np.abs(high_daily - np.roll(close_daily, 1))
+    low_close = np.abs(low_daily - np.roll(close_daily, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    true_range[0] = high_low[0]  # First value
+    atr14_daily = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
-    # Align 5-day pivots and EMA to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_5d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_5d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_5d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_5d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_5d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_5d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_5d)
-    ema5_aligned = align_htf_to_ltf(prices, df_1d, ema5_5d)
+    # Align ATR to 12h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_daily, atr14_daily)
     
-    # Volume spike filter (24-period average on 6h data ≈ 6 days)
+    # Price data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any data is not ready
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema5_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if np.isnan(ema50_aligned[i]) or np.isnan(atr_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        vol = volume[i]
-        vol_ma = vol_ma_24[i]
-        pp = pp_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
-        ema5 = ema5_aligned[i]
+        price = close[i]
+        atr = atr_aligned[i]
+        ema50 = ema50_aligned[i]
         
         if position == 0:
-            # Long: price breaks above S3 (deep value) with volume spike and above EMA5
-            if price < s3 and vol > 2.0 * vol_ma and price > ema5:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks above R3 (overbought) with volume spike and below EMA5
-            elif price > r3 and vol > 2.0 * vol_ma and price < ema5:
-                signals[i] = -0.25
-                position = -1
+            # Long: price above weekly EMA50 and breaks above highest high of last 6 periods
+            if price > ema50:
+                highest_high = np.max(high[max(0, i-6):i])
+                if price > highest_high:
+                    signals[i] = 0.25
+                    position = 1
+            # Short: price below weekly EMA50 and breaks below lowest low of last 6 periods
+            elif price < ema50:
+                lowest_low = np.min(low[max(0, i-6):i])
+                if price < lowest_low:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position != 0:
-            # Exit: price returns to central pivot or opposite extreme
-            if position == 1:  # Long position
-                if price > pp or price < s3:  # Return to mean or oversold
+            # Exit: trailing stop based on ATR
+            if position == 1:
+                trailing_stop = np.max(high[max(0, i-12):i+1]) - 2.0 * atr
+                if price < trailing_stop:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            elif position == -1:  # Short position
-                if price < pp or price > r3:  # Return to mean or overbought
+            elif position == -1:
+                trailing_stop = np.min(low[max(0, i-12):i+1]) + 2.0 * atr
+                if price > trailing_stop:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -114,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_S3_R3_Reversal_5dEMA5_Volume_Spike"
-timeframe = "6h"
+name = "12h_EMA50_Trend_Breakout_ATR_Trailing_Stop"
+timeframe = "12h"
 leverage = 1.0
