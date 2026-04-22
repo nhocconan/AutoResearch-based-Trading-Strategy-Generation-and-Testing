@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R reversal with 12h trend filter and volume confirmation.
-Long when Williams %R crosses above -80 (oversold) with bullish 12h trend and volume spike.
-Short when Williams %R crosses below -20 (overbought) with bearish 12h trend and volume spike.
-Exit when Williams %R returns to -50 (mean reversion zone).
-Williams %R identifies exhaustion points in trends; 12h filter avoids counter-trend trades.
-Designed for low trade frequency (10-25/year) to minimize fee drag in ranging markets.
+Hypothesis: 4-hour Donchian channel breakout with 1-day VWAP filter and volume confirmation.
+Long when price breaks above Donchian upper with price above daily VWAP and volume spike.
+Short when price breaks below Donchian lower with price below daily VWAP and volume spike.
+Exit when price crosses Donchian middle or price crosses daily VWAP in opposite direction.
+Uses daily VWAP as trend filter to avoid whipsaws in ranging markets.
+Designed for low trade frequency (15-35/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,28 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load daily data for VWAP filter - ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Williams %R (14-period) on 6h
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max()
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).values
+    # Calculate Donchian Channel (20-period) on 4h
+    lookback = 20
+    dc_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    dc_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    dc_middle = (dc_upper + dc_lower) / 2.0
     
-    # 12h EMA50 trend filter
-    close_12h = pd.Series(df_12h['close'].values)
-    ema_50_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate daily VWAP (typical price * volume cumulative)
+    typical_price_d = (df_daily['high'] + df_daily['low'] + df_daily['close']) / 3.0
+    vwap_d = (typical_price_d * df_daily['volume']).cumsum() / df_daily['volume'].cumsum()
+    vwap_d_values = vwap_d.values
     
-    # 12h close for trend direction (bullish if close > EMA50)
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, df_12h['close'].values)
-    bullish_trend = close_12h_aligned > ema_50_12h_aligned
+    # Align daily VWAP to 4h timeframe
+    vwap_aligned = align_ltf_to_htf(prices, df_daily, vwap_d_values)
     
-    # 6h volume average (20-period)
+    # Calculate 4h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -53,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(lookback, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(bullish_trend[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
+            np.isnan(vwap_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,24 +69,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (oversold) with bullish 12h trend and volume
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and  # Cross above -80
-                bullish_trend[i] and 
-                volume[i] > 1.8 * vol_avg_20[i]):
+            # Long: Price breaks above Donchian upper with price above VWAP and volume
+            if (close[i] > dc_upper[i] and 
+                close[i] > vwap_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 (overbought) with bearish 12h trend and volume
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and  # Cross below -20
-                  not bullish_trend[i] and 
-                  volume[i] > 1.8 * vol_avg_20[i]):
+            # Short: Price breaks below Donchian lower with price below VWAP and volume
+            elif (close[i] < dc_lower[i] and 
+                  close[i] < vwap_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit when Williams %R returns to -50 (mean reversion)
-            if position == 1 and williams_r[i] >= -50:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and williams_r[i] <= -50:
+            # Exit conditions
+            exit_signal = False
+            
+            if position == 1:
+                # Exit long: price crosses below middle OR price crosses below VWAP
+                if close[i] < dc_middle[i] or close[i] < vwap_aligned[i]:
+                    exit_signal = True
+            else:  # position == -1
+                # Exit short: price crosses above middle OR price crosses above VWAP
+                if close[i] > dc_middle[i] or close[i] > vwap_aligned[i]:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,7 +102,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsR_Reversal_12hTrend_Volume"
-timeframe = "6h"
+name = "4H_DonchianBreakout_1dVWAP_Volume"
+timeframe = "4h"
 leverage = 1.0
 #%%
