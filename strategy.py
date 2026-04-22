@@ -3,96 +3,99 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with 1d ADX trend filter and volume confirmation.
-# Works in bull/bear by only trading in the direction of higher timeframe trend.
-# Targets 15-25 trades/year (60-100 total) with low frequency to avoid fee drag.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 34:
+    if n < 120:  # need enough data for weekly and daily indicators
         return np.zeros(n)
     
-    # Load 1d data once for ADX and Donchian calculation
+    # Load 1w and 1d data once
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
+    
+    # Weekly ATR(14) for volatility filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1]))
+    tr2 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, tr2)])
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Daily Donchian(20) for trend
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    upper_donchian = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_donchian = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 14-period ADX for trend strength
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), np.abs(high_1d[1:] - close_1d[:-1]))
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], tr1, tr2])
-    tr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily RSI(14) for mean reversion
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    plus_dm = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    # Align HTF indicators to 6h
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    upper_donchian_aligned = align_htf_to_ltf(prices, df_1d, upper_donchian)
+    lower_donchian_aligned = align_htf_to_ltf(prices, df_1d, lower_donchian)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    plus_di = 100 * plus_dm / tr
-    minus_di = 100 * minus_dm / tr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 6h Donchian channels (20-period)
+    # 6h ATR(14) for position sizing and stop
     high_6h = prices['high'].values
     low_6h = prices['low'].values
-    donch_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike filter
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    close_6h = prices['close'].values
+    tr1_6h = np.maximum(high_6h[1:] - low_6h[1:], np.abs(high_6h[1:] - close_6h[:-1]))
+    tr2_6h = np.abs(low_6h[1:] - close_6h[:-1])
+    tr_6h = np.concatenate([[np.inf], np.maximum(tr1_6h, tr2_6h)])
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(120, n):
         # Skip if any data is not ready
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_1w_aligned[i]) or 
+            np.isnan(upper_donchian_aligned[i]) or 
+            np.isnan(lower_donchian_aligned[i]) or 
+            np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(atr_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        adx_val = adx_aligned[i]
+        price = close_6h[i]
+        atr_1w_val = atr_1w_aligned[i]
+        upper_donch = upper_donchian_aligned[i]
+        lower_donch = lower_donchian_aligned[i]
+        rsi_val = rsi_1w_aligned[i]
+        atr_6h_val = atr_6h[i]
         
-        # Volume filter: current volume > 1.8 * 20-day average
-        vol_spike = vol > 1.8 * vol_ma
+        # Weekly volatility filter: only trade when weekly ATR is elevated
+        vol_filter = atr_1w_val > np.nanpercentile(atr_1w_aligned[:i+1], 50)
         
         if position == 0:
-            # Long: price breaks above Donchian high + ADX > 25 + volume spike
-            if price > donch_high[i] and adx_val > 25 and vol_spike:
+            # Long: price breaks above weekly Donchian upper + RSI < 50 (mean reversion in uptrend)
+            if price > upper_donch and rsi_val < 50 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + ADX > 25 + volume spike
-            elif price < donch_low[i] and adx_val > 25 and vol_spike:
+            # Short: price breaks below weekly Donchian lower + RSI > 50
+            elif price < lower_donch and rsi_val > 50 and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back through Donchian middle or ADX weakens
-            donch_mid = (donch_high[i] + donch_low[i]) / 2
+            # Exit: opposite Donchian break or RSI extreme
             exit_signal = False
             
             if position == 1:  # long position
-                if price < donch_mid or adx_val < 20:
+                if price < lower_donch or rsi_val > 70:
                     exit_signal = True
+            
             elif position == -1:  # short position
-                if price > donch_mid or adx_val < 20:
+                if price > upper_donch or rsi_val < 30:
                     exit_signal = True
             
             if exit_signal:
@@ -104,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_ADX25_Volume"
+name = "6h_WeeklyDonchian_RSI_MeanReversion"
 timeframe = "6h"
 leverage = 1.0
