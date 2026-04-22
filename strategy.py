@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot points and trend (ONCE before loop)
+    # Load 1d data for pivot points (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -23,22 +23,30 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (R1/S1)
+    # Calculate Camarilla pivot levels (R1/S1 and R4/S4)
     pivot = (high_1d + low_1d + close_1d) / 3
     range_ = high_1d - low_1d
     r1 = close_1d + range_ * 1.1 / 12  # Resistance level 1
     s1 = close_1d - range_ * 1.1 / 12  # Support level 1
+    r4 = close_1d + range_ * 1.1 / 2   # Resistance level 4
+    s4 = close_1d - range_ * 1.1 / 2   # Support level 4
     
-    # Align all levels to 12h timeframe
+    # Align all levels to 1d timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Trend filter: 1d EMA20 (HTF trend)
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Trend filter: 1w EMA200 (HTF trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -50,7 +58,8 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready or outside session
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_avg_20[i]) or
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -58,18 +67,18 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume AND above 1d EMA20 (uptrend)
-            if (close[i] > r1_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and 
-                close[i] > ema_20_1d_aligned[i]):
+            # Long: Price breaks above R4 with volume AND above 1w EMA200 (uptrend)
+            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                close[i] > ema_200_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume AND below 1d EMA20 (downtrend)
-            elif (close[i] < s1_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and 
-                  close[i] < ema_20_1d_aligned[i]):
+            # Short: Price breaks below S4 with volume AND below 1w EMA200 (downtrend)
+            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                  close[i] < ema_200_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite S1/R1 level (tighter stop)
+            # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
             if position == 1:
                 if not np.isnan(s1_aligned[i]) and close[i] < s1_aligned[i]:
                     signals[i] = 0.0
@@ -85,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R1_S1_Breakout_1dEMA20_Trend_Volume_Session"
-timeframe = "12h"
+name = "1D_Camarilla_R4_S4_Breakout_1wEMA200_Trend_Volume_Session"
+timeframe = "1d"
 leverage = 1.0
