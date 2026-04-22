@@ -1,3 +1,9 @@
+# 4h_200EMA_RSI2080_TrendFollowing_v1
+# Hypothesis: Use 200EMA as long-term trend filter (works in bull/bear) with RSI(14) for momentum entries (20/80 levels).
+# Only trade in direction of 200EMA to avoid counter-trend whipsaws. Volume confirmation filters low-conviction moves.
+# Target: 20-40 trades/year on 4h timeframe with clear trend + momentum signals.
+# Should work in bull (trend up + RSI buy signals) and bear (trend down + RSI sell signals).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,91 +11,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Daily ATR for volatility regime filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1h trend filter (HTF) - more responsive than daily for 4h signals
+    df_1h = get_htf_data(prices, '1h')
+    close_1h = df_1h['close'].values
+    ema_200_1h = pd.Series(close_1h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_200_1h)
     
-    # True Range for daily ATR
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    
-    # 12h ATR for entry trigger and stop
+    # 4h indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
-    # 12h SMA for trend direction
-    sma = pd.Series(close).rolling(window=50, min_periods=50).mean().values
-    
-    # Align daily ATR and its MA to 12h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    # Volume average for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(50, n):
-        # Skip if any data is not ready
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_ma_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(sma[i])):
+    for i in range(200, n):
+        # Skip if data not ready
+        if (np.isnan(ema_200_1h_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        atr_val = atr[i]
-        sma_val = sma[i]
-        atr_1d = atr_1d_aligned[i]
-        atr_ma_1d = atr_ma_1d_aligned[i]
+        ema_trend = ema_200_1h_aligned[i]
+        rsi_val = rsi[i]
+        vol = volume[i]
+        vol_avg_val = vol_avg[i]
         
-        # Volatility regime: only trade when daily ATR is elevated (trending market)
-        vol_regime = atr_1d > atr_ma_1d
+        # Volume confirmation: above average volume
+        vol_confirm = vol > vol_avg_val
         
-        if position == 0 and vol_regime:
-            # Long: price breaks above SMA + 1.5*ATR with rising volatility
-            if price > sma_val + 1.5 * atr_val and atr_val > atr[i-1]:
+        if position == 0:
+            # Long: above 200EMA (uptrend) + RSI oversold bounce + volume
+            if price > ema_trend and rsi_val < 30 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price breaks below SMA - 1.5*ATR with rising volatility
-            elif price < sma_val - 1.5 * atr_val and atr_val > atr[i-1]:
+            # Short: below 200EMA (downtrend) + RSI overbought bounce + volume
+            elif price < ema_trend and rsi_val > 70 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
-        elif position != 0:
-            # Exit: mean reversion to SMA or volatility collapse
-            mean_rev = (position == 1 and price < sma_val) or (position == -1 and price > sma_val)
-            vol_collapse = atr_val < 0.5 * atr[i-1]  # Sharp drop in volatility
-            
-            if mean_rev or vol_collapse:
+        elif position == 1:  # Long position
+            # Exit: RSI overbought or trend break
+            if rsi_val > 70 or price < ema_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.25  # hold
+        
+        elif position == -1:  # Short position
+            # Exit: RSI oversold or trend break
+            if rsi_val < 30 or price > ema_trend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25  # hold
     
     return signals
 
-name = "12h_AverageTrueRangeTrend_FilteredBreakout_v1"
-timeframe = "12h"
+name = "4h_200EMA_RSI2080_TrendFollowing_v1"
+timeframe = "4h"
 leverage = 1.0
