@@ -1,3 +1,9 @@
+#2025-06-05
+# Hypothesis: 6h timeframe with weekly Donchian channel breakout and daily volume confirmation.
+# In bull markets, price breaks above weekly high with volume; in bear markets, breaks below weekly low with volume.
+# Weekly filter reduces whipsaw, volume confirms institutional participation.
+# Target: 50-150 total trades over 4 years (12-37/year), size 0.25.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,105 +11,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:  # Need enough data for weekly lookback
         return np.zeros(n)
     
-    # Load 1d data once
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data once for Donchian channel (20-week lookback)
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate Pivot levels using previous day's HLC (no look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # Calculate weekly Donchian channels (20-period high/low)
+    # Use pandas rolling with min_periods to avoid look-ahead
+    high_series = pd.Series(high_weekly)
+    low_series = pd.Series(low_weekly)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1_1d = 2 * pp_1d - prev_low_1d
-    s1_1d = 2 * pp_1d - prev_high_1d
-    r2_1d = pp_1d + (prev_high_1d - prev_low_1d)
-    s2_1d = pp_1d - (prev_high_1d - prev_low_1d)
+    # Load daily data for volume confirmation
+    df_daily = get_htf_data(prices, '1d')
+    volume_daily = df_daily['volume'].values
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily volume average (20-period)
+    volume_series = pd.Series(volume_daily)
+    vol_ma_daily = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Align to 1h timeframe (primary timeframe)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align weekly Donchian levels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
     
-    # Volume spike filter (20-period average)
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 8-20 UTC (pre-compute hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Align daily volume MA to 6h timeframe
+    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):  # Start after warmup period
         # Skip if any data is not ready
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: only trade 8-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(vol_ma_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        pp = pp_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
-        ema34 = ema34_aligned[i]
+        vol_ma = vol_ma_daily_aligned[i]
+        upper_band = donchian_high_aligned[i]
+        lower_band = donchian_low_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R2 + volume spike + above EMA34
-            if price > r2 and vol > 1.5 * vol_ma and price > ema34:
-                signals[i] = 0.20
+            # Long: price breaks above weekly Donchian high + volume above average
+            if price > upper_band and prices['volume'].iloc[i] > vol_ma:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 + volume spike + below EMA34
-            elif price < s2 and vol > 1.5 * vol_ma and price < ema34:
-                signals[i] = -0.20
+            # Short: price breaks below weekly Donchian low + volume above average
+            elif price < lower_band and prices['volume'].iloc[i] > vol_ma:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back through central pivot
-            if position == 1 and price < pp:
+            # Exit: price returns to the opposite Donchian band (mean reversion within channel)
+            if position == 1 and price < lower_band:
                 signals[i] = 0.0
                 position = 0
-            elif position == -1 and price > pp:
+            elif position == -1 and price > upper_band:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Spike"
-timeframe = "1h"
+name = "6h_WeeklyDonchian_Breakout_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
