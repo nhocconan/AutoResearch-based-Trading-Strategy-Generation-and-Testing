@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,102 +13,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for weekly trend filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20w)
-    
-    # Load 1d data for daily pivot points and ATR
+    # Load 1d data for pivot points and trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Previous day's high, low, close for pivot calculation
+    # Previous day's high, low, close for Camarilla pivot points
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
+    # Calculate Camarilla pivot levels (R4/S4 are key breakout levels)
     pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    range_ = high_1d - low_1d
+    r4 = close_1d + range_ * 1.1 / 2  # Resistance level 4
+    s4 = close_1d - range_ * 1.1 / 2  # Support level 4
     
-    # Daily ATR(14) for volatility filter
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    ranges = np.maximum(high_low, np.maximum(high_close, low_close))
-    ranges[0] = high_low[0]  # First value
-    tr = pd.Series(ranges).rolling(window=14, min_periods=14).mean().values
-    atr_14 = align_htf_to_ltf(prices, df_1d, tr)
+    # 1d EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 6-period RSI for momentum confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align all levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume filter: 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(ema_20w_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or
-            np.isnan(r2[i]) or np.isnan(s2[i]) or np.isnan(atr_14[i]) or
-            np.isnan(rsi_values[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above weekly EMA20 (uptrend) + breaks above R2 with volume + RSI > 50
-            if (close[i] > ema_20w_aligned[i] and 
-                close[i] > r2[i] and 
-                volume[i] > 1.5 * vol_avg[i] and 
-                rsi_values[i] > 50):
-                signals[i] = 0.25
+            # Long: Price breaks above R4 with volume spike AND above 1d EMA34 (uptrend)
+            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                close[i] > ema_34_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: Price below weekly EMA20 (downtrend) + breaks below S2 with volume + RSI < 50
-            elif (close[i] < ema_20w_aligned[i] and 
-                  close[i] < s2[i] and 
-                  volume[i] > 1.5 * vol_avg[i] and 
-                  rsi_values[i] < 50):
-                signals[i] = -0.25
+            # Short: Price breaks below S4 with volume spike AND below 1d EMA34 (downtrend)
+            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                  close[i] < ema_34_aligned[i]):
+                signals[i] = -0.30
                 position = -1
         else:
-            # Exit conditions
+            # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
             if position == 1:
-                # Exit long: Price closes below S1 OR RSI < 40
-                if close[i] < s1[i] or rsi_values[i] < 40:
+                # Exit long: Price closes below S1 (calculated from previous day)
+                if i > 0:
+                    s1 = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
+                    s1_series = pd.Series(np.full_like(close_1d, s1))
+                    s1_aligned_exit = align_htf_to_ltf(prices, df_1d, s1_series.values)[i]
+                else:
+                    s1_aligned_exit = np.nan
+                if not np.isnan(s1_aligned_exit) and close[i] < s1_aligned_exit:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
-                # Exit short: Price closes above R1 OR RSI > 60
-                if close[i] > r1[i] or rsi_values[i] > 60:
+                # Exit short: Price closes above R1 (calculated from previous day)
+                if i > 0:
+                    r1 = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
+                    r1_series = pd.Series(np.full_like(close_1d, r1))
+                    r1_aligned_exit = align_htf_to_ltf(prices, df_1d, r1_series.values)[i]
+                else:
+                    r1_aligned_exit = np.nan
+                if not np.isnan(r1_aligned_exit) and close[i] > r1_aligned_exit:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
-name = "6H_WeeklyEMA20_DailyPivot_RSI_Volume"
-timeframe = "6h"
+name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
