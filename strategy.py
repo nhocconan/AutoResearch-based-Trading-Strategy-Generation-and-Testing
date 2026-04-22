@@ -3,97 +3,87 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot R1/S1 breakout with volume confirmation and 12h EMA50 trend filter.
-# Uses daily Camarilla pivot levels (R1, S1) from previous day. In uptrend (price > 12h EMA50): long on break above R1 with volume spike.
-# In downtrend (price < 12h EMA50): short on break below S1 with volume spike.
-# Designed to capture momentum in trending markets while avoiding false breakouts in ranging markets.
-# Targets 20-50 trades/year with disciplined risk control.
+# Hypothesis: 1h trend following with 4h EMA filter and volume confirmation.
+# Uses 4h EMA50 to determine trend direction and 1h EMA20 for entry timing.
+# Only trades in direction of 4h trend during high-liquidity session (08-20 UTC).
+# Volume filter requires 1.5x average volume to avoid false breakouts.
+# Designed for low trade frequency (15-35/year) to minimize fee drag in ranging markets.
+# Works in both bull and bear markets by following established 4h trend.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Camarilla pivot calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate Camarilla pivot levels for each day
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate 4h EMA50 for trend direction
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate 1h EMA20 for entry timing
+    close = prices['close'].values
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Load 12h data for EMA50 trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    
-    # Calculate 20-period average volume for volume spike detection
+    # Calculate 20-period average volume for volume filter
     volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
+        # Skip if not in trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(ema_20[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
         vol = volume[i]
+        ema4h = ema_4h_aligned[i]
+        ema20 = ema_20[i]
         vol_ma = vol_ma_20[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema50_val = ema_50_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 1.5 * 20-period EMA volume
+        vol_filter = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Determine trend based on 12h EMA50
-            uptrend = price > ema50_val
-            downtrend = price < ema50_val
-            
-            if uptrend:
-                # Uptrend: long on break above R1 with volume spike
-                if price > r1_val and vol_spike:
-                    signals[i] = 0.25
-                    position = 1
-            elif downtrend:
-                # Downtrend: short on break below S1 with volume spike
-                if price < s1_val and vol_spike:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price above both EMAs and volume filter
+            if price > ema20 and price > ema4h and vol_filter:
+                signals[i] = 0.20
+                position = 1
+            # Short: price below both EMAs and volume filter
+            elif price < ema20 and price < ema4h and vol_filter:
+                signals[i] = -0.20
+                position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit: price crosses back below/above EMA20
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on retracement to S1 or below
-                if price < s1_val:
+                if price < ema20:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on retracement to R1 or above
-                if price > r1_val:
+                if price > ema20:
                     exit_signal = True
             
             if exit_signal:
@@ -101,10 +91,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1h_EMA20_EMA50_Trend_Filter_Volume"
+timeframe = "1h"
 leverage = 1.0
