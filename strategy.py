@@ -3,9 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h timeframe with Camarilla pivot breakout + volume spike + session filter
+# Targets 12-37 trades/year (50-150 total over 4 years) by using strict entry conditions
+# Works in bull/bear markets via volatility expansion (volume spike) and institutional levels
+# Uses 1-day Camarilla levels for institutional reference points
+# Volume confirmation ensures breakouts have institutional participation
+# Session filter (08-20 UTC) focuses on liquid trading hours
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -38,7 +45,7 @@ def generate_signals(prices):
     r1 = prev_close + (prev_range * 1.1 / 12)
     s1 = prev_close - (prev_range * 1.1 / 12)
     
-    # Volume spike filter (20-period on 4h)
+    # Volume spike filter (20-period on 12h)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
     
@@ -46,14 +53,14 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Align indicators to 4-hour timeframe
+    # Align indicators to 12-hour timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready or outside session
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma20[i]) or not in_session[i]):
@@ -64,11 +71,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R1 + volume spike
-            if (close[i] > r1_aligned[i] and vol_spike[i]):
+            if close[i] > r1_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 + volume spike
-            elif (close[i] < s1_aligned[i] and vol_spike[i]):
+            elif close[i] < s1_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -88,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_Volume_Session"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
