@@ -45,25 +45,31 @@ def generate_signals(prices):
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Add price momentum filter: 4-period ROC > 0 for long, < 0 for short
+    roc4 = pd.Series(close).pct_change(4).values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
+            np.isnan(s2_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i]) or
+            np.isnan(roc4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike AND above 1d EMA34 (uptrend)
-            if (close[i] > r1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and close[i] > ema_34_aligned[i]):
+            # Long: Price breaks above R1 with volume spike AND above 1d EMA34 (uptrend) AND positive momentum
+            if (close[i] > r1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
+                close[i] > ema_34_aligned[i] and roc4[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume spike AND below 1d EMA34 (downtrend)
-            elif (close[i] < s1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and close[i] < ema_34_aligned[i]):
+            # Short: Price breaks below S1 with volume spike AND below 1d EMA34 (downtrend) AND negative momentum
+            elif (close[i] < s1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
+                  close[i] < ema_34_aligned[i] and roc4[i] < 0):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -85,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_Momentum"
 timeframe = "4h"
 leverage = 1.0
