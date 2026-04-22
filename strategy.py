@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot levels and trend filter
+    # Load 1d data for pivot and trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 35:
         return np.zeros(n)
@@ -22,10 +22,10 @@ def generate_signals(prices):
     close_1d = pd.Series(df_1d['close'].values)
     ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA34 to 12h timeframe
+    # Align EMA34 to 4h timeframe
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily OHLC for Camarilla pivot levels (S1 and R1)
+    # Calculate daily OHLC for Camarilla pivot levels
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
@@ -46,12 +46,12 @@ def generate_signals(prices):
     s1 = close_prev - (range_val * 1.1 / 12)
     r1 = close_prev + (range_val * 1.1 / 12)
     
-    # Align all levels to 12h timeframe
+    # Align all levels to 4h timeframe
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Calculate 12h volume average (20-period)
+    # Calculate 4h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
