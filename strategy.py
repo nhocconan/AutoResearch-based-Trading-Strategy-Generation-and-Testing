@@ -31,13 +31,13 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2   # Resistance level 4
     s4 = close_1d - range_ * 1.1 / 2   # Support level 4
     
-    # Align all levels to 12h timeframe
+    # Align all levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: 20-period average (12h)
+    # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Trend filter: 1d EMA34 (HTF trend)
@@ -66,12 +66,12 @@ def generate_signals(prices):
             # Long: Price breaks above R4 with volume AND above 1d EMA34 (uptrend)
             if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
                 close[i] > ema_34_1d_aligned[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Price breaks below S4 with volume AND below 1d EMA34 (downtrend)
             elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
                   close[i] < ema_34_1d_aligned[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
@@ -80,16 +80,16 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
                 if not np.isnan(r1_aligned[i]) and close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
-name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume_Session"
-timeframe = "12h"
+name = "4H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
