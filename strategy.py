@@ -13,7 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Camarilla pivot calculation and EMA
+    # Load 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1-week EMA50 for trend filter (requires 50 weeks of data)
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Load 1-day data for 12-hour pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -22,76 +29,75 @@ def generate_signals(prices):
     # Calculate daily range
     daily_range = high_1d - low_1d
     
-    # Calculate Camarilla levels for previous day (shifted by 1 to avoid look-ahead)
+    # Calculate pivot points from previous day
     prev_close = np.roll(close_1d, 1)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_range = np.roll(daily_range, 1)
     
-    # Set first day values to NaN since we don't have previous day data
+    # Set first day values to NaN
     prev_close[0] = np.nan
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_range[0] = np.nan
     
-    # Calculate Camarilla R3 and S3 from previous day (tighter levels for fewer trades)
-    r3 = prev_close + (prev_range * 1.1 / 4)
-    s3 = prev_close - (prev_range * 1.1 / 4)
+    # Calculate pivot point and support/resistance levels
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pp + (prev_range * 1.1 / 12)
+    s1 = pp - (prev_range * 1.1 / 12)
     
-    # Calculate 1-day EMA50 for trend filter (slower for fewer signals)
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume spike filter (30-period on 4h for stricter confirmation)
-    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > 2.5 * vol_ma30  # Require 2.5x volume for confirmation
+    # Volume spike filter (10-period on 12h)
+    vol_ma10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    vol_spike = volume > 2.0 * vol_ma10
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Align indicators to 4-hour timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align indicators to 12-hour timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma30[i]) or
-            not in_session[i]):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(pp_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma10[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 + above 1d EMA50 + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
+            # Long: Price above 1w EMA50 + breaks above R1 + volume spike
+            if (close[i] > ema50_1w_aligned[i] and 
+                close[i] > r1_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + below 1d EMA50 + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
+            # Short: Price below 1w EMA50 + breaks below S1 + volume spike
+            elif (close[i] < ema50_1w_aligned[i] and 
+                  close[i] < s1_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to opposite S3/R3 level or trend changes
+            # Exit: Price returns to opposite level or trend changes
             if position == 1:
-                if (close[i] < s3_aligned[i] or 
-                    close[i] < ema50_1d_aligned[i]):
+                if (close[i] < s1_aligned[i] or 
+                    close[i] < ema50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if (close[i] > r3_aligned[i] or 
-                    close[i] > ema50_1d_aligned[i]):
+                if (close[i] > r1_aligned[i] or 
+                    close[i] > ema50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -99,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA50_Volume_Session"
-timeframe = "4h"
+name = "12h_Pivot_EMA50_Trend_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
