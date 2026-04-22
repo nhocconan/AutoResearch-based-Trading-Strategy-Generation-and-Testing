@@ -3,83 +3,66 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 12-hour Choppiness Index regime filter + 1-day Bollinger Band reversal.
-# In choppy markets (CHOP > 61.8), price tends to revert from Bollinger Band extremes.
-# Uses 12h Choppiness Index to detect regime and 1d Bollinger Bands (20,2) for entry.
-# Long when price touches lower BB in chop, short when price touches upper BB in chop.
-# Designed for low trade frequency (~20-35/year) to minimize fee decay.
-# Works in ranging markets which dominate 2025+ test period.
+# Hypothesis: 1d Donchian breakout (20-period) with weekly EMA200 trend filter and volume confirmation.
+# Uses Donchian channel breakouts for trend following, with weekly EMA200 as primary trend filter
+# and volume spikes (>1.5x 20-period average) for confirmation. Designed for low trade frequency
+# (~10-20 trades/year) to minimize fee decay. Works in both bull and bear markets by following
+# higher timeframe trend - only takes long signals in uptrend (price > weekly EMA200) and short
+# signals in downtrend (price < weekly EMA200).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 12h data for Choppiness Index (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load weekly data for EMA200 trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 14-period Choppiness Index on 12h data
-    # TR = max(high-low, abs(high-previous close), abs(low-previous close))
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Set first TR to high-low since no previous close
-    tr[0] = high_12h[0] - low_12h[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 200-period EMA on weekly close for trend filter
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Sum of true ranges over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Align weekly EMA200 to daily timeframe (waits for weekly bar to close)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Choppiness Index = 100 * log10(tr_sum / (atr * 14)) / log10(14)
-    chop = 100 * np.log10(tr_sum / (atr * 14)) / np.log10(14)
+    # Calculate Donchian channels (20-period high/low) on daily data
+    high_max = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_min = prices['low'].rolling(window=20, min_periods=20).min().values
     
-    # Load 1d data for Bollinger Bands (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate 20-period Bollinger Bands on 1d close
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2.0 * std_20)
-    lower_bb = sma_20 - (2.0 * std_20)
-    
-    # Align indicators to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i])):
+        if np.isnan(ema_200_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        chop_val = chop_aligned[i]
-        upper_bb_val = upper_bb_aligned[i]
-        lower_bb_val = lower_bb_aligned[i]
+        high = prices['high'].iloc[i]
+        low = prices['low'].iloc[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        ema_val = ema_200_aligned[i]
+        donchian_high = high_max[i]
+        donchian_low = low_min[i]
         
-        # Chop regime filter: chop > 61.8 indicates ranging market
-        is_chop = chop_val > 61.8
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long when price touches lower BB in chop regime
-            if is_chop and price <= lower_bb_val:
+            # Long conditions: price breaks above Donchian high + uptrend + volume spike
+            if high > donchian_high and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short when price touches upper BB in chop regime
-            elif is_chop and price >= upper_bb_val:
+            # Short conditions: price breaks below Donchian low + downtrend + volume spike
+            elif low < donchian_low and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -88,13 +71,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price reaches middle (SMA) or chop ends
-                if price >= sma_20[-1] if len(sma_20) > 0 else False or chop_val <= 61.8:
+                # Exit when price breaks below Donchian low or trend breaks
+                if low < donchian_low or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price reaches middle (SMA) or chop ends
-                if price <= sma_20[-1] if len(sma_20) > 0 else False or chop_val <= 61.8:
+                # Exit when price breaks above Donchian high or trend breaks
+                if high > donchian_high or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -106,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Choppiness_BBReversal_12h_1d"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA200_Volume"
+timeframe = "1d"
 leverage = 1.0
