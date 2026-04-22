@@ -24,11 +24,11 @@ def generate_signals(prices):
     upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
     lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian channels to 4h timeframe
+    # Align Donchian channels to 12h timeframe
     upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
     lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
     
-    # Calculate 4h volume average (20-period)
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -84,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Volume_Session"
-timeframe = "4h"
+name = "12H_Donchian20_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
