@@ -34,7 +34,7 @@ def generate_signals(prices):
     close_12h_series = pd.Series(df_12h['close'].values)
     ema_50 = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 4h timeframe
+    # Align to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
@@ -58,12 +58,12 @@ def generate_signals(prices):
             # Long: Price breaks above R1 with volume spike AND above 12h EMA50 (uptrend)
             if (close[i] > r1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
                 close[i] > ema_50_aligned[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: Price breaks below S1 with volume spike AND below 12h EMA50 (downtrend)
             elif (close[i] < s1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
                   close[i] < ema_50_aligned[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit: Price crosses back to opposite level (S1 for long, R1 for short)
@@ -73,17 +73,17 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
                 # Exit short: Price closes above R1
                 if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
