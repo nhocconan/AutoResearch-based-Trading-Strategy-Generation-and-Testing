@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: Weekly Bollinger Band squeeze with daily trend filter and volume confirmation.
-Only trade long when price breaks above upper Bollinger Band during low volatility (squeeze)
-and daily trend is up; short when price breaks below lower Bollinger Band during squeeze
-and daily trend is down. Uses Bollinger Band width percentile to detect squeeze conditions,
-avoiding false breakouts in high volatility periods. Designed for low trade frequency
-(12-37 trades/year) by requiring multiple confirmations: volatility squeeze, price breakout,
-and trend alignment. Works in both bull and bear markets by following the daily trend.
+Hypothesis: 6h ADX trend strength combined with 1d Williams %R mean reversion.
+In strong trends (ADX > 25), pullbacks to oversold/overbought levels (Williams %R < -80 or > -20)
+offer high-probability continuation entries. Works in both bull and bear markets by following
+the trend direction from ADX. Low trade frequency achieved by requiring both trend strength
+and extreme momentum readings.
 """
 
 import numpy as np
@@ -19,76 +17,76 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Bollinger Bands (20, 2) on weekly
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # 6h ADX for trend strength (14-period)
+    plus_dm = np.diff(high, prepend=high[0])
+    minus_dm = np.diff(low, prepend=low[0]) * -1
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
     
-    # Bollinger Band width percentile (50-period lookback) for squeeze detection
-    bb_width_pct = pd.Series(bb_width).rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
+    tr = np.maximum(
+        np.maximum(high - low, np.abs(high - np.roll(low, 1))),
+        np.abs(low - np.roll(high, 1))
+    )
+    tr[0] = high[0] - low[0]
     
-    # Load daily data for trend filter - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # 1d Williams %R for mean reversion (14-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA34 for trend direction
-    daily_close = df_daily['close'].values
-    ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low + 1e-10)
+    
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(bb_width_pct[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(ema34_daily_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+    for i in range(30, n):
+        if np.isnan(adx[i]) or np.isnan(williams_r_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Squeeze condition: Bollinger Band width in lower 30th percentile
-        squeeze = bb_width_pct[i] < 0.3
-        
-        # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Trend strength filter
+        strong_trend = adx[i] > 25
         
         if position == 0:
-            # Long: squeeze + price breaks above upper band + daily uptrend + volume spike
-            if squeeze and close[i] > bb_upper[i] and ema34_daily_aligned[i] > ema34_daily_aligned[i-1] and vol_spike:
+            # Long: strong trend + Williams %R oversold (< -80)
+            if strong_trend and williams_r_aligned[i] < -80:
                 signals[i] = 0.25
                 position = 1
-            # Short: squeeze + price breaks below lower band + daily downtrend + volume spike
-            elif squeeze and close[i] < bb_lower[i] and ema34_daily_aligned[i] < ema34_daily_aligned[i-1] and vol_spike:
+            # Short: strong trend + Williams %R overbought (> -20)
+            elif strong_trend and williams_r_aligned[i] > -20:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: volatility expansion (end of squeeze) or price returns to middle band
+            # Exit: trend weakness or Williams %R returns to neutral range
             exit_signal = False
             
             if position == 1:
-                # Exit long: volatility expansion or price closes below middle band
-                if bb_width_pct[i] > 0.7 or close[i] < bb_middle[i]:
+                # Exit long: trend weakens or Williams %R rises above -50
+                if adx[i] <= 25 or williams_r_aligned[i] > -50:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: volatility expansion or price closes above middle band
-                if bb_width_pct[i] > 0.7 or close[i] > bb_middle[i]:
+                # Exit short: trend weakens or Williams %R falls below -50
+                if adx[i] <= 25 or williams_r_aligned[i] < -50:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Weekly_Bollinger_Squeeze_DailyTrend_Volume"
-timeframe = "12h"
+name = "6h_ADX_TrendStrength_1d_WilliamsR_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
