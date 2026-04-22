@@ -3,90 +3,92 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h volume-weighted RSI with 4h trend filter and session filter.
-# Long when RSI < 30 (oversold) + price > 4h EMA20 (uptrend) + volume > 1.5x average + during active session (08-20 UTC)
-# Short when RSI > 70 (overbought) + price < 4h EMA20 (downtrend) + volume > 1.5x average + during active session
-# Exit when RSI crosses back to neutral (40-60 range) or volume drops below average.
-# Uses discrete position sizing (0.20) to minimize churn. Target: 15-35 trades/year.
+# Hypothesis: 4h Bollinger Band breakout with volume spike and 1d RSI filter.
+# Long when price breaks above upper band + volume spike + 1d RSI > 50 (bullish regime)
+# Short when price breaks below lower band + volume spike + 1d RSI < 50 (bearish regime)
+# Exit when price crosses back through middle band or volume drops below 80% of average.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Target: 20-40 trades/year to avoid excessive fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Load 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Load 1d data for RSI filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA20 for trend filter
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # 14-period RSI on 1d
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
     
-    # Calculate RSI(14) on 1h closes
+    # Bollinger Bands on 4h (20-period, 2 std dev)
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper = ma_20 + 2 * std_20
+    lower = ma_20 - 2 * std_20
+    middle = ma_20
+    upper = upper.values
+    lower = lower.values
+    middle = middle.values
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(rsi[i]) or 
+        if (np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or 
+            np.isnan(middle[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        rsi_val = rsi[i]
-        ema20 = ema20_4h_aligned[i]
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Get 1d RSI aligned (same value for all 4h bars in the day)
+        rsi_val = rsi_1d[i // 96] if i // 96 < len(rsi_1d) else rsi_1d[-1]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: RSI oversold + uptrend + volume spike + session
-            if rsi_val < 30 and price > ema20 and vol_spike and in_session:
-                signals[i] = 0.20
+            # Long conditions: price breaks above upper band + volume spike + 1d RSI > 50
+            if price > upper[i] and vol_spike and rsi_val > 50:
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: RSI overbought + downtrend + volume spike + session
-            elif rsi_val > 70 and price < ema20 and vol_spike and in_session:
-                signals[i] = -0.20
+            # Short conditions: price breaks below lower band + volume spike + 1d RSI < 50
+            elif price < lower[i] and vol_spike and rsi_val < 50:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: RSI returns to neutral range or volume drops
+            # Exit conditions: price crosses back through middle band or volume dries up
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when RSI > 40 or volume drops
-                if rsi_val > 40 or vol < vol_ma:
+                # Exit when price crosses below middle band or volume dries up
+                if price < middle[i] or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when RSI < 60 or volume drops
-                if rsi_val < 60 or vol < vol_ma:
+                # Exit when price crosses above middle band or volume dries up
+                if price > middle[i] or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -94,10 +96,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_VolumeWeightedRSI_4hEMA20_Session"
-timeframe = "1h"
+name = "4h_Bollinger_Breakout_Volume_1dRSI"
+timeframe = "4h"
 leverage = 1.0
