@@ -1,19 +1,47 @@
 #!/usr/bin/env python3
 
 """
-1D Weekly Donchian Breakout with Volume Confirmation and ATR Filter
-Trades breakouts of weekly Donchian channels (20-period) in the direction of the weekly EMA trend.
-Uses volume spike to confirm institutional interest and ATR filter to avoid whipsaws.
-Designed for low trade frequency (7-25/year) to minimize fee drift and work in both bull and bear markets.
+Hypothesis: 4-hour Williams %R Extreme Reversal with 1-day ADX trend filter and volume confirmation.
+Trades reversals when Williams %R reaches oversold/overbought levels in the direction of daily trend.
+Uses volume spike to confirm institutional interest. Designed for low trade frequency (20-50 trades/year)
+to minimize fee drain and work in both bull and bear markets by aligning with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_williams_r(high, low, close, period=14):
+    """Calculate Williams %R indicator."""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return wr.values
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX indicator."""
+    plus_dm = np.diff(high, prepend=high[0])
+    minus_dm = np.diff(low, prepend=low[0])
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    
+    tr1 = np.abs(np.diff(high, prepend=high[0]))
+    tr2 = np.abs(np.diff(low, prepend=low[0]))
+    tr3 = np.abs(np.diff(close, prepend=close[0]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).sum().values / (atr * period + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).sum().values / (atr * period + 1e-10)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,72 +49,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for Donchian and EMA - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA for trend filter (34-period)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Daily ADX for trend filter (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
-    # Weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # Williams %R on 4h data (14-period)
+    wr_14 = calculate_williams_r(high, low, close, 14)
     
-    # ATR filter (weekly ATR to avoid whipsaws)
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
-    
-    # Volume spike: current volume > 1.8x 20-period average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_14_1d_aligned[i]) or np.isnan(wr_14[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0 and vol_spike:
-            # Long: price breaks above weekly Donchian high with uptrend bias
-            if close[i] > donchian_high_aligned[i] and close[i] > ema_34_1w_aligned[i]:
+            # Long: Williams %R oversold (< -80) with strong uptrend (ADX > 25)
+            if wr_14[i] < -80 and adx_14_1d_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian low with downtrend bias
-            elif close[i] < donchian_low_aligned[i] and close[i] < ema_34_1w_aligned[i]:
+            # Short: Williams %R overbought (> -20) with strong downtrend (ADX > 25)
+            elif wr_14[i] > -20 and adx_14_1d_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to opposite Donchian level or trend reverses
+            # Exit: Williams %R returns to neutral range (-50) or trend weakens (ADX < 20)
             exit_signal = False
             
-            if position == 1:
-                # Exit long: price crosses below weekly Donchian low or closes below weekly EMA
-                if close[i] < donchian_low_aligned[i] or close[i] < ema_34_1w_aligned[i]:
-                    exit_signal = True
-            else:  # position == -1
-                # Exit short: price crosses above weekly Donchian high or closes above weekly EMA
-                if close[i] > donchian_high_aligned[i] or close[i] > ema_34_1w_aligned[i]:
-                    exit_signal = True
+            if wr_14[i] > -50 or adx_14_1d_aligned[i] < 20:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -96,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Weekly_Donchian_Breakout_1wEMA34_Volume"
-timeframe = "1d"
+name = "4h_WilliamsR_Extreme_1dADX25_Volume"
+timeframe = "4h"
 leverage = 1.0
