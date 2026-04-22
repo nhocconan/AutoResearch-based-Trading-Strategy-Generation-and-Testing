@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-hour momentum with 4-hour trend filter and 1-day volume confirmation.
-Long when price > 4h EMA50 (uptrend), RSI(14) > 55, and volume > 1.5x 24-period average.
-Short when price < 4h EMA50 (downtrend), RSI(14) < 45, and volume > 1.5x 24-period average.
-Exit when RSI crosses back to 50 (mean reversion within trend).
-Uses 4h for trend direction, 1d for volume regime filter, 1h for entry timing.
-Designed for low trade frequency (~20-40/year) to avoid fee drag in 1h timeframe.
+Hypothesis: 6-hour Elder Ray Index combined with 1-day trend filter and volume confirmation.
+Long when Bull Power > 0 (close > EMA13) and Bear Power < 0 (low < EMA13) with volume > 1.5x 20-period average.
+Short when Bear Power > 0 (low > EMA13) and Bull Power < 0 (close < EMA13) with volume > 1.5x 20-period average.
+Exit when Elder Ray signals reverse or volume drops below average.
+Uses 1-day EMA50 for trend filter: only take longs when price > EMA50, shorts when price < EMA50.
+Designed for low trade frequency (~15-25/year) to avoid fee drag while capturing strong institutional moves.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,78 +22,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Load 4h data for EMA50 trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Load 1d data for volume filter - ONCE before loop
+    # Load 1-day data for EMA50 trend filter and EMA13 for Elder Ray - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 24:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_avg_24 = pd.Series(volume_1d).rolling(window=24, min_periods=24).mean().values
-    vol_avg_24_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_24)
+    # Calculate EMA13 and EMA50 on 1-day data
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate Elder Ray components: Bull Power = Close - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = close_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
+    
+    # Align indicators to 6h timeframe (wait for prior day's close)
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Volume filter: 20-period average volume on 6h timeframe
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_avg_24_aligned[i]) or not in_session[i]):
+    for i in range(20, n):
+        # Skip if data not ready
+        if (np.isnan(ema13_aligned[i]) or np.isnan(ema50_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Uptrend (price > 4h EMA50), bullish momentum (RSI > 55), volume confirmation
-            if (close[i] > ema_50_4h_aligned[i] and 
-                rsi[i] > 55 and 
-                volume[i] > 1.5 * vol_avg_24_aligned[i]):
-                signals[i] = 0.20
+            # Long conditions: Bull Power > 0, Bear Power < 0, price > EMA50, volume confirmation
+            if (bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and 
+                close[i] > ema50_aligned[i] and volume[i] > 1.5 * vol_ma[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: Downtrend (price < 4h EMA50), bearish momentum (RSI < 45), volume confirmation
-            elif (close[i] < ema_50_4h_aligned[i] and 
-                  rsi[i] < 45 and 
-                  volume[i] > 1.5 * vol_avg_24_aligned[i]):
-                signals[i] = -0.20
+            # Short conditions: Bear Power > 0, Bull Power < 0, price < EMA50, volume confirmation
+            elif (bear_power_aligned[i] > 0 and bull_power_aligned[i] < 0 and 
+                  close[i] < ema50_aligned[i] and volume[i] > 1.5 * vol_ma[i]):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit when RSI crosses back to 50 (mean reversion within trend)
+            # Exit conditions: Reverse Elder Ray signal or volume drop
             exit_signal = False
-            if position == 1 and rsi[i] < 50:
-                exit_signal = True
-            elif position == -1 and rsi[i] > 50:
-                exit_signal = True
+            
+            if position == 1:
+                # Exit long: Bear Power becomes positive OR Bull Power negative OR volume drops
+                if (bear_power_aligned[i] >= 0 or bull_power_aligned[i] <= 0 or 
+                    volume[i] < vol_ma[i]):
+                    exit_signal = True
+            else:  # position == -1
+                # Exit short: Bull Power becomes positive OR Bear Power negative OR volume drops
+                if (bull_power_aligned[i] >= 0 or bear_power_aligned[i] <= 0 or 
+                    volume[i] < vol_ma[i]):
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_4hEMA50_RSI_VolumeFilter_Session"
-timeframe = "1h"
+name = "6H_ElderRay_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
