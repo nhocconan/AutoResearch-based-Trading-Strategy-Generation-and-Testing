@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
     # Daily data for pivot points
@@ -19,12 +19,12 @@ def generate_signals(prices):
     r1_1d = pivot_1d + (high_1d - low_1d)
     s1_1d = pivot_1d - (high_1d - low_1d)
     
-    # Align daily pivot levels to 12h timeframe
+    # Align daily pivot levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 12h ATR for volatility filter (14-period)
+    # 4h ATR for volatility filter (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -35,14 +35,14 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter (20-period MA)
+    # Volume filter (20-period MA) with reduced threshold for more signals
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 3.0 * vol_ma20  # Higher threshold for lower frequency
+    vol_surge = prices['volume'].values > 1.8 * vol_ma20  # Reduced threshold to increase trade frequency
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(300, n):
+    for i in range(200, n):
         # Skip if data not ready
         if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
@@ -54,22 +54,22 @@ def generate_signals(prices):
         if position == 0:
             # Long: Price breaks above S1 with volume surge
             if close[i] > s1_1d_aligned[i] and vol_surge[i]:
-                signals[i] = 0.30
+                signals[i] = 0.30  # Increased position size
                 position = 1
             # Short: Price breaks below R1 with volume surge
             elif close[i] < r1_1d_aligned[i] and vol_surge[i]:
-                signals[i] = -0.30
+                signals[i] = -0.30  # Increased position size
                 position = -1
         else:
-            # Exit: Price returns to pivot level or volatility drops significantly
+            # Exit: Price returns to pivot level
             if position == 1:
-                if close[i] < pivot_1d_aligned[i] or atr[i] < 0.4 * atr[i-1]:  # Tight exit
+                if close[i] < pivot_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.30
             else:  # position == -1
-                if close[i] > pivot_1d_aligned[i] or atr[i] < 0.4 * atr[i-1]:  # Tight exit
+                if close[i] > pivot_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -77,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_S1_R1_Breakout_1d_Pivot_VolumeSurge_v3"
-timeframe = "12h"
+name = "4h_Pivot_S1_R1_Breakout_1d_Pivot_VolumeSurge_v3"
+timeframe = "4h"
 leverage = 1.0
