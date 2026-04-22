@@ -13,28 +13,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivot points and EMA (ONCE before loop)
+    # Load 1d data for pivot points and EMA (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 35:  # Need enough for EMA34
         return np.zeros(n)
     
-    # Previous day's Camarilla pivot points
+    # Previous day's pivot points (standard)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels
+    # Calculate pivot levels
     pivot = (high_1d + low_1d + close_1d) / 3
-    range_ = high_1d - low_1d
-    r1 = close_1d + range_ * 1.1 / 12
-    s1 = close_1d - range_ * 1.1 / 12
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
     # 1d EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all to 4h timeframe
+    # Align all to daily timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
@@ -56,12 +55,12 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R1 with volume spike AND above 1d EMA34 (uptrend)
-            if (close[i] > r1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+            if (close[i] > r1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S1 with volume spike AND below 1d EMA34 (downtrend)
-            elif (close[i] < s1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+            elif (close[i] < s1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
                   close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
@@ -84,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "1D_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
