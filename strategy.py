@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # 1d ATR for volatility regime filter (HTF)
+    # 1d ATR for volatility regime filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -20,23 +20,16 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
     
-    # 12h ATR for entry trigger and stop
-    high = prices['high'].values
-    low = prices['low'].values
+    # 4h Bollinger Bands (20, 2.0) for mean reversion
     close = prices['close'].values
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma_20 + 2.0 * std_20
+    lower_bb = ma_20 - 2.0 * std_20
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 12h SMA for trend direction
-    sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # Align daily ATR and its MA to 12h timeframe
+    # Align daily ATR and its MA to 4h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
@@ -48,16 +41,19 @@ def generate_signals(prices):
         # Skip if any data is not ready
         if (np.isnan(atr_1d_aligned[i]) or 
             np.isnan(atr_ma_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(sma[i])):
+            np.isnan(ma_20[i]) or 
+            np.isnan(std_20[i]) or
+            np.isnan(upper_bb[i]) or
+            np.isnan(lower_bb[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        atr_val = atr[i]
-        sma_val = sma[i]
+        ma_20_val = ma_20[i]
+        upper_bb_val = upper_bb[i]
+        lower_bb_val = lower_bb[i]
         atr_1d = atr_1d_aligned[i]
         atr_ma_1d = atr_ma_1d_aligned[i]
         
@@ -65,31 +61,30 @@ def generate_signals(prices):
         vol_regime = atr_1d > atr_ma_1d
         
         if position == 0 and vol_regime:
-            # Long: price breaks above SMA + 1.5*ATR with rising volatility
-            if price > sma_val + 1.5 * atr_val and atr_val > atr[i-1]:
-                signals[i] = 0.25
+            # Long: price touches lower BB
+            if price <= lower_bb_val:
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
-            # Short: price breaks below SMA - 1.5*ATR with rising volatility
-            elif price < sma_val - 1.5 * atr_val and atr_val > atr[i-1]:
-                signals[i] = -0.25
+            # Short: price touches upper BB
+            elif price >= upper_bb_val:
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
         elif position != 0:
-            # Exit: mean reversion to SMA or volatility collapse
-            mean_rev = (position == 1 and price < sma_val) or (position == -1 and price > sma_val)
-            vol_collapse = atr_val < 0.5 * atr[i-1]  # Sharp drop in volatility
+            # Exit: mean reversion to middle band
+            mean_rev = (position == 1 and price >= ma_20_val) or (position == -1 and price <= ma_20_val)
             
-            if mean_rev or vol_collapse:
+            if mean_rev:
                 signals[i] = 0.0
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "12h_AverageTrueRangeTrend_FilteredBreakout_v1"
-timeframe = "12h"
+name = "4h_BollingerBandsMeanReversion_1dVolRegime_v1"
+timeframe = "4h"
 leverage = 1.0
