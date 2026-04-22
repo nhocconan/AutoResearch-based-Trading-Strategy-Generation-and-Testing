@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian channel breakout with 1d ADX filter and volume confirmation.
-Long when price breaks above Donchian upper with strong ADX trend and volume spike.
-Short when price breaks below Donchian lower with strong ADX trend and volume spike.
-Exit when price crosses Donchian middle or ADX weakens.
-Uses 1d ADX for trend strength filter to avoid whipsaws in ranging markets.
-Designed for low trade frequency (12-37/year) to minimize fee drag.
+Hypothesis: 4h Camarilla pivot level reversal with 1d ADX trend filter and volume confirmation.
+Long at S1 when price rejects with bullish candle and strong ADX trend, short at R1 with bearish candle.
+Exit at midpoint or when ADX weakens. Designed for low trade frequency (20-40/year) to minimize fee drag.
+Works in both bull and bear markets by using ADX to filter strong trends and Camarilla levels for mean reversion.
 """
 import numpy as np
 import pandas as pd
@@ -13,24 +11,39 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Load daily data for ADX filter - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate Donchian Channel (20-period) on 12h
-    lookback = 20
-    dc_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    dc_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    dc_middle = (dc_upper + dc_lower) / 2.0
+    # Calculate 45-period Camarilla levels from previous day
+    # H(L) = high, L(L) = low, C(L) = close of previous day
+    phigh = df_daily['high'].shift(1).values
+    plow = df_daily['low'].shift(1).values
+    pclose = df_daily['close'].shift(1).values
+    
+    # Camarilla levels: H3, H4, L3, L4
+    # H4 = C + 1.5 * (H - L), H3 = C + 1.125 * (H - L)
+    # L3 = C - 1.125 * (H - L), L4 = C - 1.5 * (H - L)
+    camarilla_H4 = pclose + 1.5 * (phigh - plow)
+    camarilla_H3 = pclose + 1.125 * (phigh - plow)
+    camarilla_L3 = pclose - 1.125 * (phigh - plow)
+    camarilla_L4 = pclose - 1.5 * (phigh - plow)
+    
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    H4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_H4)
+    H3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_H3)
+    L3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_L3)
+    L4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_L4)
     
     # Calculate 1d ADX (14-period)
     high_d = pd.Series(df_daily['high'].values)
@@ -56,10 +69,10 @@ def generate_signals(prices):
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     adx_d = dx.rolling(window=14, min_periods=14).mean()
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_daily, adx_d.values)
     
-    # Calculate 12h volume average (20-period)
+    # Calculate 4h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -68,9 +81,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(1, n):  # Start from 1 to access previous candle
         # Skip if data not ready
-        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,14 +101,21 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian upper with strong ADX and volume
-            if (close[i] > dc_upper[i] and 
+            # Bullish candle: close > open
+            bullish = close[i] > open_price[i]
+            # Bearish candle: close < open
+            bearish = close[i] < open_price[i]
+            
+            # Long: Price rejects at L3/L4 with bullish candle, strong ADX, volume
+            if (bullish and 
+                (close[i] <= L3_aligned[i] * 1.001 or close[i] <= L4_aligned[i] * 1.001) and
                 adx_aligned[i] > 25 and  # Strong trend
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower with strong ADX and volume
-            elif (close[i] < dc_lower[i] and 
+            # Short: Price rejects at H3/H4 with bearish candle, strong ADX, volume
+            elif (bearish and 
+                  (close[i] >= H3_aligned[i] * 0.999 or close[i] >= H4_aligned[i] * 0.999) and
                   adx_aligned[i] > 25 and  # Strong trend
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
@@ -105,12 +125,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below middle OR ADX weakens
-                if close[i] < dc_middle[i] or adx_aligned[i] < 20:
+                # Exit long: price reaches midpoint (H3/L3 average) OR ADX weakens
+                midpoint = (H3_aligned[i] + L3_aligned[i]) / 2.0
+                if close[i] >= midpoint or adx_aligned[i] < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above middle OR ADX weakens
-                if close[i] > dc_middle[i] or adx_aligned[i] < 20:
+                # Exit short: price reaches midpoint OR ADX weakens
+                midpoint = (H3_aligned[i] + L3_aligned[i]) / 2.0
+                if close[i] <= midpoint or adx_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -121,7 +143,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_DonchianBreakout_1dADX_Volume"
-timeframe = "12h"
+name = "4H_CamarillaReversal_1dADX_Volume"
+timeframe = "4h"
 leverage = 1.0
 #%%
