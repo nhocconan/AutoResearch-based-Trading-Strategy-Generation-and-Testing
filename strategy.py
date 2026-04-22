@@ -22,7 +22,7 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # 4h ATR for entry trigger and stop
+    # 12h ATR for entry trigger and stop
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -33,10 +33,10 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h SMA for trend direction
+    # 12h SMA for trend direction
     sma = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
-    # Align daily ATR and its MA to 4h timeframe
+    # Align daily ATR and its MA to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
@@ -90,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_AverageTrueRangeTrend_FilteredBreakout_v1"
-timeframe = "4h"
+name = "12h_AverageTrueRangeTrend_FilteredBreakout_v1"
+timeframe = "12h"
 leverage = 1.0
