@@ -1,156 +1,102 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 1-day KAMA + RSI + Choppiness regime filter.
-Trades in direction of KAMA trend when RSI shows momentum and market is not choppy.
-Uses weekly EMA trend filter for multi-timeframe confirmation.
-Designed for low trade frequency (7-25/year) to minimize fee drag and work in both bull and bear markets
-by adapting to trending vs ranging regimes.
+Hypothesis: 4-hour Williams Fractal Breakout with 1-day EMA trend filter and volume confirmation.
+Trades breakouts of daily Williams Fractal levels in the direction of the daily EMA trend.
+Uses volume spike to confirm breakout strength. Designed for low trade frequency (20-50 trades/year)
+to minimize fee drag and work in both bull and bear markets by aligning with higher timeframe trend
+and using breakout logic (momentum) rather than mean-reversion.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
-    """Calculate Kaufman Adaptive Moving Average."""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+def calculate_williams_fractals(high, low):
+    """Calculate Williams Fractals: bearish (high) and bullish (low) fractals."""
+    n = len(high)
+    bearish = np.full(n, np.nan)
+    bullish = np.full(n, np.nan)
     
-    # Handle first element
-    change[0] = 0
+    for i in range(2, n - 2):
+        # Bearish fractal: high[i] is highest among 5 bars
+        if (high[i] > high[i-1] and high[i] > high[i-2] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            bearish[i] = high[i]
+        
+        # Bullish fractal: low[i] is lowest among 5 bars
+        if (low[i] < low[i-1] and low[i] < low[i-2] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            bullish[i] = low[i]
     
-    er = np.zeros_like(close)
-    for i in range(len(close)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_rsi(close, length=14):
-    """Calculate Relative Strength Index."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    avg_gain[length] = np.mean(gain[1:length+1])
-    avg_loss[length] = np.mean(loss[1:length+1])
-    
-    for i in range(length+1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
-        avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_choppiness(high, low, close, length=14):
-    """Calculate Choppiness Index."""
-    atr = np.zeros_like(close)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # First TR
-    tr[0] = tr1[0]
-    
-    # Sum of TR over period
-    atr_sum = np.zeros_like(close)
-    for i in range(length, len(close)):
-        atr_sum[i] = np.sum(tr[i-length+1:i+1])
-    
-    # Highest high and lowest low over period
-    hh = np.zeros_like(close)
-    ll = np.zeros_like(close)
-    for i in range(length-1, len(close)):
-        hh[i] = np.max(high[i-length+1:i+1])
-        ll[i] = np.min(low[i-length+1:i+1])
-    
-    chop = np.zeros_like(close)
-    for i in range(length-1, len(close)):
-        if hh[i] != ll[i]:
-            chop[i] = 100 * np.log10(atr_sum[i] / (hh[i] - ll[i])) / np.log10(length)
-        else:
-            chop[i] = 50
-    
-    return chop
+    return bearish, bullish
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load weekly data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load daily data for trend filter and fractal calculation - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly EMA for trend filter (34-period)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Daily EMA for trend filter (34-period)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily KAMA for trend (10-period ER, 2/30 SC)
-    kama = calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30)
+    # Calculate daily Williams Fractals
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_1d, low_1d)
+    # Williams fractals need 2 extra bars for confirmation (center bar + 2 right bars)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Daily RSI for momentum (14-period)
-    rsi = calculate_rsi(close, length=14)
-    
-    # Daily Choppiness for regime filter (14-period)
-    chop = calculate_choppiness(high, low, close, length=14)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade when not choppy (Choppiness < 61.8)
-        not_choppy = chop[i] < 61.8
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        if position == 0 and not_choppy:
-            # Long: price above KAMA, RSI > 50 (bullish momentum), weekly uptrend
-            if close[i] > kama[i] and rsi[i] > 50 and close[i] > ema_34_1w_aligned[i]:
+        if position == 0 and vol_spike:
+            # Long: price breaks above bearish fractal (resistance) with uptrend bias
+            if not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI < 50 (bearish momentum), weekly downtrend
-            elif close[i] < kama[i] and rsi[i] < 50 and close[i] < ema_34_1w_aligned[i]:
+            # Short: price breaks below bullish fractal (support) with downtrend bias
+            elif not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: opposite condition or choppy market
+            # Exit: price returns to opposite fractal level or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price below KAMA or RSI < 40 or market becomes choppy
-                if close[i] < kama[i] or rsi[i] < 40 or chop[i] >= 61.8:
+                # Exit long: price closes below bullish fractal or below daily EMA
+                if (not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i]) or close[i] < ema_34_1d_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price above KAMA or RSI > 60 or market becomes choppy
-                if close[i] > kama[i] or rsi[i] > 60 or chop[i] >= 61.8:
+                # Exit short: price closes above bearish fractal or above daily EMA
+                if (not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i]) or close[i] > ema_34_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -161,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_ChopFilter_1wEMA34_Trend"
-timeframe = "1d"
+name = "4h_Williams_Fractal_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
