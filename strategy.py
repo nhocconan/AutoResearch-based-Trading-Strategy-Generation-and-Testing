@@ -1,13 +1,14 @@
-#!/usr/bin/env python3
+# 6h Donchian(20) breakout + daily pivot direction + volume confirmation
+# Hypothesis: Daily pivot points (PP, R1, S1) provide strong institutional support/resistance.
+# Breakouts of 6h Donchian channels in direction of daily pivot bias capture
+# institutional flow while avoiding false breakouts. Works in bull/bear by
+# following daily bias. Volume confirmation ensures commitment.
+# Target: 12-37 trades/year (50-150 total over 4 years)
+# Position size: 0.25 (discrete to minimize churn)
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA40 trend filter and volume confirmation
-# This strategy trades breakouts of daily price channels (Donchian 20-day high/low)
-# with trend alignment from weekly EMA and volume confirmation.
-# It works in both bull and bear markets by following the trend direction on higher timeframe.
-# Uses discrete position sizing (0.25) to balance return and minimize transaction costs.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,35 +20,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Donchian channels and 1w data for EMA trend (ONCE before loop)
+    # Load daily data for pivots and Donchian (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    close_1w = df_1w['close'].values
     
-    # Calculate Donchian channels (20-period) for previous day
-    # Upper = max(high, lookback=20)
-    # Lower = min(low, lookback=20)
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate daily pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pp - low_1d
+    s1 = 2 * pp - high_1d
     
-    # Align Donchian levels to 1d timeframe (already aligned, but for consistency)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Align daily pivots to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 1w EMA(40) for trend filter
-    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
+    # 6h Donchian channel (20-period)
+    lookback = 20
+    dc_upper = np.full(n, np.nan)
+    dc_lower = np.full(n, np.nan)
+    for i in range(lookback-1, n):
+        dc_upper[i] = np.max(high[i-lookback+1:i+1])
+        dc_lower[i] = np.min(low[i-lookback+1:i+1])
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,36 +53,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to avoid index issues
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_40_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above Donchian upper + above 1w EMA + volume spike
-            if close[i] > donchian_upper_aligned[i] and close[i] > ema_40_1w_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
+            # Long: Break above Donchian upper + above daily R1 + volume spike
+            if close[i] > dc_upper[i] and close[i] > r1_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Donchian lower + below 1w EMA + volume spike
-            elif close[i] < donchian_lower_aligned[i] and close[i] < ema_40_1w_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
+            # Short: Break below Donchian lower + below daily S1 + volume spike
+            elif close[i] < dc_lower[i] and close[i] < s1_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses 1w EMA in opposite direction
+            # Exit: Price crosses opposite Donchian level
             if position == 1:
-                # Exit long: Close below 1w EMA
-                if close[i] < ema_40_1w_aligned[i]:
+                # Exit long: Close below Donchian lower
+                if close[i] < dc_lower[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Close above 1w EMA
-                if close[i] > ema_40_1w_aligned[i]:
+                # Exit short: Close above Donchian upper
+                if close[i] > dc_upper[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -92,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA40_VolumeConfirmation"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_DailyPivot_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
