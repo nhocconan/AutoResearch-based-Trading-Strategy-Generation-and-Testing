@@ -13,94 +13,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter and ATR (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Weekly EMA40 for trend filter
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema_40_1w = close_1w_series.ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
-    
-    # Weekly ATR(20) for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_arr = df_1w['close'].values
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w_arr, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w_arr, 1))
-    tr1[0] = high_1w[0] - low_1w[0]  # first bar
-    tr2[0] = high_1w[0] - close_1w_arr[0]
-    tr3[0] = low_1w[0] - close_1w_arr[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_20_1w = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr_20_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_20_1w)
-    
-    # Load daily data for price levels
+    # Load daily data for pivot points and trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Daily Donchian(20) channels
+    # Previous day's high, low, close for Camarilla pivot points
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    close_1d = df_1d['close'].values
     
-    # Daily volume average for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Calculate Camarilla pivot levels (R4/S4 are key breakout levels)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
+    r4 = close_1d + range_ * 1.1 / 2  # Resistance level 4
+    s4 = close_1d - range_ * 1.1 / 2  # Support level 4
+    
+    # 1d EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Volume confirmation: 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_40_1w_aligned[i]) or np.isnan(atr_20_1w_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above 20-day high with volume filter AND weekly uptrend
-            if (close[i] > high_20_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20_1d_aligned[i] and
-                close[i] > ema_40_1w_aligned[i]):
-                signals[i] = 0.25
+            # Long: Price breaks above R4 with volume spike AND above 1d EMA34 (uptrend)
+            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                close[i] > ema_34_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below 20-day low with volume filter AND weekly downtrend
-            elif (close[i] < low_20_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20_1d_aligned[i] and
-                  close[i] < ema_40_1w_aligned[i]):
-                signals[i] = -0.25
+            # Short: Price breaks below S4 with volume spike AND below 1d EMA34 (downtrend)
+            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                  close[i] < ema_34_aligned[i]):
+                signals[i] = -0.30
                 position = -1
         else:
-            # Exit: Price crosses midline or opposite band
+            # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
             if position == 1:
-                # Exit long: Price closes below 20-day low
-                if close[i] < low_20_aligned[i]:
+                # Exit long: Price closes below S1 (calculated from previous day)
+                # Recalculate S1 for exit condition
+                if i > 0:
+                    s1 = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
+                    s1_series = pd.Series(np.full_like(close_1d, s1))
+                    s1_aligned_exit = align_htf_to_ltf(prices, df_1d, s1_series.values)[i]
+                else:
+                    s1_aligned_exit = np.nan
+                if not np.isnan(s1_aligned_exit) and close[i] < s1_aligned_exit:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
-                # Exit short: Price closes above 20-day high
-                if close[i] > high_20_aligned[i]:
+                # Exit short: Price closes above R1 (calculated from previous day)
+                if i > 0:
+                    r1 = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
+                    r1_series = pd.Series(np.full_like(close_1d, r1))
+                    r1_aligned_exit = align_htf_to_ltf(prices, df_1d, r1_series.values)[i]
+                else:
+                    r1_aligned_exit = np.nan
+                if not np.isnan(r1_aligned_exit) and close[i] > r1_aligned_exit:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
-name = "1D_Donchian20_WeeklyEMA40_Trend_VolumeFilter"
-timeframe = "1d"
+name = "4H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
