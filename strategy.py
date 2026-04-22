@@ -13,32 +13,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend - ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA(20) for trend
-    close_weekly = df_weekly['close'].values
-    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
-    
-    # Load daily data for ATR(14) - ONCE before loop
+    # Load daily data for HL2-based PPO - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 14:
+    if len(df_daily) < 35:
         return np.zeros(n)
     
-    # Calculate daily ATR(14)
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
-    tr1 = high_daily - low_daily
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr_14_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14_daily)
+    # Calculate daily HL2
+    hl2_daily = (df_daily['high'].values + df_daily['low'].values) / 2
+    
+    # Calculate PPO on daily HL2: (EMA12 - EMA26) / EMA26 * 100
+    ema12 = pd.Series(hl2_daily).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(hl2_daily).ewm(span=26, adjust=False, min_periods=26).mean().values
+    ppo_daily = np.where(ema26 != 0, (ema12 - ema26) / ema26 * 100, 0)
+    
+    # Calculate signal line (9-period EMA of PPO)
+    ppo_signal = pd.Series(ppo_daily).ewm(span=9, adjust=False, min_periods=9).mean().values
+    
+    # Calculate PPO histogram
+    ppo_hist = ppo_daily - ppo_signal
+    
+    # Calculate 60-period SMA of PPO histogram for trend filter
+    ppo_hist_sma = pd.Series(ppo_hist).rolling(window=60, min_periods=60).mean().values
+    
+    # Align PPO histogram and its SMA to 6h timeframe
+    ppo_hist_aligned = align_htf_to_ltf(prices, df_daily, ppo_hist)
+    ppo_hist_sma_aligned = align_htf_to_ltf(prices, df_daily, ppo_hist_sma)
+    
+    # Calculate 6h volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -48,7 +50,8 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_weekly_aligned[i]) or np.isnan(atr_14_aligned[i])):
+        if (np.isnan(ppo_hist_aligned[i]) or np.isnan(ppo_hist_sma_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,26 +68,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above weekly EMA(20) with volatility filter
-            if (close[i] > ema_20_weekly_aligned[i] and 
-                atr_14_aligned[i] > 0.01 * close[i]):  # Ensure sufficient volatility
+            # Long: PPO histogram crosses above its SMA with volume confirmation
+            if (ppo_hist_aligned[i] > ppo_hist_sma_aligned[i] and 
+                ppo_hist_aligned[i-1] <= ppo_hist_sma_aligned[i-1] and
+                volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly EMA(20) with volatility filter
-            elif (close[i] < ema_20_weekly_aligned[i] and 
-                  atr_14_aligned[i] > 0.01 * close[i]):
+            # Short: PPO histogram crosses below its SMA with volume confirmation
+            elif (ppo_hist_aligned[i] < ppo_hist_sma_aligned[i] and 
+                  ppo_hist_aligned[i-1] >= ppo_hist_sma_aligned[i-1] and
+                  volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back below/above weekly EMA(20)
+            # Exit: PPO histogram crosses back below/above its SMA
             if position == 1:
-                if close[i] < ema_20_weekly_aligned[i]:
+                if ppo_hist_aligned[i] < ppo_hist_sma_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema_20_weekly_aligned[i]:
+                if ppo_hist_aligned[i] > ppo_hist_sma_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -92,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_WeeklyEMA20_Trend_Volatility"
-timeframe = "1d"
+name = "6H_PPO_Histogram_SMA_Crossover_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
