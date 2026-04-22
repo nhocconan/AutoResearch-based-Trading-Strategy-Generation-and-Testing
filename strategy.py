@@ -3,23 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter combined with Donchian breakout
-# Uses daily trend filter (EMA50) to avoid counter-trend trades
-# Long: Price breaks above Donchian(20) high + Choppiness < 38.2 (trending) + close > daily EMA50
-# Short: Price breaks below Donchian(20) low + Choppiness < 38.2 (trending) + close < daily EMA50
-# Exit: Price returns to Donchian midpoint or trend reverses
-# Designed for low trade frequency (15-25/year) with strong trend capture in both bull/bear markets
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Long when price breaks above Donchian upper channel + price > 1d EMA50 + volume spike
+# Short when price breaks below Donchian lower channel + price < 1d EMA50 + volume spike
+# Exit when price crosses Donchian midline or trend reverses
+# Designed for low trade frequency (~20-40/year) to minimize fee drain and work in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for trend filter
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 50-period EMA on daily close for trend filter
+    # Calculate 50-period EMA on 1d close for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
@@ -28,85 +27,62 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Donchian(20) - 20-period high/low
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
+    # Donchian channels (20-period)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # Calculate Choppiness Index on 4h data
-    atr_period = 14
-    chop_period = 14
-    
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # ATR
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Sum of ATR over chop_period
-    sum_atr = pd.Series(atr).rolling(window=chop_period, min_periods=chop_period).sum().values
-    
-    # Max(high) - Min(low) over chop_period
-    max_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
-    min_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
-    range_max_min = max_high - min_low
-    
-    # Choppiness Index
-    cpi = np.where(
-        (range_max_min != 0) & (sum_atr != 0),
-        100 * np.log10(sum_atr / range_max_min) / np.log10(chop_period),
-        50.0
-    )
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(cpi[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        chop = cpi[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        mid = donchian_mid[i]
         ema_val = ema_50_aligned[i]
         
+        # Volume filter: current volume > 2.0 * 20-period average
+        vol_spike = vol > 2.0 * vol_ma
+        
         if position == 0:
-            # Long: break above Donchian high + trending market (low chop) + uptrend
-            if (price > donch_high[i] and 
-                chop < 38.2 and 
-                price > ema_val):
+            # Long conditions: price breaks above Donchian upper + uptrend + volume spike
+            if price > upper and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low + trending market (low chop) + downtrend
-            elif (price < donch_low[i] and 
-                  chop < 38.2 and 
-                  price < ema_val):
+            # Short conditions: price breaks below Donchian lower + downtrend + volume spike
+            elif price < lower and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: return to Donchian midpoint or trend reversal
+            # Exit conditions: price crosses Donchian midline or trend reverses
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price returns to midpoint or trend turns down
-                if (price < donch_mid[i] or 
-                    price < ema_val):
+                # Exit when price crosses below midline or trend turns down
+                if price < mid or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price returns to midpoint or trend turns up
-                if (price > donch_mid[i] or 
-                    price > ema_val):
+                # Exit when price crosses above midline or trend turns up
+                if price > mid or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -118,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Choppiness_Donchian_Trend"
+name = "4h_Donchian_1dEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
