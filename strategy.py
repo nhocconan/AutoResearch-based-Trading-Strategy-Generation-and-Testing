@@ -3,35 +3,37 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 12h trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low (EMA13 on close).
-# Long when Bull Power > 0 and Bear Power < 0 (bullish momentum) + price > 12h EMA50 (uptrend) + volume spike.
-# Short when Bull Power < 0 and Bear Power > 0 (bearish momentum) + price < 12h EMA50 (downtrend) + volume spike.
-# Uses 13-period EMA for Elder Ray (standard) and 50-period EMA on 12h for trend filter.
-# Volume confirmation requires current volume > 1.8x 20-period average to filter noise.
-# Designed to capture momentum shifts in both bull and bear markets by combining
-# intraday momentum (Elder Ray) with higher timeframe trend (12h EMA).
-# Targets 15-30 trades/year with strict entry conditions to minimize fee drag.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Camarilla pivot levels (R1/S1) derived from prior day's range act as strong intraday support/resistance.
+# Breakouts above R1 or below S1 with volume confirmation indicate institutional participation.
+# 1d EMA34 filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
+# Volume spike (>2x 20-period average) filters low-probability breakouts.
+# Designed for low trade frequency (~25-40/year) to minimize fee drag while capturing strong moves.
+# Works in both bull and bear markets by following higher timeframe trend.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 1d data for Camarilla pivot calculation and EMA trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 50-period EMA on 12h data
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate Camarilla pivot levels for each 1d bar
+    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    cam_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    cam_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Calculate EMA13 for Elder Ray (on close)
-    ema13 = pd.Series(prices['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 34-period EMA on 1d close for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Elder Ray components
-    bull_power = prices['high'].values - ema13  # High - EMA13
-    bear_power = ema13 - prices['low'].values   # EMA13 - Low
+    # Align 1d indicators to 4h timeframe (waits for 1d bar to close)
+    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
+    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -42,9 +44,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
+        if (np.isnan(cam_r1_aligned[i]) or 
+            np.isnan(cam_s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -54,20 +56,20 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        ema_val = ema_12h_aligned[i]
-        bp = bull_power[i]
-        br = bear_power[i]
+        r1 = cam_r1_aligned[i]
+        s1 = cam_s1_aligned[i]
+        ema_val = ema_34_aligned[i]
         
-        # Volume filter: current volume > 1.8 * 20-period average
-        vol_spike = vol > 1.8 * vol_ma
+        # Volume filter: current volume > 2.0 * 20-period average (strict filter for low frequency)
+        vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long conditions: bullish momentum + uptrend + volume spike
-            if bp > 0 and br < 0 and price > ema_val and vol_spike:
+            # Long conditions: break above R1 + uptrend + volume spike
+            if price > r1 and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: bearish momentum + downtrend + volume spike
-            elif bp < 0 and br > 0 and price < ema_val and vol_spike:
+            # Short conditions: break below S1 + downtrend + volume spike
+            elif price < s1 and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -76,13 +78,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when momentum turns bearish or trend breaks
-                if bp <= 0 or br >= 0 or price < ema_val:
+                # Exit when price breaks below S1 (reversal) or trend breaks
+                if price < s1 or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when momentum turns bullish or trend breaks
-                if bp >= 0 or br <= 0 or price > ema_val:
+                # Exit when price breaks above R1 (reversal) or trend breaks
+                if price > r1 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -94,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_12hEMA_Trend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
