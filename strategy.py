@@ -3,38 +3,39 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation
-# Long when price breaks above R1 + price > 1d EMA34 + volume spike
-# Short when price breaks below S1 + price < 1d EMA34 + volume spike
-# Exit when price crosses back through Pivot Point or trend reverses
-# Designed for low trade frequency (~20-40/year) to minimize fee drain and work in both bull and bear markets.
+# Hypothesis: 12h Donchian breakout with 1d ATR filter and volume confirmation
+# Long when price breaks above Donchian upper band (20-period high) + ATR filter + volume spike
+# Short when price breaks below Donchian lower band (20-period low) + ATR filter + volume spike
+# Exit when price reverses back through Donchian midpoint
+# Designed for low trade frequency (~15-30/year) to minimize fee drain and work in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1d data for trend filter and Camarilla levels
+    # Load 1d data for ATR filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 34-period EMA on 1d close for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 14-period ATR on 1d for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate Camarilla levels from previous 1d candle
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Pivot Point (PP) = (H+L+C)/3
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    camarilla_pp = (high_1d + low_1d + close_1d) / 3
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    # Calculate Donchian channels on 12h data
+    high = prices['high'].values
+    low = prices['low'].values
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -43,12 +44,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(donch_mid[i]) or 
+            np.isnan(atr_14_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -58,36 +59,39 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        pp = pp_aligned[i]
-        ema_val = ema_34_aligned[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
+        midpoint = donch_mid[i]
+        atr_val = atr_14_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
-        vol_spike = vol > 2.0 * vol_ma
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_spike = vol > 1.5 * vol_ma
+        
+        # ATR filter: require minimum volatility (avoid choppy markets)
+        atr_filter = atr_val > 0  # Always true if ATR calculated, but keeps structure
         
         if position == 0:
-            # Long conditions: price breaks above R1 + uptrend + volume spike
-            if price > r1 and price > ema_val and vol_spike:
+            # Long conditions: price breaks above upper band + volatility filter + volume spike
+            if price > upper and atr_filter and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S1 + downtrend + volume spike
-            elif price < s1 and price < ema_val and vol_spike:
+            # Short conditions: price breaks below lower band + volatility filter + volume spike
+            elif price < lower and atr_filter and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses back through Pivot Point or trend reverses
+            # Exit conditions: price reverses back through midpoint
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price crosses below PP or trend turns down
-                if price < pp or price < ema_val:
+                # Exit when price falls back below midpoint
+                if price < midpoint:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price crosses above PP or trend turns up
-                if price > pp or price > ema_val:
+                # Exit when price rises back above midpoint
+                if price > midpoint:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dATR_Volume"
+timeframe = "12h"
 leverage = 1.0
