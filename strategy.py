@@ -3,87 +3,88 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h trend following with 4h EMA filter and volume confirmation.
-# Uses 4h EMA50 to determine trend direction and 1h EMA20 for entry timing.
-# Only trades in direction of 4h trend during high-liquidity session (08-20 UTC).
-# Volume filter requires 1.5x average volume to avoid false breakouts.
-# Designed for low trade frequency (15-35/year) to minimize fee drag in ranging markets.
-# Works in both bull and bear markets by following established 4h trend.
+# Hypothesis: 12h Williams %R + 1d EMA34 trend filter + volume confirmation.
+# Williams %R identifies overbought/oversold conditions. In trending markets (price > EMA34),
+# we look for pullbacks to oversold levels (-80) for long entries and overbought levels (-20) for shorts.
+# Volume confirmation ensures institutional participation. Designed for 12h timeframe to reduce
+# trade frequency and avoid fee drag. Works in both bull and bear markets by following the trend.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 4h data for trend filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Load daily data for EMA34 (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA50 for trend direction
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate EMA34 on daily close
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 1h EMA20 for entry timing
+    # Calculate Williams %R on 12h data (14-period)
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 20-period average volume for volume filter
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Avoid division by zero
+    
+    # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(ema_20[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        price = prices['close'].iloc[i]
         vol = volume[i]
-        ema4h = ema_4h_aligned[i]
-        ema20 = ema_20[i]
         vol_ma = vol_ma_20[i]
+        ema_trend = ema_34_aligned[i]
+        wr = williams_r[i]
         
-        # Volume filter: current volume > 1.5 * 20-period EMA volume
-        vol_filter = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price above both EMAs and volume filter
-            if price > ema20 and price > ema4h and vol_filter:
-                signals[i] = 0.20
-                position = 1
-            # Short: price below both EMAs and volume filter
-            elif price < ema20 and price < ema4h and vol_filter:
-                signals[i] = -0.20
-                position = -1
+            # Only trade in direction of trend (price > EMA34 = uptrend, price < EMA34 = downtrend)
+            if price > ema_trend:  # Uptrend
+                # Look for oversold pullback to enter long
+                if wr <= -80 and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+            else:  # Downtrend
+                # Look for overbought bounce to enter short
+                if wr >= -20 and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position != 0:
-            # Exit: price crosses back below/above EMA20
+            # Exit conditions: reverse signal or loss of trend
             exit_signal = False
             
             if position == 1:  # long position
-                if price < ema20:
+                # Exit when overbought or trend turns down
+                if wr >= -20 or price < ema_trend:
                     exit_signal = True
             
             elif position == -1:  # short position
-                if price > ema20:
+                # Exit when oversold or trend turns up
+                if wr <= -80 or price > ema_trend:
                     exit_signal = True
             
             if exit_signal:
@@ -91,10 +92,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_EMA20_EMA50_Trend_Filter_Volume"
-timeframe = "1h"
+name = "12h_WilliamsR_EMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
