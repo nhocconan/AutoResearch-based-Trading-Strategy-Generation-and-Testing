@@ -1,9 +1,3 @@
-# 4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe act as strong support/resistance.
-# Breakouts above R1 or below S1 with volume confirmation and daily EMA34 trend filter capture
-# institutional moves. Works in both bull/bear markets as it follows price action with trend filter.
-# Uses 4h timeframe for entries, 1d for pivots/trend/volume filter. Target: 20-50 trades/year.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -11,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,42 +13,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivots, EMA34, and volume average - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 34:
+    # Load weekly data for long-term trend filter - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
+    # Calculate weekly EMA(50) for trend filter
+    close_weekly = df_weekly['close'].values
+    ema_50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    
+    # Load daily data for KAMA and RSI - ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
+        return np.zeros(n)
+    
+    # Calculate daily KAMA(14) - Kaufman Adaptive Moving Average
     close_daily = df_daily['close'].values
+    change = np.abs(np.diff(close_daily, prepend=close_daily[0]))
+    volatility = np.abs(np.diff(close_daily))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+2) - 2/(30+2)) + 2/(30+2))**2
+    kama = np.zeros_like(close_daily)
+    kama[0] = close_daily[0]
+    for i in range(1, len(close_daily)):
+        kama[i] = kama[i-1] + sc[i] * (close_daily[i] - kama[i-1])
+    kama_aligned = align_htf_to_ltf(prices, df_daily, kama)
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_high = np.roll(high_daily, 1)
-    prev_low = np.roll(low_daily, 1)
-    prev_close = np.roll(close_daily, 1)
-    prev_high[0] = high_daily[0]  # First day uses same day's high
-    prev_low[0] = low_daily[0]    # First day uses same day's low
-    prev_close[0] = close_daily[0] # First day uses same day's close
-    
-    # Calculate Camarilla levels
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 12
-    s1 = prev_close - 1.1 * camarilla_range / 12
-    
-    # Calculate EMA34 on daily close
-    ema_34 = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Calculate 20-period average volume on daily
-    vol_avg_20 = pd.Series(df_daily['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all daily indicators to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_daily, ema_34)
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20)
+    # Calculate daily RSI(14)
+    delta = np.diff(close_daily, prepend=close_daily[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_daily, rsi)
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -64,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
+        if (np.isnan(ema_50_weekly_aligned[i]) or np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,28 +76,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume and trend filter
-            if (close[i] > r1_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20_aligned[i] and
-                close[i] > ema_34_aligned[i]):
+            # Long: Price above weekly EMA50 + KAMA turning up + RSI > 50
+            if (close[i] > ema_50_weekly_aligned[i] and 
+                kama[i] > kama[i-1] and 
+                rsi[i] > 50):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume and trend filter
-            elif (close[i] < s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20_aligned[i] and
-                  close[i] < ema_34_aligned[i]):
+            # Short: Price below weekly EMA50 + KAMA turning down + RSI < 50
+            elif (close[i] < ema_50_weekly_aligned[i] and 
+                  kama[i] < kama[i-1] and 
+                  rsi[i] < 50):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to the opposite Camarilla level
+            # Exit: Reverse conditions
             if position == 1:
-                if close[i] < s1_aligned[i]:
+                if (close[i] < ema_50_weekly_aligned[i] or 
+                    kama[i] < kama[i-1] or 
+                    rsi[i] < 50):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r1_aligned[i]:
+                if (close[i] > ema_50_weekly_aligned[i] or 
+                    kama[i] > kama[i-1] or 
+                    rsi[i] > 50):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -111,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS"
-timeframe = "4h"
+name = "1D_KAMA_WeeklyTrend_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
