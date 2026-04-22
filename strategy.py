@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Williams Fractal Breakout with 1-day Trend Filter and Volume Confirmation.
-Long when price breaks above bearish fractal high during 1-day uptrend with volume spike.
-Short when price breaks below bullish fractal low during 1-day downtrend with volume spike.
-Exit when price returns to the fractal midpoint or trend reverses.
-Williams fractals provide natural support/resistance levels that work in both trending and ranging markets.
+12-hour Williams Alligator with 1-day Trend Filter and Volume Confirmation.
+Long when price > Alligator Teeth + 1-day uptrend + volume spike.
+Short when price < Alligator Teeth + 1-day downtrend + volume spike.
+Exit when price crosses Alligator Jaw or trend reverses.
+Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trends: price above teeth = uptrend.
+Designed for low trade frequency by requiring trend alignment and volume confirmation.
+Works in both bull and bear markets by following the 1-day trend.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,19 +23,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for fractals and trend - ONCE before loop
+    # Williams Alligator components
+    # Jaw (blue): 13-period SMMA smoothed 8 bars ahead
+    # Teeth (red): 8-period SMMA smoothed 5 bars ahead  
+    # Lips (green): 5-period SMMA smoothed 3 bars ahead
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=float)
+        result = np.full_like(arr, np.nan, dtype=float)
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CLOSE) / N
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Shift as per Alligator definition
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    # Set NaN for rolled values
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
+    
+    # Load 1-day data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
-    
-    # Calculate Williams fractals on 1D data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
-    
-    # Align fractals to 6h timeframe with 2-bar delay for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
     # 20-period EMA on 1d close for trend
     close_1d = df_1d['close'].values
@@ -46,9 +68,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+        if (np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
             np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,30 +81,26 @@ def generate_signals(prices):
         vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above bearish fractal + 1d uptrend + volume spike
-            if close[i] > bearish_fractal_aligned[i] and ema20_1d_aligned[i] > ema20_1d_aligned[i-1] and vol_spike:
+            # Long: price > Teeth + 1-day uptrend + volume spike
+            if close[i] > teeth[i] and ema20_1d_aligned[i] > ema20_1d_aligned[i-1] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below bullish fractal + 1d downtrend + volume spike
-            elif close[i] < bullish_fractal_aligned[i] and ema20_1d_aligned[i] < ema20_1d_aligned[i-1] and vol_spike:
+            # Short: price < Teeth + 1-day downtrend + volume spike
+            elif close[i] < teeth[i] and ema20_1d_aligned[i] < ema20_1d_aligned[i-1] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to fractal midpoint or trend reverses
+            # Exit: price crosses Jaw or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price below fractal midpoint or 1d trend turns down
-                if bullish_fractal_aligned[i] > 0:  # valid bullish fractal
-                    midpoint = (bearish_fractal_aligned[i] + bullish_fractal_aligned[i]) / 2
-                    if close[i] < midpoint or ema20_1d_aligned[i] < ema20_1d_aligned[i-1]:
-                        exit_signal = True
+                # Exit long: price < Jaw or 1-day trend turns down
+                if close[i] < jaw[i] or ema20_1d_aligned[i] < ema20_1d_aligned[i-1]:
+                    exit_signal = True
             else:  # position == -1
-                # Exit short: price above fractal midpoint or 1d trend turns up
-                if bearish_fractal_aligned[i] > 0:  # valid bearish fractal
-                    midpoint = (bearish_fractal_aligned[i] + bullish_fractal_aligned[i]) / 2
-                    if close[i] > midpoint or ema20_1d_aligned[i] > ema20_1d_aligned[i-1]:
-                        exit_signal = True
+                # Exit short: price > Jaw or 1-day trend turns up
+                if close[i] > jaw[i] or ema20_1d_aligned[i] > ema20_1d_aligned[i-1]:
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -92,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Williams_Fractal_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12H_Williams_Alligator_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
