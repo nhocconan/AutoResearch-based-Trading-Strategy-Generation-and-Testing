@@ -3,64 +3,47 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h trend following with 4h Supertrend filter and volume confirmation.
-# Long when price > 4h Supertrend + volume > 1.5x 20-period average.
-# Short when price < 4h Supertrend + volume > 1.5x 20-period average.
-# Exit when price crosses back below/above 4h Supertrend.
-# Uses 4h for trend direction, 1h for entry timing and volume confirmation.
-# Designed for low trade frequency (15-30/year) to avoid fee drag in 1h timeframe.
+# Hypothesis: 4h Williams %R with 14-period lookback + 1d EMA50 trend filter + volume spike.
+# Long when %R crosses above -20 (oversold reversal) + volume spike + price > 1d EMA50
+# Short when %R crosses below -80 (overbought reversal) + volume spike + price < 1d EMA50
+# Exit when %R crosses back through -50 (middle) or volume drops below 70% of average.
+# Williams %R captures reversals in ranging markets and pullbacks in trends.
+# Target: 15-25 trades/year to minimize fee drag while capturing mean reversion and trend continuation.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for Supertrend calculation
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Load 1d data for EMA50
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR for Supertrend (period=10)
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Supertrend
-    hl2 = (high_4h + low_4h) / 2
-    upper = hl2 + (3.0 * atr)
-    lower = hl2 - (3.0 * atr)
+    # Calculate Williams %R on 4h data (14-period)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    supertrend = np.zeros_like(close_4h)
-    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
-    supertrend[0] = upper[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_4h)):
-        if close_4h[i] > supertrend[i-1]:
-            supertrend[i] = max(upper[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(lower[i], supertrend[i-1])
-            direction[i] = -1
-    
-    # Align Supertrend to 1h
-    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
-    
-    # Volume confirmation (20-period average)
+    # Volume spike filter (20-period average)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(supertrend_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema50_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,31 +53,42 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        st = supertrend_aligned[i]
+        wr = williams_r[i]
+        ema50 = ema50_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_filter = vol > 1.5 * vol_ma
+        # Williams %R crossovers
+        wr_prev = williams_r[i-1] if i > 0 else -50
+        
+        wr_cross_above_20 = wr > -20 and wr_prev <= -20
+        wr_cross_below_80 = wr < -80 and wr_prev >= -80
+        wr_cross_above_50 = wr > -50 and wr_prev <= -50
+        wr_cross_below_50 = wr < -50 and wr_prev >= -50
+        
+        # Volume filter: current volume > 1.5 * 20-day average
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price above Supertrend + volume confirmation
-            if price > st and vol_filter:
-                signals[i] = 0.20
+            # Long conditions: %R crosses above -20 (from oversold) + volume spike + price > EMA50
+            if wr_cross_above_20 and vol_spike and price > ema50:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below Supertrend + volume confirmation
-            elif price < st and vol_filter:
-                signals[i] = -0.20
+            # Short conditions: %R crosses below -80 (from overbought) + volume spike + price < EMA50
+            elif wr_cross_below_80 and vol_spike and price < ema50:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back through Supertrend
+            # Exit conditions: %R crosses back through -50 or volume drops significantly
             exit_signal = False
             
             if position == 1:  # long position
-                if price < st:
+                # Exit when %R crosses below -50 (losing momentum) or volume dries up
+                if wr_cross_below_50 or vol < 0.7 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                if price > st:
+                # Exit when %R crosses above -50 (gaining momentum) or volume dries up
+                if wr_cross_above_50 or vol < 0.7 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -102,10 +96,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_Supertrend4h_Volume_Filter"
-timeframe = "1h"
+name = "4h_WilliamsR_EMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
