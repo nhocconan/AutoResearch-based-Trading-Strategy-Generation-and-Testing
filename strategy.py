@@ -3,105 +3,79 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku with 1d cloud filter and volume confirmation
-# - Tenkan-sen (9) > Kijun-sen (26) = bullish momentum
-# - Price above 1d Kumo (cloud) = bullish trend filter
-# - Volume surge confirms breakout strength
-# Works in bull/bear via cloud filter (trend direction) + momentum cross
-# Target: 50-150 total trades over 4 years (12-37/year)
-# Size: 0.25
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # 1d Ichimoku components for cloud filter
+    # Daily high/low for pivot points
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    tenkan_sen_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
-                     pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    kijun_sen_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
-                    pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2, shifted 26 periods ahead
-    senkou_span_a_1d = ((tenkan_sen_1d + kijun_sen_1d) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + low)/2, shifted 26 periods ahead
-    senkou_span_b_1d = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
-                         pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2)
-    # Chikou Span (Lagging Span): close shifted 26 periods behind (not used for cloud)
+    # Pivot point calculation
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    # Align 1d Ichimoku to 6h
-    tenkan_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d.values)
-    kijun_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d.values)
-    senkou_span_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d.values)
-    senkou_span_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d.values)
+    # Align to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # 6h Ichimoku for entry signal (Tenkan/Kijun cross)
+    # 12h volatility filter - ATR(14)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Tenkan-sen (9-period)
-    tenkan_sen_6h = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
-                     pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (26-period)
-    kijun_sen_6h = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
-                    pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation
+    # Volume filter
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 2.0 * vol_ma20  # 2x volume surge
+    vol_surge = prices['volume'].values > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen_1d_aligned[i]) or np.isnan(kijun_sen_1d_aligned[i]) or
-            np.isnan(senkou_span_a_1d_aligned[i]) or np.isnan(senkou_span_b_1d_aligned[i]) or
-            np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(atr[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud boundaries and color
-        span_a = senkou_span_a_1d_aligned[i]
-        span_b = senkou_span_b_1d_aligned[i]
-        cloud_top = max(span_a, span_b)
-        cloud_bottom = min(span_a, span_b)
-        cloud_bullish = span_a > span_b  # Green cloud when Senkou A > Senkou B
-        
         if position == 0:
-            # Long: Bullish TK cross + price above cloud + cloud bullish + volume surge
-            if (tenkan_sen_6h[i] > kijun_sen_6h[i] and  # Bullish TK cross
-                close[i] > cloud_top and                 # Price above cloud
-                cloud_bullish and                        # Cloud is bullish
-                vol_surge[i]):                           # Volume surge
+            # Long: Price breaks above S1 with volume surge and ATR filter
+            if (close[i] > s1_12h[i] and vol_surge[i] and atr[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish TK cross + price below cloud + cloud bearish + volume surge
-            elif (tenkan_sen_6h[i] < kijun_sen_6h[i] and  # Bearish TK cross
-                  close[i] < cloud_bottom and             # Price below cloud
-                  not cloud_bullish and                   # Cloud is bearish
-                  vol_surge[i]):                          # Volume surge
+            # Short: Price breaks below R1 with volume surge and ATR filter
+            elif (close[i] < r1_12h[i] and vol_surge[i] and atr[i] > 0):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: TK cross reverses or price enters cloud
+            # Exit: Price crosses pivot or volatility drops
             if position == 1:
-                if tenkan_sen_6h[i] <= kijun_sen_6h[i] or close[i] < cloud_top:
+                if close[i] < pivot_12h[i] or atr[i] < 0.5 * atr[i]:  # Volatility drop
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if tenkan_sen_6h[i] >= kijun_sen_6h[i] or close[i] > cloud_bottom:
+                if close[i] > pivot_12h[i] or atr[i] < 0.5 * atr[i]:  # Volatility drop
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -109,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_TK_Cross_VolumeSurge_v1"
-timeframe = "6h"
+name = "12h_PivotBreakout_VolumeSurge_ATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
