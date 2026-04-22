@@ -1,4 +1,3 @@
-# Solution
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -9,13 +8,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # Hypothesis: 4h Donchian breakout with 1d EMA34 trend filter and volume confirmation
+    # Donchian channels provide clear support/resistance levels. Breakouts with volume
+    # confirm institutional participation. 1d EMA34 ensures alignment with higher timeframe trend.
+    # This combination reduces false breakouts and improves win rate in both bull and bear markets.
+    # Focus on 4h timeframe with strict entry conditions to limit trades to 20-50/year.
+    
     # Price and volume data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for Donchian channels (primary timeframe)
+    # Load 4h data for Donchian channels
     df_4h = get_htf_data(prices, '4h')
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
@@ -25,11 +30,11 @@ def generate_signals(prices):
     upper_donchian = pd.Series(high_4h).rolling(window=donchian_period, min_periods=donchian_period).max().values
     lower_donchian = pd.Series(low_4h).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Align Donchian Channels to 4h timeframe
+    # Align Donchian Channels to 4h timeframe (already aligned but keeping for clarity)
     upper_donchian_aligned = align_htf_to_ltf(prices, df_4h, upper_donchian)
     lower_donchian_aligned = align_htf_to_ltf(prices, df_4h, lower_donchian)
     
-    # Load 1d data for EMA34 trend filter (higher timeframe)
+    # Load 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -46,7 +51,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(50, n):  # Start after EMA warmup
         # Skip if data not ready or outside session
         if (np.isnan(upper_donchian_aligned[i]) or np.isnan(lower_donchian_aligned[i]) or
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or
@@ -82,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_1dEMA34_Volume_Session_v1"
+name = "4h_Donchian_Breakout_1dEMA34_Volume_Session_v2"
 timeframe = "4h"
 leverage = 1.0
