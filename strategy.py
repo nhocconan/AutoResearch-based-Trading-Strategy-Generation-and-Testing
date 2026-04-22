@@ -5,14 +5,14 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume surge and 1w EMA50 trend filter
-    # Camarilla levels provide precise intraday support/resistance with high win rate
-    # Breakout of R3/S3 indicates strong momentum; volume surge confirms institutional interest
-    # 1w EMA50 filter ensures trading with the dominant weekly trend, avoiding counter-trend whipsaws
-    # This combination works in both bull (buy R3 breaks in uptrend) and bear (sell S3 breaks in downtrend)
+    # Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and volume confirmation
+    # Williams Alligator identifies trend direction via SMMA crossovers
+    # When Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+    # Entries require Alligator alignment + 1w EMA50 trend filter + volume spike
+    # This combination filters weak signals and improves win rate in both bull/bear markets
     
     # Price and volume data
     close = prices['close'].values
@@ -20,59 +20,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    # R3 = Close + 1.1*(High - Low)
-    # S3 = Close - 1.1*(High - Low)
-    df_1d = get_htf_data(prices, '1d')
-    camarilla_R3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low'])
-    camarilla_S3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low'])
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3.values)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3.values)
-    
-    # 1d volume surge (20-period average)
-    vol_ma20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_surge = df_1d['volume'] > 2.0 * vol_ma20  # Require 2x volume for confirmation
-    vol_surge_aligned = align_htf_to_ltf(prices, df_1d, vol_surge)
-    
-    # 1w EMA50 trend filter
+    # Load 1w data for EMA50 trend filter (higher timeframe)
     df_1w = get_htf_data(prices, '1w')
     ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
+    # Williams Alligator components (using SMMA - smoothed moving average)
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            # First value is simple average
+            result[period-1] = np.mean(arr[:period])
+            # Subsequent values: (prev*(period-1) + current) / period
+            for i in range(period, len(arr)):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(close, 13)   # Jaw (13-period SMMA)
+    teeth = smma(close, 8)  # Teeth (8-period SMMA)
+    lips = smma(close, 5)   # Lips (5-period SMMA)
+    
+    # Volume spike filter (20-period)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.5 * vol_ma20  # Require 1.5x volume for confirmation
+    
     signals = np.zeros(n)
     position = 0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(50, n):  # Start after Alligator warmup
         # Skip if data not ready
-        if (np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_surge_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above R3 + volume surge + above weekly EMA50 (uptrend)
-            if close[i] > camarilla_R3_aligned[i] and vol_surge_aligned[i] and close[i] > ema50_1w_aligned[i]:
+            # Long: Lips > Teeth > Jaw (bullish alignment) + volume spike + price above 1w EMA50
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and vol_spike[i] and close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 + volume surge + below weekly EMA50 (downtrend)
-            elif close[i] < camarilla_S3_aligned[i] and vol_surge_aligned[i] and close[i] < ema50_1w_aligned[i]:
+            # Short: Lips < Teeth < Jaw (bearish alignment) + volume spike + price below 1w EMA50
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and vol_spike[i] and close[i] < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to Camarilla center (PPT) or trend reversal vs weekly EMA50
-            camarilla_PPT = (df_1d['close'] + df_1d['high'] + df_1d['low']) / 3
-            camarilla_PPT_aligned = align_htf_to_ltf(prices, df_1d, camarilla_PPT.values)
-            
+            # Exit: Alligator lines cross (trend weakening) or trend reversal vs 1w EMA50
             if position == 1:
-                if close[i] < camarilla_PPT_aligned[i] or close[i] < ema50_1w_aligned[i]:
+                if lips[i] < teeth[i] or close[i] < ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > camarilla_PPT_aligned[i] or close[i] > ema50_1w_aligned[i]:
+                if lips[i] > teeth[i] or close[i] > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -80,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dVolumeSurge_1wEMA50_Trend_v1"
-timeframe = "4h"
+name = "1d_Williams_Alligator_1wEMA50_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
