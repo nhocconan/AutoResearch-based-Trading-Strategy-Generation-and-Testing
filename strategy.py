@@ -1,9 +1,12 @@
-# 1. Hypothesis: 4-hour Williams Alligator with 12-hour Trend and Volume Confirmation
-# Long when Alligator lines are bullish (Green > Red > Blue) and 12h EMA50 rising with volume spike.
-# Short when Alligator lines are bearish (Blue > Red > Green) and 12h EMA50 falling with volume spike.
-# Exit when Alligator lines cross or 12h EMA50 reverses.
-# Designed for low trade frequency by requiring multiple confirmations.
-# Works in both bull and bear markets by following the 12h trend.
+#!/usr/bin/env python3
+"""
+Hypothesis: 1h Timeframe with 4h Trend Direction and Volume Confirmation.
+Long when 4h close > 4h EMA50 (uptrend), 1h RSI < 30 (oversold), and volume > 1.5x 20-period average.
+Short when 4h close < 4h EMA50 (downtrend), 1h RSI > 70 (overbought), and volume > 1.5x 20-period average.
+Exit when 4h trend reverses or RSI returns to neutral (40-60).
+Designed for low trade frequency by requiring trend alignment and extreme RSI readings.
+Works in both bull and bear markets by following the 4h trend and fading extremes.
+"""
 
 import numpy as np
 import pandas as pd
@@ -14,53 +17,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: Smoothed Moving Average (SMA-like) with different periods and shifts
-    # Jaw (Blue): 13-period SMMA, shifted 8 bars forward
-    # Teeth (Red): 8-period SMMA, shifted 5 bars forward  
-    # Lips (Green): 5-period SMMA, shifted 3 bars forward
-    # SMMA = (Previous SMMA * (period-1) + Current Close) / period
+    # 1h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    def smma(series, period):
-        result = np.full_like(series, np.nan, dtype=float)
-        if len(series) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(series[:period])
-        # Subsequent values: SMMA = (Previous SMMA * (period-1) + Current Close) / period
-        for i in range(period, len(series)):
-            result[i] = (result[i-1] * (period-1) + series[i]) / period
-        return result
-    
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line  
-    lips = smma(close, 5)   # Green line
-    
-    # Shift the lines forward (Williams Alligator shifts)
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # Invalidate the shifted values at the beginning
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
-    
-    # Load 12h data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data for trend filter - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 50-period EMA on 12h close for trend
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 50-period EMA on 4h close for trend
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -68,55 +50,48 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        vol_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Bullish: Lips > Teeth > Jaw (Green > Red > Blue)
-            bullish = lips_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > jaw_shifted[i]
-            # Bearish: Jaw > Teeth > Lips (Blue > Red > Green)
-            bearish = jaw_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > lips_shifted[i]
-            
-            # Long: Bullish Alligator, 12h EMA50 rising, volume spike
-            if (bullish and 
-                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and vol_spike):
-                signals[i] = 0.25
+            # Long: 4h uptrend, RSI oversold, volume confirmation
+            if (close[i] > ema50_4h_aligned[i] and  # 4h trend proxy using 1h close vs 4h EMA
+                rsi[i] < 30 and vol_confirmed):
+                signals[i] = 0.20
                 position = 1
-            # Short: Bearish Alligator, 12h EMA50 falling, volume spike
-            elif (bearish and 
-                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and vol_spike):
-                signals[i] = -0.25
+            # Short: 4h downtrend, RSI overbought, volume confirmation
+            elif (close[i] < ema50_4h_aligned[i] and 
+                  rsi[i] > 70 and vol_confirmed):
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: Alligator lines cross or 12h EMA50 reverses
+            # Exit: 4h trend reverses or RSI returns to neutral
             exit_signal = False
             
             if position == 1:
-                # Exit long: Bullish alignment breaks or 12h EMA50 turns down
-                bullish = lips_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > jaw_shifted[i]
-                if not bullish or ema50_12h_aligned[i] < ema50_12h_aligned[i-1]:
+                # Exit long: 4h downtrend or RSI >= 40
+                if close[i] < ema50_4h_aligned[i] or rsi[i] >= 40:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Bearish alignment breaks or 12h EMA50 turns up
-                bearish = jaw_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > lips_shifted[i]
-                if not bearish or ema50_12h_aligned[i] > ema50_12h_aligned[i-1]:
+                # Exit short: 4h uptrend or RSI <= 60
+                if close[i] > ema50_4h_aligned[i] or rsi[i] <= 60:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4H_WilliamsAlligator_12hTrend_Volume"
-timeframe = "4h"
+name = "1H_4hTrend_RSIExtremes_Volume"
+timeframe = "1h"
 leverage = 1.0
