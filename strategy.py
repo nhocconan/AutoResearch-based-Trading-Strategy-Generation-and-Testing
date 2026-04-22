@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Camarilla Pivot Point breakout with 12-hour trend filter and volume confirmation.
-Camarilla pivots identify intraday support/resistance levels that work well in ranging markets.
-12-hour EMA50 determines trend direction for bias.
-Volume spike confirms institutional participation at breakout.
-Works in bull/bear markets by combining mean-reversion pivots with trend filtering.
+Hypothesis: 6-hour Bollinger Band Width regime with 1-week RSI trend filter.
+In low volatility (BB Width < 20th percentile), mean revert at Bollinger Bands.
+In high volatility (BB Width > 80th percentile), follow 1-week RSI trend (RSI>50 long, <50 short).
+BB Width regime identifies market state; 1-week RSI provides trend filter for breakouts.
+Works in bull markets (trend following breakouts) and bear markets (mean reversion in ranges).
 """
 
 import numpy as np
@@ -16,84 +16,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 12h data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Bollinger Bands (20, 2) on 6h
+    basis = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    dev = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = basis + 2.0 * dev
+    lower = basis - 2.0 * dev
+    bb_width = (upper - lower) / basis
+    
+    # Percentile rank of BB Width (50-period lookback)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) == 50 else np.nan, raw=False
+    ).values
+    
+    # Load 1-week RSI for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Load 1d data for Camarilla pivots - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla pivot levels for previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
-    r2 = close_1d + 1.1 * (high_1d - low_1d) / 6
-    s2 = close_1d - 1.1 * (high_1d - low_1d) / 6
-    
-    # Align Camarilla levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Volume confirmation: 4h volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(bb_width_percentile[i]) or np.isnan(rsi_1w_aligned[i]) or
+            np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(basis[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long conditions: Price breaks above R1 with volume and uptrend
-            if (close[i] > r1_aligned[i] and 
-                volume[i] > vol_ma[i] and 
-                close[i] > ema_12h_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short conditions: Price breaks below S1 with volume and downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  volume[i] > vol_ma[i] and 
-                  close[i] < ema_12h_aligned[i]):
-                signals[i] = -0.25
-                position = -1
+            # Entry logic based on regime
+            if bb_width_percentile[i] < 0.20:  # Low volatility - mean revert
+                if close[i] < lower[i]:  # Oversold - go long
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] > upper[i]:  # Overbought - go short
+                    signals[i] = -0.25
+                    position = -1
+            elif bb_width_percentile[i] > 0.80:  # High volatility - follow trend
+                if rsi_1w_aligned[i] > 50:  # Uptrend - go long
+                    signals[i] = 0.25
+                    position = 1
+                elif rsi_1w_aligned[i] < 50:  # Downtrend - go short
+                    signals[i] = -0.25
+                    position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls back to pivot or below S1
-                if close[i] < pivot_aligned[i]:
+                # Exit long: price crosses above mean (basis) or volatility regime changes
+                if close[i] > basis[i] or bb_width_percentile[i] > 0.80:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises back to pivot or above R1
-                if close[i] > pivot_aligned[i]:
+                # Exit short: price crosses below mean (basis) or volatility regime changes
+                if close[i] < basis[i] or bb_width_percentile[i] > 0.80:
                     exit_signal = True
             
             if exit_signal:
@@ -104,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1S1_Breakout_12hEMA50_Volume"
-timeframe = "4h"
+name = "6H_BBWidth_Regime_1wRSI_Trend"
+timeframe = "6h"
 leverage = 1.0
