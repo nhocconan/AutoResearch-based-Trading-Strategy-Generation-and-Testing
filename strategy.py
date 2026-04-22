@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once
+    # Load daily data once for pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Pivot levels using previous day's HLC (no look-ahead)
+    # Previous day's HLC for pivot calculation (no look-ahead)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
     prev_close_1d = np.roll(close_1d, 1)
@@ -22,16 +22,17 @@ def generate_signals(prices):
     prev_low_1d[0] = np.nan
     prev_close_1d[0] = np.nan
     
+    # Calculate pivot levels
     pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
     r1_1d = 2 * pp_1d - prev_low_1d
     s1_1d = 2 * pp_1d - prev_high_1d
     r2_1d = pp_1d + (prev_high_1d - prev_low_1d)
     s2_1d = pp_1d - (prev_high_1d - prev_low_1d)
     
-    # 1d EMA34 for trend filter
+    # Daily EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 12h timeframe (primary timeframe)
+    # Align to 4h timeframe (primary)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -39,7 +40,7 @@ def generate_signals(prices):
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike filter (20-period average on 12h data)
+    # Volume spike filter (20-period average on 4h data)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -71,11 +72,11 @@ def generate_signals(prices):
         ema34 = ema34_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume + above EMA34
+            # Long: price breaks above R2 with volume + above daily EMA34
             if price > r2 and vol > 1.5 * vol_ma and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 with volume + below EMA34
+            # Short: price breaks below S2 with volume + below daily EMA34
             elif price < s2 and vol > 1.5 * vol_ma and price < ema34:
                 signals[i] = -0.25
                 position = -1
@@ -93,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Spike"
-timeframe = "12h"
+name = "4h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
