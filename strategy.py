@@ -5,27 +5,24 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # 12h high/low for Donchian channel (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Weekly high-low for volatility regime (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 12h Donchian channels (20-period)
-    high_max = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # True Range for weekly ATR
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    atr_ma_1w = pd.Series(atr_1w).rolling(window=50, min_periods=50).mean().values
     
-    # Align Donchian levels to 4h timeframe
-    high_max_aligned = align_htf_to_ltf(prices, df_12h, high_max)
-    low_min_aligned = align_htf_to_ltf(prices, df_12h, low_min)
-    
-    # 4h volume moving average for confirmation
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # 4h ATR for volatility filter and position sizing
+    # 6h ATR for entry trigger
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -36,44 +33,55 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # 6h SMA for trend direction
+    sma = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    
+    # Align weekly ATR and its MA to 6h timeframe
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    atr_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any data is not ready
-        if (np.isnan(high_max_aligned[i]) or 
-            np.isnan(low_min_aligned[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(atr_1w_aligned[i]) or 
+            np.isnan(atr_ma_1w_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(sma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_ma_val = vol_ma[i]
         atr_val = atr[i]
+        sma_val = sma[i]
+        atr_1w = atr_1w_aligned[i]
+        atr_ma_1w = atr_ma_1w_aligned[i]
         
-        # Volume confirmation: above average volume
-        vol_confirmed = vol > vol_ma_val
+        # Volatility regime: only trade when weekly ATR is elevated (trending market)
+        vol_regime = atr_1w > atr_ma_1w
         
-        if position == 0 and vol_confirmed:
-            # Long: price breaks above 12h Donchian upper band
-            if price > high_max_aligned[i]:
+        if position == 0 and vol_regime:
+            # Long: price breaks above SMA + 1.5*ATR with rising volatility
+            if price > sma_val + 1.5 * atr_val and atr_val > atr[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 12h Donchian lower band
-            elif price < low_min_aligned[i]:
+                entry_price = price
+            # Short: price breaks below SMA - 1.5*ATR with rising volatility
+            elif price < sma_val - 1.5 * atr_val and atr_val > atr[i-1]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position != 0:
-            # Exit: price returns to the opposite Donchian band
-            if position == 1 and price < low_min_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and price > high_max_aligned[i]:
+            # Exit: mean reversion to SMA or volatility collapse
+            mean_rev = (position == 1 and price < sma_val) or (position == -1 and price > sma_val)
+            vol_collapse = atr_val < 0.5 * atr[i-1]  # Sharp drop in volatility
+            
+            if mean_rev or vol_collapse:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -82,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_12hVolFilter_v1"
-timeframe = "4h"
+name = "6h_WeeklyATRRegime_FilteredBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
