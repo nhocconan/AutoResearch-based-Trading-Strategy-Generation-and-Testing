@@ -1,11 +1,25 @@
-# 1H_Momentum_4hTrend_1dVolume - 1h momentum aligned with 4h trend and daily volume
-# Uses 4h EMA for trend direction, 1h RSI for momentum entry, and 1d volume filter
-# Designed for low trade frequency (15-35/year) with momentum + trend alignment
-# Works in both bull and bear markets by following higher timeframe trend
-
+#!/usr/bin/env python3
+"""
+Hypothesis: 6h Williams Alligator with 1d momentum filter and volume confirmation.
+Long when jaw (13-period SMMA) crosses above teeth (8-period SMMA) with bullish momentum.
+Short when jaw crosses below teeth with bearish momentum.
+Exit when teeth crosses jaw in opposite direction.
+Uses 1d ROC for momentum filter to avoid whipsaws and targets 20-40 trades/year.
+Williams Alligator uses smoothed moving averages for smoother trend signals.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def _smma(series, period):
+    """Smoothed Moving Average (SMMA) - Wilder's smoothing"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    smma = np.full_like(series, np.nan, dtype=float)
+    smma[period-1] = np.mean(series[:period])
+    for i in range(period, len(series)):
+        smma[i] = (smma[i-1] * (period-1) + series[i]) / period
+    return smma
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,35 +31,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load daily data for momentum filter - ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Load 1d data for volume filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate Williams Alligator (6-period jaw, 5-period teeth, 3-period lips)
+    # Using 6, 5, 3 periods for smoother signals on 6h timeframe
+    jaw_period = 6   # SMMA of median price
+    teeth_period = 5 # SMMA of median price
     
-    # Calculate 4h EMA (20-period) for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    median_price = (high + low) / 2.0
+    jaw = _smma(median_price, jaw_period)
+    teeth = _smma(median_price, teeth_period)
     
-    # Calculate 1d average volume (20-period) for volume filter
-    vol_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Calculate 1d ROC (10-period) for momentum filter
+    close_d = df_daily['close'].values
+    roc_d = np.full_like(close_d, np.nan, dtype=float)
+    roc_d[10:] = (close_d[10:] - close_d[:-10]) / close_d[:-10] * 100
     
-    # Calculate 1h RSI (14-period) for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Align ROC to 6h timeframe
+    roc_aligned = align_htf_to_ltf(prices, df_daily, roc_d)
+    
+    # Calculate 6h volume average (20-period)
+    vol_avg_20 = np.full_like(volume, np.nan, dtype=float)
+    for i in range(20, len(volume)):
+        vol_avg_20[i] = np.mean(volume[i-20:i])
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -53,10 +64,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(max(jaw_period, teeth_period, 20), n):
         # Skip if data not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(roc_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,40 +84,40 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 4h uptrend + 1h momentum (RSI > 50) + volume above average
-            if (close[i] > ema_4h_aligned[i] and  # Price above 4h EMA (uptrend)
-                rsi[i] > 50 and                 # Bullish momentum
-                volume[i] > avg_vol_1d_aligned[i]):  # Above average daily volume
-                signals[i] = 0.20
+            # Long: Jaw crosses above teeth with positive momentum and volume
+            if (jaw[i] > teeth[i] and jaw[i-1] <= teeth[i-1] and  # Bullish crossover
+                roc_aligned[i] > 0 and                           # Positive momentum
+                volume[i] > 1.5 * vol_avg_20[i]):                # Volume spike
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + 1h momentum (RSI < 50) + volume above average
-            elif (close[i] < ema_4h_aligned[i] and  # Price below 4h EMA (downtrend)
-                  rsi[i] < 50 and                 # Bearish momentum
-                  volume[i] > avg_vol_1d_aligned[i]):  # Above average daily volume
-                signals[i] = -0.20
+            # Short: Jaw crosses below teeth with negative momentum and volume
+            elif (jaw[i] < teeth[i] and jaw[i-1] >= teeth[i-1] and  # Bearish crossover
+                  roc_aligned[i] < 0 and                           # Negative momentum
+                  volume[i] > 1.5 * vol_avg_20[i]):                # Volume spike
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: trend reversal or momentum exhaustion
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price below 4h EMA OR RSI < 40 (momentum loss)
-                if close[i] < ema_4h_aligned[i] or rsi[i] < 40:
+                # Exit long: jaw crosses below teeth (bearish crossover)
+                if jaw[i] < teeth[i] and jaw[i-1] >= teeth[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price above 4h EMA OR RSI > 60 (momentum loss)
-                if close[i] > ema_4h_aligned[i] or rsi[i] > 60:
+                # Exit short: jaw crosses above teeth (bullish crossover)
+                if jaw[i] > teeth[i] and jaw[i-1] <= teeth[i-1]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Momentum_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6H_WilliamsAlligator_1dROC_Volume"
+timeframe = "6h"
 leverage = 1.0
 #%%
