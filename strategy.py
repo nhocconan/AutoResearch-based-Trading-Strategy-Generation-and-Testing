@@ -13,66 +13,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for daily indicators and 1w for weekly trend - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 50:
+    # Load 12h data (HTF) - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 12-period RSI on 12h closes
+    close_12h = df_12h['close'].values
+    delta = np.diff(close_12h)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    avg_gain = pd.Series(gain).ewm(span=12, adjust=False, min_periods=12).mean().values
+    avg_loss = pd.Series(loss).ewm(span=12, adjust=False, min_periods=12).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_12h = 100 - (100 / (1 + rs))
     
-    # Calculate 1d volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h ATR(14) for volatility filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h_shift = np.roll(close_12h, 1)
+    close_12h_shift[0] = close_12h[0]
+    tr = np.maximum(high_12h - low_12h, np.maximum(np.abs(high_12h - close_12h_shift), np.abs(low_12h - close_12h_shift)))
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align all indicators to 12h timeframe
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1w)
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    # Calculate 12h volume average (20-period)
+    volume_12h = df_12h['volume'].values
+    vol_avg_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 4h timeframe
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    vol_avg_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20_12h)
+    
+    # Calculate 4h Bollinger Bands (20, 2.0)
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = ma_20 + 2 * std_20
+    lower_band = ma_20 - 2 * std_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
+        if (np.isnan(rsi_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(vol_avg_20_12h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above 20-day Donchian high with volume AND above weekly EMA50 (uptrend)
-            if (close[i] > donch_high_20_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: Price touches lower Bollinger Band, RSI oversold (<30), and volume spike
+            if (close[i] <= lower_band[i] and 
+                rsi_12h_aligned[i] < 30 and 
+                volume[i] > 2.0 * vol_avg_20_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 20-day Donchian low with volume AND below weekly EMA50 (downtrend)
-            elif (close[i] < donch_low_20_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: Price touches upper Bollinger Band, RSI overbought (>70), and volume spike
+            elif (close[i] >= upper_band[i] and 
+                  rsi_12h_aligned[i] > 70 and 
+                  volume[i] > 2.0 * vol_avg_20_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite Donchian level
+            # Exit: Price crosses back to middle (mean reversion complete)
             if position == 1:
-                if close[i] < donch_low_20_aligned[i]:
+                if close[i] >= ma_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donch_high_20_aligned[i]:
+                if close[i] <= ma_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -80,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_WeeklyEMA50_Trend_Volume"
-timeframe = "12h"
+name = "4H_BollingerBand_RSI12h_VolumeSpike_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
