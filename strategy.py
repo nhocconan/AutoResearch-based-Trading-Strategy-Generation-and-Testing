@@ -43,11 +43,6 @@ def generate_signals(prices):
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Daily volatility filter (10-day average of absolute returns)
-    daily_return = pd.Series(close_1d).pct_change().abs()
-    vol_filter = pd.Series(daily_return).rolling(window=10, min_periods=10).mean().values
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -59,8 +54,7 @@ def generate_signals(prices):
             np.isnan(r2_aligned[i]) or 
             np.isnan(s2_aligned[i]) or 
             np.isnan(ema34_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(vol_filter_aligned[i])):
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,7 +63,6 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        vol_filter_val = vol_filter_aligned[i]
         pp = pp_aligned[i]
         r1 = r1_aligned[i]
         s1 = s1_aligned[i]
@@ -77,41 +70,29 @@ def generate_signals(prices):
         s2 = s2_aligned[i]
         ema34 = ema34_aligned[i]
         
-        # Volatility filter: only trade in normal volatility (avoid chop)
-        vol_condition = vol_filter_val < 0.03  # Less than 3% daily volatility
-        
-        # Volume spike: current volume > 1.5 * 20-period average
-        vol_spike = vol > 1.5 * vol_ma
-        
         if position == 0:
-            # Long: price breaks above R2 + volume spike + above EMA34 + normal vol
-            if price > r2 and vol_spike and price > ema34 and vol_condition:
-                signals[i] = 0.25
+            # Long: price breaks above R2 + volume spike + above EMA34
+            if price > r2 and vol > 1.5 * vol_ma and price > ema34:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below S2 + volume spike + below EMA34 + normal vol
-            elif price < s2 and vol_spike and price < ema34 and vol_condition:
-                signals[i] = -0.25
+            # Short: price breaks below S2 + volume spike + below EMA34
+            elif price < s2 and vol > 1.5 * vol_ma and price < ema34:
+                signals[i] = -0.30
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back through central pivot or volatility increases
-            exit_signal = False
-            
-            if position == 1:  # long
-                if price < pp or vol_filter_val > 0.05:  # High volatility exit
-                    exit_signal = True
-            elif position == -1:  # short
-                if price > pp or vol_filter_val > 0.05:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit: price crosses back through central pivot
+            if position == 1 and price < pp:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and price > pp:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "4h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Filter"
+name = "4h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
