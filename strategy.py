@@ -1,12 +1,11 @@
-#1/2025-06-20
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation.
-Long when price breaks above Donchian upper band with bullish 1d trend and volume spike.
-Short when price breaks below Donchian lower band with bearish 1d trend and volume spike.
-Exit when price returns to Donchian middle band or trend weakens.
-Uses 1d EMA34 for trend filter to avoid whipsaws in ranging markets.
-Designed for low trade frequency (12-37/year) to minimize fee drift.
+Hypothesis: 4h Williams Alligator (13,8,5 SMAs) with 1d trend filter and volume confirmation.
+Long when green Alligator (JAW>TEETH>LIPS) with bullish 1d trend and volume spike.
+Short when red Alligator (LIPS>TEETH>JAW) with bearish 1d trend and volume spike.
+Exit when Alligator turns neutral (intertwined) or trend weakens.
+Designed for low trade frequency (20-40/year) to minimize fee drag.
+Alligator indicator works well in trending markets and avoids whipsaws in ranges.
 """
 import numpy as np
 import pandas as pd
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,25 +30,28 @@ def generate_signals(prices):
     close_d = pd.Series(df_daily['close'].values)
     ema34_d = close_d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA34 to 12h timeframe
+    # Align EMA34 to 4h timeframe
     ema34_aligned = align_htf_to_ltf(prices, df_daily, ema34_d)
     
-    # Calculate Donchian channels from 1d data (20-period)
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
+    # Calculate Williams Alligator on 4h timeframe
+    # Jaw: 13-period SMMA (smoothed with 8-period offset)
+    # Teeth: 8-period SMMA (smoothed with 5-period offset)
+    # Lips: 5-period SMMA (smoothed with 3-period offset)
     
-    # Donchian upper/lower bands (20-period)
-    upper_d = pd.Series(high_d).rolling(window=20, min_periods=20).max().values
-    lower_d = pd.Series(low_d).rolling(window=20, min_periods=20).min().values
-    middle_d = (upper_d + lower_d) / 2.0
+    # SMMA calculation (Smoothed Moving Average)
+    def smma(data, period):
+        sma = np.full_like(data, np.nan, dtype=float)
+        if len(data) >= period:
+            sma[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
+        return sma
     
-    # Align Donchian bands to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
-    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
-    middle_aligned = align_htf_to_ltf(prices, df_daily, middle_d)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # Calculate 12h volume average (20-period)
+    # Calculate 4h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -58,11 +60,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):  # Start after lookbacks
+    for i in range(30, n):  # Start after Alligator lookback
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(middle_aligned[i]) or np.isnan(ema34_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,14 +80,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above upper band with bullish 1d trend and volume spike
-            if (close[i] > upper_aligned[i] and 
+            # Long: Green Alligator (JAW > TEETH > LIPS) with bullish 1d trend and volume spike
+            if (jaw[i] > teeth[i] and teeth[i] > lips[i] and  # Green Alligator
                 close[i] > ema34_aligned[i] and  # Bullish trend: price above EMA34
                 volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower band with bearish 1d trend and volume spike
-            elif (close[i] < lower_aligned[i] and 
+            # Short: Red Alligator (LIPS > TEETH > JAW) with bearish 1d trend and volume spike
+            elif (lips[i] > teeth[i] and teeth[i] > jaw[i] and  # Red Alligator
                   close[i] < ema34_aligned[i] and  # Bearish trend: price below EMA34
                   volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = -0.25
@@ -96,12 +97,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to middle band OR trend turns bearish
-                if close[i] <= middle_aligned[i] or close[i] < ema34_aligned[i]:
+                # Exit long: Alligator turns neutral or trend turns bearish
+                if not (jaw[i] > teeth[i] and teeth[i] > lips[i]) or close[i] < ema34_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to middle band OR trend turns bullish
-                if close[i] >= middle_aligned[i] or close[i] > ema34_aligned[i]:
+                # Exit short: Alligator turns neutral or trend turns bullish
+                if not (lips[i] > teeth[i] and teeth[i] > jaw[i]) or close[i] > ema34_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -112,7 +113,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian_UpperLower_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4H_WilliamsAlligator_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 #%%
