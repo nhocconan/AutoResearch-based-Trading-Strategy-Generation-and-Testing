@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,92 +13,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Ichimoku (ONCE before loop)
+    # Load 1d data for pivot points and trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Ichimoku components on 1d
+    # Previous day's pivot points (standard)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # 1d EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    # Align to 1h timeframe (primary)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC (pre-compute hour array)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_aligned[i]) or
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Kumo (cloud) top and bottom
-        kumo_top = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        kumo_bottom = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Long: TK cross above AND price above cloud AND volume spike
-            if (tenkan_aligned[i] > kijun_aligned[i] and 
-                close[i] > kumo_top and 
-                volume[i] > 2.0 * vol_avg_20[i]):
-                signals[i] = 0.25
+            # Long: Price breaks above R1 with volume spike AND above 1d EMA34 (uptrend) AND in session
+            if (close[i] > r1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
+                close[i] > ema_34_aligned[i] and in_session):
+                signals[i] = 0.20
                 position = 1
-            # Short: TK cross below AND price below cloud AND volume spike
-            elif (tenkan_aligned[i] < kijun_aligned[i] and 
-                  close[i] < kumo_bottom and 
-                  volume[i] > 2.0 * vol_avg_20[i]):
-                signals[i] = -0.25
+            # Short: Price breaks below S1 with volume spike AND below 1d EMA34 (downtrend) AND in session
+            elif (close[i] < s1_aligned[i] and volume[i] > 1.8 * vol_avg_20[i] and 
+                  close[i] < ema_34_aligned[i] and in_session):
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: TK cross reverses OR price re-enters cloud
+            # Exit: Price crosses back to opposite level (S1 for long, R1 for short)
             if position == 1:
-                if (tenkan_aligned[i] < kijun_aligned[i] or 
-                    close[i] < kumo_top):
+                # Exit long: Price closes below S1
+                if close[i] < s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if (tenkan_aligned[i] > kijun_aligned[i] or 
-                    close[i] > kumo_bottom):
+                # Exit short: Price closes above R1
+                if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "6H_Ichimoku_TK_Cross_Cloud_Filter_Volume"
-timeframe = "6h"
+name = "1H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
