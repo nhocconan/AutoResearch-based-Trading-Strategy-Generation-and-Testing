@@ -13,71 +13,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for indicators
+    # Load 1-day data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate daily range for Keltner channels
-    daily_range = high_1d - low_1d
-    
-    # Calculate ATR(10) on daily data
+    # Calculate ATR(14) on 1-day timeframe
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First value
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate EMA(20) on daily data
-    ema20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_period = 14
+    atr = np.zeros_like(tr)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Calculate Keltner Channels: Upper = EMA20 + 2*ATR, Lower = EMA20 - 2*ATR
-    keltner_upper = ema20 + 2 * atr
-    keltner_lower = ema20 - 2 * atr
+    # Calculate ATR(14) on 6-hour timeframe
+    tr_6h_1 = high - low
+    tr_6h_2 = np.abs(high - np.roll(close, 1))
+    tr_6h_3 = np.abs(low - np.roll(close, 1))
+    tr_6h_1[0] = high[0] - low[0]
+    tr_6h_2[0] = tr_6h_1[0]
+    tr_6h_3[0] = tr_6h_1[0]
+    tr_6h = np.maximum(tr_6h_1, np.maximum(tr_6h_2, tr_6h_3))
     
-    # Volume spike filter (20-day on daily data)
-    vol_ma20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > 1.5 * vol_ma20  # Require 1.5x volume for confirmation
+    atr_6h = np.zeros_like(tr_6h)
+    atr_6h[atr_period-1] = np.mean(tr_6h[:atr_period])
+    for i in range(atr_period, len(tr_6h)):
+        atr_6h[i] = (atr_6h[i-1] * (atr_period-1) + tr_6h[i]) / atr_period
     
-    # Align indicators to daily timeframe (1d is our primary timeframe)
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Calculate ATR ratio: 6h ATR / daily ATR (volatility regime filter)
+    atr_ratio_raw = atr_6h / atr
+    
+    # Align ATR ratio to 6-hour timeframe
+    atr_ratio = align_htf_to_ltf(prices, df_1d, atr_ratio_raw)
+    
+    # Volume spike filter (20-period on 6h)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.5 * vol_ma20  # Require 1.5x volume for confirmation
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):  # Start after warmup
-        # Skip if data not ready
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
-            np.isnan(vol_spike_aligned[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(atr_ratio[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Keltner Upper + volume spike
-            if close[i] > keltner_upper_aligned[i] and vol_spike_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: Price breaks below Keltner Lower + volume spike
-            elif close[i] < keltner_lower_aligned[i] and vol_spike_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # Low volatility regime: ATR ratio < 0.8 (6h vol < 80% of daily vol)
+            # Look for breakouts with volume confirmation
+            if atr_ratio[i] < 0.8:
+                # Donchian breakout (20-period) with volume
+                if i >= 20:
+                    highest_20 = np.max(high[i-20:i])
+                    lowest_20 = np.min(low[i-20:i])
+                    
+                    if close[i] > highest_20 and vol_spike[i]:
+                        signals[i] = 0.25
+                        position = 1
+                    elif close[i] < lowest_20 and vol_spike[i]:
+                        signals[i] = -0.25
+                        position = -1
         else:
-            # Exit: Price returns to EMA20 (middle of Keltner Channel)
-            ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
-            if position == 1:
-                if close[i] < ema20_aligned[i]:
+            # Exit conditions: volatility expansion or mean reversion
+            if position == 1:  # Long position
+                # Exit if volatility expands (ATR ratio > 1.2) or price drops below entry - 1*ATR
+                if atr_ratio[i] > 1.2 or close[i] < close[i-1] - atr_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            else:  # position == -1
-                if close[i] > ema20_aligned[i]:
+            else:  # Short position
+                # Exit if volatility expands or price rises above entry + 1*ATR
+                if atr_ratio[i] > 1.2 or close[i] > close[i-1] + atr_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -85,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Keltner_Breakout_Volume"
-timeframe = "1d"
+name = "6h_ATR_Ratio_Vol_Spike_Donchian_Breakout"
+timeframe = "6h"
 leverage = 1.0
