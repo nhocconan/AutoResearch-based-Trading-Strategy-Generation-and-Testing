@@ -3,134 +3,104 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + daily Choppiness Index regime filter + volume confirmation.
-# Uses daily Choppiness Index to detect trending (CHOP < 38.2) vs ranging (CHOP > 61.8) markets.
-# In trending regimes: breakout above/below Donchian channel with volume spike.
-# In ranging regimes: mean reversion at Donchian channel boundaries with volume confirmation.
-# Designed to work in both bull and bear markets by adapting to regime.
-# Targets 12-37 trades/year with disciplined risk control.
+# Hypothesis: 4h Bollinger Band squeeze + momentum reversal with volume confirmation.
+# Uses Bollinger Band width to detect low volatility (squeeze) conditions.
+# When price breaks out of Bollinger Bands with volume expansion, enter in breakout direction.
+# Uses RSI for momentum confirmation to avoid false breakouts.
+# Designed to work in both bull and bear markets by capturing volatility breakouts.
+# Targets 20-50 trades/year with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for Choppiness Index (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate True Range for Choppiness Index
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Calculate ADX components for Choppiness Index
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
-    # Smooth TR, +DM, -DM
-    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # Calculate DX and Choppiness Index
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # Avoid division by zero
-    
-    # Align Choppiness Index to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Calculate Donchian channels (20-period) on 12h data
+    # Calculate Bollinger Bands (20, 2) on 4h data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
-    
-    # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
+    
+    # Bollinger Bands components
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma_20 + 2 * std_20
+    lower_bb = ma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / ma_20  # Normalized bandwidth
+    
+    # Bollinger Band width squeeze detection (low volatility)
+    bb_width_ma_50 = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    bb_width_std_50 = pd.Series(bb_width).rolling(window=50, min_periods=50).std().values
+    squeeze_threshold = bb_width_ma_50 - bb_width_std_50  # Below average volatility
+    
+    # RSI for momentum confirmation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rs = np.where(avg_loss == 0, 100, rs)  # Avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or 
+        if (np.isnan(bb_width[i]) or 
+            np.isnan(squeeze_threshold[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        chop_val = chop_aligned[i]
-        upper = donch_high[i]
-        lower = donch_low[i]
-        mid = donch_mid[i]
+        bbw = bb_width[i]
+        squeeze_thresh = squeeze_threshold[i]
+        upper = upper_bb[i]
+        lower = lower_bb[i]
+        rsi_val = rsi[i]
         
-        # Volume filter: current volume > 1.3 * 20-period average
-        vol_spike = vol > 1.3 * vol_ma
+        # Squeeze condition: low volatility environment
+        is_squeeze = bbw < squeeze_thresh
+        
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Determine market regime
-            is_trending = chop_val < 38.2  # Trending market
-            is_ranging = chop_val > 61.8   # Ranging market
-            
-            if is_trending:
-                # Trending regime: breakout strategy
-                if price > upper and vol_spike:
+            # Look for breakout from Bollinger Bands with volume and momentum confirmation
+            if is_squeeze and vol_spike:
+                # Bullish breakout: price above upper band with RSI > 50 (bullish momentum)
+                if price > upper and rsi_val > 50:
                     signals[i] = 0.25
                     position = 1
-                elif price < lower and vol_spike:
-                    signals[i] = -0.25
-                    position = -1
-            elif is_ranging:
-                # Ranging regime: mean reversion at channel boundaries
-                if price <= lower and vol_spike:
-                    signals[i] = 0.25
-                    position = 1
-                elif price >= upper and vol_spike:
+                # Bearish breakout: price below lower band with RSI < 50 (bearish momentum)
+                elif price < lower and rsi_val < 50:
                     signals[i] = -0.25
                     position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: mean reversion to middle band or opposite band touch
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on retracement to middle or opposite band touch
-                if price < mid or price >= upper:
+                # Exit when price returns to middle band or touches lower band
+                if price < ma_20[i] or price <= lower:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on retracement to middle or opposite band touch
-                if price > mid or price <= lower:
+                # Exit when price returns to middle band or touches upper band
+                if price > ma_20[i] or price >= upper:
                     exit_signal = True
             
             if exit_signal:
@@ -142,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Chop_Donchian_Breakout_MeanRev"
-timeframe = "12h"
+name = "4h_BB_Squeeze_Momentum_Breakout"
+timeframe = "4h"
 leverage = 1.0
