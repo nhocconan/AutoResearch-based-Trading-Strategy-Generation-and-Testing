@@ -3,49 +3,26 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
-# Uses Williams Alligator (Jaw, Teeth, Lips) on 12h to identify trend direction.
-# Only takes longs when price > Teeth and shorts when price < Teeth in trending markets (1d ADX > 25).
-# Adds volume confirmation (current volume > 1.5x 20-period average) to avoid false breakouts.
-# Designed to work in both bull and bear markets by filtering for strong trends.
-# Targets 15-30 trades/year with disciplined risk control.
+# Hypothesis: 4h Donchian breakout with daily ADX trend filter and volume confirmation.
+# Uses daily ADX (14) to confirm trend strength (ADX > 25) and avoid whipsaws.
+# In trending markets: long on breakout above Donchian(20) upper band,
+# short on breakdown below lower band, both with volume spike confirmation.
+# Includes ATR-based trailing stop (3x ATR) to manage risk.
+# Designed to work in both bull and bear markets by filtering for strong trends only.
+# Targets 20-40 trades/year with strict entry conditions to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for Williams Alligator (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate Williams Alligator components
-    # Jaw: 13-period SMMA smoothed 8 periods ahead
-    jaw_raw = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().values
-    jaw = pd.Series(jaw_raw).rolling(window=8, min_periods=8).mean().values
-    
-    # Teeth: 8-period SMMA smoothed 5 periods ahead
-    teeth_raw = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().values
-    teeth = pd.Series(teeth_raw).rolling(window=5, min_periods=5).mean().values
-    
-    # Lips: 5-period SMMA smoothed 3 periods ahead
-    lips_raw = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().values
-    lips = pd.Series(lips_raw).rolling(window=3, min_periods=3).mean().values
-    
-    # Align Alligator lines to 12h timeframe (no extra delay needed for SMMA)
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    
-    # Load 1d data for ADX trend filter (once before loop)
+    # Load daily data for ADX and ATR (once before loop)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range
+    # Calculate True Range for ADX and ATR
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -54,7 +31,7 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate DM components
+    # Calculate ADX components
     plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
                        np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
     minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
@@ -76,8 +53,18 @@ def generate_signals(prices):
     dx = np.where(np.isnan(dx), 0, dx)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 12h timeframe
+    # Calculate ATR for stop loss
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX and ATR to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # Calculate Donchian channels (20-period) on 4h data
+    high = prices['high'].values
+    low = prices['low'].values
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -85,13 +72,16 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or 
+            np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -101,10 +91,10 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
         adx_val = adx_aligned[i]
+        atr_val = atr_aligned[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
         
         # Volume filter: current volume > 1.5 * 20-period average
         vol_spike = vol > 1.5 * vol_ma
@@ -113,38 +103,42 @@ def generate_signals(prices):
         is_trending = adx_val > 25
         
         if position == 0:
-            # Enter long when price > Teeth and Lips > Jaw (bullish alignment)
-            if price > teeth_val and lips_val > jaw_val and is_trending and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            # Enter short when price < Teeth and Lips < Jaw (bearish alignment)
-            elif price < teeth_val and lips_val < jaw_val and is_trending and vol_spike:
-                signals[i] = -0.25
-                position = -1
+            if is_trending and vol_spike:
+                # Long on breakout above upper band
+                if price > upper:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                    highest_since_entry = price
+                # Short on breakdown below lower band
+                elif price < lower:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
+                    lowest_since_entry = price
         
         elif position != 0:
-            # Exit conditions
-            exit_signal = False
+            # Update highest/lowest since entry for trailing stop
+            if position == 1:
+                highest_since_entry = max(highest_since_entry, price)
+                # ATR trailing stop: exit if price drops 3*ATR from high
+                if price < highest_since_entry - 3.0 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             
-            if position == 1:  # long position
-                # Exit when price crosses below Teeth or Lips crosses below Jaw
-                if price < teeth_val or lips_val < jaw_val:
-                    exit_signal = True
-            
-            elif position == -1:  # short position
-                # Exit when price crosses above Teeth or Lips crosses above Jaw
-                if price > teeth_val or lips_val > jaw_val:
-                    exit_signal = True
-            
-            if exit_signal:
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+            elif position == -1:
+                lowest_since_entry = min(lowest_since_entry, price)
+                # ATR trailing stop: exit if price rises 3*ATR from low
+                if price > lowest_since_entry + 3.0 * atr_val:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "12h_WilliamsAlligator_1dADXFilter_Volume"
-timeframe = "12h"
+name = "4h_Donchian_ADX_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
