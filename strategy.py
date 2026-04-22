@@ -3,92 +3,116 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with RSI filter and volume confirmation. 
-# KAMA adapts to market noise - effective in both trending and ranging markets.
-# Long when KAMA turns up + RSI > 50 + volume > 1.5x average
-# Short when KAMA turns down + RSI < 50 + volume > 1.5x average
-# Exit when KAMA reverses direction
-# Target: 10-25 trades/year to minimize fee drag on 1d timeframe.
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d ADX trend filter.
+# Long when price breaks above Donchian upper (20) + volume spike + 1d ADX > 25 (trending)
+# Short when price breaks below Donchian lower (20) + volume spike + 1d ADX > 25 (trending)
+# Exit when price crosses back through Donchian middle or volume drops below 80% of average.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Target: 20-40 trades/year to avoid excessive fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
-    # Load 1d data (same as primary timeframe for calculations)
+    # Load 1d data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # ER = |Change| / Volatility
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
-    # Avoid division by zero
-    er = np.where(volatility > 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate ADX (14-period) on 1d data
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Smooth TR and DM (Wilder's smoothing)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Align indicators (though 1d data on 1d timeframe, alignment ensures proper handling)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smooth(dx, 14)
+    
+    # Align ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Donchian channels (20-period) on 4h data
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    middle = (upper + lower) / 2
+    
+    # Volume spike filter (20-period average)
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(35, n):  # Start after ADX and Donchian warmup
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(middle[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        kama = kama_aligned[i]
-        rsi = rsi_aligned[i]
-        vol_ma = vol_ma_aligned[i]
-        volume = prices['volume'].iloc[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        adx_val = adx_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-day average
-        vol_filter = volume > 1.5 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_val > 25
         
         if position == 0:
-            # Long: KAMA turning up + RSI > 50 + volume filter
-            if i > 0 and kama > kama_aligned[i-1] and rsi > 50 and vol_filter:
+            # Long conditions: price breaks above upper + volume spike + trending
+            if price > upper[i] and vol_spike and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turning down + RSI < 50 + volume filter
-            elif i > 0 and kama < kama_aligned[i-1] and rsi < 50 and vol_filter:
+            # Short conditions: price breaks below lower + volume spike + trending
+            elif price < lower[i] and vol_spike and trending:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: KAMA reverses direction
-            if (position == 1 and kama < kama_aligned[i-1]) or \
-               (position == -1 and kama > kama_aligned[i-1]):
+            # Exit conditions: price crosses back through middle or volume dries up
+            exit_signal = False
+            
+            if position == 1:  # long position
+                # Exit when price crosses below middle or volume dries up
+                if price < middle[i] or vol < 0.8 * vol_ma:
+                    exit_signal = True
+            
+            elif position == -1:  # short position
+                # Exit when price crosses above middle or volume dries up
+                if price > middle[i] or vol < 0.8 * vol_ma:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_Volume_Filter"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_Volume_ADX25"
+timeframe = "4h"
 leverage = 1.0
