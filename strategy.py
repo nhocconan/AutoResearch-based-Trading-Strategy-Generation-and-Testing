@@ -1,15 +1,5 @@
-# -*- coding: utf-8 -*-
+# %%
 #!/usr/bin/env python3
-"""
-Hypothesis: 6h Williams Alligator + Elder Ray power with 1d trend filter.
-- Williams Alligator (Jaws/Teeth/Lips) identifies trend phases via SMAs.
-- Elder Ray (Bull/Bear Power = Close - EMA13) measures trend strength.
-- Trade only when Alligator is aligned (bullish/bearish) AND Elder Ray confirms strength.
-- Use 1d EMA50 as higher-timeframe trend filter to avoid counter-trend trades.
-- Target: 50-150 total trades over 4 years (~12-37/year) with size 0.25.
-- Works in bull (riding trends) and bear (avoiding false breaks via 1d filter).
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -24,73 +14,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter (ONCE before loop)
+    # Load 1d data for pivot points and trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
+    # Previous day's high, low, close for Camarilla pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla pivot levels (R4/S4 are key breakout levels)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
+    r4 = close_1d + range_ * 1.1 / 2  # Resistance level 4
+    s4 = close_1d - range_ * 1.1 / 2  # Support level 4
+    
+    # 1d EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Williams Alligator on 6h: SMAs of median price
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # 13-period
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # 8-period
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values     # 5-period
+    # Align all levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Elder Ray: Bull Power = Close - EMA13, Bear Power = EMA13 - Close
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = close - ema_13
-    bear_power = ema_13 - close
+    # Volume confirmation: 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):  # Wait for Alligator components
-        # Skip if 1d trend filter not ready
-        if np.isnan(ema_50_1d_aligned[i]):
+    for i in range(1, n):
+        # Skip if data not ready
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator alignment: check if jaws < teeth < lips (bullish) or jaws > teeth > lips (bearish)
-        if (jaw[i] < teeth[i] < lips[i]):  # Bullish alignment
-            bullish_aligned = True
-        elif (jaw[i] > teeth[i] > lips[i]):  # Bearish alignment
-            bullish_aligned = False
-        else:
-            bullish_aligned = None  # No clear alignment (intertwined)
-        
-        if position == 0 and bullish_aligned is not None:
-            # Enter long: bullish Alligator + positive Bull Power + above 1d EMA50
-            if bullish_aligned and bull_power[i] > 0 and close[i] > ema_50_1d_aligned[i]:
-                signals[i] = 0.25
+        if position == 0:
+            # Long: Price breaks above R4 with volume spike AND above 1d EMA34 (uptrend)
+            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                close[i] > ema_34_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # Enter short: bearish Alligator + positive Bear Power + below 1d EMA50
-            elif not bullish_aligned and bear_power[i] > 0 and close[i] < ema_50_1d_aligned[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below S4 with volume spike AND below 1d EMA34 (downtrend)
+            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                  close[i] < ema_34_aligned[i]):
+                signals[i] = -0.30
                 position = -1
-        elif position == 1:
-            # Exit long: Alligator loses bullish alignment OR Bear Power becomes positive
-            if not (jaw[i] < teeth[i] < lips[i]) or bear_power[i] > 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit short: Alligator loses bearish alignment OR Bull Power becomes positive
-            if not (jaw[i] > teeth[i] > lips[i]) or bull_power[i] > 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        else:
+            # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
+            if position == 1:
+                # Exit long: Price closes below S1 (calculated from previous day)
+                if i > 0:
+                    s1 = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
+                    s1_series = pd.Series(np.full_like(close_1d, s1))
+                    s1_aligned_exit = align_htf_to_ltf(prices, df_1d, s1_series.values)[i]
+                else:
+                    s1_aligned_exit = np.nan
+                if not np.isnan(s1_aligned_exit) and close[i] < s1_aligned_exit:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.30
+            else:  # position == -1
+                # Exit short: Price closes above R1 (calculated from previous day)
+                if i > 0:
+                    r1 = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
+                    r1_series = pd.Series(np.full_like(close_1d, r1))
+                    r1_aligned_exit = align_htf_to_ltf(prices, df_1d, r1_series.values)[i]
+                else:
+                    r1_aligned_exit = np.nan
+                if not np.isnan(r1_aligned_exit) and close[i] > r1_aligned_exit:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.30
     
     return signals
 
-name = "6H_Alligator_ElderRay_1dEMA50_Trend"
-timeframe = "6h"
+name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
