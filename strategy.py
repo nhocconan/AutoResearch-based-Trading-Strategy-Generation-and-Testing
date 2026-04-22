@@ -1,9 +1,3 @@
-# 1h_Combined_Momentum_Regime_V2
-# Hypothesis: Use 1d trend filter (price > EMA50 for long, < EMA50 for short) + 4h momentum (MACD histogram cross) + 1h entry timing with volume confirmation.
-# Trend filter from higher timeframe reduces false signals in choppy markets. Momentum captures short-term moves. Volume confirms conviction.
-# Designed to work in both bull and bear by only taking trades aligned with daily trend.
-# Target trade frequency: 15-30/year per symbol.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,93 +13,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Higher Timeframe Data (loaded ONCE before loop) ---
-    # 1d for trend filter
+    # Load daily data for pivot points and ATR (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h for momentum
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Previous day's data for pivot calculation
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
+    
+    # Calculate pivot points
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    r3 = prev_high + 2 * (pivot - prev_low)
+    s3 = prev_low - 2 * (prev_high - pivot)
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Load weekly data for trend filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # --- 1d Trend Filter: EMA50 ---
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly EMA50 for trend filter
+    weekly_close = df_1w['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
-    # --- 4h Momentum: MACD Histogram (12,26,9) ---
-    close_4h = df_4h['close'].values
-    ema12 = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close_4h).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
-    macd_hist_aligned = align_htf_to_ltf(prices, df_4h, macd_hist)
-    
-    # --- 1h Filters: Volume Average (20-period) ---
+    # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # --- Session Filter: 08-20 UTC ---
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Warmup for indicators
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(macd_hist_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter
-        if not in_session[i]:
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(weekly_ema50_aligned[i]) or np.isnan(vol_avg_20[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Daily uptrend (price > EMA50) + MACD hist crosses above zero + volume spike
-            if (close[i] > ema50_1d_aligned[i] and 
-                macd_hist_aligned[i] > 0 and 
-                macd_hist_aligned[i-1] <= 0 and  # crossed above zero this bar
-                volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = 0.20
+            # Long: Price breaks above R3 + weekly uptrend + volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > weekly_ema50_aligned[i] and
+                volume[i] > 2.0 * vol_avg_20[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: Daily downtrend (price < EMA50) + MACD hist crosses below zero + volume spike
-            elif (close[i] < ema50_1d_aligned[i] and 
-                  macd_hist_aligned[i] < 0 and 
-                  macd_hist_aligned[i-1] >= 0 and  # crossed below zero this bar
-                  volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = -0.20
+            # Short: Price breaks below S3 + weekly downtrend + volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < weekly_ema50_aligned[i] and
+                  volume[i] > 2.0 * vol_avg_20[i]):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit: Price crosses back to opposite S1/R1 level
             if position == 1:
-                # Exit long: Daily trend turns down OR MACD hist crosses below zero
-                if (close[i] <= ema50_1d_aligned[i] or 
-                    macd_hist_aligned[i] < 0):
+                # Exit long: Price closes below S1
+                if close[i] < s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Daily trend turns up OR MACD hist crosses above zero
-                if (close[i] >= ema50_1d_aligned[i] or 
-                    macd_hist_aligned[i] > 0):
+                # Exit short: Price closes above R1
+                if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_Combined_Momentum_Regime_V2"
-timeframe = "1h"
+name = "6H_Pivot_R3_S3_Breakout_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
