@@ -35,8 +35,6 @@ def generate_signals(prices):
     weekly_range = weekly_high - weekly_low
     weekly_r1 = 2 * weekly_pivot - weekly_low
     weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + weekly_range
-    weekly_s2 = weekly_pivot - weekly_range
     
     # Calculate ATR(14) from daily data for volatility filter
     tr1 = high_daily - low_daily
@@ -46,15 +44,13 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First TR is just high-low
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly pivot levels and ATR to 4h timeframe
+    # Align weekly pivot levels and ATR to 12h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_daily, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, df_daily, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_daily, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_daily, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_daily, weekly_s2)
     atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
     
-    # Calculate 4h volume average (20-period)
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -66,8 +62,7 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or
-            np.isnan(weekly_s2_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -87,14 +82,14 @@ def generate_signals(prices):
         if position == 0:
             # Long: Price closes above weekly R1 with volume confirmation and sufficient volatility
             if (close[i] > weekly_r1_aligned[i] and 
-                volume[i] > 1.8 * vol_avg_20[i] and
-                atr_14_aligned[i] > 0.5 * np.mean(atr_14_aligned[max(0, i-50):i+1])):  # Volatility filter
+                volume[i] > 2.0 * vol_avg_20[i] and
+                atr_14_aligned[i] > 0.7 * np.mean(atr_14_aligned[max(0, i-50):i+1])):  # Volatility filter
                 signals[i] = 0.25
                 position = 1
             # Short: Price closes below weekly S1 with volume confirmation and sufficient volatility
             elif (close[i] < weekly_s1_aligned[i] and 
-                  volume[i] > 1.8 * vol_avg_20[i] and
-                  atr_14_aligned[i] > 0.5 * np.mean(atr_14_aligned[max(0, i-50):i+1])):
+                  volume[i] > 2.0 * vol_avg_20[i] and
+                  atr_14_aligned[i] > 0.7 * np.mean(atr_14_aligned[max(0, i-50):i+1])):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -114,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_WeeklyPivot_R1S1_Volume_ATR_Filter"
-timeframe = "4h"
+name = "12H_WeeklyPivot_R1S1_Volume_ATR_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
