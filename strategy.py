@@ -3,90 +3,84 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily CRSI (2,1,2) with weekly Bollinger Band squeeze filter and volume confirmation.
-# CRSI < 10 for long, > 90 for short with price > 50-day SMA for longs and < 50-day SMA for shorts.
-# Weekly Bollinger Band width < 50th percentile indicates low volatility squeeze, favoring mean reversion.
-# Volume > 1.5x 20-day average confirms institutional interest.
-# Designed for 1d timeframe to capture multi-day mean reversion moves in both bull and bear markets.
-# Targets 10-20 trades/year with strict entry conditions to minimize fee drag.
+# Hypothesis: 12h Donchian channel breakout with 1d ADX trend filter and volume confirmation.
+# Donchian(20) breakouts capture momentum in both bull and bear markets.
+# 1d ADX > 25 ensures we only trade in trending markets, reducing whipsaws.
+# Volume confirmation requires current volume > 1.3x 20-period average to validate breakouts.
+# Designed for 12h timeframe to target 12-37 trades/year with strict entry conditions.
+# Uses discrete position sizing (0.25) to minimize fee churn.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for Bollinger Band squeeze filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Load 1d data for ADX trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period Bollinger Bands on weekly data
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20
+    # Calculate 1d ADX (14-period)
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(low_1d)
+    tr = np.zeros_like(high_1d)
     
-    # Calculate 50-period percentile of BB width for squeeze filter
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).rank(pct=True).values
+    for i in range(1, len(high_1d)):
+        plus_dm[i] = max(0, high_1d[i] - high_1d[i-1])
+        minus_dm[i] = max(0, low_1d[i-1] - low_1d[i])
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - close_1d[i-1]),
+                   abs(low_1d[i] - close_1d[i-1]))
     
-    # Calculate daily RSI(2) for CRSI
-    close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # RSI(2)
-    avg_gain_2 = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss_2 = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs_2 = np.where(avg_loss_2 != 0, avg_gain_2 / avg_loss_2, 0)
-    rsi_2 = 100 - (100 / (1 + rs_2))
+    period = 14
+    if len(tr) >= period:
+        atr = wilder_smooth(tr, period)
+        plus_dm_smooth = wilder_smooth(plus_dm, period)
+        minus_dm_smooth = wilder_smooth(minus_dm, period)
+        
+        plus_di = 100 * plus_dm_smooth / atr
+        minus_di = 100 * minus_dm_smooth / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = wilder_smooth(dx, period)
+    else:
+        adx = np.full_like(high_1d, np.nan)
     
-    # RSI(1) on RSI(2) values
-    delta_rsi2 = np.diff(rsi_2, prepend=rsi_2[0])
-    gain_rsi2 = np.where(delta_rsi2 > 0, delta_rsi2, 0)
-    loss_rsi2 = np.where(delta_rsi2 < 0, -delta_rsi2, 0)
-    avg_gain_1 = pd.Series(gain_rsi2).ewm(alpha=1/1, adjust=False, min_periods=1).mean().values
-    avg_loss_1 = pd.Series(loss_rsi2).ewm(alpha=1/1, adjust=False, min_periods=1).mean().values
-    rs_1 = np.where(avg_loss_1 != 0, avg_gain_1 / avg_loss_1, 0)
-    rsi_1 = 100 - (100 / (1 + rs_1))
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # RSI(2) on RSI(1) values to complete CRSI
-    delta_rsi1 = np.diff(rsi_1, prepend=rsi_1[0])
-    gain_rsi1 = np.where(delta_rsi1 > 0, delta_rsi1, 0)
-    loss_rsi1 = np.where(delta_rsi1 < 0, -delta_rsi1, 0)
-    avg_gain_2b = pd.Series(gain_rsi1).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss_2b = pd.Series(loss_rsi1).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs_2b = np.where(avg_loss_2b != 0, avg_gain_2b / avg_loss_2b, 0)
-    rsi_2b = 100 - (100 / (1 + rs_2b))
+    # Load 12h data for Donchian channel (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Percentile rank of RSI(2) over 100 days for CRSI
-    rsi_2_series = pd.Series(rsi_2b)
-    percentrank = rsi_2_series.rolling(window=100, min_periods=100).apply(
-        lambda x: (x < x[-1]).sum() / len(x) * 100 if len(x) > 0 else 50, raw=True
-    ).values
+    # Calculate 20-period Donchian channels on 12h data
+    highest_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # CRSI = (RSI(2) + RSI(1) + Percentile Rank) / 3
-    crsi = (rsi_2 + rsi_1 + percentrank) / 3
+    highest_high_aligned = align_htf_to_ltf(prices, df_12h, highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_12h, lowest_low)
     
-    # Calculate 50-day SMA for trend filter
-    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
-    
-    # Calculate 20-day average volume for volume confirmation
+    # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(sma_50[i]) or 
-            np.isnan(crsi[i]) or 
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(bb_width_percentile[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(highest_high_aligned[i]) or 
+            np.isnan(lowest_low_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,38 +89,40 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        crsi_val = crsi[i]
-        sma_val = sma_50[i]
-        bb_percentile = bb_width_percentile[i]
+        adx_val = adx_aligned[i]
+        upper_channel = highest_high_aligned[i]
+        lower_channel = lowest_low_aligned[i]
         
-        # Bollinger Band squeeze: width < 50th percentile indicates low volatility
-        bb_squeeze = bb_percentile < 0.5
+        # Volume filter: current volume > 1.3 * 20-period average
+        vol_spike = vol > 1.3 * vol_ma
         
-        # Volume filter: current volume > 1.5 * 20-day average
-        vol_spike = vol > 1.5 * vol_ma
+        # ADX filter: trending market (ADX > 25)
+        trending = adx_val > 25
         
         if position == 0:
-            # Long conditions: oversold CRSI + above SMA + BB squeeze + volume spike
-            if crsi_val < 10 and price > sma_val and bb_squeeze and vol_spike:
+            # Long conditions: breakout above upper channel + trending + volume spike
+            if price > upper_channel and trending and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: overbought CRSI + below SMA + BB squeeze + volume spike
-            elif crsi_val > 90 and price < sma_val and bb_squeeze and vol_spike:
+            # Short conditions: breakout below lower channel + trending + volume spike
+            elif price < lower_channel and trending and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: CRSI returns to neutral zone (40-60)
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when CRSI returns to neutral or becomes overbought
-                if crsi_val > 60:
+                # Exit when price returns to middle of channel or trend weakens
+                mid_channel = (upper_channel + lower_channel) / 2
+                if price < mid_channel or adx_val < 20:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when CRSI returns to neutral or becomes oversold
-                if crsi_val < 40:
+                # Exit when price returns to middle of channel or trend weakens
+                mid_channel = (upper_channel + lower_channel) / 2
+                if price > mid_channel or adx_val < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -138,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_CRSI_BB_Squeeze_Volume"
-timeframe = "1d"
+name = "12h_Donchian20_1dADX_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
