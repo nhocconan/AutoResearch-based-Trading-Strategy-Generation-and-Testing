@@ -3,11 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly pivot-based mean reversion on 1d timeframe with volume confirmation
-# Targets price reversals at weekly support/resistance levels during London/NY session
-# Works in bull/bear via mean reversion at extremes; volume filters false breaks
-# Target: 15-25 trades/year to minimize fee drag
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -18,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for weekly pivot calculation - ONCE before loop
+    # Load daily data for weekly pivot - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
@@ -42,6 +37,8 @@ def generate_signals(prices):
     weekly_s1 = 2 * weekly_pivot - weekly_high
     weekly_r2 = weekly_pivot + weekly_range
     weekly_s2 = weekly_pivot - weekly_range
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
     # Calculate ATR(14) from daily data for volatility filter
     tr1 = high_daily - low_daily
@@ -51,15 +48,17 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First TR is just high-low
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly pivot levels and ATR to 1d timeframe
+    # Align weekly pivot levels and ATR to 6h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_daily, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, df_daily, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_daily, weekly_s1)
     weekly_r2_aligned = align_htf_to_ltf(prices, df_daily, weekly_r2)
     weekly_s2_aligned = align_htf_to_ltf(prices, df_daily, weekly_s2)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_daily, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_daily, weekly_s3)
     atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
     
-    # Calculate 1d volume average (20-period)
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -72,7 +71,8 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
             np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or
-            np.isnan(weekly_s2_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(weekly_s2_aligned[i]) or np.isnan(weekly_r3_aligned[i]) or
+            np.isnan(weekly_s3_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_WeeklyPivot_R1S1_Volume_ATR_Filter_v1"
-timeframe = "1d"
+name = "6H_WeeklyPivot_R1S1_Volume_ATR_Filter_v3"
+timeframe = "6h"
 leverage = 1.0
