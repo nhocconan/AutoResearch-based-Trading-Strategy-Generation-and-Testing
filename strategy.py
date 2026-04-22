@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Williams %R extreme reversals with 12-hour trend filter and volume confirmation.
-Long when Williams %R crosses above -80 from oversold with 12-hour EMA50 rising and volume spike.
-Short when Williams %R crosses below -20 from overbought with 12-hour EMA50 falling and volume spike.
-Exit when Williams %R returns to -50 (mean reversion center).
-Williams %R identifies overextended moves; 12-hour EMA50 filters for higher-timeframe trend;
-volume spike confirms momentum exhaustion. Designed for low frequency by requiring overextension
-plus trend alignment plus volume. Works in both bull (buy oversold dips) and bear (sell overbought rallies).
+Hypothesis: 4-hour Williams %R reversal with 1-day ADX trend filter and volume confirmation.
+Long when %R crosses above -80 from oversold with 1-day ADX > 25 and volume spike.
+Short when %R crosses below -20 from overbought with 1-day ADX > 25 and volume spike.
+Exit when %R crosses -50 (centerline) in opposite direction.
+Williams %R captures momentum reversals; ADX filters for trending markets; volume confirms strength.
+Designed for low trade frequency by requiring multiple confirmations. Works in both bull and bear
+markets by trading reversals within the prevailing trend.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,68 +23,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12-hour data for Williams %R and EMA50 - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 1-day data for ADX trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate ADX (14) on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    period = 14
-    highest_high = pd.Series(high_12h).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=period, min_periods=period).min().values
-    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # 12-hour EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period]) 
+        # Subsequent values: smoothed = previous * (period-1)/period + current/period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] * (period-1)/period + data[i]/period
+        return result
     
-    # Volume confirmation: current volume > 1.8x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align ADX to 4h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Williams %R (14) on 4h data
+    def williams_r(high, low, close, period):
+        highest_high = np.maximum.accumulate(high)
+        lowest_low = np.minimum.accumulate(low)
+        # For proper lookback, we need to use rolling window
+        hh = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        ll = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        wr = -100 * (hh - close) / (hh - ll)
+        return wr
+    
+    wr = williams_r(high, low, close, 14)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after enough data
+    for i in range(30, n):  # Start after enough data for indicators
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(wr[i]) or np.isnan(wr[i-1]) or
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 1.8 * vol_ma_30[i]
+        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -80 from oversold with 12h EMA50 rising and volume spike
-            if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and
-                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and vol_spike):
+            # Long: %R crosses above -80 from oversold with ADX > 25 and volume spike
+            if (wr[i] > -80 and wr[i-1] <= -80 and 
+                adx_1d_aligned[i] > 25 and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 from overbought with 12h EMA50 falling and volume spike
-            elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and
-                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and vol_spike):
+            # Short: %R crosses below -20 from overbought with ADX > 25 and volume spike
+            elif (wr[i] < -20 and wr[i-1] >= -20 and 
+                  adx_1d_aligned[i] > 25 and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Williams %R returns to -50 (mean reversion center)
+            # Exit: %R crosses -50 (centerline) in opposite direction
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R crosses below -50
-                if williams_r_aligned[i] < -50 and williams_r_aligned[i-1] >= -50:
+                # Exit long: %R crosses below -50
+                if wr[i] < -50 and wr[i-1] >= -50:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R crosses above -50
-                if williams_r_aligned[i] > -50 and williams_r_aligned[i-1] <= -50:
+                # Exit short: %R crosses above -50
+                if wr[i] > -50 and wr[i-1] <= -50:
                     exit_signal = True
             
             if exit_signal:
@@ -95,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsR_Extreme_12hEMA50_Trend_Volume"
-timeframe = "6h"
+name = "4H_WilliamsR_Reversal_1dADX_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
