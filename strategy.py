@@ -1,94 +1,80 @@
-# USDC-midterm-mean-reversion
-# Mean reversion on USDC-like assets (BTC/ETH) with low volatility + oversold conditions
-# Uses 1d price action and 1-week volatility regime for filtering
-# Designed to work in both bull and bear markets by focusing on mean reversion during low volatility periods
-# Target: 10-25 trades/year, low turnover, high win rate
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 6h timeframe with 12h pivot-based breakout and volume confirmation.
+# Uses 12h Camarilla pivot levels (R4/S4 for breakout, R3/S3 for fade) with volume spike.
+# Designed to work in both bull and bear markets by capturing institutional breakouts
+# while avoiding false moves in low-volume conditions. Targets 12-37 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for volatility regime filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data for Camarilla pivot calculation (once before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly ATR for volatility regime
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla pivot levels for 12h timeframe
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # True Range calculation
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Pivot point (PP) = (H + L + C) / 3
+    pp_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
     
-    # Weekly ATR moving average for regime classification
-    atr_ma_1w = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    atr_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
+    # Camarilla levels
+    r4_12h = pp_12h + (range_12h * 1.1 / 2)
+    r3_12h = pp_12h + (range_12h * 1.1 / 4)
+    s3_12h = pp_12h - (range_12h * 1.1 / 4)
+    s4_12h = pp_12h - (range_12h * 1.1 / 2)
     
-    # Low volatility regime: weekly ATR < 80% of its 20-period average
-    low_vol_regime = atr_1w_aligned < 0.8 * atr_ma_1w_aligned
+    # Align pivot levels to 6h timeframe (wait for 12h bar close)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    # Daily price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
-    
-    # 20-day RSI for mean reversion signal
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # 20-day moving average for mean reversion target
-    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # Volume filter: avoid extremely low volume days
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 0.3 * vol_ma_20  # Minimum volume threshold
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ma_20[i]) or 
-            np.isnan(low_vol_regime[i]) or 
-            np.isnan(vol_filter[i])):
+        if (np.isnan(r4_12h_aligned[i]) or 
+            np.isnan(r3_12h_aligned[i]) or 
+            np.isnan(s3_12h_aligned[i]) or 
+            np.isnan(s4_12h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi[i]
-        price = close[i]
-        ma_val = ma_20[i]
-        low_vol = low_vol_regime[i]
-        vol_ok = vol_filter[i]
+        price = prices['close'].iloc[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        
+        # Volume filter: current volume > 2.0 * 20-period average (strict filter)
+        vol_spike = vol > 2.0 * vol_ma
+        
+        r4 = r4_12h_aligned[i]
+        r3 = r3_12h_aligned[i]
+        s3 = s3_12h_aligned[i]
+        s4 = s4_12h_aligned[i]
         
         if position == 0:
-            # Long: RSI oversold (< 30) + price below MA + low volatility regime + adequate volume
-            if rsi_val < 30 and price < ma_val and low_vol and vol_ok:
+            # Long breakout: price breaks above R4 with volume spike
+            if price > r4 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (> 70) + price above MA + low volatility regime + adequate volume
-            elif rsi_val > 70 and price > ma_val and low_vol and vol_ok:
+            # Short breakdown: price breaks below S4 with volume spike
+            elif price < s4 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -97,18 +83,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when RSI returns to neutral (50) or price reaches MA
-                if rsi_val >= 50 or price >= ma_val:
+                # Exit on retracement to R3 (take profit) or breakdown below S4 (stop)
+                if price < r3 or price < s4:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when RSI returns to neutral (50) or price reaches MA
-                if rsi_val <= 50 or price <= ma_val:
+                # Exit on retracement to S3 (take profit) or breakout above R4 (stop)
+                if price > s3 or price > r4:
                     exit_signal = True
-            
-            # Also exit if volatility regime changes (no longer low vol)
-            if not low_vol:
-                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -119,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "USDC_midterm_mean_reversion"
-timeframe = "1d"
+name = "6h_Camarilla_R4_S4_Breakout_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
