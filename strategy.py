@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Camarilla Pivot Reversal with 1-day Trend Filter and Volume Confirmation.
-Long when price touches S1 support in bullish regime (1d EMA34 rising) with volume spike.
-Short when price touches R1 resistance in bearish regime (1d EMA34 falling) with volume spike.
-Exit when price moves to opposite H1/L1 level or trend reverses.
-Camarilla levels provide precise intraday support/resistance; 1d trend ensures alignment with higher timeframe momentum;
-volume spike confirms institutional interest. Designed for low trade frequency by requiring confluence of multiple factors.
-Works in both bull and bear markets by following the 1d trend direction.
+Hypothesis: 4-hour Camarilla Pivot Point Reversal with 12-hour Trend Filter and Volume Spike.
+Long when price touches S1 support and reverses up in an uptrend (12h EMA50 rising) with volume spike.
+Short when price touches R1 resistance and reverses down in a downtrend (12h EMA50 falling) with volume spike.
+Camarilla levels provide precise intraday support/resistance; 12h EMA filters for higher-timeframe trend;
+volume spike confirms institutional interest. Designed for low trade frequency by requiring confluence of 3 conditions.
+Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
 """
 
 import numpy as np
@@ -18,42 +17,62 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter and Camarilla calculation - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate Camarilla pivot levels for the current day
+    # Using previous day's OHLC
+    pivots_high = np.full(n, np.nan)
+    pivots_low = np.full(n, np.nan)
+    camarilla_R1 = np.full(n, np.nan)
+    camarilla_S1 = np.full(n, np.nan)
+    
+    # Group by date to get previous day's OHLC
+    dates = pd.to_datetime(prices['open_time']).date
+    unique_dates = np.unique(dates)
+    
+    for i, date in enumerate(unique_dates):
+        # Find indices for this date
+        date_mask = (dates == date)
+        if not np.any(date_mask):
+            continue
+        
+        idx = np.where(date_mask)[0]
+        start_idx = idx[0]
+        end_idx = idx[-1]
+        
+        # Get previous day's data (if exists)
+        if i > 0:
+            prev_date = unique_dates[i-1]
+            prev_mask = (dates == prev_date)
+            if np.any(prev_mask):
+                prev_idx = np.where(prev_mask)[0]
+                prev_high = np.max(high[prev_idx])
+                prev_low = np.min(low[prev_idx])
+                prev_close = close[prev_idx[-1]]  # last close of previous day
+                
+                # Calculate Camarilla levels
+                range_val = prev_high - prev_low
+                camarilla_R1_val = prev_close + (range_val * 1.1 / 12)
+                camarilla_S1_val = prev_close - (range_val * 1.1 / 12)
+                
+                # Apply to current day
+                pivots_high[start_idx:end_idx+1] = prev_high
+                pivots_low[start_idx:end_idx+1] = prev_low
+                camarilla_R1[start_idx:end_idx+1] = camarilla_R1_val
+                camarilla_S1[start_idx:end_idx+1] = camarilla_S1_val
+    
+    # Load 12h data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 34-period EMA on 1d close for trend
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Calculate Camarilla levels from previous 1d bar
-    # Typical Price = (H + L + C) / 3
-    # Range = H - L
-    tp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    rng = df_1d['high'] - df_1d['low']
-    
-    # Camarilla levels
-    H4 = tp + rng * 1.5
-    H3 = tp + rng * 1.25
-    H2 = tp + rng * 1.1666
-    H1 = tp + rng * 1.0833
-    L1 = tp - rng * 1.0833
-    L2 = tp - rng * 1.1666
-    L3 = tp - rng * 1.25
-    L4 = tp - rng * 1.5
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1.values)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1.values)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3.values)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3.values)
+    # 50-period EMA on 12h close for trend
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,9 +82,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(H1_aligned[i]) or np.isnan(L1_aligned[i]) or
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(camarilla_R1[i]) or np.isnan(camarilla_S1[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,27 +93,29 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Price touches S1 (L1) in bullish trend with volume spike
-            if (low[i] <= L1_aligned[i] and 
-                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike):
+            # Long: price touches S1 and reverses up, in uptrend with volume spike
+            if (low[i] <= camarilla_S1[i] and close[i] > camarilla_S1[i] and  # touched S1 and closed above
+                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and  # 12h uptrend
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price touches R1 (H1) in bearish trend with volume spike
-            elif (high[i] >= H1_aligned[i] and 
-                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike):
+            # Short: price touches R1 and reverses down, in downtrend with volume spike
+            elif (high[i] >= camarilla_R1[i] and close[i] < camarilla_R1[i] and  # touched R1 and closed below
+                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and  # 12h downtrend
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price moves to opposite H3/L3 level or trend reverses
+            # Exit: price reaches opposite Camarilla level or trend changes
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price reaches H3 or trend turns bearish
-                if high[i] >= H3_aligned[i] or ema34_1d_aligned[i] < ema34_1d_aligned[i-1]:
+                # Exit long: price reaches R1 or 12h trend turns down
+                if high[i] >= camarilla_R1[i] or ema50_12h_aligned[i] < ema50_12h_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price reaches L3 or trend turns bullish
-                if low[i] <= L3_aligned[i] or ema34_1d_aligned[i] > ema34_1d_aligned[i-1]:
+                # Exit short: price reaches S1 or 12h trend turns up
+                if low[i] <= camarilla_S1[i] or ema50_12h_aligned[i] > ema50_12h_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -106,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_Pivot_Reversal_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_Pivot_Reversal_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
