@@ -13,80 +13,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend bias (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Weekly EMA(50) for trend bias
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Daily ATR for volatility filter (to avoid chop)
+    # Load 1d data for pivot points (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    
+    if len(df_1d) < 2:
         return np.zeros(n)
+    
+    # Previous day's pivot points (standard)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first value
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])  # first value
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])   # first value
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    prev_high = high_1d
+    prev_low = low_1d
+    prev_close = close_1d
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
     
-    # 60-period high/low for breakout levels (60 * 6h = 15 days)
-    high_60 = pd.Series(high).rolling(window=60, min_periods=60).max().values
-    low_60 = pd.Series(low).rolling(window=60, min_periods=60).min().values
+    # Align pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume confirmation: 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after 60-period lookback
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(high_60[i]) or np.isnan(low_60[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volatility filter: avoid extremely low volatility (chop)
-        if atr_14_aligned[i] < 0.5 * np.mean(atr_14_aligned[max(0, i-50):i+1]):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above 60-period high + weekly uptrend
-            if close[i] > high_60[i] and close[i] > ema_50_1w_aligned[i]:
+            # Long: Price breaks above R1 + volume spike
+            if close[i] > r1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below 60-period low + weekly downtrend
-            elif close[i] < low_60[i] and close[i] < ema_50_1w_aligned[i]:
+            # Short: Price breaks below S1 + volume spike
+            elif close[i] < s1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Reverse signal or volatility drop
+            # Exit: Price crosses back below/above pivot (full exit)
             if position == 1:
-                # Exit long: Break below 60-period low or weekly trend turns down
-                if close[i] < low_60[i] or close[i] < ema_50_1w_aligned[i]:
+                # Exit long: Price closes below pivot
+                if close[i] < pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Break above 60-period high or weekly trend turns up
-                if close[i] > high_60[i] or close[i] > ema_50_1w_aligned[i]:
+                # Exit short: Price closes above pivot
+                if close[i] > pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -94,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WeeklyTrend_60Breakout_VolatilityFilter"
-timeframe = "6h"
+name = "4H_Pivot_R1_S1_Breakout_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
