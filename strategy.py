@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day Donchian Channel Breakout with 1-week ADX trend filter and volume confirmation.
-Long when price breaks above 20-period high with ADX > 25 and volume > 20-period average volume.
-Short when price breaks below 20-period low with ADX > 25 and volume > 20-period average volume.
-Exit when price crosses the 10-period midpoint or ADX drops below 20.
-Donchian channels capture breakouts; ADX filters for trending markets; volume confirms institutional interest.
-Designed for low trade frequency to minimize fee drag in trending markets while avoiding whipsaws in ranges.
+Hypothesis: 12-hour Time-Weighted Average Price (TWAP) with 1-day price trend filter.
+Long when price > TWAP and 1-day close > 1-day open (bullish daily candle).
+Short when price < TWAP and 1-day close < 1-day open (bearish daily candle).
+Exit when price crosses TWAP or daily trend reverses.
+TWAP provides a fair value reference; daily trend filter ensures alignment with higher timeframe momentum.
+Works in both bull and bear markets by following institutional price action while using TWAP for entry timing.
 """
 
 import numpy as np
@@ -14,104 +14,60 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1-day data for Donchian and volume filter - ONCE before loop
+    # Load 1-day data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Load 1-week data for ADX trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Calculate daily trend: 1 if bullish (close > open), -1 if bearish (close < open)
+    daily_trend = np.where(df_1d['close'] > df_1d['open'], 1, -1)
+    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
     
-    # 1-day Donchian Channel (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # TWAP calculation for 12h period (simple average of typical price)
+    typical_price = (high + low + close) / 3.0
     
-    # Calculate rolling high and low for Donchian channels
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Cumulative TWAP (resets daily)
+    twap = np.full(n, np.nan)
+    cum_tp = 0.0
+    count = 0
     
-    # 1-day volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # 1-week ADX calculation (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # DI values
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align 1-day indicators to lower timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    
-    # Align 1-week ADX to lower timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    for i in range(n):
+        # Reset at start of each day (00:00 UTC)
+        if i > 0 and prices['open_time'].iloc[i].date() != prices['open_time'].iloc[i-1].date():
+            cum_tp = 0.0
+            count = 0
+        
+        cum_tp += typical_price[i]
+        count += 1
+        
+        if count > 0:
+            twap[i] = cum_tp / count
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(avg_vol_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if np.isnan(twap[i]) or np.isnan(daily_trend_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high with strong trend and volume
-            if (close[i] > donchian_high_aligned[i] and 
-                adx_aligned[i] > 25 and 
-                volume[i] > avg_vol_1d_aligned[i]):
+            # Long: Price above TWAP and daily trend bullish
+            if close[i] > twap[i] and daily_trend_aligned[i] == 1:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low with strong trend and volume
-            elif (close[i] < donchian_low_aligned[i] and 
-                  adx_aligned[i] > 25 and 
-                  volume[i] > avg_vol_1d_aligned[i]):
+            # Short: Price below TWAP and daily trend bearish
+            elif close[i] < twap[i] and daily_trend_aligned[i] == -1:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -119,12 +75,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls below Donchian midpoint OR weak trend
-                if close[i] < donchian_mid_aligned[i] or adx_aligned[i] < 20:
+                # Exit long: Price falls below TWAP or daily trend turns bearish
+                if close[i] < twap[i] or daily_trend_aligned[i] == -1:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises above Donchian midpoint OR weak trend
-                if close[i] > donchian_mid_aligned[i] or adx_aligned[i] < 20:
+                # Exit short: Price rises above TWAP or daily trend turns bullish
+                if close[i] > twap[i] or daily_trend_aligned[i] == 1:
                     exit_signal = True
             
             if exit_signal:
@@ -135,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian_1wADX_Volume_Breakout"
-timeframe = "1d"
+name = "12H_TWAP_1dTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
