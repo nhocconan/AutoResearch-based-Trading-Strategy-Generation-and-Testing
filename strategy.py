@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian channel breakout with volume confirmation and 1-day trend filter.
-Enter long when price breaks above Donchian(20) high + volume spike + 1-day EMA50 rising.
-Enter short when price breaks below Donchian(20) low + volume spike + 1-day EMA50 falling.
-Exit when price returns to Donchian midpoint or trend reverses.
-Designed for low trade frequency by requiring three confirmations (price, volume, trend).
-Works in both bull and bear markets by following daily trend while using 4h breakouts for entries.
+Hypothesis: 12-hour ADX-based trend following with 1-week volatility filter.
+Long when ADX > 25 (trending) and +DI > -DI (bullish momentum) and weekly ATR < median (low volatility).
+Short when ADX > 25 and -DI > +DI (bearish momentum) and weekly ATR < median.
+Exit when ADX < 20 (trend weakens) or DI crossover reverses.
+Uses weekly ATR regime filter to avoid whipsaws in high volatility periods.
+Designed for low trade frequency by requiring strong trend + low volatility conditions.
+Works in both bull and bear markets by following the trend direction with volatility filter.
 """
 
 import numpy as np
@@ -14,55 +15,103 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1-day data for EMA50 trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data for ATR volatility filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly ATR(14) for volatility regime
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w = np.concatenate([[np.nan], tr_1w])
+    atr_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Weekly ATR median for regime threshold
+    atr_median_1w = np.nanmedian(atr_1w[~np.isnan(atr_1w)])
+    atr_1w_low_vol = atr_1w < atr_median_1w  # Low volatility regime
+    
+    # Align weekly low vol regime to 12h
+    atr_1w_low_vol_aligned = align_htf_to_ltf(prices, df_1w, atr_1w_low_vol.astype(float))
+    
+    # Daily data for ADX calculation (using 1d as proxy for higher timeframe trend strength)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_20 + low_20) / 2.0
+    # ADX(14) calculation on daily data
+    # True Range
+    tr1_d = np.abs(high_1d[1:] - low_1d[1:])
+    tr2_d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    tr_d = np.concatenate([[np.nan], tr_d])
     
-    # Volume spike: current volume > 1.5 * 20-period average volume
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    atr_1d = pd.Series(tr_d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI values
+    di_plus = 100 * dm_plus_smooth / np.where(atr_1d == 0, 1, atr_1d)
+    di_minus = 100 * dm_minus_smooth / np.where(atr_1d == 0, 1, atr_1d)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align daily indicators to 12h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    di_plus_aligned = align_htf_to_ltf(prices, df_1d, di_plus)
+    di_minus_aligned = align_htf_to_ltf(prices, df_1d, di_minus)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):  # Start after enough data for ADX
         # Skip if data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(di_plus_aligned[i]) or np.isnan(di_minus_aligned[i]) or
+            np.isnan(atr_1w_low_vol_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high + volume spike + 1-day EMA50 rising
-            if (close[i] > high_20[i] and 
-                volume_spike[i] and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):
+            # Long: ADX > 25 (strong trend), +DI > -DI (bullish), low volatility regime
+            if (adx_aligned[i] > 25 and 
+                di_plus_aligned[i] > di_minus_aligned[i] and 
+                atr_1w_low_vol_aligned[i] > 0.5):  # True (1.0) indicates low vol
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + volume spike + 1-day EMA50 falling
-            elif (close[i] < low_20[i] and 
-                  volume_spike[i] and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):
+            # Short: ADX > 25 (strong trend), -DI > +DI (bearish), low volatility regime
+            elif (adx_aligned[i] > 25 and 
+                  di_minus_aligned[i] > di_plus_aligned[i] and 
+                  atr_1w_low_vol_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -70,14 +119,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price returns to Donchian midpoint OR trend reverses
-                if (close[i] < donchian_mid[i] or 
-                    ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):
+                # Exit long: ADX < 20 (weak trend) OR -DI crosses above +DI
+                if (adx_aligned[i] < 20 or 
+                    di_minus_aligned[i] > di_plus_aligned[i]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price returns to Donchian midpoint OR trend reverses
-                if (close[i] > donchian_mid[i] or 
-                    ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):
+                # Exit short: ADX < 20 (weak trend) OR +DI crosses above -DI
+                if (adx_aligned[i] < 20 or 
+                    di_plus_aligned[i] > di_minus_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -88,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_VolumeSpike_1dEMA50_Trend"
-timeframe = "4h"
+name = "12H_ADX_Trend_1wVolatilityFilter"
+timeframe = "12h"
 leverage = 1.0
