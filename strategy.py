@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: Weekly pivot-based mean reversion on 1d timeframe with volume confirmation
+# Targets price reversals at weekly support/resistance levels during London/NY session
+# Works in bull/bear via mean reversion at extremes; volume filters false breaks
+# Target: 15-25 trades/year to minimize fee drag
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -13,32 +18,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data - ONCE before loop
+    # Load daily data for weekly pivot calculation - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate daily Donchian channel (20) - breakout levels
+    # Calculate weekly pivot points from daily data (using 5-day lookback)
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    donchian_high = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
+    # Weekly high/low/close approximation using 5-day lookback
+    weekly_high = pd.Series(high_daily).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(low_daily).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(close_daily).rolling(window=5, min_periods=5).last().values
     
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate weekly pivot point: (H + L + C) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    
+    # Calculate weekly support and resistance levels
+    weekly_range = weekly_high - weekly_low
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + weekly_range
+    weekly_s2 = weekly_pivot - weekly_range
+    
+    # Calculate ATR(14) from daily data for volatility filter
     tr1 = high_daily - low_daily
     tr2 = np.abs(high_daily - np.roll(close_daily, 1))
     tr3 = np.abs(low_daily - np.roll(close_daily, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First TR is just high-low
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily Donchian and ATR to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_daily, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_daily, donchian_low)
+    # Align weekly pivot levels and ATR to 1d timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_daily, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_daily, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_daily, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_daily, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_daily, weekly_s2)
     atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
     
-    # Calculate 4h volume average (20-period)
+    # Calculate 1d volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -49,8 +70,10 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or
+            np.isnan(weekly_s2_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,29 +90,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above daily Donchian high with volume and volatility
-            if (close[i] > donchian_high_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i] and
-                atr_14_aligned[i] > 0.3 * np.mean(atr_14_aligned[max(0, i-50):i+1])):
+            # Long: Price closes above weekly R1 with volume confirmation and sufficient volatility
+            if (close[i] > weekly_r1_aligned[i] and 
+                volume[i] > 1.8 * vol_avg_20[i] and
+                atr_14_aligned[i] > 0.5 * np.mean(atr_14_aligned[max(0, i-50):i+1])):  # Volatility filter
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below daily Donchian low with volume and volatility
-            elif (close[i] < donchian_low_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i] and
-                  atr_14_aligned[i] > 0.3 * np.mean(atr_14_aligned[max(0, i-50):i+1])):
+            # Short: Price closes below weekly S1 with volume confirmation and sufficient volatility
+            elif (close[i] < weekly_s1_aligned[i] and 
+                  volume[i] > 1.8 * vol_avg_20[i] and
+                  atr_14_aligned[i] > 0.5 * np.mean(atr_14_aligned[max(0, i-50):i+1])):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to the midpoint of the Donchian channel
-            donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
+            # Exit: Price returns to weekly pivot level
             if position == 1:
-                if close[i] < donchian_mid:
+                if close[i] < weekly_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donchian_mid:
+                if close[i] > weekly_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -97,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_DailyDonchian20_Breakout_Volume_Volatility"
-timeframe = "4h"
+name = "1D_WeeklyPivot_R1S1_Volume_ATR_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
