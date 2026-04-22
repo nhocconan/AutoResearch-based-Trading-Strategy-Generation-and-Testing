@@ -8,9 +8,9 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian breakout with 1d EMA34 trend and volume confirmation
+    # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend and volume confirmation
     # Works in both bull and bear markets: breakouts from price channels capture directional moves
-    # Donchian channels identify breakout zones, volume confirms strength, EMA34 filters trend
+    # EMA34 filters trend direction, volume surge confirms breakout strength
     
     # Load daily data once
     df_1d = get_htf_data(prices, '1d')
@@ -22,12 +22,11 @@ def generate_signals(prices):
     ema_1d_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
-    # 12h Donchian channels (20-period)
+    # 4h Donchian channel (20)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate Donchian upper and lower bands
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -57,16 +56,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to Donchian middle or opposite band touch
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+            # Exit: Price returns to Donchian midpoint
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2
             if position == 1:
-                if close[i] < donchian_mid:
+                if close[i] < midpoint:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donchian_mid:
+                if close[i] > midpoint:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -74,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dEMA34_Trend_VolumeSurge_v1"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dEMA34_Trend_VolumeSurge_v1"
+timeframe = "4h"
 leverage = 1.0
