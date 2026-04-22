@@ -1,130 +1,102 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Relative Strength Index (RSI) with 1-day volume-weighted average price (VWAP) trend filter and 1-day volatility regime filter.
-RSI provides mean-reversion signals at extremes while VWAP trend filter ensures trades align with the daily institutional flow.
-Volatility regime filter (using ATR ratio) avoids choppy markets where mean reversion fails.
-This combination should work in both bull and bear markets by adapting to daily trend and volatility conditions.
-Target: 20-35 trades/year per symbol.
+Hypothesis: Daily Bollinger Band breakout with weekly trend filter and volume confirmation.
+Buy when price breaks above upper BB with bullish weekly trend and volume spike.
+Sell when price breaks below lower BB with bearish weekly trend and volume spike.
+Uses Bollinger Bands (20,2) for volatility-based breakouts and weekly trend to avoid counter-trend trades.
+Target: 10-20 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_bollinger_bands(close, window=20, num_std=2):
+    """Calculate Bollinger Bands"""
+    ma = pd.Series(close).rolling(window=window, min_periods=window).mean()
+    std = pd.Series(close).rolling(window=window, min_periods=window).std()
+    upper = ma + (num_std * std)
+    lower = ma - (num_std * std)
+    return upper.values, ma.values, lower.values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Load daily data - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily VWAP for trend filter
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    vwap_1d = (np.cumsum(typical_price_1d * df_1d['volume'].values) / 
-               np.cumsum(df_1d['volume'].values))
+    # Calculate weekly EMA for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate daily ATR for volatility regime filter
-    high_low_1d = df_1d['high'].values - df_1d['low'].values
-    high_close_1d = np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
-    low_close_1d = np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
-    true_range_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    atr_1d = pd.Series(true_range_1d).rolling(window=14, min_periods=14).mean().values
+    # Weekly trend: bullish when EMA20 > EMA50
+    bullish_trend_1w = ema_20_1w > ema_50_1w
+    bearish_trend_1w = ema_20_1w < ema_50_1w
     
-    # Calculate 4-period RSI for 4h timeframe
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=4, min_periods=4).mean().values
-    avg_loss = pd.Series(loss).rolling(window=4, min_periods=4).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly trend to daily timeframe
+    bullish_aligned = align_htf_to_ltf(prices, df_1w, bullish_trend_1w.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1w, bearish_trend_1w.astype(float))
     
-    # Align daily indicators to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate daily Bollinger Bands
+    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close, 20, 2)
     
-    # Calculate 4h ATR for volatility regime (current volatility)
-    high_low = high - low
-    high_close = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    low_close = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_4h = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
-    
-    # Volatility regime: current 4h ATR vs daily ATR (normalized)
-    vol_regime = atr_4h / atr_aligned  # < 1 = low vol, > 1 = high vol
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Calculate volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(vwap_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_regime[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volatility regime filter: trade only in low to normal volatility (avoid extreme volatility)
-        # vol_regime between 0.5 and 2.0 (ATR ratio)
-        if vol_regime[i] < 0.5 or vol_regime[i] > 2.0:
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(bb_middle[i]) or np.isnan(vol_avg_20[i]) or
+            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold (< 30) AND price below VWAP (mean reversion to VWAP)
-            if (rsi[i] < 30 and close[i] < vwap_aligned[i]):
+            # Long: price breaks above upper BB, bullish weekly trend, volume spike
+            if (close[i] > bb_upper[i] and 
+                bullish_aligned[i] > 0.5 and 
+                volume[i] > 2.0 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (> 70) AND price above VWAP (mean reversion to VWAP)
-            elif (rsi[i] > 70 and close[i] > vwap_aligned[i]):
+            # Short: price breaks below lower BB, bearish weekly trend, volume spike
+            elif (close[i] < bb_lower[i] and 
+                  bearish_aligned[i] > 0.5 and 
+                  volume[i] > 2.0 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: RSI returns to neutral zone (40-60) OR price crosses VWAP
-            exit_signal = False
-            
+            # Exit: price returns to middle Bollinger Band
             if position == 1:
-                # Exit long: RSI >= 40 OR price crosses above VWAP
-                if (rsi[i] >= 40 or close[i] >= vwap_aligned[i]):
-                    exit_signal = True
+                if close[i] < bb_middle[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:  # position == -1
-                # Exit short: RSI <= 60 OR price crosses below VWAP
-                if (rsi[i] <= 60 or close[i] <= vwap_aligned[i]):
-                    exit_signal = True
-            
-            if exit_signal:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                if close[i] > bb_middle[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "4h_RSI_VWAP_MeanReversion_VolRegime"
-timeframe = "4h"
+name = "1d_Bollinger_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
