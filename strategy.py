@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day CCI with weekly trend filter and volume confirmation.
-Long when CCI crosses above -100 (mean reversion) + weekly close > weekly EMA50 + volume > 1.5x average.
-Short when CCI crosses below +100 (mean reversion) + weekly close < weekly EMA50 + volume > 1.5x average.
-Exit when CCI crosses zero (mean reversion complete) or weekly trend changes.
-Designed for low trade frequency (~10-20/year) to minimize fee drift in both bull and bear markets.
+Hypothesis: 6h Ichimoku Cloud with 12h ADX trend filter and volume confirmation.
+Long when Tenkan > Kijun + price above cloud (bullish) + 12h ADX > 25 (trending) + volume > 1.5x average.
+Short when Tenkan < Kijun + price below cloud (bearish) + 12h ADX > 25 + volume > 1.5x average.
+Exit when Tenkan/Kijun cross reverses or ADX < 20 (range) or price re-enters cloud.
+Ichimoku provides multi-factor confirmation, ADX filters for trending markets only, volume confirms strength.
+Designed for 6h timeframe to balance signal quality and trade frequency (~15-30/year).
 """
 
 import numpy as np
@@ -21,66 +22,99 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-week data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate weekly EMA50 for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun = (period26_high + period26_low) / 2
     
-    # Calculate CCI (20-period)
-    typical_price = (high + low + close) / 3
-    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
-    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci = (typical_price - sma_tp.values) / (0.015 * mad.values)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max()
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min()
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for signals)
     
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
+    # Load 12h data for ADX trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    # Calculate ADX (14-period) on 12h data
+    # True Range
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
+    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
+    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    
+    # Directional Movement
+    dm_plus = df_12h['high'] - df_12h['high'].shift(1)
+    dm_minus = df_12h['low'].shift(1) - df_12h['low']
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+    
+    # Smoothed values
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    dm_plus_smooth = dm_plus.rolling(window=14, min_periods=14).mean()
+    dm_minus_smooth = dm_minus.rolling(window=14, min_periods=14).mean()
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = dx.rolling(window=14, min_periods=14).mean()
+    
+    # Align 12h ADX to 6s timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx.values)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(52, n):  # Start after Senkou B calculation period
         # Skip if data not ready
-        if (np.isnan(cci[i]) or np.isnan(weekly_ema50_aligned[i]) or 
-            np.isnan(avg_volume[i]) or volume[i] == 0):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(avg_volume[i]) or volume[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        weekly_close_val = None
-        weekly_ema50_val = None
-        if i < len(weekly_ema50_aligned):
-            weekly_close_val = df_1w['close'].values[-1] if len(df_1w) > 0 else np.nan
-            weekly_ema50_val = weekly_ema50_aligned[i]
-        else:
-            weekly_close_val = np.nan
-            weekly_ema50_val = np.nan
-            
-        if np.isnan(weekly_close_val) or np.isnan(weekly_ema50_val):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        weekly_trend_up = weekly_close_val > weekly_ema50_val
-        weekly_trend_down = weekly_close_val < weekly_ema50_val
+        # Ichimoku signals
+        tenkan_above_kijun = tenkan[i] > kijun[i]
+        tenkan_below_kijun = tenkan[i] < kijun[i]
+        price_above_cloud = close[i] > max(senkou_a[i], senkou_b[i])
+        price_below_cloud = close[i] < min(senkou_a[i], senkou_b[i])
         
+        # ADX trend filter
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20  # Exit threshold
+        
+        # Volume confirmation
         volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 0:
-            # Long: CCI crosses above -100 + weekly uptrend + volume confirmation
-            if (cci[i] > -100 and cci[i-1] <= -100 and 
-                weekly_trend_up and volume_confirm):
+            # Long: Bullish Ichimoku + strong trend + volume
+            if (tenkan_above_kijun and price_above_cloud and 
+                strong_trend and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: CCI crosses below +100 + weekly downtrend + volume confirmation
-            elif (cci[i] < 100 and cci[i-1] >= 100 and 
-                  weekly_trend_down and volume_confirm):
+            # Short: Bearish Ichimoku + strong trend + volume
+            elif (tenkan_below_kijun and price_below_cloud and 
+                  strong_trend and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -88,12 +122,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: CCI crosses above +100 or weekly trend changes to down
-                if cci[i] >= 100 or not weekly_trend_up:
+                # Exit long: Bearish cross OR weak trend OR price re-enters cloud
+                if (tenkan_below_kijun or not price_above_cloud or weak_trend):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: CCI crosses below -100 or weekly trend changes to up
-                if cci[i] <= -100 or not weekly_trend_down:
+                # Exit short: Bullish cross OR weak trend OR price re-enters cloud
+                if (tenkan_above_kijun or not price_below_cloud or weak_trend):
                     exit_signal = True
             
             if exit_signal:
@@ -104,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_CCI_WeeklyTrend_VolumeFilter"
-timeframe = "1d"
+name = "6H_Ichimoku_12hADX_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
