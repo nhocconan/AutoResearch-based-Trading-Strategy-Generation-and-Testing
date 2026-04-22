@@ -14,7 +14,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (based on current day's HLC)
+    # Calculate Camarilla levels (based on previous day's HLC)
     range_1d = high_1d - low_1d
     r1_1d = close_1d + range_1d * 1.1 / 12
     s1_1d = close_1d - range_1d * 1.1 / 12
@@ -23,7 +23,7 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
@@ -92,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
