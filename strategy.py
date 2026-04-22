@@ -3,69 +3,56 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index regime filter + 1d ATR-based breakout with volume confirmation
-# Long when price breaks above ATR(14) upper band AND Choppiness < 38.2 (trending) AND volume spike
-# Short when price breaks below ATR(14) lower band AND Choppiness < 38.2 (trending) AND volume spike
-# Exit when price returns to ATR midline OR Choppiness > 61.8 (ranging) OR volatility drops
-# Designed for low trade frequency with regime awareness - avoids whipsaws in ranging markets
-# Uses ATR-based channels for volatility-adjusted breakouts and Choppiness Index for regime detection
+# Hypothesis: 1h RSI mean reversion with 4h EMA50 trend filter and volume confirmation
+# Long when RSI < 30 (oversold) + price > 4h EMA50 (uptrend) + volume spike
+# Short when RSI > 70 (overbought) + price < 4h EMA50 (downtrend) + volume spike
+# Exit when RSI returns to neutral zone (40-60) or trend reverses
+# Uses RSI for mean reversion in ranging markets, EMA50 for trend filter to avoid counter-trend trades
+# Volume spike filters for institutional participation
+# Designed for 15-30 trades/year with edge in both bull (buy dips) and bear (sell rallies)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for ATR calculation and Choppiness Index
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate ATR(14) for volatility-based channels
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate ATR midline (average of high and low)
-    atr_mid = (high_1d + low_1d) / 2
-    atr_upper = atr_mid + atr * 1.5  # Upper band
-    atr_lower = atr_mid - atr * 1.5  # Lower band
+    # Calculate RSI(14) on 1h closes
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align ATR bands to 12h timeframe
-    atr_upper_aligned = align_htf_to_ltf(prices, df_1d, atr_upper)
-    atr_lower_aligned = align_htf_to_ltf(prices, df_1d, atr_lower)
-    atr_mid_aligned = align_htf_to_ltf(prices, df_1d, atr_mid)
-    
-    # Calculate Choppiness Index for regime detection
-    # CHOP = 100 * log10(sum(TR over n) / (HH(n) - LL(n))) / log10(n)
-    period = 14
-    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    hh = pd.Series(high_1d).rolling(window=period, min_periods=period).max().values
-    ll = pd.Series(low_1d).rolling(window=period, min_periods=period).min().values
-    chop_raw = 100 * np.log10(sum_tr / (hh - ll + 1e-10)) / np.log10(period)
-    chop_raw[hh == ll] = 50  # Avoid division by zero
-    chop = np.where((hh - ll) > 0, chop_raw, 50)
-    
-    # Align Choppiness Index to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Wilder's smoothing (equivalent to alpha = 1/14)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Pre-compute session filter (8:00-20:00 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if data not ready
-        if (np.isnan(atr_upper_aligned[i]) or 
-            np.isnan(atr_lower_aligned[i]) or 
-            np.isnan(atr_mid_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+    for i in range(14, n):
+        # Skip if data not ready or outside session
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(vol_ma_20[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,40 +61,34 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr_upper_val = atr_upper_aligned[i]
-        atr_lower_val = atr_lower_aligned[i]
-        atr_mid_val = atr_mid_aligned[i]
-        chop_val = chop_aligned[i]
+        ema_val = ema_50_aligned[i]
+        rsi_val = rsi[i]
         
-        # Volume filter: current volume > 2.0 * 20-day average
-        vol_spike = vol > 2.0 * vol_ma
-        
-        # Regime filters: trending market (CHOP < 38.2) vs ranging (CHOP > 61.8)
-        trending = chop_val < 38.2
-        ranging = chop_val > 61.8
+        # Volume filter: current volume > 1.5 * 20-day average
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long conditions: price breaks above ATR upper band AND trending AND volume spike
-            if price > atr_upper_val and trending and vol_spike:
-                signals[i] = 0.25
+            # Long conditions: RSI oversold + uptrend + volume spike
+            if rsi_val < 30 and price > ema_val and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: price breaks below ATR lower band AND trending AND volume spike
-            elif price < atr_lower_val and trending and vol_spike:
-                signals[i] = -0.25
+            # Short conditions: RSI overbought + downtrend + volume spike
+            elif rsi_val > 70 and price < ema_val and vol_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price returns to ATR midline OR market becomes ranging OR volatility drops
+            # Exit conditions: RSI returns to neutral or trend reverses
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price returns to ATR midline or market ranges
-                if price <= atr_mid_val or ranging:
+                # Exit when RSI >= 40 (exiting oversold) or trend turns down
+                if rsi_val >= 40 or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price returns to ATR midline or market ranges
-                if price >= atr_mid_val or ranging:
+                # Exit when RSI <= 60 (exiting overbought) or trend turns up
+                if rsi_val <= 60 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -115,10 +96,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12h_ATR_Choppiness_Breakout_Volume"
-timeframe = "12h"
+name = "1h_RSI_MeanReversion_4hEMA50_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
