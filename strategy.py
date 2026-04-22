@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Load daily data for pivot levels (HTF)
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
-timeframe = "12h"
+name = "4h_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
+timeframe = "4h"
 leverage = 1.0
