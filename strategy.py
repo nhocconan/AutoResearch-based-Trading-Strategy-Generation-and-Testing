@@ -1,32 +1,47 @@
-# [76720] 4H_Range_Breakout_1dTrend_Volume
-# Hypothesis: 4-hour Candlestick Range Breakout with 1-day Trend Filter and Volume Confirmation.
-# Long when price breaks above the prior 4-hour bar's high during 1-day uptrend with volume spike.
-# Short when price breaks below the prior 4-hour bar's low during 1-day downtrend with volume spike.
-# Exit when price returns to the prior 4-hour bar's midpoint or trend reverses.
-# Designed for moderate trade frequency by requiring trend alignment and volume confirmation.
-# Works in both bull and bear markets by following the 1-day trend.
+#!/usr/bin/env python3
+"""
+Hypothesis: 12-hour Williams Alligator with 1-day Trend Filter and Volume Confirmation.
+Long when price is above Alligator's Jaw during 1-day uptrend with volume spike.
+Short when price is below Alligator's Jaw during 1-day downtrend with volume spike.
+Exit when price crosses the Alligator's Teeth or trend reverses.
+Williams Alligator uses smoothed moving averages (SMMA) of median price.
+Designed for low trade frequency by requiring trend alignment and volume confirmation.
+Works in both bull and bear markets by following the 1-day trend.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(arr, period):
+    """Smoothed Moving Average (SMMA) - same as Wilder's smoothing"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan, dtype=float)
+    result = np.full_like(arr, np.nan, dtype=float)
+    # First value is simple average
+    result[period-1] = np.mean(arr[:period])
+    # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+    for i in range(period, len(arr)):
+        result[i] = (result[i-1] * (period-1) + arr[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Prior 4-hour bar's high and low for breakout detection
-    prior_high = np.roll(high, 1)
-    prior_low = np.roll(low, 1)
-    prior_mid = (prior_high + prior_low) / 2
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    prior_mid[0] = np.nan
+    # Median price for Alligator
+    median_price = (high + low) / 2
+    
+    # Williams Alligator: SMMA(13,8), SMMA(8,5), SMMA(5,3) of median price
+    jaw = smma(median_price, 13)  # Blue line (slowest)
+    teeth = smma(median_price, 8)  # Red line (middle)
+    lips = smma(median_price, 5)   # Green line (fastest)
     
     # Load 1-day data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -44,9 +59,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(50, n):  # Increased warmup for Alligator
         # Skip if data not ready
-        if (np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -57,25 +72,29 @@ def generate_signals(prices):
         vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above prior 4h high + 1d uptrend + volume spike
-            if close[i] > prior_high[i] and ema20_1d_aligned[i] > ema20_1d_aligned[i-1] and vol_spike:
+            # Long: price above Jaw (Alligator bullish alignment) + 1d uptrend + volume spike
+            # Bullish alignment: Lips > Teeth > Jaw
+            if (close[i] > jaw[i] and lips[i] > teeth[i] and teeth[i] > jaw[i] and 
+                ema20_1d_aligned[i] > ema20_1d_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below prior 4h low + 1d downtrend + volume spike
-            elif close[i] < prior_low[i] and ema20_1d_aligned[i] < ema20_1d_aligned[i-1] and vol_spike:
+            # Short: price below Jaw (Alligator bearish alignment) + 1d downtrend + volume spike
+            # Bearish alignment: Lips < Teeth < Jaw
+            elif (close[i] < jaw[i] and lips[i] < teeth[i] and teeth[i] < jaw[i] and 
+                  ema20_1d_aligned[i] < ema20_1d_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to prior 4h midpoint or trend reverses
+            # Exit: price crosses Teeth or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price below midpoint or 1d trend turns down
-                if close[i] < prior_mid[i] or ema20_1d_aligned[i] < ema20_1d_aligned[i-1]:
+                # Exit long: price below Teeth or 1d trend turns down
+                if close[i] < teeth[i] or ema20_1d_aligned[i] < ema20_1d_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price above midpoint or 1d trend turns up
-                if close[i] > prior_mid[i] or ema20_1d_aligned[i] > ema20_1d_aligned[i-1]:
+                # Exit short: price above Teeth or 1d trend turns up
+                if close[i] > teeth[i] or ema20_1d_aligned[i] > ema20_1d_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -86,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Range_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12H_Williams_Alligator_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
