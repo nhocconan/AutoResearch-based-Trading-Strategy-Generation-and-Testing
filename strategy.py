@@ -27,19 +27,20 @@ def generate_signals(prices):
     s1_1d = 2 * pp_1d - prev_high_1d
     r2_1d = pp_1d + (prev_high_1d - prev_low_1d)
     s2_1d = pp_1d - (prev_high_1d - prev_low_1d)
+    r3_1d = pp_1d + 2 * (prev_high_1d - prev_low_1d)
+    s3_1d = pp_1d - 2 * (prev_high_1d - prev_low_1d)
+    r4_1d = pp_1d + 3 * (prev_high_1d - prev_low_1d)
+    s4_1d = pp_1d - 3 * (prev_high_1d - prev_low_1d)
     
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe (primary timeframe)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Align to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike filter (20-period average on 4h data)
+    # Volume spike filter (20-period average on 6h data)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -53,11 +54,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any data is not ready
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
+        if (np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
             np.isnan(ema34_aligned[i]) or 
             np.isnan(vol_ma_20[i]) or
             np.isnan(vol_filter_aligned[i])):
@@ -70,11 +68,8 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         vol_filter_val = vol_filter_aligned[i]
-        pp = pp_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
+        r4 = r4_aligned[i]
+        s4 = s4_aligned[i]
         ema34 = ema34_aligned[i]
         
         # Volatility filter: only trade in normal volatility (avoid chop)
@@ -84,24 +79,24 @@ def generate_signals(prices):
         vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above R2 + volume spike + above EMA34 + normal vol
-            if price > r2 and vol_spike and price > ema34 and vol_condition:
+            # Long: price breaks above R4 + volume spike + above EMA34 + normal vol
+            if price > r4 and vol_spike and price > ema34 and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 + volume spike + below EMA34 + normal vol
-            elif price < s2 and vol_spike and price < ema34 and vol_condition:
+            # Short: price breaks below S4 + volume spike + below EMA34 + normal vol
+            elif price < s4 and vol_spike and price < ema34 and vol_condition:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back through central pivot or volatility increases
+            # Exit: price crosses back through S4/R4 or volatility increases
             exit_signal = False
             
             if position == 1:  # long
-                if price < pp or vol_filter_val > 0.05:  # High volatility exit
+                if price < r4 or vol_filter_val > 0.05:  # High volatility exit
                     exit_signal = True
             elif position == -1:  # short
-                if price > pp or vol_filter_val > 0.05:
+                if price > s4 or vol_filter_val > 0.05:
                     exit_signal = True
             
             if exit_signal:
@@ -112,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Filter"
-timeframe = "4h"
+name = "6h_Pivot_R4_S4_Breakout_1dEMA34_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
