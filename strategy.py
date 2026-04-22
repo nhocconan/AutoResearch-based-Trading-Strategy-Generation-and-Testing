@@ -8,9 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4-hour 123 Reversal pattern with 1d EMA34 trend filter and volume spike
-    # Works in bull/bear via trend filter: only take long in uptrend, short in downtrend.
-    # 123 pattern captures short-term reversals at swing points; EMA34 filters trend; volume confirms.
+    # Hypothesis: 4-hour volume-weighted average price (VWAP) reversion with 1-day trend filter
+    # Uses VWAP deviation as mean reversion signal, filtered by daily EMA trend direction
+    # Works in bull/bear via trend filter: only take long when above daily EMA (uptrend bias)
+    # and short when below daily EMA (downtrend bias). VWAP deviation captures intraday mean reversion.
     # Targets ~20-30 trades/year to minimize fee drag.
     
     close = prices['close'].values
@@ -18,55 +19,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA34 trend filter
+    # Calculate typical price and VWAP components
+    typical_price = (high + low + close) / 3.0
+    pv = typical_price * volume
+    
+    # Calculate VWAP (20-period on 4h)
+    vwap_numerator = pd.Series(pv).rolling(window=20, min_periods=20).sum().values
+    vwap_denominator = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price)
+    
+    # VWAP deviation as percentage
+    vwap_dev = (close - vwap) / vwap
+    
+    # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 123 pattern components on 4h data
-    # Need swing highs and lows - using 5-period lookback/forward for simplicity
-    # Swing high: high[i] is highest in window [i-2, i+2]
-    # Swing low: low[i] is lowest in window [i-2, i+2]
-    window = 5
-    half_window = window // 2
-    
-    # Initialize arrays for swing points
-    swing_high = np.full(n, np.nan)
-    swing_low = np.full(n, np.nan)
-    
-    # Calculate swing points (avoiding look-ahead by using only past data)
-    for i in range(half_window, n - half_window):
-        # Check if current high is the highest in the window
-        if high[i] == np.max(high[i-half_window:i+half_window+1]):
-            swing_high[i] = high[i]
-        # Check if current low is the lowest in the window
-        if low[i] == np.min(low[i-half_window:i+half_window+1]):
-            swing_low[i] = low[i]
-    
-    # For the 123 pattern, we need to identify:
-    # Point 1: swing high (for short) or swing low (for long)
-    # Point 2: pullback/pullup
-    # Point 3: failure to make new high/low
-    
-    # Track recent swing points for pattern detection
-    last_swing_high = np.full(n, np.nan)
-    last_swing_low = np.full(n, np.nan)
-    
-    # Forward fill swing points (using only past information)
-    last_high = np.nan
-    last_low = np.nan
-    for i in range(n):
-        if not np.isnan(swing_high[i]):
-            last_high = swing_high[i]
-        if not np.isnan(swing_low[i]):
-            last_low = swing_low[i]
-        last_swing_high[i] = last_high
-        last_swing_low[i] = last_low
-    
-    # Volume spike filter (20-period)
+    # Volume filter: above average volume
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.8 * vol_ma20  # Require 1.8x volume for confirmation
+    vol_filter = volume > vol_ma20
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -77,53 +50,32 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready or outside session
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or
-            not in_session[i]):
+        if (np.isnan(vwap_dev[i]) or np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long 123 pattern: 
-            # 1. Make swing low (point 1)
-            # 2. Pullback to point 2 (higher low)
-            # 3. Failed breakdown below point 1 (point 3) and close above point 2
-            if (not np.isnan(last_swing_low[i]) and 
-                low[i] <= last_swing_low[i] * 1.005 and  # Near swing low (within 0.5%)
-                i >= 3 and low[i-1] > low[i-3] and  # Pullback: higher low
-                close[i] > close[i-1] and  # Close up
-                vol_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):  # Uptrend filter
+            # Long: Price below VWAP (oversold) in uptrend (price > daily EMA50) with volume
+            if vwap_dev[i] < -0.008 and close[i] > ema50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short 123 pattern:
-            # 1. Make swing high (point 1)
-            # 2. Pullback to point 2 (lower high)
-            # 3. Failed breakout above point 1 (point 3) and close below point 2
-            elif (not np.isnan(last_swing_high[i]) and 
-                  high[i] >= last_swing_high[i] * 0.995 and  # Near swing high (within 0.5%)
-                  i >= 3 and high[i-1] < high[i-3] and  # Pullback: lower high
-                  close[i] < close[i-1] and  # Close down
-                  vol_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):  # Downtrend filter
+            # Short: Price above VWAP (overbought) in downtrend (price < daily EMA50) with volume
+            elif vwap_dev[i] > 0.008 and close[i] < ema50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: 
-            # For long: price breaks below the swing low that started the pattern
-            # For short: price breaks above the swing high that started the pattern
-            # Or trend reversal vs 1d EMA34
+            # Exit: Price returns to VWAP or trend reversal
             if position == 1:
-                if (not np.isnan(last_swing_low[i]) and close[i] < last_swing_low[i] * 0.995) or \
-                   close[i] < ema34_1d_aligned[i]:
+                if vwap_dev[i] > -0.002 or close[i] < ema50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if (not np.isnan(last_swing_high[i]) and close[i] > last_swing_high[i] * 1.005) or \
-                   close[i] > ema34_1d_aligned[i]:
+                if vwap_dev[i] < 0.002 or close[i] > ema50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -131,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_123_Pattern_1dEMA34_Volume_Spike_Session_v1"
+name = "4h_VWAP_Reversion_DailyEMA50_Trend_Volume_Session_v1"
 timeframe = "4h"
 leverage = 1.0
