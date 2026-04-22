@@ -3,93 +3,90 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Donchian breakout (20-period) with 1h EMA50 trend filter and 1d volume spike confirmation
-# Long: Price breaks above 20-day high (excluding current) + 1h close > 1h EMA50 + volume > 1.5x 20-day avg volume
-# Short: Price breaks below 20-day low (excluding current) + 1h close < 1h EMA50 + volume > 1.5x 20-day avg volume
-# Exit: Price crosses below/above 20-day SMA (for long/short respectively)
-# Designed for 1d timeframe targeting 10-25 trades/year. Works in bull/bear markets via trend filter and volume confirmation.
+# Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and 1d volume confirmation.
+# Breakouts in the direction of the daily trend capture momentum while avoiding counter-trend whipsaws.
+# Volume confirmation ensures breakouts have conviction, reducing false signals.
+# Designed for 6h timeframe targeting 15-30 trades/year per symbol.
+# Works in bull markets by capturing upward breakouts and in bear markets by avoiding false breakdowns
+# via trend filter and requiring volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need sufficient data for indicators
+    if n < 60:
         return np.zeros(n)
     
-    # Extract price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for trend filter (EMA50 and close)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 50:
+    # Load 1d data for trend filter and volume confirmation (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    close_1h = df_1h['close'].values
-    # Calculate 1h EMA50
-    ema50_1h = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align 1h indicators to 1d timeframe
-    close_1h_aligned = align_htf_to_ltf(prices, df_1h, close_1h)
-    ema50_1h_aligned = align_htf_to_ltf(prices, df_1h, ema50_1h)
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d Donchian bands (20-period, excluding current bar)
-    upper_band = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lower_band = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d 20-day SMA for exit
-    sma_20d = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # 1d volume 20-period average for spike detection
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # 1d 20-day average volume (excluding current bar) for volume spike
-    vol_avg_20d = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    # Donchian Channel (20-period) on 6h data
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Initialize signals and position tracker
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(n):
-        # Skip if any data is not ready
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(sma_20d[i]) or np.isnan(vol_avg_20d[i]) or
-            np.isnan(close_1h_aligned[i]) or np.isnan(ema50_1h_aligned[i])):
+    for i in range(40, n):
+        # Skip if data not ready
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long breakout conditions
-            if (close[i] > upper_band[i] and 
-                close_1h_aligned[i] > ema50_1h_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20d[i]):
+            # Long: Donchian breakout above upper band + 1d uptrend + volume spike
+            if (close[i] > highest_high_20[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakout conditions
-            elif (close[i] < lower_band[i] and 
-                  close_1h_aligned[i] < ema50_1h_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20d[i]):
+            # Short: Donchian breakdown below lower band + 1d downtrend + volume spike
+            elif (close[i] < lowest_low_20[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # Long exit: price below 20-day SMA
-            if close[i] < sma_20d[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        else:  # position == -1
-            # Short exit: price above 20-day SMA
-            if close[i] > sma_20d[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        else:
+            # Exit: price returns to midpoint of Donchian channel or trend reversal
+            midpoint = (highest_high_20[i] + lowest_low_20[i]) / 2.0
+            if position == 1:
+                # Exit long on return to midpoint or trend reversal
+                if (close[i] <= midpoint or 
+                    close[i] < ema_34_1d_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # position == -1
+                # Exit short on return to midpoint or trend reversal
+                if (close[i] >= midpoint or 
+                    close[i] > ema_34_1d_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_Donchian20_1hEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_Donchian20_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
