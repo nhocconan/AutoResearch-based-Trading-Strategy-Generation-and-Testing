@@ -13,50 +13,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for weekly pivot - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    # Load weekly data for trend - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from daily data (using 5-day lookback)
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Calculate weekly EMA(21) for trend
+    weekly_close = df_weekly['close'].values
+    ema_21_weekly = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Weekly high/low/close approximation using 5-day lookback
-    weekly_high = pd.Series(high_daily).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_daily).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(close_daily).rolling(window=5, min_periods=5).last().values
+    # Load daily data for daily pivot levels - ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
+        return np.zeros(n)
     
-    # Calculate weekly pivot point: (H + L + C) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Calculate daily pivot points
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Calculate weekly support and resistance levels
-    weekly_range = weekly_high - weekly_low
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + weekly_range
-    weekly_s2 = weekly_pivot - weekly_range
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_range = daily_high - daily_low
+    daily_r1 = 2 * daily_pivot - daily_low
+    daily_s1 = 2 * daily_pivot - daily_high
+    daily_r2 = daily_pivot + daily_range
+    daily_s2 = daily_pivot - daily_range
     
-    # Calculate ATR(14) from daily data for volatility filter
-    tr1 = high_daily - low_daily
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    # Align weekly trend and daily pivot levels to 6h timeframe
+    ema_21_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_21_weekly)
+    daily_pivot_aligned = align_htf_to_ltf(prices, df_daily, daily_pivot)
+    daily_r1_aligned = align_htf_to_ltf(prices, df_daily, daily_r1)
+    daily_s1_aligned = align_htf_to_ltf(prices, df_daily, daily_s1)
+    daily_r2_aligned = align_htf_to_ltf(prices, df_daily, daily_r2)
+    daily_s2_aligned = align_htf_to_ltf(prices, df_daily, daily_s2)
+    
+    # Calculate 6h ADX(14) for trend strength
+    plus_dm = np.zeros_like(high)
+    minus_dm = np.zeros_like(high)
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
+        minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]
     
-    # Align weekly pivot levels and ATR to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_daily, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_daily, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_daily, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_daily, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_daily, weekly_s2)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_daily, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_daily, weekly_s3)
-    atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,11 +79,10 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or
-            np.isnan(weekly_s2_aligned[i]) or np.isnan(weekly_r3_aligned[i]) or
-            np.isnan(weekly_s3_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_21_weekly_aligned[i]) or np.isnan(daily_pivot_aligned[i]) or 
+            np.isnan(daily_r1_aligned[i]) or np.isnan(daily_s1_aligned[i]) or
+            np.isnan(daily_r2_aligned[i]) or np.isnan(daily_s2_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,35 +99,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price crosses above weekly R1 with volume confirmation
-            if (close[i] > weekly_r1_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i] and
-                atr_14_aligned[i] > 0):
-                signals[i] = 0.30
+            # Long: Weekly uptrend + price breaks above daily R2 with volume + strong trend
+            if (close[i] > ema_21_weekly_aligned[i] and  # Weekly uptrend
+                close[i] > daily_r2_aligned[i] and       # Break above daily R2
+                volume[i] > 2.0 * vol_avg_20[i] and    # Volume spike
+                adx[i] > 25):                          # Strong trend
+                signals[i] = 0.25
                 position = 1
-            # Short: Price crosses below weekly S1 with volume confirmation
-            elif (close[i] < weekly_s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i] and
-                  atr_14_aligned[i] > 0):
-                signals[i] = -0.30
+            # Short: Weekly downtrend + price breaks below daily S2 with volume + strong trend
+            elif (close[i] < ema_21_weekly_aligned[i] and  # Weekly downtrend
+                  close[i] < daily_s2_aligned[i] and       # Break below daily S2
+                  volume[i] > 2.0 * vol_avg_20[i] and    # Volume spike
+                  adx[i] > 25):                          # Strong trend
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to weekly pivot level
+            # Exit: Price returns to daily pivot level
             if position == 1:
-                if close[i] < weekly_pivot_aligned[i]:
+                if close[i] < daily_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > weekly_pivot_aligned[i]:
+                if close[i] > daily_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
-name = "6H_WeeklyPivot_R1S1_Volume_ATR_Filter"
+name = "6H_WeeklyTrend_DailyPivot_R2S2_Breakout"
 timeframe = "6h"
 leverage = 1.0
