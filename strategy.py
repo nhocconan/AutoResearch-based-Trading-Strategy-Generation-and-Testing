@@ -13,13 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (primary timeframe) and weekly data (HTF) - ONCE before loop
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 2 or len(df_1w) < 2:
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-day)
+    # Calculate 1-day Donchian channels (20-day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
@@ -32,7 +32,7 @@ def generate_signals(prices):
     # Calculate 1d volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to daily timeframe
+    # Align all indicators to 6h timeframe
     donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
     donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1w)
@@ -80,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_WeeklyEMA50_Trend_Volume"
-timeframe = "1d"
+name = "6H_Donchian20_WeeklyEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
