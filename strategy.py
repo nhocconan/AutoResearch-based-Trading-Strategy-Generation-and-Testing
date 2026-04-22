@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
-Long when price breaks above Donchian high and weekly EMA > previous weekly EMA.
-Short when price breaks below Donchian low and weekly EMA < previous weekly EMA.
-Exit when price returns to Donchian midline or trend reverses.
-Works in trending markets by capturing breakouts; avoids whipsaws with weekly trend filter.
-Volume confirmation ensures institutional participation in breakouts.
+Hypothesis: 6-hour Bollinger Band breakout with 1-day Bollinger Band width regime filter.
+Long when price breaks above upper BB(20,2) and 1-day BB width > 30th percentile (trending regime).
+Short when price breaks below lower BB(20,2) and 1-day BB width > 30th percentile (trending regime).
+Exit when price returns to middle band (mean reversion within trend).
+Uses Bollinger Bands for volatility-based breakouts and regime filter to avoid chop.
+Works in both bull and bear markets by only trading during trending regimes (high volatility).
 """
 
 import numpy as np
@@ -17,69 +17,66 @@ def generate_signals(prices):
     if n < 20:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load weekly data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Bollinger Bands for 6h period (20, 2)
+    close_s = pd.Series(close)
+    ma = close_s.rolling(window=20, min_periods=20).mean().values
+    std = close_s.rolling(window=20, min_periods=20).std().values
+    upper_bb = ma + 2 * std
+    lower_bb = ma - 2 * std
+    middle_bb = ma
+    
+    # Load 1-day data for BB width regime filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA(20) for trend direction
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_1w_prev = np.roll(ema_20_1w, 1)
-    ema_20_1w_prev[0] = ema_20_1w[0]
-    ema_rising = ema_20_1w > ema_20_1w_prev
-    ema_falling = ema_20_1w < ema_20_1w_prev
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_rising)
-    ema_falling_aligned = align_htf_to_ltf(prices, df_1w, ema_falling)
+    close_1d = df_1d['close'].values
+    close_1d_s = pd.Series(close_1d)
+    ma_1d = close_1d_s.rolling(window=20, min_periods=20).mean().values
+    std_1d = close_1d_s.rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = ma_1d + 2 * std_1d
+    lower_bb_1d = ma_1d - 2 * std_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / ma_1d  # Normalized width
     
-    # Daily Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
-    
-    # Daily volume filter - average volume over 20 periods
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 30th percentile of BB width over 50 periods for regime filter
+    bb_width_percentile = pd.Series(bb_width_1d).rolling(window=50, min_periods=50).quantile(0.30).values
+    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or np.isnan(middle_bb[i]) or \
+           np.isnan(bb_width_1d_aligned[i]) or np.isnan(bb_width_percentile_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high, weekly EMA rising, volume above average
-            if (close[i] > donch_high[i] and 
-                ema_rising_aligned[i] and 
-                volume[i] > avg_volume[i]):
+            # Long: Price breaks above upper BB and 1-day BB width > 30th percentile (trending)
+            if close[i] > upper_bb[i] and bb_width_1d_aligned[i] > bb_width_percentile_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low, weekly EMA falling, volume above average
-            elif (close[i] < donch_low[i] and 
-                  ema_falling_aligned[i] and 
-                  volume[i] > avg_volume[i]):
+            # Short: Price breaks below lower BB and 1-day BB width > 30th percentile (trending)
+            elif close[i] < lower_bb[i] and bb_width_1d_aligned[i] > bb_width_percentile_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: Return to middle band (mean reversion within trend)
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price returns to Donchian midline or trend turns down
-                if (close[i] <= donch_mid[i] or not ema_rising_aligned[i]):
+                # Exit long: Price returns to or below middle band
+                if close[i] <= middle_bb[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price returns to Donchian midline or trend turns up
-                if (close[i] >= donch_mid[i] or not ema_falling_aligned[i]):
+                # Exit short: Price returns to or above middle band
+                if close[i] >= middle_bb[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -90,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_1wEMA20_Trend_Volume"
-timeframe = "1d"
+name = "6H_BB_Breakout_1dBBWidth_Regime"
+timeframe = "6h"
 leverage = 1.0
