@@ -13,83 +13,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points (ONCE before loop)
+    # Load 1d and 1w data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # Previous day's pivot points (standard)
+    # Calculate 1d ATR for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    prev_high = high_1d
-    prev_low = low_1d
-    prev_close = close_1d
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Volume confirmation: 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 1d ATR percentile (20-day lookback) for regime filter
+    atr_percentile = pd.Series(atr_1d).rolling(window=20, min_periods=20).quantile(0.5).values
+    # Low volatility regime: current ATR < 50th percentile of recent ATR
+    low_vol_regime = atr_1d < atr_percentile
+    
+    # Align 1d volatility regime to 6h
+    low_vol_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime.astype(float))
+    
+    # Calculate 1-week trend using EMA crossover
+    ema_fast = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_slow = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    weekly_uptrend = ema_fast > ema_slow
+    
+    # Align weekly trend to 6h
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    
+    # Calculate 6-period RSI for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_avg_20[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(low_vol_aligned[i]) or np.isnan(weekly_uptrend_aligned[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R2 + volume spike + volatility filter
-            if (close[i] > r2_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i] and
-                atr[i] > 0.5 * atr[i-1] if i > 0 else True):
+            # Enter long in low volatility + weekly uptrend when RSI oversold
+            if (low_vol_aligned[i] > 0.5 and 
+                weekly_uptrend_aligned[i] > 0.5 and
+                rsi[i] < 30):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S2 + volume spike + volatility filter
-            elif (close[i] < s2_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i] and
-                  atr[i] > 0.5 * atr[i-1] if i > 0 else True):
+            # Enter short in low volatility + weekly downtrend when RSI overbought
+            elif (low_vol_aligned[i] > 0.5 and 
+                  weekly_uptrend_aligned[i] < 0.5 and
+                  rsi[i] > 70):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite pivot level (full exit)
+            # Exit when RSI returns to neutral zone
             if position == 1:
-                # Exit long: Price closes below S1
-                if close[i] < s1_aligned[i]:
+                if rsi[i] >= 50:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above R1
-                if close[i] > r1_aligned[i]:
+                if rsi[i] <= 50:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -97,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Pivot_R2_S2_Breakout_Volume_Volatility"
-timeframe = "4h"
+name = "6H_VolRegime_WeeklyTrend_RSI_MeanRev"
+timeframe = "6h"
 leverage = 1.0
