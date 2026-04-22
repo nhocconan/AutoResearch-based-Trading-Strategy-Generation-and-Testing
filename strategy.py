@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Donchian channel breakout with 1-day EMA trend filter and volume confirmation.
-Trades breakouts above the 20-period upper band or below the 20-period lower band only when
-aligned with the daily EMA trend direction. Uses volume spike to confirm institutional interest.
-Designed for low trade frequency (20-50 trades/year) to minimize fee flood and work in both
-bull and bear markets by combining trend-following breakouts with higher timeframe trend alignment.
+Hypothesis: 12-hour Donchian Channel Breakout with 1-day ATR volatility filter and volume confirmation.
+Trades breakouts of the 20-period Donchian channel (upper/lower bands) in the direction of the breakout,
+filtered by elevated ATR (volatility expansion) and volume spike to avoid false breakouts in low volatility.
+Designed for low trade frequency (15-30 trades/year) to minimize fee drag and work in both bull and bear
+markets by requiring volatility expansion and volume confirmation, reducing whipsaws during ranging periods.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,59 +22,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter - ONCE before loop
+    # Load daily data for ATR and trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Daily EMA for trend filter (34-period)
+    # Daily ATR (14-period) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Donchian channel (20-period) on 4h data
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12-hour Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: current volume > 1.5x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_max_20[i]) or 
-            np.isnan(low_min_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma_30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Volatility filter: ATR above 50-period average (expanding volatility)
+        atr_ma_50 = pd.Series(atr_14_1d_aligned).rolling(window=50, min_periods=50).mean().values
+        vol_expansion = atr_14_1d_aligned[i] > atr_ma_50[i]
         
-        if position == 0 and vol_spike:
-            # Long: price breaks above upper Donchian band with uptrend bias
-            if close[i] > high_max_20[i] and close[i] > ema_34_1d_aligned[i]:
+        # Volume confirmation
+        vol_spike = volume[i] > 1.5 * vol_ma_30[i]
+        
+        if position == 0 and vol_expansion and vol_spike:
+            # Long: breakout above Donchian high
+            if high[i] > donchian_high[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band with downtrend bias
-            elif close[i] < low_min_20[i] and close[i] < ema_34_1d_aligned[i]:
+            # Short: breakout below Donchian low
+            elif low[i] < donchian_low[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to opposite Donchian level or trend reverses
+            # Exit: opposite Donchian breakout or volatility contraction
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below lower Donchian band or closes below daily EMA
-                if close[i] < low_min_20[i] or close[i] < ema_34_1d_aligned[i]:
+                # Exit long: price breaks below Donchian low
+                if low[i] < donchian_low[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above upper Donchian band or closes above daily EMA
-                if close[i] > high_max_20[i] or close[i] > ema_34_1d_aligned[i]:
+                # Exit short: price breaks above Donchian high
+                if high[i] > donchian_high[i]:
                     exit_signal = True
+            
+            # Also exit if volatility contracts significantly
+            if atr_14_1d_aligned[i] < 0.7 * atr_ma_50[i]:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -84,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_20_1dEMA34_Volume_Breakout"
-timeframe = "4h"
+name = "12h_Donchian20_ATR14_Volume30_Breakout"
+timeframe = "12h"
 leverage = 1.0
