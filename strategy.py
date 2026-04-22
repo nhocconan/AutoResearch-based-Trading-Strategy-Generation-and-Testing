@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 12-hour chart with daily pivot points and volume confirmation.
-Trade long when price breaks above daily R1 pivot with volume confirmation and daily trend up.
-Trade short when price breaks below daily S1 pivot with volume confirmation and daily trend down.
-Uses pivot points as key support/resistance levels with volume confirmation to filter false breakouts.
-Designed for low trade frequency (12-37 trades/year) by requiring multiple confirmations: 
-pivot breakout, volume spike, and trend alignment. Works in both bull and bear markets by 
-following the daily trend direction.
+Hypothesis: 6h Ichimoku Cloud (Tenkan/Kijun + Senkou Span) with weekly trend filter.
+Go long when Tenkan crosses above Kijun, price is above cloud, and weekly trend is up.
+Go short when Tenkan crosses below Kijun, price is below cloud, and weekly trend is down.
+Ichimoku provides multi-factor confirmation (momentum, trend, support/resistance) in one system.
+Weekly trend filter ensures alignment with higher timeframe momentum, reducing whipsaws.
+Designed for low trade frequency (12-37/year) by requiring multiple confirmations.
+Works in both bull and bear markets by following the weekly trend direction.
 """
 
 import numpy as np
@@ -16,76 +16,99 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Load daily data for pivot points and trend - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    # Ichimoku components (9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 52 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Current cloud boundaries (shifted back to align with current price)
+    # Senkou Span values are plotted 26 periods ahead, so to get current cloud we look back 26
+    senkou_a_shifted = np.roll(senkou_a, 26)
+    senkou_b_shifted = np.roll(senkou_b, 26)
+    # First 26 values will be invalid due to roll, but we start loop after warmup anyway
+    
+    # Upper cloud (Kumo) is the higher of Senkou A and Senkou B
+    upper_cloud = np.maximum(senkou_a_shifted, senkou_b_shifted)
+    # Lower cloud is the lower of Senkou A and Senkou B
+    lower_cloud = np.minimum(senkou_a_shifted, senkou_b_shifted)
+    
+    # Load weekly data for trend filter - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Calculate daily pivot points (standard formula)
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
-    
-    pivot = (daily_high + daily_low + daily_close) / 3.0
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
-    
-    # Align pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_daily, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
-    
-    # Daily EMA34 for trend direction
-    ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Weekly EMA50 for trend direction
+    weekly_close = df_weekly['close'].values
+    ema50_weekly = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema34_daily_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i]) or 
+            np.isnan(ema50_weekly_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
+        # Ichimoku signals
+        tenkan_prev = tenkan[i-1]
+        kijun_prev = kijun[i-1]
+        tk_cross_up = tenkan[i] > kijun[i] and tenkan_prev <= kijun_prev
+        tk_cross_down = tenkan[i] < kijun[i] and tenkan_prev >= kijun_prev
+        
+        price_above_cloud = close[i] > upper_cloud[i]
+        price_below_cloud = close[i] < lower_cloud[i]
+        
+        # Weekly trend: slope of EMA50
+        weekly_up = ema50_weekly_aligned[i] > ema50_weekly_aligned[i-1]
+        weekly_down = ema50_weekly_aligned[i] < ema50_weekly_aligned[i-1]
         
         if position == 0:
-            # Long: price breaks above R1 + daily uptrend + volume spike
-            if close[i] > r1_aligned[i] and ema34_daily_aligned[i] > ema34_daily_aligned[i-1] and vol_spike:
+            # Long: TK cross up + price above cloud + weekly uptrend
+            if tk_cross_up and price_above_cloud and weekly_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + daily downtrend + volume spike
-            elif close[i] < s1_aligned[i] and ema34_daily_aligned[i] < ema34_daily_aligned[i-1] and vol_spike:
+            # Short: TK cross down + price below cloud + weekly downtrend
+            elif tk_cross_down and price_below_cloud and weekly_down:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to pivot level or opposite pivot level touched
+            # Exit: TK cross in opposite direction or price enters cloud
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to pivot or breaks below S1
-                if close[i] <= pivot_aligned[i] or close[i] < s1_aligned[i]:
+                # Exit long: TK cross down or price drops below cloud
+                if tk_cross_down or close[i] < upper_cloud[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to pivot or breaks above R1
-                if close[i] >= pivot_aligned[i] or close[i] > r1_aligned[i]:
+                # Exit short: TK cross up or price rises above cloud
+                if tk_cross_up or close[i] > lower_cloud[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -96,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1S1_Breakout_DailyTrend_Volume"
-timeframe = "12h"
+name = "Ichimoku_Cloud_WeeklyTrend_6h"
+timeframe = "6h"
 leverage = 1.0
