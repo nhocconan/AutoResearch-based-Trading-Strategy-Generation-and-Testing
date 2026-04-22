@@ -14,7 +14,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (based on previous day's HLC)
+    # Calculate Camarilla levels (based on current day's HLC)
     range_1d = high_1d - low_1d
     r1_1d = close_1d + range_1d * 1.1 / 12
     s1_1d = close_1d - range_1d * 1.1 / 12
