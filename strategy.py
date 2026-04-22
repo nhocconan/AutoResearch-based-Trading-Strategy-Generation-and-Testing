@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Bollinger Squeeze with 1-day RSI momentum.
-Long when price breaks above upper Bollinger band during low volatility (squeeze) and 1-day RSI > 50.
-Short when price breaks below lower Bollinger band during low volatility and 1-day RSI < 50.
-Exit when price returns to middle Bollinger band (20-period SMA).
-Bollinger Squeeze identifies low volatility breakouts; 1-day RSI filters momentum direction.
-Designed for low trade frequency by requiring volatility contraction before breakout.
-Works in both bull and bear markets by capturing volatility expansion moves in direction of higher timeframe momentum.
+Hypothesis: 12-hour Donchian channel breakout with 1-day trend filter and volume confirmation.
+Long when price breaks above Donchian(20) high, 1-day EMA34 rising, and volume spikes above 1.5x average.
+Short when price breaks below Donchian(20) low, 1-day EMA34 falling, and volume spikes above 1.5x average.
+Exit when price returns to Donchian midpoint or trend reverses.
+Designed for low trade frequency by requiring multiple confirmations and using 12h timeframe.
+Works in both bull and bear markets by following daily trend while using 12h Donchian for entries.
 """
 
 import numpy as np
@@ -21,67 +20,66 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1-day data for RSI filter - ONCE before loop
+    # Load 1-day data for EMA34 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate 14-period RSI
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Bollinger Bands (20, 2)
-    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper = ma20 + 2 * std20
-    lower = ma20 - 2 * std20
+    # Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_20
+    donchian_low = low_20
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Bollinger Band Width for squeeze detection (normalized by middle band)
-    bb_width = (upper - lower) / ma20
-    # Squeeze condition: BB width below its 50-period minimum (volatility contraction)
-    bb_width_min = pd.Series(bb_width).rolling(window=50, min_periods=50).min().values
-    squeeze = bb_width < bb_width_min
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(ma20[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(squeeze[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above upper band during squeeze and 1-day RSI > 50
-            if (close[i] > upper[i] and squeeze[i] and rsi_1d_aligned[i] > 50):
+            # Long: Price breaks above Donchian high, EMA34 rising, volume spike
+            if (close[i] > donchian_high[i] and 
+                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower band during squeeze and 1-day RSI < 50
-            elif (close[i] < lower[i] and squeeze[i] and rsi_1d_aligned[i] < 50):
+            # Short: Price breaks below Donchian low, EMA34 falling, volume spike
+            elif (close[i] < donchian_low[i] and 
+                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to middle Bollinger band (20-period SMA)
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price falls below middle band
-                if close[i] < ma20[i]:
+                # Exit long: Price falls to Donchian mid OR EMA34 starts falling
+                if (close[i] <= donchian_mid[i] or 
+                    ema34_1d_aligned[i] < ema34_1d_aligned[i-1]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price rises above middle band
-                if close[i] > ma20[i]:
+                # Exit short: Price rises to Donchian mid OR EMA34 starts rising
+                if (close[i] >= donchian_mid[i] or 
+                    ema34_1d_aligned[i] > ema34_1d_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -92,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Bollinger_Squeeze_1dRSI_Momentum"
-timeframe = "4h"
+name = "12H_Donchian_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
