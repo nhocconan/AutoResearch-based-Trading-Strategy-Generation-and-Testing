@@ -32,8 +32,6 @@ def generate_signals(prices):
     s2 = close_1d - range_ * 1.1 / 6
     r3 = close_1d + range_ * 1.1 / 4
     s3 = close_1d - range_ * 1.1 / 4
-    r4 = close_1d + range_ * 1.1 / 2
-    s4 = close_1d - range_ * 1.1 / 2
     
     # 1d EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
@@ -46,8 +44,6 @@ def generate_signals(prices):
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Volume confirmation: 20-period average
@@ -60,8 +56,7 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
             np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
