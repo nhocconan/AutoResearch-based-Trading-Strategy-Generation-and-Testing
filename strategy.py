@@ -8,10 +8,9 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: Daily Bollinger Band squeeze breakout with weekly EMA34 trend and volume confirmation
-    # Works in both bull and bear markets: breakouts from low volatility capture directional moves
-    # Bollinger Band squeeze identifies compression before expansion
-    # Volume surge confirms breakout strength, weekly EMA34 filters trend direction
+    # Hypothesis: 4h Camarilla R3/S3 level breakout with 1d EMA34 trend and volume confirmation
+    # Works in both bull and bear markets: breakouts from key pivot levels with trend filter
+    # Camarilla levels provide strong support/resistance, volume confirms breakout strength
     
     # Load daily data once
     df_1d = get_htf_data(prices, '1d')
@@ -19,65 +18,70 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Weekly EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
+    # Daily EMA34 trend filter
+    ema_1d_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
-    # Daily Bollinger Bands (20, 2)
+    # Previous day's Camarilla levels (calculate from previous day's OHLC)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # First day: use same day's values (will be overwritten as we align)
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    # Calculate Camarilla levels for previous day
+    # R3 = close + (high - low) * 1.1/2
+    # S3 = close - (high - low) * 1.1/2
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # 4h price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    
-    # Calculate BB middle (SMA20), upper and lower bands
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2 * std20
-    lower_band = sma20 - 2 * std20
-    
-    # Bollinger Band width (normalized)
-    bb_width = (upper_band - lower_band) / sma20
-    
-    # Bollinger Band squeeze: BB width below 20-period mean (low volatility)
-    bb_width_ma20 = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_squeeze = bb_width < bb_width_ma20
+    volume = prices['volume'].values
     
     # Volume filter (20-period MA surge)
-    vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 1.5 * vol_ma20
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_surge = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(ema_1w_34_aligned[i]) or np.isnan(sma20[i]) or 
-            np.isnan(std20[i]) or np.isnan(vol_ma20[i]) or np.isnan(bb_width_ma20[i])):
+        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: BB squeeze breakout above upper band with volume surge AND weekly EMA34 uptrend
-            if close[i] > upper_band[i] and bb_squeeze[i] and vol_surge[i] and close[i] > ema_1w_34_aligned[i]:
+            # Long: Breakout above R3 with volume surge AND daily EMA34 uptrend
+            if close[i] > camarilla_r3_aligned[i] and vol_surge[i] and close[i] > ema_1d_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: BB squeeze breakout below lower band with volume surge AND weekly EMA34 downtrend
-            elif close[i] < lower_band[i] and bb_squeeze[i] and vol_surge[i] and close[i] < ema_1w_34_aligned[i]:
+            # Short: Breakdown below S3 with volume surge AND daily EMA34 downtrend
+            elif close[i] < camarilla_s3_aligned[i] and vol_surge[i] and close[i] < ema_1d_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to Bollinger middle (SMA20) or opposite band touch
+            # Exit: Price returns to previous day's close (pivot point) or opposite level
             if position == 1:
-                if close[i] < sma20[i]:
+                if close[i] < prev_close[i]:  # Return to previous day's close
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > sma20[i]:
+                if close[i] > prev_close[i]:  # Return to previous day's close
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -85,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Bollinger_Squeeze_Breakout_1wEMA34_Trend_VolumeSurge_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSurge_v1"
+timeframe = "4h"
 leverage = 1.0
