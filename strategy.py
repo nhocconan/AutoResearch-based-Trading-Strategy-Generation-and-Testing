@@ -1,42 +1,20 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 6-hour Williams Fractal Breakout with weekly EMA trend filter and volume confirmation.
-Trades breakouts of weekly Williams Fractals (significant support/resistance) in the direction of the weekly EMA trend.
-Uses volume spike to confirm institutional interest at breakout. Designed for low trade frequency
-(10-30 trades/year) to minimize fee flood and work in both bull and bear markets by aligning with
-higher timeframe trend and using breakout logic rather than mean-reversion.
+Hypothesis: 4-hour Bollinger Band Width squeeze breakout with 1-day EMA trend filter and volume confirmation.
+Trades breakouts after low volatility contractions (squeeze) in the direction of the daily EMA trend.
+Uses volume spike to confirm institutional interest. Designed for low trade frequency (20-50 trades/year)
+to minimize fee drift and work in both bull and bear markets by combining volatility contraction
+with trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_williams_fractals(high, low):
-    """Calculate Williams Fractals: bearish (high) and bullish (low) fractals.
-    Bearish fractal: middle bar has highest high of 5-bar window.
-    Bullish fractal: middle bar has lowest low of 5-bar window.
-    Returns arrays of same length with values where fractal exists, else NaN.
-    """
-    n = len(high)
-    bearish = np.full(n, np.nan)
-    bullish = np.full(n, np.nan)
-    
-    for i in range(2, n - 2):
-        # Bearish fractal: current high is highest of 5 bars
-        if (high[i] >= high[i-2] and high[i] >= high[i-1] and 
-            high[i] >= high[i+1] and high[i] >= high[i+2]):
-            bearish[i] = high[i]
-        # Bullish fractal: current low is lowest of 5 bars
-        if (low[i] <= low[i-2] and low[i] <= low[i-1] and 
-            low[i] <= low[i+1] and low[i] <= low[i+2]):
-            bullish[i] = low[i]
-    
-    return bearish, bullish
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -44,23 +22,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter and fractal calculation - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load daily data for trend filter and Bollinger calculation - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly EMA for trend filter (34-period)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Daily EMA for trend filter (34-period)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate weekly Williams Fractals
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_1w, low_1w)
-    # Williams fractals need 2 extra weekly bars for confirmation (after the center bar)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
+    # Calculate daily Bollinger Bands (20, 2.0) for squeeze detection
+    close_1d_series = pd.Series(close_1d)
+    bb_middle = close_1d_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_1d_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    
+    # Bollinger Band Width squeeze: current width < 50th percentile of past 50 days
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).quantile(0.50).values
+    squeeze = bb_width < bb_width_percentile
+    
+    # Align daily indicators to 4h
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,10 +54,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(squeeze_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,26 +66,26 @@ def generate_signals(prices):
         # Volume confirmation
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        if position == 0 and vol_spike:
-            # Long: price breaks above bearish fractal (resistance) with uptrend bias
-            if not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i] and close[i] > ema_34_1w_aligned[i]:
+        if position == 0 and vol_spike and squeeze_aligned[i]:
+            # Long: price breaks above upper Bollinger Band with uptrend bias
+            if close[i] > bb_upper[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below bullish fractal (support) with downtrend bias
-            elif not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i] and close[i] < ema_34_1w_aligned[i]:
+            # Short: price breaks below lower Bollinger Band with downtrend bias
+            elif close[i] < bb_lower[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to opposite fractal or trend reverses
+            # Exit: price returns to middle Bollinger Band or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below bullish fractal (support) or closes below weekly EMA
-                if (not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i]) or close[i] < ema_34_1w_aligned[i]:
+                # Exit long: price crosses below middle band or closes below daily EMA
+                if close[i] < bb_middle[i] or close[i] < ema_34_1d_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above bearish fractal (resistance) or closes above weekly EMA
-                if (not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i]) or close[i] > ema_34_1w_aligned[i]:
+                # Exit short: price crosses above middle band or closes above daily EMA
+                if close[i] > bb_middle[i] or close[i] > ema_34_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Williams_Fractal_Breakout_1wEMA34_Volume"
-timeframe = "6h"
+name = "4h_Bollinger_Width_Squeeze_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
