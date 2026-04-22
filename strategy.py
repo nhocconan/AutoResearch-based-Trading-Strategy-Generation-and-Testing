@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-# Uses Donchian upper/lower channels for breakout entries
-# Long when price breaks above Donchian upper channel with 1d uptrend and volume spike
-# Short when price breaks below Donchian lower channel with 1d downtrend and volume spike
-# Designed for 4h timeframe to target 20-50 trades/year per symbol.
-# Works in bull/bear via 1d trend filter and volatility-based volume confirmation.
+# Hypothesis: Daily Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation
+# Long when price breaks above 20-day high with weekly uptrend and volume spike
+# Short when price breaks below 20-day low with weekly downtrend and volume spike
+# Designed for daily timeframe to target 10-30 trades/year per symbol.
+# Works in bull/bear via weekly trend filter and volatility-based volume confirmation.
+# Uses volatility-adjusted breakout to reduce false signals in choppy markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,68 +20,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter (ONCE before loop)
+    # Load daily data for Donchian calculation (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period high/low) on 4h data
-    # Using rolling window with min_periods
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Donchian channels (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA(50) for higher timeframe trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Donchian channels to daily timeframe (will be available after daily bar completes)
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Volume spike filter (20-period on 4h data)
+    # Load weekly data for EMA(50) trend filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume spike filter (20-period on daily data)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20  # Higher threshold for fewer, higher quality trades
+    vol_spike = volume > 1.5 * vol_ma20  # Moderate threshold for quality signals
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper + 1d uptrend + volume spike
-            if (close[i] > high_max[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Long: price breaks above Donchian high + weekly uptrend + volume spike
+            if (close[i] > donchian_high_20_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + 1d downtrend + volume spike
-            elif (close[i] < low_min[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Short: price breaks below Donchian low + weekly downtrend + volume spike
+            elif (close[i] < donchian_low_20_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to Donchian middle or trend reversal
-            # Calculate Donchian middle (average of upper and lower)
-            donchian_middle = (high_max[i] + low_min[i]) / 2
-            
+            # Exit conditions: price returns to opposite Donchian band or trend reversal
             if position == 1:
-                # Exit on price below Donchian middle or trend reversal
-                if (close[i] < donchian_middle or 
-                    close[i] < ema_50_1d_aligned[i]):
+                # Exit on price below Donchian low or weekly trend reversal
+                if (close[i] < donchian_low_20_aligned[i] or 
+                    close[i] < ema_50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on price above Donchian middle or trend reversal
-                if (close[i] > donchian_middle or 
-                    close[i] > ema_50_1d_aligned[i]):
+                # Exit on price above Donchian high or weekly trend reversal
+                if (close[i] > donchian_high_20_aligned[i] or 
+                    close[i] > ema_50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -89,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeConfirmation"
+timeframe = "1d"
 leverage = 1.0
