@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
+
 """
-Hypothesis: 4-hour Volume-Weighted Average Price (VWAP) deviation with 1-day trend filter and volume confirmation.
-Price deviations from VWAP indicate mean-reversion opportunities in ranging markets, while strong deviations
-with volume confirm institutional activity. The 1-day trend filter ensures trades align with the daily trend.
-Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+Hypothesis: 1-day RSI with 1-week trend filter and volume confirmation. 
+RSI(14) identifies overbought/oversold conditions, while the 1-week EMA(34) 
+determines the primary trend direction. Volume spikes confirm momentum at 
+extreme RSI readings. This strategy aims to capture mean reversion in ranging 
+markets and trend continuation in trending markets by filtering RSI signals 
+with the higher timeframe trend. Target: 7-25 trades/year per symbol (30-100 total).
 """
 
 import numpy as np
@@ -12,44 +15,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate typical price and VWAP components
-    typical_price = (high + low + close) / 3.0
-    tp_vol = typical_price * volume
-    
-    # Calculate 20-period VWAP
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    tp_vol_sum = pd.Series(tp_vol).rolling(window=20, min_periods=20).sum().values
-    vwap = np.where(vol_sum != 0, tp_vol_sum / vol_sum, np.nan)
-    
-    # Calculate standard deviation of TP from VWAP for volatility bands
-    tp_dev = typical_price - vwap
-    # Use 20-period rolling std dev of TP deviation
-    tp_dev_ma = pd.Series(tp_dev).rolling(window=20, min_periods=20).mean().values
-    tp_dev_sq = tp_dev * tp_dev
-    tp_dev_var = pd.Series(tp_dev_sq).rolling(window=20, min_periods=20).mean().values - (tp_dev_ma * tp_dev_ma)
-    tp_dev_std = np.sqrt(np.maximum(tp_dev_var, 0))
-    
-    # Upper and lower bands (2 standard deviations)
-    upper_band = vwap + 2.0 * tp_dev_std
-    lower_band = vwap - 2.0 * tp_dev_std
-    
-    # Load 1d data for trend filter - ONCE before loop
+    # Load 1d data for RSI calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA for trend filter (50-period)
+    # Calculate RSI(14) on 1d data
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 periods
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_1d = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
+    
+    # Align RSI to lower timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Load 1w data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Calculate volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,10 +69,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(vwap[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,30 +88,35 @@ def generate_signals(prices):
                 position = 0
             continue
         
+        # RSI levels
+        rsi = rsi_1d_aligned[i]
+        ema_trend = ema_34_1w_aligned[i]
+        close_price = close[i]
+        
         if position == 0:
-            # Long: price touches lower band with volume, in uptrend
-            if (close[i] <= lower_band[i] and                    # Price at or below lower band
-                close[i] > ema_50_1d_aligned[i] and              # Above 1d EMA (uptrend)
-                volume[i] > 1.5 * vol_avg_20[i]):                # Volume confirmation
+            # Long: RSI oversold (<30) in uptrend (price > weekly EMA) with volume confirmation
+            if (rsi < 30 and 
+                close_price > ema_trend and 
+                volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches upper band with volume, in downtrend
-            elif (close[i] >= upper_band[i] and                  # Price at or above upper band
-                  close[i] < ema_50_1d_aligned[i] and            # Below 1d EMA (downtrend)
-                  volume[i] > 1.5 * vol_avg_20[i]):              # Volume confirmation
+            # Short: RSI overbought (>70) in downtrend (price < weekly EMA) with volume confirmation
+            elif (rsi > 70 and 
+                  close_price < ema_trend and 
+                  volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to VWAP or crosses 1d EMA in opposite direction
+            # Exit: RSI returns to neutral zone (40-60) or contrary signal
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses above VWAP or below 1d EMA
-                if close[i] >= vwap[i] or close[i] < ema_50_1d_aligned[i]:
+                # Exit long: RSI reaches 50 or bearish reversal signal
+                if rsi >= 50 or (rsi > 70 and close_price < ema_trend):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses below VWAP or above 1d EMA
-                if close[i] <= vwap[i] or close[i] > ema_50_1d_aligned[i]:
+                # Exit short: RSI reaches 50 or bullish reversal signal
+                if rsi <= 50 or (rsi < 30 and close_price > ema_trend):
                     exit_signal = True
             
             if exit_signal:
@@ -113,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_Deviation_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_RSI_1wEMA_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
