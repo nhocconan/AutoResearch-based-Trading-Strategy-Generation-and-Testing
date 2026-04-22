@@ -8,10 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h momentum with 4h EMA50 trend filter and volume spike
-    # Uses 1h RSI(14) for momentum signals, filtered by 4h EMA50 trend direction
+    # Hypothesis: 6h Donchian(20) breakout with weekly pivot direction + volume confirmation
+    # Weekly pivot (from prior week) provides directional bias for trend alignment
+    # Donchian breakout captures momentum with statistical significance
     # Volume spike (2x 20-period MA) confirms institutional participation
-    # Works in bull/bear: momentum in direction of higher timeframe trend
+    # Works in bull/bear: breaks through key levels with trend and volume confirmation
     
     # Price and volume data
     close = prices['close'].values
@@ -19,19 +20,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for EMA50 trend filter (higher timeframe trend)
-    df_4h = get_htf_data(prices, '4h')
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Load weekly data for pivot direction
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate weekly pivot points (standard formula)
+    # PP = (H + L + C) / 3
+    # R1 = 2*PP - L
+    # S1 = 2*PP - H
+    # R2 = PP + (H - L)
+    # S2 = PP - (H - L)
+    # R3 = H + 2*(PP - L)
+    # S3 = L - 2*(H - PP)
+    pp_1w = (high_1w + low_1w + close_1w) / 3
+    r1_1w = 2 * pp_1w - low_1w
+    s1_1w = 2 * pp_1w - high_1w
+    r2_1w = pp_1w + (high_1w - low_1w)
+    s2_1w = pp_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pp_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pp_1w)
+    
+    # Use weekly pivot direction: above PP = bullish bias, below PP = bearish bias
+    weekly_bias = pp_1w  # Use pivot point as reference for bias
+    
+    # Align weekly bias to 6h timeframe (using previous week's bias)
+    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
+    
+    # Donchian channel (20-period) on 6h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,8 +61,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(rsi[i]) or 
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(weekly_bias_aligned[i]) or 
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -51,31 +71,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI > 55 (bullish momentum) with volume spike and price above 4h EMA50 (uptrend)
-            if rsi[i] > 55 and vol_spike[i] and close[i] > ema50_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: Break above Donchian high with volume spike and price above weekly pivot (bullish bias)
+            if close[i] > highest_high[i] and vol_spike[i] and close[i] > weekly_bias_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45 (bearish momentum) with volume spike and price below 4h EMA50 (downtrend)
-            elif rsi[i] < 45 and vol_spike[i] and close[i] < ema50_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: Break below Donchian low with volume spike and price below weekly pivot (bearish bias)
+            elif close[i] < lowest_low[i] and vol_spike[i] and close[i] < weekly_bias_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral zone (45-55)
+            # Exit: Return to opposite Donchian level (lower band for longs, upper band for shorts)
             if position == 1:
-                if rsi[i] < 45:
+                if close[i] < lowest_low[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if rsi[i] > 55:
+                if close[i] > highest_high[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI_Momentum_4hEMA50_Trend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Donchian_20_Breakout_WeeklyPivot_Direction_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
