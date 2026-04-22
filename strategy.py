@@ -3,11 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with daily pivot level confirmation and volume spike.
-# Uses daily pivot levels (R1/S1) to define key support/resistance zones.
-# Breakouts above daily R1 or below daily S1 are taken only with volume confirmation.
-# Designed for 12h timeframe to capture multi-day swings with low frequency (<30 trades/year).
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4h Choppiness Index regime filter with Donchian(20) breakout and volume confirmation.
+# Uses Choppiness Index (26-period) to detect trending vs ranging markets:
+#   CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (trend follow).
+# In trending regimes: take Donchian breakout with volume confirmation.
+# In ranging regimes: fade Donchian breakout (mean reversion) with volume confirmation.
+# Volume confirmation: volume > 1.5x 24-period moving average.
+# Designed for 4h timeframe to capture trend and range regimes with low frequency.
+# Target: 20-40 trades/year per symbol (80-160 total) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,74 +22,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for pivot levels and Donchian channel
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Choppiness Index (26-period) on close prices
+    # CHOP = 100 * log10(sum(ATR(1)) / (highesthigh - lowestlow)) / log10(period)
+    tr1 = np.maximum(high[1:] - low[1:], np.maximum(abs(high[1:] - close[:-1]), abs(low[1:] - close[:-1])))
+    tr1 = np.concatenate([[np.nan], tr1])  # align with original length
+    atr1 = pd.Series(tr1).rolling(window=1, min_periods=1).mean().values  # ATR(1) = TR
     
-    # Calculate daily pivot points (using prior day's data)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot_1d = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3
-    r1_1d = 2 * pivot_1d - np.roll(low_1d, 1)
-    s1_1d = 2 * pivot_1d - np.roll(high_1d, 1)
+    sum_atr1 = pd.Series(atr1).rolling(window=26, min_periods=26).sum().values
+    highest_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    lowest_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
     
-    # Donchian channel: 20-period high/low (prior period)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Avoid division by zero
+    range_hl = highest_high - lowest_low
+    chop = np.where(range_hl != 0, 100 * np.log10(sum_atr1 / range_hl) / np.log10(26), 50)
+    chop = np.nan_to_num(chop, nan=50.0)
     
-    # Shift to use only completed periods (avoid look-ahead)
-    high_20 = np.roll(high_20, 1)
-    low_20 = np.roll(low_20, 1)
+    # Regime thresholds
+    chop_ranging = chop > 61.8  # ranging market (mean revert)
+    chop_trending = chop < 38.2  # trending market (trend follow)
     
-    # Volume spike filter (12-period on 12h: 6 days)
-    vol_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    vol_spike = volume > 2.0 * vol_ma12
+    # Donchian channel (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align indicators to 12-hour timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # Volume confirmation (24-period average)
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > 1.5 * vol_ma24
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
-            np.isnan(vol_ma12[i])):
+        if (np.isnan(chop[i]) or np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
+            np.isnan(vol_ma24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above daily R1 + Donchian high + volume spike
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > high_20_aligned[i] and 
-                vol_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below daily S1 + Donchian low + volume spike
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < low_20_aligned[i] and 
-                  vol_spike[i]):
-                signals[i] = -0.25
-                position = -1
+            # Trending regime: follow breakout
+            if chop_trending[i]:
+                # Long: breakout above Donchian high with volume
+                if close[i] > highest_high_20[i] and vol_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: breakdown below Donchian low with volume
+                elif close[i] < lowest_low_20[i] and vol_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Ranging regime: fade breakout (mean reversion)
+            elif chop_ranging[i]:
+                # Short: fade breakout above Donchian high (sell the spike)
+                if close[i] > highest_high_20[i] and vol_confirm[i]:
+                    signals[i] = -0.25
+                    position = -1
+                # Long: fade breakdown below Donchian low (buy the dip)
+                elif close[i] < lowest_low_20[i] and vol_confirm[i]:
+                    signals[i] = 0.25
+                    position = 1
         else:
-            # Exit: price breaks opposite pivot level or Donchian level
+            # Exit conditions: opposite signal or regime change
             if position == 1:
-                if (close[i] < s1_1d_aligned[i] or close[i] < low_20_aligned[i]):
+                # Exit long: breakdown below Donchian low or shift to ranging regime
+                if close[i] < lowest_low_20[i] or chop_ranging[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if (close[i] > r1_1d_aligned[i] or close[i] > high_20_aligned[i]):
+                # Exit short: breakout above Donchian high or shift to ranging regime
+                if close[i] > highest_high_20[i] or chop_ranging[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -94,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_DailyPivot_Level_Volume_Spike"
-timeframe = "12h"
+name = "4h_Choppiness_Regime_Donchian20_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
