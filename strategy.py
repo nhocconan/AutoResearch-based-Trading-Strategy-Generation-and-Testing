@@ -3,9 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume spike confirmation.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
+# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low.
+# Long when Bull Power > 0 and Bear Power < 0 in uptrend (price > 1d EMA50) with volume spike.
+# Short when Bear Power < 0 and Bull Power < 0 in downtrend (price < 1d EMA50) with volume spike.
 # Works in bull/bear by using 1d EMA50 trend filter + volume spike for momentum confirmation.
-# Target: 20-50 trades/year (80-200 total over 4 years).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,73 +20,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter - ONCE before loop
+    # Load 1d data for trend and Elder Ray calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA13 for Elder Ray
     close_1d = df_1d['close'].values
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power = high_1d - ema_13_1d
+    bear_power = ema_13_1d - low_1d
+    
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Calculate 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Load 4h data for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Donchian upper/lower (20-period)
-    high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 4h timeframe
-    high_20_4h_aligned = align_htf_to_ltf(prices, df_4h, high_20_4h)
-    low_20_4h_aligned = align_htf_to_ltf(prices, df_4h, low_20_4h)
-    
-    # Calculate 4h volume average (20-period)
-    volume_4h = df_4h['volume'].values
-    vol_avg_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20_4h)
+    # Calculate 6h volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20_4h_aligned[i]) or 
-            np.isnan(low_20_4h_aligned[i]) or np.isnan(vol_avg_20_4h_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian upper in uptrend with volume spike
-            if (close[i] > high_20_4h_aligned[i] and 
+            # Long: Bull Power > 0, Bear Power < 0 (both positive and negative power present)
+            # in uptrend (price > 1d EMA50) with volume spike
+            if (bull_power_aligned[i] > 0 and 
+                bear_power_aligned[i] > 0 and  # Note: bear_power = EMA13 - Low, so >0 means Low < EMA13
                 close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > 2.0 * vol_avg_20_4h_aligned[i]):
+                volume[i] > 2.0 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower in downtrend with volume spike
-            elif (close[i] < low_20_4h_aligned[i] and 
+            # Short: Bear Power > 0, Bull Power < 0 
+            # in downtrend (price < 1d EMA50) with volume spike
+            elif (bear_power_aligned[i] > 0 and 
+                  bull_power_aligned[i] < 0 and  # Bull Power < 0 means High < EMA13
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > 2.0 * vol_avg_20_4h_aligned[i]):
+                  volume[i] > 2.0 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to opposite Donchian level
+            # Exit: Elder Power divergence or trend change
             if position == 1:
-                if close[i] < low_20_4h_aligned[i]:
+                # Exit long when Bull Power turns negative or Bear Power turns negative
+                if bull_power_aligned[i] <= 0 or bear_power_aligned[i] <= 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > high_20_4h_aligned[i]:
+                # Exit short when Bear Power turns negative or Bull Power turns positive
+                if bear_power_aligned[i] <= 0 or bull_power_aligned[i] >= 0:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -91,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_1dTrend_Volume_Spike"
-timeframe = "4h"
+name = "6H_ElderRay_1dTrend_Filter_Volume"
+timeframe = "6h"
 leverage = 1.0
