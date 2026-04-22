@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Williams %R with 1-day ADX trend filter.
-Long when Williams %R < -80 (oversold) and 1-day ADX > 25 (strong trend).
-Short when Williams %R > -20 (overbought) and 1-day ADX > 25 (strong trend).
-Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
-Williams %R identifies overextended moves; ADX ensures we only trade in trending markets.
-Works in bull markets (catching pullbacks in uptrends) and bear markets (catching bounces in downtrends).
+Hypothesis: 4-hour KAMA (Kaufman Adaptive Moving Average) with 1-day RSI filter.
+Long when KAMA slope > 0 and 1-day RSI < 55.
+Short when KAMA slope < 0 and 1-day RSI > 45.
+Exit when KAMA slope reverses or 1-day RSI reaches extremes (30/70).
+KAMA adapts to market noise, reducing whipsaw in ranging markets. RSI filter avoids overextended moves.
+Designed for 4h timeframe with 1-day HTF to work in both bull and bear markets by following adaptive trend with momentum filter.
 """
 
 import numpy as np
@@ -14,81 +14,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 14:
+    if n < 30:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     
-    # Williams %R calculation (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # KAMA parameters
+    er_period = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    # Load 1-day data for ADX filter - ONCE before loop
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    
+    # Proper ER calculation
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        price_change = np.abs(close[i] - close[i - er_period])
+        volatility_sum = np.sum(np.abs(np.diff(close[i - er_period + 1:i + 1])))
+        if volatility_sum > 0:
+            er[i] = price_change / volatility_sum
+        else:
+            er[i] = 0
+    
+    # Smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # KAMA slope (1-period change)
+    kama_slope = np.diff(kama, prepend=0)
+    
+    # Load 1-day data for RSI filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate ADX (14-period) on 1-day data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Calculate RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[:13] = np.nan
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Handle division by zero and NaN
-    adx = np.where((di_plus + di_minus) == 0, 0, adx)
-    adx = np.nan_to_num(adx, nan=0.0)
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align RSI to 4h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(kama_slope[i]) or np.isnan(rsi_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Oversold and strong trend
-            if williams_r[i] < -80 and adx_aligned[i] > 25:
+            # Long: KAMA rising and RSI not overbought
+            if kama_slope[i] > 0 and rsi_1d_aligned[i] < 55:
                 signals[i] = 0.25
                 position = 1
-            # Short: Overbought and strong trend
-            elif williams_r[i] > -20 and adx_aligned[i] > 25:
+            # Short: KAMA falling and RSI not oversold
+            elif kama_slope[i] < 0 and rsi_1d_aligned[i] > 45:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -96,12 +102,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R crosses above -50
-                if williams_r[i] > -50:
+                # Exit long: KAMA falls or RSI overbought
+                if kama_slope[i] <= 0 or rsi_1d_aligned[i] >= 70:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R crosses below -50
-                if williams_r[i] < -50:
+                # Exit short: KAMA rises or RSI oversold
+                if kama_slope[i] >= 0 or rsi_1d_aligned[i] <= 30:
                     exit_signal = True
             
             if exit_signal:
@@ -112,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_1dADX_Trend_Filter"
-timeframe = "12h"
+name = "4H_KAMA_1dRSI_Filter"
+timeframe = "4h"
 leverage = 1.0
