@@ -5,11 +5,11 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(15) breakout with weekly EMA34 trend filter and volume spike
-    # Targets 15-30 trades/year per symbol to minimize fee drag.
+    # Hypothesis: 1d Donchian(20) breakout with weekly EMA34 trend filter and volume spike
+    # Targets 10-25 trades/year per symbol to minimize fee drag.
     # Donchian breakouts capture momentum; weekly EMA34 filters long-term trend;
     # volume spike confirms institutional interest. Works in bull/bear via trend filter.
     
@@ -18,19 +18,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Donchian(15) calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load 1d data for Donchian(20) calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate Donchian channels (15-period) for each 12h bar
-    donchian_upper = pd.Series(high_12h).rolling(window=15, min_periods=15).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=15, min_periods=15).min().values
+    # Calculate Donchian channels (20-period) for each 1d bar
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 12h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    # Align Donchian levels to 1d timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
     # Load weekly data for EMA34 trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -38,9 +37,9 @@ def generate_signals(prices):
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Volume spike filter (15-period)
-    vol_ma15 = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
-    vol_spike = volume > 2.0 * vol_ma15  # Require 2x volume for confirmation
+    # Volume spike filter (20-period)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -49,10 +48,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(200, n):  # Start after warmup
         # Skip if data not ready or outside session
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma15[i]) or
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i]) or
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -85,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_15_Breakout_1wEMA34_Volume_Session_v1"
-timeframe = "12h"
+name = "1d_Donchian_20_Breakout_1wEMA34_Volume_Session_v1"
+timeframe = "1d"
 leverage = 1.0
