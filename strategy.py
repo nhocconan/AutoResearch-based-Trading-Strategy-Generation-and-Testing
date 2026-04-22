@@ -5,13 +5,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
-    
-    # Load weekly data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Load daily data for pivot levels (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -61,20 +56,18 @@ def generate_signals(prices):
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):
+    for i in range(30, n):
         # Skip if any data is not ready
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
             np.isnan(r2_aligned[i]) or 
             np.isnan(s2_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema200_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i]) or 
             np.isnan(atr[i])):
             if position != 0:
@@ -90,17 +83,16 @@ def generate_signals(prices):
         r2 = r2_aligned[i]
         s2 = s2_aligned[i]
         atr_1d = atr_1d_aligned[i]
-        ema200_1w = ema200_1w_aligned[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume + above weekly EMA200 + volatility filter
-            if price > r2 and vol > 1.5 * vol_ma and price > ema200_1w and atr_1d > 0:
+            # Long: price breaks above R2 with volume + volatility filter
+            if price > r2 and vol > 1.5 * vol_ma and atr_1d > 0:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S2 with volume + below weekly EMA200 + volatility filter
-            elif price < s2 and vol > 1.5 * vol_ma and price < ema200_1w and atr_1d > 0:
+            # Short: price breaks below S2 with volume + volatility filter
+            elif price < s2 and vol > 1.5 * vol_ma and atr_1d > 0:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -123,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DailyPivot_R1_S1_Breakout_1wEMA200_Volume_ATRStop"
-timeframe = "1d"
+name = "6h_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
+timeframe = "6h"
 leverage = 1.0
