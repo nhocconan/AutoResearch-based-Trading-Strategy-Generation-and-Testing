@@ -1,3 +1,9 @@
+# USDC-midterm-mean-reversion
+# Mean reversion on USDC-like assets (BTC/ETH) with low volatility + oversold conditions
+# Uses 1d price action and 1-week volatility regime for filtering
+# Designed to work in both bull and bear markets by focusing on mean reversion during low volatility periods
+# Target: 10-25 trades/year, low turnover, high win rate
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,103 +11,104 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for volatility regime filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Calculate daily ATR for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly ATR for volatility regime
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align daily ATR to 4h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Weekly ATR moving average for regime classification
+    atr_ma_1w = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    atr_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Low volatility regime: weekly ATR < 80% of its 20-period average
+    low_vol_regime = atr_1w_aligned < 0.8 * atr_ma_1w_aligned
+    
+    # Daily price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Price array
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period average volume for volume filter
+    # 20-day RSI for mean reversion signal
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # 20-day moving average for mean reversion target
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    
+    # Volume filter: avoid extremely low volume days
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 0.3 * vol_ma_20  # Minimum volume threshold
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(atr_14_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ma_20[i]) or 
+            np.isnan(low_vol_regime[i]) or 
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        donch_high_val = donch_high[i]
-        donch_low_val = donch_low[i]
-        atr_daily = atr_14_aligned[i]
-        ema34_1d_val = ema34_1d_aligned[i]
+        rsi_val = rsi[i]
         price = close[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        
-        # Volatility filter: daily ATR > 0.5 * 20-period average (avoid low volatility chop)
-        atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
-        vol_filter = atr_daily > 0.5 * atr_ma_20
-        
-        # Volume filter: current volume > 1.5 * 20-period average volume
-        vol_spike = vol > 1.5 * vol_ma
-        
-        # Trend filter: price above/below daily EMA34
-        uptrend = price > ema34_1d_val
-        downtrend = price < ema34_1d_val
+        ma_val = ma_20[i]
+        low_vol = low_vol_regime[i]
+        vol_ok = vol_filter[i]
         
         if position == 0:
-            # Long: price breaks above 4h Donchian high + daily uptrend + volatility filter + volume spike
-            if price > donch_high_val and uptrend and vol_filter and vol_spike:
+            # Long: RSI oversold (< 30) + price below MA + low volatility regime + adequate volume
+            if rsi_val < 30 and price < ma_val and low_vol and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low + daily downtrend + volatility filter + volume spike
-            elif price < donch_low_val and downtrend and vol_filter and vol_spike:
+            # Short: RSI overbought (> 70) + price above MA + low volatility regime + adequate volume
+            elif rsi_val > 70 and price > ma_val and low_vol and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back through opposite Donchian level or volatility drops or volume drops
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on breakdown below Donchian low or volatility collapse or volume drop
-                if price < donch_low_val or not vol_filter or not vol_spike:
+                # Exit when RSI returns to neutral (50) or price reaches MA
+                if rsi_val >= 50 or price >= ma_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on breakout above Donchian high or volatility collapse or volume drop
-                if price > donch_high_val or not vol_filter or not vol_spike:
+                # Exit when RSI returns to neutral (50) or price reaches MA
+                if rsi_val <= 50 or price <= ma_val:
                     exit_signal = True
+            
+            # Also exit if volatility regime changes (no longer low vol)
+            if not low_vol:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -112,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_ATRVolFilter_VolSpike"
-timeframe = "4h"
+name = "USDC_midterm_mean_reversion"
+timeframe = "1d"
 leverage = 1.0
