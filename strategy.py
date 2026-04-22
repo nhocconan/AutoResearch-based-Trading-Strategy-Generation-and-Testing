@@ -3,42 +3,43 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with daily ATR filter and volume confirmation
-# Long when price breaks above Donchian(20) high + ATR(14) rising + volume spike
-# Short when price breaks below Donchian(20) low + ATR(14) rising + volume spike
-# Exit when price returns to Donchian midline or ATR declines
-# Designed for moderate trade frequency (~20-30/year) with strong trend-following edge
-# Works in bull markets via breakouts and in bear markets via short breakdowns
+# Hypothesis: 4h Williams %R + Daily VWAP Trend with Volume Spike
+# Long when Williams %R < -80 (oversold) + price > daily VWAP + volume spike
+# Short when Williams %R > -20 (overbought) + price < daily VWAP + volume spike
+# Exit when Williams %R returns to -50 level or trend reverses
+# Williams %R identifies mean reversion extremes; VWAP provides institutional trend filter
+# Volume spike confirms institutional participation. Designed for 15-25 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for ATR filter
+    # Load daily data for Williams %R and VWAP
     df_daily = get_htf_data(prices, '1d')
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
+    volume_daily = df_daily['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Calculate Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_daily).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_daily).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_daily) / (highest_high - lowest_low) * -100
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
-    # Calculate daily ATR(14) for trend strength filter
-    tr1 = high_daily[1:] - low_daily[1:]
-    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
-    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_rising = atr_14 > np.roll(atr_14, 1)  # ATR rising vs previous day
+    # Calculate daily VWAP
+    # VWAP = Cumulative (Price * Volume) / Cumulative Volume
+    typical_price = (high_daily + low_daily + close_daily) / 3
+    pv = typical_price * volume_daily
+    cum_pv = np.nancumsum(pv)
+    cum_volume = np.nancumsum(volume_daily)
+    vwap = np.where(cum_volume != 0, cum_pv / cum_volume, typical_price)
     
-    # Align daily ATR and ATR rising to 4h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
-    atr_rising_aligned = align_htf_to_ltf(prices, df_daily, atr_rising.astype(float))
+    # Align Williams %R and VWAP to 4h timeframe (previous day's values)
+    williams_r_aligned = align_htf_to_ltf(prices, df_daily, williams_r)
+    vwap_aligned = align_htf_to_ltf(prices, df_daily, vwap)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -49,11 +50,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or 
-            np.isnan(atr_14_aligned[i]) or 
-            np.isnan(atr_rising_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vwap_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -63,37 +61,34 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        upper = donch_high[i]
-        lower = donch_low[i]
-        midline = donch_mid[i]
-        atr_val = atr_14_aligned[i]
-        atr_rise = atr_rising_aligned[i] > 0.5  # Convert back to boolean
+        wr = williams_r_aligned[i]
+        vwap_val = vwap_aligned[i]
         
-        # Volume filter: current volume > 1.8 * 20-period average
-        vol_spike = vol > 1.8 * vol_ma
+        # Volume filter: current volume > 2.2 * 20-period average
+        vol_spike = vol > 2.2 * vol_ma
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high + ATR rising + volume spike
-            if price > upper and atr_rise and vol_spike:
+            # Long conditions: Williams %R oversold (< -80) + price > VWAP + volume spike
+            if wr < -80 and price > vwap_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian low + ATR rising + volume spike
-            elif price < lower and atr_rise and vol_spike:
+            # Short conditions: Williams %R overbought (> -20) + price < VWAP + volume spike
+            elif wr > -20 and price < vwap_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price returns to midline or ATR declines
+            # Exit conditions: Williams %R returns to -50 level or trend reverses
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price returns to midline or ATR stops rising
-                if price <= midline or not atr_rise:
+                # Exit when Williams %R returns to -50 or price < VWAP
+                if wr >= -50 or price < vwap_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price returns to midline or ATR stops rising
-                if price >= midline or not atr_rise:
+                # Exit when Williams %R returns to -50 or price > VWAP
+                if wr <= -50 or price > vwap_val:
                     exit_signal = True
             
             if exit_signal:
@@ -105,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_DailyATR_Volume"
+name = "4h_WilliamsR_VWAP_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
