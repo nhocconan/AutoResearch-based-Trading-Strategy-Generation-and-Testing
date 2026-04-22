@@ -33,12 +33,12 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First TR is just high-low
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Donchian channels and ATR to 1d timeframe (already aligned since daily data)
-    upper_20_aligned = upper_20
-    lower_20_aligned = lower_20
-    atr_14_aligned = atr_14
+    # Align Donchian channels and ATR to 6h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
+    atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
     
-    # Calculate daily volume average (20-period)
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -96,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_Volume_ATR_Filter"
-timeframe = "1d"
+name = "6H_Donchian20_Volume_ATR_Filter"
+timeframe = "6h"
 leverage = 1.0
