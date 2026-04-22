@@ -1,16 +1,30 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 12-hour Williams Fractal Breakout with 1-day EMA trend filter and volume confirmation.
-Trades breakouts of daily Williams fractal levels (bearish fractal for long, bullish for short) in the direction of the daily EMA trend.
-Uses volume spike to confirm institutional interest at key fractal levels. Designed for low trade frequency
-(12-37 trades/year) to minimize fee drag and work in both bull and bear markets by aligning with
-higher timeframe trend and using mean-reversion at extreme fractal levels.
+Hypothesis: 1-hour Donchian Channel Breakout with 4-hour ADX trend filter and 1-day volume confirmation.
+Trades breakouts of 20-period Donchian channels only when 4-hour ADX > 25 (trending market) and volume confirms.
+Uses 1-hour for entry timing to capture momentum, while 4-hour trend and 1-day volume filter out false breakouts.
+Designed for low trade frequency (15-35 trades/year) to minimize fee drag in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index."""
+    plus_dm = np.diff(high)
+    minus_dm = np.diff(low)
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    tr = np.maximum(np.abs(np.diff(high)), np.maximum(np.abs(np.diff(low)), np.abs(np.diff(close))))
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,76 +36,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for fractal calculation and trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Load 4h data for ADX trend filter - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    # Daily EMA for trend filter (34-period)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_ltf_to_htf(prices, df_1d, ema_34_1d)
+    # 4h ADX for trend filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    adx_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
     
-    # Calculate daily Williams fractals
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
-    # Williams fractals need 2 extra bars for confirmation (center bar + 2 right bars)
-    bearish_fractal_aligned = align_ltf_to_htf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_ltf_to_htf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Load 1d data for volume confirmation - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1-day average volume
+    vol_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    
+    # 1-hour Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_4h_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or 
+            np.isnan(high_max_20[i]) or np.isnan(low_min_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Trend and volume filters
+        strong_trend = adx_4h_aligned[i] > 25
+        vol_confirm = volume[i] > 1.5 * avg_vol_1d_aligned[i]
         
-        if position == 0 and vol_spike:
-            # Long: price breaks above bearish fractal (resistance) with uptrend bias
-            if not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i] and close[i] > ema_34_1d_aligned[i]:
-                signals[i] = 0.25
+        if position == 0 and strong_trend and vol_confirm:
+            # Long breakout
+            if close[i] > high_max_20[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below bullish fractal (support) with downtrend bias
-            elif not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i] and close[i] < ema_34_1d_aligned[i]:
-                signals[i] = -0.25
+            # Short breakout
+            elif close[i] < low_min_20[i]:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: price returns to opposite fractal level or trend reverses
+            # Exit: opposite Donchian breakout or trend weakening
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below bullish fractal or closes below daily EMA
-                if not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i]:
-                    exit_signal = True
-                elif close[i] < ema_34_1d_aligned[i]:
+                # Exit long on lower band break or weak trend
+                if close[i] < low_min_20[i] or adx_4h_aligned[i] < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above bearish fractal or closes above daily EMA
-                if not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i]:
-                    exit_signal = True
-                elif close[i] > ema_34_1d_aligned[i]:
+                # Exit short on upper band break or weak trend
+                if close[i] > high_max_20[i] or adx_4h_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12h_Williams_Fractal_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "1h_Donchian_Breakout_4hADX_1dVolume"
+timeframe = "1h"
 leverage = 1.0
