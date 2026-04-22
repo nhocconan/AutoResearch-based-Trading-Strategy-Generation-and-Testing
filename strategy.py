@@ -24,11 +24,11 @@ def generate_signals(prices):
     upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
     lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian channels to 6h timeframe
+    # Align Donchian channels to 12h timeframe
     upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
     lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
     
-    # Calculate 6h volume average (20-period)
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -59,13 +59,13 @@ def generate_signals(prices):
         if position == 0:
             # Long: Price breaks above upper Donchian(20) with volume
             if (close[i] > upper_20_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = 0.25
+                volume[i] > 1.8 * vol_avg_20[i]):
+                signals[i] = 0.30
                 position = 1
             # Short: Price breaks below lower Donchian(20) with volume
             elif (close[i] < lower_20_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = -0.25
+                  volume[i] > 1.8 * vol_avg_20[i]):
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit: Price returns to the opposite Donchian channel
@@ -74,16 +74,16 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
                 if close[i] > upper_20_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
-name = "6H_Donchian20_Volume_Session"
-timeframe = "6h"
+name = "12H_Donchian20_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
