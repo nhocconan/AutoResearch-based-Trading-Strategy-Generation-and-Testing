@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 1d EMA(34) trend filter + volume confirmation
-# Choppiness Index identifies ranging vs trending markets (range: >61.8, trend: <38.2)
-# In trending regimes, we follow 1d EMA(34) direction with breakout entries
-# Volume confirmation (>1.5x 20-period avg) filters false signals
-# Designed for 4h timeframe targeting 20-40 trades/year with low churn
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1-day EMA(34) trend filter and volume confirmation.
+# Camarilla pivot levels provide short-term support/resistance zones. Breakouts above R1 or below S1
+# signal momentum. The 1-day EMA(34) ensures trades align with the daily trend, reducing whipsaws.
+# Volume confirmation (>1.5x 20-period average) filters false breakouts.
+# This combination targets 20-40 trades per year, balancing opportunity and cost.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,30 +19,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA trend filter (ONCE before loop)
+    # Load 1d data for Camarilla pivot and EMA(34) (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1d EMA(34) for trend filter
+    # 1-day EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Choppiness Index (14-period) on 4h data
-    atr_14 = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=14, min_periods=14).mean().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop_num = np.log(atr_14 * 14) / np.log(2)
-    chop_den = np.log(highest_high_14 - lowest_low_14)
-    chop = 100 * chop_num / chop_den
+    # Camarilla pivot levels from previous 1-day candle
+    close_prev_1d = np.concatenate([[np.nan], close_1d[:-1]])
+    high_prev_1d = np.concatenate([[np.nan], high_1d[:-1]])
+    low_prev_1d = np.concatenate([[np.nan], low_1d[:-1]])
+    range_1d = high_prev_1d - low_prev_1d
+    # Avoid division by zero
+    range_1d = np.where(range_1d == 0, 1e-10, range_1d)
     
-    # Donchian Channel (20) for breakout entries
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for each day, then align to 4h
+    R1 = close_prev_1d + (range_1d * 1.1 / 12)
+    S1 = close_prev_1d - (range_1d * 1.1 / 12)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 20-period average on 4h data
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -50,39 +54,40 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop[i]) or np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade in trending markets (Choppiness < 38.2)
-        is_trending = chop[i] < 38.2
-        
-        if position == 0 and is_trending:
-            # Long: Uptrend (price > 1d EMA) + breakout above upper Donchian + volume
-            if (close[i] > ema_34_1d_aligned[i] and
-                close[i] > highest_20[i-1] and
+        if position == 0:
+            # Long: breakout above R1 + 1-day uptrend + volume confirmation
+            if (close[i] > R1_aligned[i] and
+                close[i] > ema_34_1d_aligned[i] and
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Downtrend (price < 1d EMA) + breakout below lower Donchian + volume
-            elif (close[i] < ema_34_1d_aligned[i] and
-                  close[i] < lowest_20[i-1] and
+            # Short: breakout below S1 + 1-day downtrend + volume confirmation
+            elif (close[i] < S1_aligned[i] and
+                  close[i] < ema_34_1d_aligned[i] and
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: trend reversal or chop increases (range market)
+            # Exit: price returns to opposite Camarilla level or trend reversal
             if position == 1:
-                if (close[i] < ema_34_1d_aligned[i] or chop[i] > 61.8):
+                # Exit long: price returns to S1 or trend turns down
+                if (close[i] < S1_aligned[i] or
+                    close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            elif position == -1:
-                if (close[i] > ema_34_1d_aligned[i] or chop[i] > 61.8):
+            else:  # position == -1
+                # Exit short: price returns to R1 or trend turns up
+                if (close[i] > R1_aligned[i] or
+                    close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -90,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Chop_Regime_1dEMA34_VolumeConfirm"
+name = "4h_Camarilla_R1S1_1dEMA34_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
