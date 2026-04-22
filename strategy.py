@@ -3,49 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d trend filter (10 EMA) and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In strong trends (price > 10 EMA),
-# we fade extreme readings: buy when %R < -80 (oversold), sell when %R > -20 (overbought).
-# Volume confirmation ensures participation. Designed for mean reversion within trends,
-# working in both bull and bear markets by aligning with trend direction.
-# Targets 20-40 trades/year with strict entry conditions.
+# Hypothesis: 4h Choppiness Index (14) regime filter + 12h Donchian(20) breakout + volume confirmation.
+# Uses daily Choppiness Index to detect trending (CHOP < 38.2) vs ranging (CHOP > 61.8) markets.
+# In trending regimes: breakout above/below 12h Donchian channel with volume spike.
+# In ranging regimes: mean reversion at 12h Donchian channel boundaries with volume confirmation.
+# Designed to work in both bull and bear markets by adapting to regime.
+# Targets 25-35 trades/year with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for trend filter (once before loop)
+    # Load daily data for Choppiness Index (once before loop)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 10-period EMA on daily close
-    ema_10 = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_aligned = align_htf_to_ltf(prices, df_1d, ema_10)
+    # Calculate True Range for Choppiness Index
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate Williams %R on 4h data (14-period)
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Calculate ADX components for Choppiness Index
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # Williams %R = -100 * (HH - Close) / (HH - LL)
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    wr = np.where((highest_high - lowest_low) == 0, -50, wr)  # Handle division by zero
+    # Calculate DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
     
-    # Calculate 20-period average volume for volume confirmation
+    # Calculate DX and Choppiness Index
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # Avoid division by zero
+    
+    # Align Choppiness Index to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Load 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate Donchian channels (20-period) on 12h data
+    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donch_mid_12h = (donch_high_12h + donch_low_12h) / 2
+    
+    # Align 12h Donchian channels to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_12h, donch_mid_12h)
+    
+    # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup for Williams %R
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_10_aligned[i]) or 
-            np.isnan(wr[i]) or 
+        if (np.isnan(chop_aligned[i]) or 
+            np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -55,35 +97,48 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        wr_val = wr[i]
-        ema10 = ema_10_aligned[i]
+        chop_val = chop_aligned[i]
+        upper = donch_high_aligned[i]
+        lower = donch_low_aligned[i]
+        mid = donch_mid_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_confirmed = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 1.3 * 20-period average
+        vol_spike = vol > 1.3 * vol_ma
         
         if position == 0:
-            # Only trade in direction of daily trend: price above/below 10 EMA
-            if price > ema10:  # Uptrend bias
-                if wr_val < -80 and vol_confirmed:  # Oversold with volume
-                    signals[i] = 0.25
+            # Determine market regime
+            is_trending = chop_val < 38.2  # Trending market
+            is_ranging = chop_val > 61.8   # Ranging market
+            
+            if is_trending:
+                # Trending regime: breakout strategy
+                if price > upper and vol_spike:
+                    signals[i] = 0.30
                     position = 1
-            else:  # Downtrend bias
-                if wr_val > -20 and vol_confirmed:  # Overbought with volume
-                    signals[i] = -0.25
+                elif price < lower and vol_spike:
+                    signals[i] = -0.30
+                    position = -1
+            elif is_ranging:
+                # Ranging regime: mean reversion at channel boundaries
+                if price <= lower and vol_spike:
+                    signals[i] = 0.30
+                    position = 1
+                elif price >= upper and vol_spike:
+                    signals[i] = -0.30
                     position = -1
         
         elif position != 0:
-            # Exit conditions: Williams %R returns to neutral zone or trend reversal
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when overbought or trend turns down
-                if wr_val > -20 or price < ema10:
+                # Exit on retracement to middle or opposite band touch
+                if price < mid or price >= upper:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when oversold or trend turns up
-                if wr_val < -80 or price > ema10:
+                # Exit on retracement to middle or opposite band touch
+                if price > mid or price <= lower:
                     exit_signal = True
             
             if exit_signal:
@@ -91,10 +146,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "4h_WilliamsR_TrendFilter_Volume"
+name = "4h_Chop_12hDonchian_Breakout_MeanRev"
 timeframe = "4h"
 leverage = 1.0
