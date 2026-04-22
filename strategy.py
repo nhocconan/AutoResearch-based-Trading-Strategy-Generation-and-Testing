@@ -13,70 +13,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Donchian(20) - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    # Load weekly data for ADX and RSI - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 14:
         return np.zeros(n)
     
-    # Calculate Donchian(20) channels from daily data
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly RSI(14)
+    weekly_close = df_weekly['close'].values
+    delta = np.diff(weekly_close, prepend=weekly_close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    weekly_rsi = 100 - (100 / (1 + rs))
     
-    # Align Donchian channels to 4h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
+    # Calculate weekly ADX(14)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close_adx = df_weekly['close'].values
     
-    # Calculate 4h volume average (20-period)
+    # True Range
+    tr1 = weekly_high - weekly_low
+    tr2 = np.abs(weekly_high - np.roll(weekly_close_adx, 1))
+    tr3 = np.abs(weekly_low - np.roll(weekly_close_adx, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Directional Movement
+    dm_plus = np.where((weekly_high - np.roll(weekly_high, 1)) > (np.roll(weekly_low, 1) - weekly_low),
+                       np.maximum(weekly_high - np.roll(weekly_high, 1), 0), 0)
+    dm_minus = np.where((np.roll(weekly_low, 1) - weekly_low) > (weekly_high - np.roll(weekly_high, 1)),
+                        np.maximum(np.roll(weekly_low, 1) - weekly_low, 0), 0)
+    
+    # Smooth TR, DM+
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    weekly_adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align weekly indicators to daily
+    weekly_rsi_aligned = align_htf_to_ltf(prices, df_weekly, weekly_rsi)
+    weekly_adx_aligned = align_htf_to_ltf(prices, df_weekly, weekly_adx)
+    
+    # Daily RSI(14) for entry timing
+    delta_daily = np.diff(close, prepend=close[0])
+    gain_daily = np.where(delta_daily > 0, delta_daily, 0)
+    loss_daily = np.where(delta_daily < 0, -delta_daily, 0)
+    avg_gain_daily = pd.Series(gain_daily).rolling(window=14, min_periods=14).mean().values
+    avg_loss_daily = pd.Series(loss_daily).rolling(window=14, min_periods=14).mean().values
+    rs_daily = avg_gain_daily / (avg_loss_daily + 1e-10)
+    daily_rsi = 100 - (100 / (1 + rs_daily))
+    
+    # Daily volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(14, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(weekly_rsi_aligned[i]) or np.isnan(weekly_adx_aligned[i]) or 
+            np.isnan(daily_rsi[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Weekly regime filter: ADX > 25 for trending, RSI not extreme
+        adx = weekly_adx_aligned[i]
+        weekly_rsi_val = weekly_rsi_aligned[i]
+        trending = adx > 25
+        not_overbought = weekly_rsi_val < 70
+        not_oversold = weekly_rsi_val > 30
         
         if position == 0:
-            # Long: Price breaks above upper Donchian(20) with volume
-            if (close[i] > upper_20_aligned[i] and 
+            # Long: Daily RSI oversold (<30) in weekly uptrend with volume
+            if (daily_rsi[i] < 30 and weekly_rsi_val > 50 and trending and
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian(20) with volume
-            elif (close[i] < lower_20_aligned[i] and 
+            # Short: Daily RSI overbought (>70) in weekly downtrend with volume
+            elif (daily_rsi[i] > 70 and weekly_rsi_val < 50 and trending and
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to the opposite Donchian channel
+            # Exit: Daily RSI returns to neutral zone (40-60)
             if position == 1:
-                if close[i] < lower_20_aligned[i]:
+                if daily_rsi[i] > 60:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > upper_20_aligned[i]:
+                if daily_rsi[i] < 40:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -84,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Volume_Session"
-timeframe = "4h"
+name = "1D_WeeklyTrend_DailyRSI_Volume"
+timeframe = "1d"
 leverage = 1.0
