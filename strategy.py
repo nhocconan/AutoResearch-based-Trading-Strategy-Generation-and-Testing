@@ -8,31 +8,27 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Daily timeframe strategy
-    # Hypothesis: Combine weekly Bollinger Band squeeze with daily price action and volume
-    # Works in bull markets (breakouts from squeeze) and bear markets (mean reversion at bands)
-    # Low frequency trading to minimize fee drag
+    # Hypothesis: 6h Donchian breakout with 12h trend filter and volume confirmation
+    # Works in bull/bear by using 12h EMA for trend direction and volume to filter false breakouts
+    # Target: 50-150 trades over 4 years (12-37/year)
     
-    # Load weekly data for Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Load 12h data for trend filter (EMA50) and Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Weekly Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
-    bb_width = (upper_band - lower_band) / sma_20
+    # 12h EMA50 for trend filter
+    ema_12h_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
     
-    # Align weekly Bollinger Bands to daily
-    sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
-    bb_width_aligned = align_htf_to_ltf(prices, df_1w, bb_width)
+    # 12h Donchian channel (20-period)
+    high_roll = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_high = align_htf_to_ltf(prices, df_12h, high_roll)
+    donchian_low = align_htf_to_ltf(prices, df_12h, low_roll)
     
-    # Daily ATR for volatility filter (14-period)
+    # 6h ATR for volatility filter (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -52,8 +48,7 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(sma_20_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
-            np.isnan(lower_band_aligned[i]) or np.isnan(bb_width_aligned[i]) or
+        if (np.isnan(ema_12h_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -61,27 +56,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Bollinger Band squeeze condition (low volatility)
-            squeeze = bb_width_aligned[i] < 0.03  # 3% width threshold
-            
-            # Long: Price breaks above upper band with volume surge during squeeze
-            if squeeze and close[i] > upper_band_aligned[i] and vol_surge[i]:
+            # Long: Price breaks above 12h Donchian high with volume surge AND 12h EMA50 uptrend
+            if close[i] > donchian_high[i] and vol_surge[i] and close[i] > ema_12h_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower band with volume surge during squeeze
-            elif squeeze and close[i] < lower_band_aligned[i] and vol_surge[i]:
+            # Short: Price breaks below 12h Donchian low with volume surge AND 12h EMA50 downtrend
+            elif close[i] < donchian_low[i] and vol_surge[i] and close[i] < ema_12h_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to middle band (mean reversion)
+            # Exit: Price returns to the opposite Donchian level
             if position == 1:
-                if close[i] < sma_20_aligned[i]:
+                if close[i] < donchian_low[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > sma_20_aligned[i]:
+                if close[i] > donchian_high[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -89,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_BollingerSqueeze_Breakout_WeeklyBB_VolumeSurge_v1"
-timeframe = "1d"
+name = "6h_Donchian_Breakout_12hEMA50_Trend_VolumeSurge_v1"
+timeframe = "6h"
 leverage = 1.0
