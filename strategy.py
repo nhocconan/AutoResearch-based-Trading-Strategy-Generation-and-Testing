@@ -3,64 +3,64 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 12h trend filter and volume confirmation.
-# Long when green line (lips) > red line (teeth) > blue line (jaw) + volume spike + price > 12h EMA50
-# Short when green line < red line < blue line + volume spike + price < 12h EMA50
-# Exit when Alligator lines re-converge (lips crosses teeth) or volume drops below 70% of average.
-# Alligator is trend-following; works in strong trends (bull/bear). Volume filters false breakouts.
-# Target: 20-35 trades/year to avoid excessive fee drag.
+# Hypothesis: 4h Williams Fractal breakout with volume spike and 1d EMA34 trend filter.
+# Long when bullish fractal breaks above previous high + volume spike + price > 1d EMA34
+# Short when bearish fractal breaks below previous low + volume spike + price < 1d EMA34
+# Exit when price crosses back through fractal level or volume drops below 80% of average.
+# Williams Fractals identify potential turning points, effective in both trending and ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 34:
         return np.zeros(n)
     
-    # Load 12h data for Alligator and EMA50
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load 1d data for fractal calculation and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator: SMAs of median price
-    # Jaw (blue): 13-period SMA, shifted 8 bars
-    # Teeth (red): 8-period SMA, shifted 5 bars
-    # Lips (green): 5-period SMA, shifted 3 bars
-    median_price = (high_12h + low_12h) / 2
-    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    # Calculate Williams Fractals (5-bar pattern)
+    # Bullish fractal: low[n-2] < low[n-1] and low[n] < low[n-1] and low[n+1] < low[n-1] and low[n+2] < low[n-1]
+    # Bearish fractal: high[n-2] > high[n-1] and high[n] > high[n-1] and high[n+1] > high[n-1] and high[n+2] > high[n-1]
+    n_1d = len(high_1d)
+    bullish_fractal = np.full(n_1d, np.nan)
+    bearish_fractal = np.full(n_1d, np.nan)
     
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    # Set NaN for shifted values
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    for i in range(2, n_1d - 2):
+        if (low_1d[i-2] > low_1d[i] and 
+            low_1d[i-1] > low_1d[i] and 
+            low_1d[i+1] > low_1d[i] and 
+            low_1d[i+2] > low_1d[i]):
+            bullish_fractal[i] = low_1d[i]  # Store the low value
+        
+        if (high_1d[i-2] < high_1d[i] and 
+            high_1d[i-1] < high_1d[i] and 
+            high_1d[i+1] < high_1d[i] and 
+            high_1d[i+2] < high_1d[i]):
+            bearish_fractal[i] = high_1d[i]  # Store the high value
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align to 4h
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike filter (24-period average)
+    # Volume spike filter (20-period average)
     volume = prices['volume'].values
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,37 +68,42 @@ def generate_signals(prices):
         
         price = prices['close'].iloc[i]
         vol = volume[i]
-        vol_ma = vol_ma_24[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        ema50 = ema50_aligned[i]
+        vol_ma = vol_ma_20[i]
+        bullish_fractal_val = bullish_fractal_aligned[i]
+        bearish_fractal_val = bearish_fractal_aligned[i]
+        ema34 = ema34_aligned[i]
         
-        # Volume filter: current volume > 1.7 * 24-period average
-        vol_spike = vol > 1.7 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: Lips > Teeth > Jaw (Alligator awake, eating up) + volume spike + price > EMA50
-            if lips_val > teeth_val and teeth_val > jaw_val and vol_spike and price > ema50:
+            # Long conditions: price breaks above bullish fractal + volume spike + price > EMA34
+            if (not np.isnan(bullish_fractal_val) and 
+                price > bullish_fractal_val and 
+                vol_spike and 
+                price > ema34):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Lips < Teeth < Jaw (Alligator awake, eating down) + volume spike + price < EMA50
-            elif lips_val < teeth_val and teeth_val < jaw_val and vol_spike and price < ema50:
+            # Short conditions: price breaks below bearish fractal + volume spike + price < EMA34
+            elif (not np.isnan(bearish_fractal_val) and 
+                  price < bearish_fractal_val and 
+                  vol_spike and 
+                  price < ema34):
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: Alligator re-converges (lips crosses teeth) or volume dries up
+            # Exit conditions: price crosses back through fractal level or volume dries up
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when lips crosses below teeth (trend weakening) or volume dries up
-                if lips_val < teeth_val or vol < 0.7 * vol_ma:
+                # Exit when price crosses below bullish fractal or volume dries up
+                if (not np.isnan(bullish_fractal_val) and price < bullish_fractal_val) or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when lips crosses above teeth (trend weakening) or volume dries up
-                if lips_val > teeth_val or vol < 0.7 * vol_ma:
+                # Exit when price crosses above bearish fractal or volume dries up
+                if (not np.isnan(bearish_fractal_val) and price > bearish_fractal_val) or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Williams_Alligator_12hEMA50_Volume"
+name = "4h_Williams_Fractal_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
