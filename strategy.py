@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 12-hour Donchian channel breakout with daily trend filter and volume confirmation.
-Go long when price breaks above 12h Donchian upper band (20-period) and daily trend is up with volume confirmation.
-Go short when price breaks below Donchian lower band and daily trend is down with volume confirmation.
-Exit on opposite breakout or volatility expansion. Designed for low trade frequency (12-37/year) with trend-following edge.
-Works in both bull and bear markets by following the daily trend.
+Hypothesis: 4-hour Volume-Weighted Average Price (VWAP) mean reversion with daily volatility regime filter.
+Long when price deviates >1.5 standard deviations below VWAP during low volatility (VIX-like regime),
+short when price deviates >1.5 standard deviations above VWAP during low volatility.
+Exit when price returns to VWAP or volatility expands. Designed for 4h timeframe to capture
+mean reversion in ranging markets while avoiding trending periods. Works in both bull and bear
+markets by fading extremes during low volatility regimes.
 """
 
 import numpy as np
@@ -22,62 +23,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Typical price for VWAP calculation
+    typical_price = (high + low + close) / 3.0
     
-    # Daily trend filter (EMA 34)
+    # VWAP (20-period)
+    pv = typical_price * volume
+    cum_pv = np.nancumsum(pv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
+    
+    # Standard deviation of price deviation from VWAP (20-period)
+    price_dev = typical_price - vwap
+    price_dev_series = pd.Series(price_dev)
+    dev_std = price_dev_series.rolling(window=20, min_periods=20).std().values
+    
+    # Daily volatility regime: ATR(14) percentile (50-period lookback)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_pct = pd.Series(atr).rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    
+    # Load daily data for trend filter - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 10:
         return np.zeros(n)
     
+    # Daily EMA50 for trend direction (avoid trading against strong trend)
     daily_close = df_daily['close'].values
-    daily_ema34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    daily_ema34_aligned = align_htf_to_ltf(prices, df_daily, daily_ema34)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    ema50_daily = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(daily_ema34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(vwap[i]) or np.isnan(dev_std[i]) or 
+            np.isnan(atr_pct[i]) or np.isnan(ema50_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
+        # Low volatility regime: ATR percentile < 40% (avoid high volatility trending periods)
+        low_vol = atr_pct[i] < 0.4
+        
+        # VWAP deviation in standard deviations
+        if dev_std[i] > 0:
+            dev_sigma = price_dev[i] / dev_std[i]
+        else:
+            dev_sigma = 0
         
         if position == 0:
-            # Long: breakout above upper band + daily uptrend + volume spike
-            if close[i] > donchian_high[i] and daily_ema34_aligned[i] > daily_ema34_aligned[i-1] and vol_spike:
+            # Long: low vol + price < -1.5 sigma below VWAP + not in strong downtrend
+            if low_vol and dev_sigma < -1.5 and ema50_daily_aligned[i] > ema50_daily_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower band + daily downtrend + volume spike
-            elif close[i] < donchian_low[i] and daily_ema34_aligned[i] < daily_ema34_aligned[i-1] and vol_spike:
+            # Short: low vol + price > +1.5 sigma above VWAP + not in strong uptrend
+            elif low_vol and dev_sigma > 1.5 and ema50_daily_aligned[i] < ema50_daily_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: opposite breakout or volatility expansion (price retracement to midpoint)
+            # Exit: price returns to VWAP (±0.5 sigma) or volatility expands
             exit_signal = False
             
-            # Calculate Donchian midpoint for exit condition
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            
             if position == 1:
-                # Exit long: breakdown below lower band or price returns to midpoint
-                if close[i] < donchian_low[i] or close[i] < donchian_mid:
+                # Exit long: price >= VWAP - 0.5 sigma or high volatility
+                if dev_sigma >= -0.5 or atr_pct[i] > 0.6:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: breakout above upper band or price returns to midpoint
-                if close[i] > donchian_high[i] or close[i] > donchian_mid:
+                # Exit short: price <= VWAP + 0.5 sigma or high volatility
+                if dev_sigma <= 0.5 or atr_pct[i] > 0.6:
                     exit_signal = True
             
             if exit_signal:
@@ -88,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_DailyTrend_Volume"
-timeframe = "12h"
+name = "4h_VWAP_MeanReversion_VolRegime_DailyTrend"
+timeframe = "4h"
 leverage = 1.0
