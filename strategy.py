@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -48,7 +48,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First TR is just high-low
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly pivot levels and ATR to 12h timeframe
+    # Align weekly pivot levels and ATR to 6h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_daily, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, df_daily, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_daily, weekly_s1)
@@ -58,7 +58,7 @@ def generate_signals(prices):
     weekly_s3_aligned = align_htf_to_ltf(prices, df_daily, weekly_s3)
     atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
     
-    # Calculate 12h volume average (20-period)
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -94,13 +94,13 @@ def generate_signals(prices):
             if (close[i] > weekly_r1_aligned[i] and 
                 volume[i] > 1.5 * vol_avg_20[i] and
                 atr_14_aligned[i] > 0):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Price crosses below weekly S1 with volume confirmation
             elif (close[i] < weekly_s1_aligned[i] and 
                   volume[i] > 1.5 * vol_avg_20[i] and
                   atr_14_aligned[i] > 0):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit: Price returns to weekly pivot level
@@ -109,16 +109,16 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
                 if close[i] > weekly_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
-name = "12H_WeeklyPivot_R1S1_Volume_ATR_Filter"
-timeframe = "12h"
+name = "6H_WeeklyPivot_R1S1_Volume_ATR_Filter"
+timeframe = "6h"
 leverage = 1.0
