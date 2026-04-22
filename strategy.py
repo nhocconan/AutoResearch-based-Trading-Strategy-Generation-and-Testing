@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA(14,2,30) direction with RSI(14) pullback and volume confirmation
-# Uses Kaufman's Adaptive Moving Average to identify trend direction efficiently.
-# Enters on pullbacks to KAMA during established trends with volume confirmation.
-# Designed to work in both bull and bear markets by following trend with mean-reversion entries.
-# Target: 20-30 trades/year per symbol (80-120 total) to avoid fee drag.
+# Hypothesis: 6h Donchian breakout with daily pivot direction and volume confirmation
+# Uses 6h Donchian(20) breakouts confirmed by 1d pivot direction (bullish if close > pivot)
+# Requires volume spike to confirm breakout strength.
+# Works in bull markets via upward breakouts, in bear via downward breakouts.
+# Target: 15-25 trades/year per symbol (60-100 total) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,78 +19,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA ( Kaufman's Adaptive Moving Average )
-    # Parameters: length=14, fast=2, slow=30
-    kama_length = 14
-    fast_sc = 2
-    slow_sc = 30
+    # Calculate 6h Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate change and volatility
-    change = np.abs(close - np.roll(close, kama_length))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+    # Load daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Handle first kama_length elements
-    change[:kama_length] = 0
-    volatility[:kama_length] = 0
+    # Calculate daily pivot point (standard: (H+L+C)/3)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
     
-    # Calculate efficiency ratio and smoothing constant
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[kama_length] = close[kama_length]
-    for i in range(kama_length + 1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation (20-period average)
+    # Volume spike filter (20-period on 6h)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > 1.5 * vol_ma20
+    vol_spike = volume > 2.0 * vol_ma20
     
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (aligns with major market sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
+    
+    # Align daily pivot to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if data not ready or outside session
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price pulls back to KAMA in uptrend (price > KAMA) with RSI < 40 and volume confirmation
-            if (close[i] > kama[i] and rsi[i] < 40 and vol_confirm[i]):
+            # Long: Break above Donchian high + price above pivot + volume spike
+            if (high[i] > high_max[i-1] and close[i] > pivot_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price pulls back to KAMA in downtrend (price < KAMA) with RSI > 60 and volume confirmation
-            elif (close[i] < kama[i] and rsi[i] > 60 and vol_confirm[i]):
+            # Short: Break below Donchian low + price below pivot + volume spike
+            elif (low[i] < low_min[i-1] and close[i] < pivot_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses KAMA or RSI reaches extreme
+            # Exit: Price returns to opposite Donchian level
             if position == 1:
-                if close[i] < kama[i] or rsi[i] > 70:
+                if low[i] < low_min[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > kama[i] or rsi[i] < 30:
+                if high[i] > high_max[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -98,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_RSI_Pullback_Volume_Session"
-timeframe = "4h"
+name = "6h_Donchian20_Pivot_Direction_Volume"
+timeframe = "6h"
 leverage = 1.0
