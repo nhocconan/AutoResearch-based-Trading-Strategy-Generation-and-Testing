@@ -5,24 +5,44 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
-    # Load daily data once for HL2 and EMA
+    # Load daily data once for Pivot and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate HL2 (typical price) for Elder Ray
-    hl2_1d = (high_1d + low_1d) / 2
+    # Calculate daily pivot points (R1, S1, PP)
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12
+    s1_1d = close_1d - range_1d * 1.1 / 12
+    pp_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Calculate EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily ATR (14-period) for volatility filter
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, tr2)
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align to 6h timeframe
-    hl2_aligned = align_htf_to_ltf(prices, df_1d, hl2_1d)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # 4-hour RSI (14-period) for momentum filter
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
@@ -31,51 +51,60 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(30, n):
         # Skip if any data is not ready
-        if (np.isnan(hl2_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or 
+            np.isnan(rsi[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        hl2 = hl2_aligned[i]
-        ema50 = ema50_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        pp = pp_aligned[i]
+        atr = atr_aligned[i]
+        rsi_val = rsi[i]
         
-        # Calculate Elder Ray components
-        bull_power = price - ema50
-        bear_power = ema50 - price
+        # Volatility filter: ATR > 0.5 * 20-period ATR average (avoid low volatility chop)
+        atr_ma_20 = pd.Series(atr_aligned).rolling(window=20, min_periods=20).mean().values[i]
+        vol_filter = atr > 0.5 * atr_ma_20
         
         # Volume filter: current volume > 1.5 * 20-day average
         vol_spike = vol > 1.5 * vol_ma
         
+        # RSI filter: avoid overbought/oversold extremes
+        rsi_filter = (rsi_val > 30) and (rsi_val < 70)
+        
         if position == 0:
-            # Long conditions: Bull Power > 0 + volume spike + price > HL2
-            if bull_power > 0 and vol_spike and price > hl2:
+            # Long conditions: price breaks above R1 + volume spike + volatility + RSI filter
+            if price > r1 and vol_spike and vol_filter and rsi_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bear Power > 0 + volume spike + price < HL2
-            elif bear_power > 0 and vol_spike and price < hl2:
+            # Short conditions: price breaks below S1 + volume spike + volatility + RSI filter
+            elif price < s1 and vol_spike and vol_filter and rsi_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: Elder Ray reverses or volume dries up
+            # Exit conditions: price crosses back through PP or volatility drops significantly
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Bull Power <= 0 or volume dries up
-                if bull_power <= 0 or vol < 0.8 * vol_ma:
+                # Exit when price crosses below PP or volatility drops
+                if price < pp or atr < 0.3 * atr_ma_20:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when Bear Power <= 0 or volume dries up
-                if bear_power <= 0 or vol < 0.8 * vol_ma:
+                # Exit when price crosses above PP or volatility drops
+                if price > pp or atr < 0.3 * atr_ma_20:
                     exit_signal = True
             
             if exit_signal:
@@ -87,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_EMA50_Volume"
-timeframe = "6h"
+name = "4h_Pivot_R1_S1_Breakout_ATR_Volume_RSI"
+timeframe = "4h"
 leverage = 1.0
