@@ -1,34 +1,15 @@
 #!/usr/bin/env python3
-
 """
-Hypothesis: 1-day Williams Fractal Breakout with 1-week EMA trend filter and volume confirmation.
-Trades breakouts of weekly Williams Fractal levels in the direction of the weekly EMA trend.
-Uses daily volume spike to confirm institutional interest at key levels. Designed for low trade
-frequency (15-30 trades/year) to minimize fee flood and work in both bull and bear markets by
-aligning with higher timeframe trend and using breakout logic at significant pivot points.
+Hypothesis: 4-hour Bollinger Band Squeeze with 1-day ATR volatility regime filter and volume confirmation.
+Trades breakouts from low volatility periods (Bollinger Band width < 20th percentile) in the direction of
+the daily ATR trend (increasing volatility = trend continuation). Uses volume spike to confirm breakout
+strength. Designed for low trade frequency (15-30 trades/year) to minimize fee flood and work in both
+bull and bear markets by trading volatility expansions rather than directional bias.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_williams_fractals(high, low):
-    """Calculate Williams Fractals: bearish (high) and bullish (low) fractals."""
-    n = len(high)
-    bearish = np.full(n, np.nan)
-    bullish = np.full(n, np.nan)
-    
-    for i in range(2, n - 2):
-        # Bearish fractal: highest high with two lower highs on each side
-        if (high[i] > high[i-1] and high[i] > high[i-2] and 
-            high[i] > high[i+1] and high[i] > high[i+2]):
-            bearish[i] = high[i]
-        # Bullish fractal: lowest low with two higher lows on each side
-        if (low[i] < low[i-1] and low[i] < low[i-2] and 
-            low[i] < low[i+1] and low[i] < low[i+2]):
-            bullish[i] = low[i]
-    
-    return bearish, bullish
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,62 +21,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter and Williams Fractals - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + bb_std * std
+    lower = sma - bb_std * std
+    bb_width = upper - lower
+    
+    # Daily ATR for volatility regime (14-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Weekly EMA for trend filter (34-period)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Williams Fractals
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_1w, low_1w)
-    # Williams fractals need 2 extra weekly bars for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Daily volume spike: current volume > 2.0x 20-period average
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Bollinger Band width percentile (20-period lookback)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    
+    # Volume spike: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bb_width_percentile[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(upper[i]) or np.isnan(lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Regime filter: low volatility (BB width < 30th percentile) AND increasing volatility (ATR rising)
+        low_vol_regime = bb_width_percentile[i] < 0.30
+        vol_increasing = atr_14_1d_aligned[i] > atr_14_1d_aligned[i-1] if i > 0 else False
         
-        if position == 0 and vol_spike:
-            # Long: price breaks above bearish fractal (resistance) with uptrend bias
-            if close[i] > bearish_fractal_aligned[i] and close[i] > ema_34_1w_aligned[i]:
+        # Volume confirmation
+        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
+        
+        if position == 0 and low_vol_regime and vol_increasing and vol_spike:
+            # Breakout direction: above upper band = long, below lower band = short
+            if close[i] > upper[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below bullish fractal (support) with downtrend bias
-            elif close[i] < bullish_fractal_aligned[i] and close[i] < ema_34_1w_aligned[i]:
+            elif close[i] < lower[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to opposite fractal level or trend reverses
+            # Exit: volatility contraction (BB width expanding) or opposite band touch
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below bullish fractal or closes below weekly EMA
-                if close[i] < bullish_fractal_aligned[i] or close[i] < ema_34_1w_aligned[i]:
+                # Exit long: price touches lower band or volatility contracting
+                if close[i] < lower[i] or bb_width_percentile[i] > 0.70:
                     exit_signal = True
-            else:  # position == -1
-                # Exit short: price crosses above bearish fractal or closes above weekly EMA
-                if close[i] > bearish_fractal_aligned[i] or close[i] > ema_34_1w_aligned[i]:
+            elif position == -1:
+                # Exit short: price touches upper band or volatility contracting
+                if close[i] > upper[i] or bb_width_percentile[i] > 0.70:
                     exit_signal = True
             
             if exit_signal:
@@ -106,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Williams_Fractal_Breakout_1wEMA34_Volume"
-timeframe = "1d"
+name = "4h_BollingerSqueeze_ATRVolatilityRegime_Volume"
+timeframe = "4h"
 leverage = 1.0
