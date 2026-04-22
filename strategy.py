@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,19 +13,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot and trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Load weekly data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly EMA20 for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align EMA34 to 1h timeframe
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align EMA20 to 6h timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate daily OHLC for Camarilla pivot levels
+    # Calculate daily OHLC for pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
@@ -46,12 +50,12 @@ def generate_signals(prices):
     s1 = close_prev - (range_val * 1.1 / 12)
     r1 = close_prev + (range_val * 1.1 / 12)
     
-    # Align all levels to 1h timeframe
+    # Align all levels to 6h timeframe
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Calculate 1h volume average (20-period)
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -60,10 +64,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(35, n):  # Start after EMA lookback
+    for i in range(30, n):  # Start after EMA lookback
         # Skip if data not ready
         if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema34_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -81,17 +85,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price closes above R1 with bullish daily trend and volume spike
+            # Long: Price closes above R1 with bullish weekly trend and volume spike
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_aligned[i] and  # Bullish trend: price above EMA34
+                close[i] > ema20_1w_aligned[i] and  # Bullish trend: price above weekly EMA20
                 volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: Price closes below S1 with bearish daily trend and volume spike
+            # Short: Price closes below S1 with bearish weekly trend and volume spike
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_aligned[i] and  # Bearish trend: price below EMA34
+                  close[i] < ema20_1w_aligned[i] and  # Bearish trend: price below weekly EMA20
                   volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions: price returns to pivot point
@@ -110,10 +114,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_1dEMA34_Trend_Volume"
-timeframe = "1h"
+name = "6h_Camarilla_R1S1_1wEMA20_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
