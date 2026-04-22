@@ -1,45 +1,54 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with Elder Ray power confirmation and volume spike.
-# Long when: Green phase (jaw<teeth<lips) + bull power > 0 + volume spike
-# Short when: Red phase (lips<teeth<jaw) + bear power < 0 + volume spike
-# Exit when: Opposite Alligator phase or volume drops below 80% of average.
-# Uses 1d for Alligator/Elder Ray calculations to reduce noise.
-# Target: 20-30 trades/year to avoid excessive fee drag.
+# Hypothesis: 6h Williams Alligator (13,8,13) with 1d trend filter and volume confirmation.
+# Long when Jaw < Teeth < Lips (bullish alignment) + price > 1d EMA50 + volume > 1.5x avg
+# Short when Jaw > Teeth > Lips (bearish alignment) + price < 1d EMA50 + volume > 1.5x avg
+# Exit when alignment breaks or volume drops below average.
+# Williams Alligator captures trending markets; 1d EMA filter avoids counter-trend trades.
+# Volume confirmation ensures moves have participation. Target: 15-30 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Alligator and Elder Ray calculations
+    # Load 1d data for EMA50
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams Alligator (13,8,5 SMAs with future shifts)
-    # Jaw (13-period, 8-bar shift)
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (8-period, 5-bar shift)
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (5-period, 3-bar shift)
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate 1d EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Elder Ray Power (13-period EMA)
-    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13
-    bear_power = low_1d - ema13
+    # Calculate Williams Alligator on 6h data
+    # Jaw: 13-period SMMA, smoothed 8 periods ahead
+    # Teeth: 8-period SMMA, smoothed 5 periods ahead  
+    # Lips: 5-period SMMA, smoothed 3 periods ahead
+    close = prices['close'].values
     
-    # Align to 12h
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    def smma(data, period):
+        """Smoothed Moving Average"""
+        if len(data) < period:
+            return np.full_like(data, np.nan, dtype=float)
+        result = np.full_like(data, np.nan, dtype=float)
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (prev_smma * (period-1) + current_price) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    jaw_raw = smma(close, 13)
+    teeth_raw = smma(close, 8)
+    lips_raw = smma(close, 5)
+    
+    # Apply smoothing offsets
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
@@ -50,12 +59,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema50_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,41 +69,36 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
         
-        # Alligator phases
-        green_phase = (jaw_val < teeth_val) and (teeth_val < lips_val)  # Jaw < Teeth < Lips
-        red_phase = (lips_val < teeth_val) and (teeth_val < jaw_val)   # Lips < Teeth < Jaw
+        # Alligator alignment conditions
+        bullish_alignment = jaw[i] < teeth[i] < lips[i]
+        bearish_alignment = jaw[i] > teeth[i] > lips[i]
         
         # Volume filter: current volume > 1.5 * 20-day average
         vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long conditions: Green phase + bull power > 0 + volume spike
-            if green_phase and bull_power_val > 0 and vol_spike:
+            # Long conditions: bullish alignment + price > EMA50 + volume spike
+            if bullish_alignment and price > ema50_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Red phase + bear power < 0 + volume spike
-            elif red_phase and bear_power_val < 0 and vol_spike:
+            # Short conditions: bearish alignment + price < EMA50 + volume spike
+            elif bearish_alignment and price < ema50_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: Opposite phase or volume dries up
+            # Exit conditions: alignment breaks or volume drops
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when red phase or volume dries up
-                if red_phase or vol < 0.8 * vol_ma:
+                # Exit when bullish alignment breaks or volume drops
+                if not bullish_alignment or vol < vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when green phase or volume dries up
-                if green_phase or vol < 0.8 * vol_ma:
+                # Exit when bearish alignment breaks or volume drops
+                if not bearish_alignment or vol < vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ElderRay_Volume"
-timeframe = "12h"
+name = "6h_WilliamsAlligator_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
