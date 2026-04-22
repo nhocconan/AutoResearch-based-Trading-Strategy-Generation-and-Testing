@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for pivot levels (no look-ahead)
+    # Load daily data once for pivot levels and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -29,7 +29,7 @@ def generate_signals(prices):
     r2_1d = pp_1d + (prev_high_1d - prev_low_1d)  # R2 = P + (High - Low)
     s2_1d = pp_1d - (prev_high_1d - prev_low_1d)  # S2 = P - (High - Low)
     
-    # Load weekly data for trend filter (no look-ahead)
+    # Load weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -48,7 +48,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all HTF data to 6h timeframe
+    # Align all HTF data to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
@@ -86,12 +86,12 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R2 with volume + above weekly EMA50 (bullish bias)
             if price > r2 and vol > 2.0 * vol_ma and price > ema50_1w:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
             # Short: price breaks below S2 with volume + below weekly EMA50 (bearish bias)
             elif price < s2 and vol > 2.0 * vol_ma and price < ema50_1w:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         
@@ -109,10 +109,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "6h_WeeklyTrend_R2_S2_Breakout_Volume_ATRStop"
-timeframe = "6h"
+name = "12h_WeeklyTrend_R2_S2_Breakout_Volume_ATRStop_v2"
+timeframe = "12h"
 leverage = 1.0
