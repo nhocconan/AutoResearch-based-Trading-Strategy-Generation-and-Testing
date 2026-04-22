@@ -1,27 +1,20 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 6-hour Williams %R with 1-day trend filter and volume spike confirmation.
-Williams %R identifies overbought/oversold conditions. Using daily trend filter avoids
-counter-trend trades. Volume spikes confirm institutional interest at reversals.
-This should work in both bull and bear regimes by adapting to the daily trend.
-Target: 20-40 trades/year per symbol.
+Hypothesis: 12-hour Donchian(20) breakout with 1-week trend filter and volume confirmation.
+Donchian breakouts capture breakout momentum. Weekly trend filter ensures we only trade
+in the direction of the major trend, reducing counter-trend trades. Volume confirmation
+filters out false breakouts. This should work in both bull and bear regimes by adapting
+to the weekly trend. Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def williams_r(high, low, close, period=14):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return wr.values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,26 +22,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily trend using EMA crossover (fast/slow)
-    close_1d = df_1d['close'].values
-    ema_fast = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_slow = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
-    bullish_trend = ema_fast > ema_slow
-    bearish_trend = ema_fast < ema_slow
+    # Calculate weekly EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily trend to 6h
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
+    # Determine weekly trend: price above/below EMA34
+    bullish_trend = close_1w > ema_34_1w
+    bearish_trend = close_1w < ema_34_1w
     
-    # Calculate 6h Williams %R
-    wr = williams_r(high, low, close, 14)
+    # Align weekly trend to 12h timeframe
+    bullish_aligned = align_htf_to_ltf(prices, df_1w, bullish_trend.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1w, bearish_trend.astype(float))
     
-    # Calculate 6h volume average (20-period)
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -57,10 +52,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(34, n):
         # Skip if data not ready
-        if (np.isnan(wr[i]) or np.isnan(bullish_aligned[i]) or 
-            np.isnan(bearish_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_avg_20[i]) or
+            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,29 +73,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80), bullish daily trend, volume spike
-            if (wr[i] < -80 and 
-                bullish_aligned[i] > 0.5 and 
-                volume[i] > 2.0 * vol_avg_20[i]):
+            # Long: Donchian breakout above, bullish weekly trend, volume spike
+            if (high[i] > donchian_high[i-1] and    # Break above upper band
+                bullish_aligned[i] > 0.5 and        # Bullish weekly trend
+                volume[i] > 2.0 * vol_avg_20[i]):   # Volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20), bearish daily trend, volume spike
-            elif (wr[i] > -20 and 
-                  bearish_aligned[i] > 0.5 and 
-                  volume[i] > 2.0 * vol_avg_20[i]):
+            # Short: Donchian breakout below, bearish weekly trend, volume spike
+            elif (low[i] < donchian_low[i-1] and    # Break below lower band
+                  bearish_aligned[i] > 0.5 and      # Bearish weekly trend
+                  volume[i] > 2.0 * vol_avg_20[i]): # Volume spike
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Williams %R returns to neutral range or opposite extreme
+            # Exit: price returns to middle of Donchian channel or opposite breakout
+            middle = (donchian_high[i] + donchian_low[i]) / 2
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R rises above -50 (momentum fading)
-                if wr[i] > -50:
+                # Exit long: price drops below middle OR breaks below lower band
+                if (close[i] < middle or low[i] < donchian_low[i]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R falls below -50 (momentum fading)
-                if wr[i] < -50:
+                # Exit short: price rises above middle OR breaks above upper band
+                if (close[i] > middle or high[i] > donchian_high[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
