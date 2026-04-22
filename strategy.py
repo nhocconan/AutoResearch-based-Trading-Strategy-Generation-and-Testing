@@ -23,31 +23,40 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and Camarilla levels (R4/S4 are key breakout levels)
+    # Calculate pivot and Camarilla levels (R1/S1 for exit, R4/S4 for entry)
     pivot = (high_1d + low_1d + close_1d) / 3
     range_ = high_1d - low_1d
     r4 = close_1d + range_ * 1.1 / 2  # Resistance level 4
     s4 = close_1d - range_ * 1.1 / 2  # Support level 4
+    r1 = close_1d + range_ * 1.1 / 12  # Resistance level 1
+    s1 = close_1d - range_ * 1.1 / 12  # Support level 1
     
     # 1d EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all levels to 4h timeframe
+    # Align all levels to 1h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        # Skip if data not ready
+        # Skip if data not ready or outside session
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,37 +66,32 @@ def generate_signals(prices):
             # Long: Price breaks above R4 with volume spike AND above 1d EMA34 (uptrend)
             if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
                 close[i] > ema_34_aligned[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: Price breaks below S4 with volume spike AND below 1d EMA34 (downtrend)
             elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
                   close[i] < ema_34_aligned[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
             if position == 1:
-                # Exit long: Price closes below S1 (calculated from previous day)
-                # Recalculate S1 for exit condition
-                s1 = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12 if i > 0 else np.nan
-                s1_aligned_exit = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, s1))[i] if not np.isnan(s1) else np.nan
-                if not np.isnan(s1_aligned_exit) and close[i] < s1_aligned_exit:
+                # Exit long: Price closes below S1
+                if not np.isnan(s1_aligned[i]) and close[i] < s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                # Exit short: Price closes above R1 (calculated from previous day)
-                r1 = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12 if i > 0 else np.nan
-                r1_aligned_exit = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, r1))[i] if not np.isnan(r1) else np.nan
-                if not np.isnan(r1_aligned_exit) and close[i] > r1_aligned_exit:
+                # Exit short: Price closes above R1
+                if not np.isnan(r1_aligned[i]) and close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
