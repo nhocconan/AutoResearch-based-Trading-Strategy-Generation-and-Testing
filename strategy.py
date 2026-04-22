@@ -13,7 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for pivot calculation - ONCE before loop
+    # Load daily data for Donchian(20) - ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian(20) channels from daily data
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian channels to 6h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
+    
+    # Load weekly data for pivot calculation
     df_weekly = get_htf_data(prices, '1w')
     if len(df_weekly) < 5:
         return np.zeros(n)
@@ -22,37 +37,13 @@ def generate_signals(prices):
     high_weekly = df_weekly['high'].values
     low_weekly = df_weekly['low'].values
     close_weekly_prev = df_weekly['close'].values
-    
-    # Standard pivot point: P = (H + L + C) / 3
     pp = (high_weekly + low_weekly + close_weekly_prev) / 3.0
-    # Weekly pivot trend: above PP = bullish, below PP = bearish
-    pp_trend = pp  # we'll use the actual PP value for comparison
+    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
     
-    # Align weekly pivot to daily timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp_trend)
-    
-    # Load daily data for Donchian calculation
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
-        return np.zeros(n)
-    
-    # Calculate Donchian(20) channels from daily data
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    
-    # Upper channel: 20-day high
-    upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
-    # Lower channel: 20-day low
-    lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian channels to daily timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
-    
-    # Calculate daily volume average (20-period)
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-calculate session hours (08-20 UTC) - skip overnight
+    # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -60,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(upper_20_aligned[i]) or 
-            np.isnan(lower_20_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -107,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_WeeklyPivot_Trend_Volume_Session"
-timeframe = "1d"
+name = "6H_Donchian20_WeeklyPivot_Trend_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
