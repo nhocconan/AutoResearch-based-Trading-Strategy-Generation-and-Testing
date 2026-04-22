@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,45 +13,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points (ONCE before loop)
+    # Load 1d data for daily open (used as reference level)
     df_1d = get_htf_data(prices, '1d')
-    
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's pivot points (standard)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    prev_high = high_1d
-    prev_low = low_1d
-    prev_close = close_1d
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
-    r4 = r3 + (high_1d - low_1d)
-    s4 = s3 - (high_1d - low_1d)
-    
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Daily open price (from previous day)
+    daily_open = df_1d['open'].values
+    daily_open_aligned = align_htf_to_ltf(prices, df_1d, daily_open)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for volatility filter
+    # ATR for volatility filter and position sizing
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -60,48 +34,56 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_avg_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(daily_open_aligned[i]) or np.isnan(vol_avg_20[i]) or 
+            np.isnan(atr[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R4 with volume spike
-            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]):
-                signals[i] = 0.25
+            # Long: Price above daily open with volume surge and low volatility
+            if (close[i] > daily_open_aligned[i] and 
+                volume[i] > 1.8 * vol_avg_20[i] and
+                atr[i] < 0.8 * np.median(atr[max(0, i-50):i+1])):  # Low volatility filter
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S4 with volume spike
-            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]):
-                signals[i] = -0.25
+            # Short: Price below daily open with volume surge and low volatility
+            elif (close[i] < daily_open_aligned[i] and 
+                  volume[i] > 1.8 * vol_avg_20[i] and
+                  atr[i] < 0.8 * np.median(atr[max(0, i-50):i+1])):
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: Price crosses back to opposite pivot level
+            # Exit: Price returns to daily open or volatility increases
             if position == 1:
-                # Exit long: Price closes below R2
-                if close[i] < r2_aligned[i]:
+                # Exit long: Price returns to daily open or volatility spikes
+                if (close[i] <= daily_open_aligned[i] or 
+                    atr[i] > 1.5 * np.median(atr[max(0, i-50):i+1])):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                # Exit short: Price closes above S2
-                if close[i] > s2_aligned[i]:
+                # Exit short: Price returns to daily open or volatility spikes
+                if (close[i] >= daily_open_aligned[i] or 
+                    atr[i] > 1.5 * np.median(atr[max(0, i-50):i+1])):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "6H_Pivot_R4_S4_Breakout_Volume"
-timeframe = "6h"
+name = "1H_DailyOpen_Volume_Volatility_Filter"
+timeframe = "1h"
 leverage = 1.0
