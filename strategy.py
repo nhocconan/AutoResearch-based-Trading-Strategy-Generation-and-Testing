@@ -5,27 +5,37 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 34:
         return np.zeros(n)
     
-    # Load 1d data once for Elder Ray and EMA50
+    # Load 1d data once for Pivot levels and EMA34
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # Calculate Pivot levels (based on previous day's HLC)
+    # Shift by 1 to avoid look-ahead: use previous day's data for today's levels
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan  # First value invalid
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Pivot Point and support/resistance levels
+    pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    r1_1d = 2 * pp_1d - prev_low_1d
+    s1_1d = 2 * pp_1d - prev_high_1d
     
-    # Align to 6h timeframe
-    bull_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
@@ -34,11 +44,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if any data is not ready
-        if (np.isnan(bull_aligned[i]) or 
-            np.isnan(bear_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or 
+        if (np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -48,35 +59,36 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        bull = bull_aligned[i]
-        bear = bear_aligned[i]
-        ema50 = ema50_aligned[i]
+        pp = pp_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        ema34 = ema34_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-day average
-        vol_spike = vol > 2.0 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: Bull Power > 0 + volume spike + price > EMA50
-            if bull > 0 and vol_spike and price > ema50:
+            # Long conditions: price breaks above R1 + volume spike + price > EMA34
+            if price > r1 and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bear Power < 0 + volume spike + price < EMA50
-            elif bear < 0 and vol_spike and price < ema50:
+            # Short conditions: price breaks below S1 + volume spike + price < EMA34
+            elif price < s1 and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: Elder Power reverses or volume dries up
+            # Exit conditions: price crosses back through PP or volume dries up
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Bull Power <= 0 or volume dries up
-                if bull <= 0 or vol < 0.7 * vol_ma:
+                # Exit when price crosses below PP or volume dries up
+                if price < pp or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when Bear Power >= 0 or volume dries up
-                if bear >= 0 or vol < 0.7 * vol_ma:
+                # Exit when price crosses above PP or volume dries up
+                if price > pp or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -88,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_EMA50_Volume"
-timeframe = "6h"
+name = "4h_Pivot_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
