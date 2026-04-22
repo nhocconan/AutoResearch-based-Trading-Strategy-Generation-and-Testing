@@ -3,45 +3,32 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Triple Exponential Moving Average (TEMA) crossover with 1d RSI filter and volume spike confirmation.
-# TEMA reduces lag compared to traditional moving averages, providing earlier trend signals.
-# A bullish signal occurs when TEMA(9) crosses above TEMA(21) with RSI(14) > 50 on daily timeframe and volume > 1.5x 20-period average.
-# Bearish signal when TEMA(9) crosses below TEMA(21) with RSI(14) < 50 and volume spike.
-# Designed for low trade frequency (~20-30/year) to minimize fee decay while capturing trends in both bull and bear markets.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
+# Donchian breakouts capture strong trends, EMA50 filters for trend direction, and volume spikes confirm institutional participation.
+# Designed for low trade frequency (~10-25/year) to minimize fee decay. Works in both bull and bear markets by following higher timeframe trend.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for RSI calculation (once before loop)
+    # Load 1d data for Donchian calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate RSI(14) on daily timeframe
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Donchian channels (20-period)
+    upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d RSI to 4h timeframe (waits for 1d bar to close)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    # Calculate 50-period EMA on 1d close for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate TEMA(9) and TEMA(21) on 4h close
-    close = prices['close'].values
-    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean()
-    ema9_ema = ema9.ewm(span=9, adjust=False, min_periods=9).mean()
-    ema9_ema2 = ema9_ema.ewm(span=9, adjust=False, min_periods=9).mean()
-    tema9 = 3 * ema9 - 3 * ema9_ema + ema9_ema2
-    
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean()
-    ema21_ema = ema21.ewm(span=21, adjust=False, min_periods=21).mean()
-    ema21_ema2 = ema21_ema.ewm(span=21, adjust=False, min_periods=21).mean()
-    tema21 = 3 * ema21 - 3 * ema21_ema + ema21_ema2
+    # Align 1d indicators to 1d timeframe (same timeframe, no alignment needed)
+    upper_aligned = upper  # Same timeframe
+    lower_aligned = lower  # Same timeframe
+    ema_50_aligned = ema_50_1d  # Same timeframe
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -50,11 +37,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(tema9[i]) or 
-            np.isnan(tema21[i]) or 
-            np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,40 +51,35 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        tema9_val = tema9[i]
-        tema21_val = tema21[i]
-        rsi_val = rsi_aligned[i]
+        upper_val = upper_aligned[i]
+        lower_val = lower_aligned[i]
+        ema_val = ema_50_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = vol > 1.5 * vol_ma
-        
-        # TEMA crossover signals
-        tema9_prev = tema9[i-1] if i > 0 else tema9_val
-        tema21_prev = tema21[i-1] if i > 0 else tema21_val
-        
-        bullish_cross = tema9_prev <= tema21_prev and tema9_val > tema21_val
-        bearish_cross = tema9_prev >= tema21_prev and tema9_val < tema21_val
+        # Volume filter: current volume > 2.0 * 20-period average (strict filter for low frequency)
+        vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long conditions: bullish TEMA crossover + RSI > 50 + volume spike
-            if bullish_cross and rsi_val > 50 and vol_spike:
+            # Long conditions: price breaks above upper Donchian + uptrend + volume spike
+            if price > upper_val and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: bearish TEMA crossover + RSI < 50 + volume spike
-            elif bearish_cross and rsi_val < 50 and vol_spike:
+            # Short conditions: price breaks below lower Donchian + downtrend + volume spike
+            elif price < lower_val and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: TEMA cross in opposite direction
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                if bearish_cross:
+                # Exit when price breaks below lower Donchian or trend breaks
+                if price < lower_val or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                if bullish_cross:
+                # Exit when price breaks above upper Donchian or trend breaks
+                if price > upper_val or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -109,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TEMA_Crossover_1dRSI_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
