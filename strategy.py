@@ -1,32 +1,42 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 6-hour VWAP Reversion with Weekly Trend Filter and Volume Confirmation.
-Trades reversals at VWAP (volume-weighted average price) when price deviates significantly from VWAP,
-filtered by weekly EMA trend direction and confirmed by volume spikes. Uses mean-reversion at VWAP
-deviations as the edge, which works in both bull and bear markets by aligning with higher timeframe
-trend. Designed for low trade frequency (15-35 trades/year) to minimize fee drag.
+12h Weekly Donchian Breakout with Weekly ADX Trend Filter and Volume Confirmation.
+Trades breakouts above weekly Donchian high (long) or below weekly Donchian low (short) only when weekly ADX > 25 (trending market).
+Uses volume spike to confirm breakout strength. Designed for low trade frequency (12-37/year) to minimize fee drift.
+Works in both bull and bear markets by only trading in strong trends (ADX filter) and using volatility-based stops.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_vwap(high, low, close, volume):
-    """Calculate VWAP for given arrays."""
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = typical_price * volume
-    vwap_denominator = volume
-    # Cumulative VWAP
-    cum_vwap_num = np.cumsum(vwap_numerator)
-    cum_vwap_den = np.cumsum(vwap_denominator)
-    # Avoid division by zero
-    vwap = np.divide(cum_vwap_num, cum_vwap_den, out=np.full_like(cum_vwap_num, np.nan), where=cum_vwap_den!=0)
-    return vwap
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    plus_dm = np.diff(high)
+    minus_dm = -np.diff(low)
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+    
+    tr1 = np.abs(np.diff(high))
+    tr2 = np.abs(np.diff(low))
+    tr3 = np.abs(np.diff(close))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
+    
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,65 +44,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter
+    # Load weekly data for trend filter and Donchian channels - ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Weekly EMA for trend filter (20-period)
+    # Weekly ADX for trend filter (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    adx_14_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_14_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_14_1w)
     
-    # Calculate VWAP
-    vwap = calculate_vwap(high, low, close, volume)
+    # Weekly Donchian channels (20-period)
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # VWAP deviation bands (2 standard deviations of price-VWAP difference)
-    price_vwap_diff = close - vwap
-    # Use 50-period rolling std of the difference
-    price_vwap_diff_series = pd.Series(price_vwap_diff)
-    vwap_std = price_vwap_diff_series.rolling(window=50, min_periods=50).std().values
-    vwap_upper = vwap + 2.0 * vwap_std
-    vwap_lower = vwap - 2.0 * vwap_std
-    
-    # Volume spike: current volume > 2.0x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vwap[i]) or np.isnan(vwap_upper[i]) or 
-            np.isnan(vwap_lower[i]) or np.isnan(vwap_std[i]) or np.isnan(vol_ma_30[i])):
+        if (np.isnan(adx_14_1w_aligned[i]) or np.isnan(donchian_high_20_aligned[i]) or 
+            np.isnan(donchian_low_20_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_30[i]
+        # Trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_14_1w_aligned[i] > 25
         
-        if position == 0 and vol_spike:
-            # Long: price touches/vwap_lower and weekly trend is up
-            if close[i] <= vwap_lower[i] and close[i] > ema_20_1w_aligned[i]:
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        
+        if position == 0 and strong_trend and vol_spike:
+            # Long: price breaks above weekly Donchian high
+            if close[i] > donchian_high_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches/vwap_upper and weekly trend is down
-            elif close[i] >= vwap_upper[i] and close[i] < ema_20_1w_aligned[i]:
+            # Short: price breaks below weekly Donchian low
+            elif close[i] < donchian_low_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to VWAP or weekly trend reverses
+            # Exit: price returns to opposite Donchian level or trend weakens
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses above VWAP or weekly trend turns down
-                if close[i] >= vwap[i] or close[i] < ema_20_1w_aligned[i]:
+                # Exit long: price breaks below weekly Donchian low or ADX drops below 20
+                if close[i] < donchian_low_20_aligned[i] or adx_14_1w_aligned[i] < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses below VWAP or weekly trend turns up
-                if close[i] <= vwap[i] or close[i] > ema_20_1w_aligned[i]:
+                # Exit short: price breaks above weekly Donchian high or ADX drops below 20
+                if close[i] > donchian_high_20_aligned[i] or adx_14_1w_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -103,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VWAP_Reversion_1wEMA20_Volume"
-timeframe = "6h"
+name = "12h_Weekly_Donchian_Breakout_1wADX14_Volume"
+timeframe = "12h"
 leverage = 1.0
