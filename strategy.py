@@ -3,127 +3,103 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with Elder Ray power and volume confirmation.
-# Uses weekly trend filter and daily volume spike to filter signals.
-# Long when Green line > Red line (bullish alignment) + Bull Power > 0 + volume spike.
-# Short when Red line > Green line (bearish alignment) + Bear Power > 0 + volume spike.
-# Exits when alignment breaks or volume drops.
-# Works in trending markets (both bull and bear) by following the Alligator's jaw/teeth/lips.
-# Target: 15-25 trades/year to minimize fee drag.
+# Hypothesis: 4h Bollinger Band squeeze breakout with 1d RSI filter and volume confirmation.
+# Long when price breaks above upper band + volume spike + 1d RSI > 50
+# Short when price breaks below lower band + volume spike + 1d RSI < 50
+# Bollinger squeeze identified when bandwidth < 20th percentile of last 50 periods.
+# Works in trending markets (breakouts) and avoids false signals in choppy markets via squeeze filter.
+# Target: 20-30 trades/year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (Alligator based on weekly)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Load daily data for Elder Ray and volume
+    # Load 1d data for RSI filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Williams Alligator (13,8,5 smoothed with future shift)
-    # Jaw (13-period SMMA shifted 8 bars)
-    # Teeth (8-period SMMA shifted 5 bars)
-    # Lips (5-period SMMA shifted 3 bars)
-    def smma(data, period):
-        sma = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            sma[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
-        return sma
+    # Calculate 1d RSI(14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
     
-    jaw_raw = smma(close_1w, 13)
-    teeth_raw = smma(close_1w, 8)
-    lips_raw = smma(close_1w, 5)
+    # Align 1d RSI to 4h
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Apply shifts (Jaw: +8, Teeth: +5, Lips: +3)
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    # Set invalid values to NaN
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    # Calculate 4h Bollinger Bands (20, 2)
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Elder Ray (13-period EMA)
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = ema13_1d - low_1d
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
     
-    # Daily volume spike (20-period average)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Bollinger Band Width for squeeze detection
+    bb_width = (upper_band - lower_band) / sma_20
+    # Squeeze when bandwidth < 20th percentile of last 50 periods
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
+    squeeze = bb_width < bb_width_percentile
     
-    # Align to 12h
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Volume spike filter (20-period average)
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        vol = prices['volume'].iloc[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
-        vol_ma = vol_ma_aligned[i]
+        price = close[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        upper = upper_band[i]
+        lower = lower_band[i]
+        rsi = rsi_1d_aligned[i]
+        is_squeeze = squeeze[i]
         
-        # Volume filter: current volume > 1.5 * 20-day average
-        vol_spike = vol > 1.5 * vol_ma
-        
-        # Alligator conditions
-        bullish_alignment = lips_val > teeth_val > jaw_val  # Lips > Teeth > Jaw
-        bearish_alignment = jaw_val > teeth_val > lips_val  # Jaw > Teeth > Lips
+        # Volume filter: current volume > 2.0 * 20-day average
+        vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long conditions: bullish alignment + bull power > 0 + volume spike
-            if bullish_alignment and bull_power_val > 0 and vol_spike:
+            # Long conditions: price breaks above upper band + volume squeeze + volume spike + RSI > 50
+            if price > upper and is_squeeze and vol_spike and rsi > 50:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: bearish alignment + bear power > 0 + volume spike
-            elif bearish_alignment and bear_power_val > 0 and vol_spike:
+            # Short conditions: price breaks below lower band + volume squeeze + volume spike + RSI < 50
+            elif price < lower and is_squeeze and vol_spike and rsi < 50:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: alignment breaks or volume drops
+            # Exit conditions: price returns to middle band (SMA20) or volatility expands
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when bullish alignment breaks or volume dries up
-                if not bullish_alignment or vol < 0.7 * vol_ma:
+                # Exit when price returns to SMA20 or volatility expands significantly
+                if price < sma_20[i] or bb_width[i] > bb_width_percentile[i] * 1.5:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when bearish alignment breaks or volume dries up
-                if not bearish_alignment or vol < 0.7 * vol_ma:
+                # Exit when price returns to SMA20 or volatility expands significantly
+                if price > sma_20[i] or bb_width[i] > bb_width_percentile[i] * 1.5:
                     exit_signal = True
             
             if exit_signal:
@@ -135,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ElderRay_Volume"
-timeframe = "12h"
+name = "4h_Bollinger_Squeeze_Breakout_1dRSI_Volume"
+timeframe = "4h"
 leverage = 1.0
