@@ -1,4 +1,3 @@
-#10
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -32,7 +31,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 6h timeframe (primary)
+    # Align to 4h timeframe (primary)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
@@ -82,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
