@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 12-hour Williams %R Mean Reversion with 1-day EMA trend filter and volume confirmation.
-Trades reversals at extreme Williams %R levels (oversold < -80, overbought > -20) in the direction of the daily EMA trend.
-Uses volume spike to confirm institutional interest at key levels. Designed for low trade frequency
-(12-37 trades/year) to minimize fee drag and work in both bull and bear markets by aligning with
-higher timeframe trend and using mean-reversion at extreme momentum levels.
+Hypothesis: Daily Bollinger Band Width Breakout with Weekly Trend Filter.
+Trades breakouts of Bollinger Bands when weekly EMA trend is established and Bollinger Band Width is low (squeeze).
+Uses volatility contraction followed by expansion to capture trend initiation in both bull and bear markets.
+Designed for very low trade frequency (<10 trades/year) to minimize fee drag and work in all market regimes.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtr_data import get_htf_data, align_htf_to_ltf
 
-def calculate_williams_r(high, low, close, period=14):
-    """Calculate Williams %R indicator."""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return williams_r.fillna(0).values
+def calculate_bollinger_bands(close, length=20, mult=2.0):
+    """Calculate Bollinger Bands: middle, upper, lower."""
+    basis = pd.Series(close).rolling(window=length, min_periods=length).mean().values
+    dev = pd.Series(close).rolling(window=length, min_periods=length).std().values
+    upper = basis + mult * dev
+    lower = basis - mult * dev
+    return basis, upper, lower
+
+def calculate_bb_width(upper, lower):
+    """Calculate Bollinger Band Width: (upper - lower) / middle."""
+    # Avoid division by zero
+    return (upper - lower) / np.where(upper + lower == 0, 1e-10, upper + lower) * 2
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,73 +32,69 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load daily data for trend filter and Williams %R calculation - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load weekly data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Daily EMA for trend filter (34-period)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA for trend filter (34-period)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate daily Williams %R (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    williams_r = calculate_williams_r(high_1d, low_1d, close_1d_arr, 14)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Daily Bollinger Bands (20, 2.0)
+    basis, upper, lower = calculate_bollinger_bands(close, 20, 2.0)
+    bb_width = calculate_bb_width(upper, lower)
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Bollinger Band Width percentile (20-period lookback)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or np.isnan(bb_width_percentile[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Bollinger Band Squeeze condition: width in lowest 20% percentile
+        squeeze = bb_width_percentile[i] <= 0.2
         
-        if position == 0 and vol_spike:
-            # Long: Williams %R oversold (< -80) with uptrend bias
-            if williams_r_aligned[i] < -80 and close[i] > ema_34_1d_aligned[i]:
-                signals[i] = 0.25
+        if position == 0 and squeeze:
+            # Long: price breaks above upper band with weekly uptrend
+            if close[i] > upper[i] and close[i] > ema_34_1w_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Williams %R overbought (> -20) with downtrend bias
-            elif williams_r_aligned[i] > -20 and close[i] < ema_34_1d_aligned[i]:
-                signals[i] = -0.25
+            # Short: price breaks below lower band with weekly downtrend
+            elif close[i] < lower[i] and close[i] < ema_34_1w_aligned[i]:
+                signals[i] = -0.30
                 position = -1
         else:
-            # Exit: Williams %R returns to neutral range (-50) or trend reverses
+            # Exit: price returns to middle band (mean reversion) or volatility expands too much
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R rises above -50 or price closes below daily EMA
-                if williams_r_aligned[i] > -50 or close[i] < ema_34_1d_aligned[i]:
+                # Exit long: price crosses below middle band or BB width expands significantly
+                if close[i] < basis[i] or bb_width_percentile[i] >= 0.8:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R falls below -50 or price closes above daily EMA
-                if williams_r_aligned[i] < -50 or close[i] > ema_34_1d_aligned[i]:
+                # Exit short: price crosses above middle band or BB width expands significantly
+                if close[i] > basis[i] or bb_width_percentile[i] >= 0.8:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "12h_WilliamsR_MeanReversion_1dEMA34_Volume"
-timeframe = "12h"
+name = "Daily_Bollinger_Width_Squeeze_WeeklyEMA34_Trend"
+timeframe = "1d"
 leverage = 1.0
