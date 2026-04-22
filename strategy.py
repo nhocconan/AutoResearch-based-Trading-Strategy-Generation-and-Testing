@@ -1,84 +1,32 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour RSI(2) Mean Reversion with 1-day ADX Trend Filter and Volume Confirmation.
-Trades extreme RSI(2) readings (<10 for long, >90 for short) only when the daily trend is strong (ADX>25).
-Uses volume spike to confirm institutional interest at extreme levels. Designed for low trade frequency
-(15-30 trades/year) to minimize fee decay and work in both bull and bear markets by only trading
-with the higher timeframe trend during overextended moves.
+Hypothesis: 4-hour TRIX momentum with volume confirmation and Choppiness regime filter.
+Goes long when TRIX crosses above zero line (momentum shift up) in trending markets (CHOPPINESS < 38.2),
+short when TRIX crosses below zero in trending markets. Uses volume spike to confirm institutional participation.
+Designed for low trade frequency (20-50 trades/year) to minimize fee drift and work in both bull and bear markets
+by avoiding ranging conditions (CHOPPINESS > 61.8) where momentum fails.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX (Average Directional Index)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
-    atr = np.zeros_like(tr)
-    dm_plus_smooth = np.zeros_like(dm_plus)
-    dm_minus_smooth = np.zeros_like(dm_minus)
-    
-    atr[period-1] = np.mean(tr[:period])
-    dm_plus_smooth[period-1] = np.mean(dm_plus[:period])
-    dm_minus_smooth[period-1] = np.mean(dm_minus[:period])
-    
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
-    
-    # Calculate DI+ and DI-
-    plus_di = 100 * dm_plus_smooth / atr
-    minus_di = 100 * dm_minus_smooth / atr
-    
-    # Calculate DX and ADX
-    dx = np.zeros_like(close)
-    dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
-    
-    adx = np.zeros_like(close)
-    adx[2*period-1:] = np.mean(dx[period-1:2*period-1])  # First ADX value
-    for i in range(2*period, len(close)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    return adx
+def calculate_trix(close, period=12):
+    """Calculate TRIX: triple smoothed EMA rate of change."""
+    ema1 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
+    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema3 = ema2.ewm(span=period, adjust=False, min_periods=period).mean()
+    trix = ema3.pct_change(periods=1) * 100
+    return trix.values
 
-def calculate_rsi(close, period=2):
-    """Calculate RSI"""
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)  # Same length as close
-    
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    avg_gain[period-1] = np.mean(gain[:period])
-    avg_loss[period-1] = np.mean(loss[:period])
-    
-    for i in range(period, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_chop(high, low, close, period=14):
+    """Calculate Choppiness Index: measures market consolidation vs trending."""
+    atr = pd.Series(np.sqrt(((high - low)**2 + (high - close.shift(1))**2 + (low - close.shift(1))**2) / 3)).rolling(window=period, min_periods=period).mean()
+    max_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    min_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    chop = 100 * np.log10(atr.sum() / (max_high - min_low)) / np.log10(period)
+    return chop.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -90,64 +38,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for ADX trend filter - ONCE before loop
+    # Load daily data for Choppiness filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Daily ADX for trend filter (14-period)
+    # Daily Choppiness for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, period=14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # RSI(2) on 4h close
-    rsi_2 = calculate_rsi(close, 2)
+    # TRIX indicator on price
+    trix = calculate_trix(close, period=12)
     
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma_20 = np.zeros_like(volume)
-    vol_ma_20[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
-    vol_ma_20 = np.concatenate([np.full(19, np.nan), vol_ma_20[19:]])
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(adx_14_1d_aligned[i]) or np.isnan(rsi_2[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix[i]) or np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Trend filter: only trade with strong daily trend
-        strong_trend = adx_14_1d_aligned[i] > 25
+        # Trending market condition (Choppiness < 38.2)
+        trending = chop_1d_aligned[i] < 38.2
         
-        if position == 0 and vol_spike and strong_trend:
-            # Long: extreme oversold RSI(2) < 10
-            if rsi_2[i] < 10:
+        if position == 0 and vol_spike and trending:
+            # Long: TRIX crosses above zero with volume
+            if trix[i] > 0 and trix[i-1] <= 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: extreme overbought RSI(2) > 90
-            elif rsi_2[i] > 90:
+            # Short: TRIX crosses below zero with volume
+            elif trix[i] < 0 and trix[i-1] >= 0:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral zone (40-60)
+            # Exit: TRIX crosses zero in opposite direction or market becomes ranging
             exit_signal = False
             
             if position == 1:
-                # Exit long: RSI crosses above 40
-                if rsi_2[i] > 40:
+                # Exit long: TRIX crosses below zero or market ranges
+                if trix[i] < 0 and trix[i-1] >= 0 or chop_1d_aligned[i] > 61.8:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: RSI crosses below 60
-                if rsi_2[i] < 60:
+                # Exit short: TRIX crosses above zero or market ranges
+                if trix[i] > 0 and trix[i-1] <= 0 or chop_1d_aligned[i] > 61.8:
                     exit_signal = True
             
             if exit_signal:
@@ -158,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI2_MeanReversion_1dADX25_Volume"
+name = "4h_TRIX_ZeroCross_Volume_ChopFilter"
 timeframe = "4h"
 leverage = 1.0
