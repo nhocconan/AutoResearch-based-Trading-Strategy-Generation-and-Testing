@@ -5,85 +5,72 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # 1w EMA34 for weekly trend
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # 1d RSI14 for daily momentum
+    # 1d Close for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # 1d volume spike
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > 2.0 * vol_ma20_1d
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    
-    # 1d ATR10 for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_10_1d = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
-    atr_10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
+    close_1d = df_1d['close'].values
     
-    # Daily closing price
+    # Daily Donchian(20) - upper and lower bands
+    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 12h timeframe
+    upper_band = align_htf_to_ltf(prices, df_1d, high_max_20)
+    lower_band = align_htf_to_ltf(prices, df_1d, low_min_20)
+    
+    # 12h ATR for volatility filter
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 12h Volume confirmation
+    vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_surge = prices['volume'].values > 1.8 * vol_ma20
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or 
-            np.isnan(atr_10_1d_aligned[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema1w = ema_34_1w_aligned[i]
-        rsi14 = rsi_1d_aligned[i]
-        vol_spike = vol_spike_1d_aligned[i]
-        atr10 = atr_10_1d_aligned[i]
-        
         if position == 0:
-            # Long: Above weekly EMA + RSI > 50 + volume spike
-            if (close[i] > ema1w and rsi14 > 50 and vol_spike):
+            # Long: Price breaks above upper Donchian band + volume surge + ATR filter
+            if (close[i] > upper_band[i] and vol_surge[i] and atr[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: Below weekly EMA + RSI < 50 + volume spike
-            elif (close[i] < ema1w and rsi14 < 50 and vol_spike):
+            # Short: Price breaks below lower Donchian band + volume surge + ATR filter
+            elif (close[i] < lower_band[i] and vol_surge[i] and atr[i] > 0):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price crosses weekly EMA or RSI reverses
+            # Exit: Price returns to middle of Donchian channel
+            mid_band = (upper_band[i] + lower_band[i]) / 2
             if position == 1:
-                if close[i] < ema1w or rsi14 < 50:
+                if close[i] < mid_band:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema1w or rsi14 > 50:
+                if close[i] > mid_band:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -91,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyEMA34_RSI14_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_DonchianBreakout_VolumeSurge_ATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
