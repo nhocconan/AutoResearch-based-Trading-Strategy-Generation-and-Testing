@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d RSI(2) + 1w Trend Filter with Volume Confirmation.
-Long when RSI(2) < 10 (oversold) and 1w EMA50 rising with volume spike.
-Short when RSI(2) > 90 (overbought) and 1w EMA50 falling with volume spike.
-Exit when RSI(2) crosses above 50 (for longs) or below 50 (for shorts).
-This targets mean reversion in daily timeframe with weekly trend filter to avoid counter-trend trades.
-Works in both bull and bear markets by following weekly trend direction.
-Low trade frequency expected due to strict RSI(2) thresholds.
+Hypothesis: 12-hour Donchian breakout with weekly trend filter, volume confirmation, and ATR-based exit.
+Long when price breaks above 20-period Donchian upper band and weekly EMA50 rising with volume spike.
+Short when price breaks below 20-period Donchian lower band and weekly EMA50 falling with volume spike.
+Exit when price crosses opposite Donchian band or ATR-based trailing stop hit.
+Designed for low trade frequency by requiring multiple confirmations and using higher timeframe trend.
+Works in both bull and bear markets by following the weekly trend.
 """
 
 import numpy as np
@@ -23,45 +22,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(2) calculation
-    def rsi(close_prices, period=2):
-        if len(close_prices) < period + 1:
-            return np.full_like(close_prices, np.nan, dtype=float)
-        delta = np.diff(close_prices)
-        up = np.where(delta > 0, delta, 0)
-        down = np.where(delta < 0, -delta, 0)
-        
-        # Wilder's smoothing (alpha = 1/period)
-        def wilders_smoothing(x, period):
-            if len(x) < period:
-                return np.full_like(x, np.nan, dtype=float)
-            result = np.full_like(x, np.nan, dtype=float)
-            result[period-1] = np.mean(x[:period])
-            for i in range(period, len(x)):
-                result[i] = (result[i-1] * (period-1) + x[i]) / period
-            return result
-        
-        up_smoothed = wilders_smoothing(up, period)
-        down_smoothed = wilders_smoothing(down, period)
-        
-        rs = np.where(down_smoothed != 0, up_smoothed / down_smoothed, 0)
-        rsi_vals = 100 - (100 / (1 + rs))
-        # Prepend NaN for the first element (since diff reduces length by 1)
-        return np.concatenate([[np.nan], rsi_vals])
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    rsi2 = rsi(close, 2)
+    # ATR for volatility filter and stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Load 1w data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load weekly data for trend filter - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # 50-period EMA on 1w close for trend
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 50-period EMA on weekly close for trend
+    close_weekly = df_weekly['close'].values
+    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -69,37 +53,38 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(rsi2[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_weekly_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: RSI(2) < 10 (oversold) and 1w EMA50 rising with volume spike
-            if (rsi2[i] < 10 and 
-                ema50_1w_aligned[i] > ema50_1w_aligned[i-1] and vol_spike):
+            # Long: Break above upper Donchian band with weekly EMA50 rising and volume spike
+            if (close[i] > donchian_high[i] and 
+                ema50_weekly_aligned[i] > ema50_weekly_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) > 90 (overbought) and 1w EMA50 falling with volume spike
-            elif (rsi2[i] > 90 and 
-                  ema50_1w_aligned[i] < ema50_1w_aligned[i-1] and vol_spike):
+            # Short: Break below lower Donchian band with weekly EMA50 falling and volume spike
+            elif (close[i] < donchian_low[i] and 
+                  ema50_weekly_aligned[i] < ema50_weekly_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI(2) crosses above 50 (for longs) or below 50 (for shorts)
+            # Exit: Cross opposite band or ATR trailing stop
             exit_signal = False
             
             if position == 1:
-                # Exit long: RSI(2) >= 50
-                if rsi2[i] >= 50:
+                # Exit long: Cross below lower band or ATR stop
+                if close[i] < donchian_low[i] or close[i] <= high_since_entry - 2.5 * atr[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: RSI(2) <= 50
-                if rsi2[i] <= 50:
+                # Exit short: Cross above upper band or ATR stop
+                if close[i] > donchian_high[i] or close[i] >= low_since_entry + 2.5 * atr[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -107,9 +92,21 @@ def generate_signals(prices):
                 position = 0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
+                
+            # Track extreme prices for trailing stop
+            if position == 1:
+                if 'high_since_entry' not in locals():
+                    high_since_entry = high[i]
+                else:
+                    high_since_entry = max(high_since_entry, high[i])
+            else:
+                if 'low_since_entry' not in locals():
+                    low_since_entry = low[i]
+                else:
+                    low_since_entry = min(low_since_entry, low[i])
     
     return signals
 
-name = "1D_RSI2_1wTrend_Volume"
-timeframe = "1d"
+name = "12H_DonchianBreakout_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
