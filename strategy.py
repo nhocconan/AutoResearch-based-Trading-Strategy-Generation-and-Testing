@@ -1,12 +1,10 @@
-#!/usr/bin/env python3
-"""
-Hypothesis: 6-hour Ehlers Fisher Transform with 12-hour trend filter and volume confirmation.
-Long when Fisher crosses above -1.5 during 12-hour uptrend with volume spike.
-Short when Fisher crosses below +1.5 during 12-hour downtrend with volume spike.
-Exit when Fisher crosses back through zero or trend reverses.
-Designed for low-to-moderate trade frequency by requiring multiple confirmations.
-Works in both bull and bear markets by following the 12-hour trend.
-"""
+# [76720] 4H_Range_Breakout_1dTrend_Volume
+# Hypothesis: 4-hour Candlestick Range Breakout with 1-day Trend Filter and Volume Confirmation.
+# Long when price breaks above the prior 4-hour bar's high during 1-day uptrend with volume spike.
+# Short when price breaks below the prior 4-hour bar's low during 1-day downtrend with volume spike.
+# Exit when price returns to the prior 4-hour bar's midpoint or trend reverses.
+# Designed for moderate trade frequency by requiring trend alignment and volume confirmation.
+# Works in both bull and bear markets by following the 1-day trend.
 
 import numpy as np
 import pandas as pd
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,93 +20,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Ehlers Fisher Transform on 6h prices (length=10)
-    def ehlers_fisher_transform(price_series, length=10):
-        n = len(price_series)
-        if n < length:
-            return np.full(n, np.nan), np.full(n, np.nan)
-        
-        # Normalize price to [-1, 1] range over lookback period
-        highest = np.maximum.accumulate(price_series)
-        lowest = np.minimum.accumulate(price_series)
-        range_val = highest - lowest
-        range_val = np.where(range_val == 0, 1, range_val)  # avoid division by zero
-        
-        value1 = 2 * ((price_series - lowest) / range_val - 0.5)
-        value1 = np.clip(value1, -0.999, 0.999)  # avoid log(0)
-        
-        # Smooth with exponential moving average
-        alpha = 2.0 / (length + 1)
-        value2 = np.zeros(n)
-        value2[0] = value1[0]
-        for i in range(1, n):
-            value2[i] = alpha * value1[i] + (1 - alpha) * value2[i-1]
-        
-        # Fisher transform
-        fish = 0.5 * np.log((1 + value2) / (1 - value2))
-        fish = np.where(np.isnan(value2) | np.isinf(value2), np.nan, fish)
-        
-        # Signal line (3-period EMA of Fisher)
-        signal = np.zeros(n)
-        signal[0] = fish[0] if not np.isnan(fish[0]) else 0
-        for i in range(1, n):
-            if np.isnan(fish[i]):
-                signal[i] = signal[i-1]
-            else:
-                signal[i] = alpha * fish[i] + (1 - alpha) * signal[i-1]
-        
-        return fish, signal
+    # Prior 4-hour bar's high and low for breakout detection
+    prior_high = np.roll(high, 1)
+    prior_low = np.roll(low, 1)
+    prior_mid = (prior_high + prior_low) / 2
+    prior_high[0] = np.nan
+    prior_low[0] = np.nan
+    prior_mid[0] = np.nan
     
-    fish, fish_signal = ehlers_fisher_transform(close, length=10)
-    
-    # Load 12-hour data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 1-day data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 20-period EMA on 12h close for trend
-    close_12h = df_12h['close'].values
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    # 20-period EMA on 1d close for trend
+    close_1d = df_1d['close'].values
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Volume confirmation: current volume > 1.8x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(fish[i]) or np.isnan(fish_signal[i]) or 
-            np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_ma_30[i])):
+        if (np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or 
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 1.8 * vol_ma_30[i]
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Fisher crosses above -1.5 + 12h uptrend + volume spike
-            if fish[i] > -1.5 and fish_signal[i] <= -1.5 and ema20_12h_aligned[i] > ema20_12h_aligned[i-1] and vol_spike:
+            # Long: price breaks above prior 4h high + 1d uptrend + volume spike
+            if close[i] > prior_high[i] and ema20_1d_aligned[i] > ema20_1d_aligned[i-1] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Fisher crosses below +1.5 + 12h downtrend + volume spike
-            elif fish[i] < 1.5 and fish_signal[i] >= 1.5 and ema20_12h_aligned[i] < ema20_12h_aligned[i-1] and vol_spike:
+            # Short: price breaks below prior 4h low + 1d downtrend + volume spike
+            elif close[i] < prior_low[i] and ema20_1d_aligned[i] < ema20_1d_aligned[i-1] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Fisher crosses back through zero or trend reverses
+            # Exit: price returns to prior 4h midpoint or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: Fisher crosses below zero or 12h trend turns down
-                if fish[i] < 0 and fish_signal[i] >= 0 or ema20_12h_aligned[i] < ema20_12h_aligned[i-1]:
+                # Exit long: price below midpoint or 1d trend turns down
+                if close[i] < prior_mid[i] or ema20_1d_aligned[i] < ema20_1d_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Fisher crosses above zero or 12h trend turns up
-                if fish[i] > 0 and fish_signal[i] <= 0 or ema20_12h_aligned[i] > ema20_12h_aligned[i-1]:
+                # Exit short: price above midpoint or 1d trend turns up
+                if close[i] > prior_mid[i] or ema20_1d_aligned[i] > ema20_1d_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -119,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Ehlers_Fisher_12hTrend_Volume"
-timeframe = "6h"
+name = "4H_Range_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
