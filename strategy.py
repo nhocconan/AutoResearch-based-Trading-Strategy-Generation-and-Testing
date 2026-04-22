@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-
 """
-Hypothesis: 6-hour Donchian(20) breakout with daily trend filter and volume confirmation.
-This strategy captures medium-term breakouts in trending markets while avoiding false breakouts
-in ranging conditions. The daily trend filter (price above/below EMA50) ensures we trade with
-the higher timeframe momentum, and volume spikes confirm institutional participation.
-Designed to work in both bull and bear markets by adapting to the daily trend.
-Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+Hypothesis: 4-hour KAMA trend filter with Bollinger Band mean-reversion entries and volume confirmation.
+KAMA adapts to market noise, reducing whipsaw in choppy markets. Bollinger Bands provide dynamic
+support/resistance for mean-reversion entries. Volume spikes confirm institutional interest.
+This combination should work in both bull and bear regimes by adapting to market conditions.
+Target: 20-35 trades/year per symbol.
 """
 
 import numpy as np
@@ -23,22 +21,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 4h data for KAMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate KAMA ( Kaufman Adaptive Moving Average ) on 4h close
+    close_4h = pd.Series(df_4h['close'].values)
+    # Efficiency Ratio
+    change = abs(close_4h - close_4h.shift(10))
+    volatility = abs(close_4h.diff()).rolling(window=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close_4h)
+    kama[0] = close_4h.iloc[0]
+    for i in range(1, len(close_4h)):
+        if not np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close_4h.iloc[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    kama_4h = kama
+    kama_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
     
-    # Calculate 6h Donchian channels (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Bollinger Bands (20, 2) on 4h close
+    sma_20 = close_4h.rolling(window=20, min_periods=20).mean()
+    std_20 = close_4h.rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    upper_bb_aligned = align_htf_to_ltf(prices, df_4h, upper_bb.values)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_4h, lower_bb.values)
     
-    # Calculate 6h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume average (20-period)
+    vol_4h = pd.Series(df_4h['volume'].values)
+    vol_avg_20 = vol_4h.rolling(window=20, min_periods=20).mean().values
+    vol_avg_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20)
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -46,10 +63,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,31 +83,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above 20-period high with bullish daily trend and volume spike
-            if (close[i] > high_max_20[i] and 
-                close[i] > ema50_aligned[i] and  # Bullish trend: price above EMA50
-                volume[i] > 1.8 * vol_avg_20[i]):  # Volume spike
+            # Long: Price touches lower BB with bullish KAMA trend and volume spike
+            if (close[i] <= lower_bb_aligned[i] and 
+                close[i] > kama_aligned[i] and 
+                volume[i] > 2.0 * vol_avg_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 20-period low with bearish daily trend and volume spike
-            elif (close[i] < low_min_20[i] and 
-                  close[i] < ema50_aligned[i] and  # Bearish trend: price below EMA50
-                  volume[i] > 1.8 * vol_avg_20[i]):  # Volume spike
+            # Short: Price touches upper BB with bearish KAMA trend and volume spike
+            elif (close[i] >= upper_bb_aligned[i] and 
+                  close[i] < kama_aligned[i] and 
+                  volume[i] > 2.0 * vol_avg_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to opposite Donchian level or contrary trend
+            # Exit conditions: price returns to KAMA (dynamic mean)
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below 20-period low OR turns bearish
-                if (close[i] < low_min_20[i] or 
-                    close[i] < ema50_aligned[i]):
+                # Exit long: price crosses above KAMA
+                if close[i] >= kama_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above 20-period high OR turns bullish
-                if (close[i] > high_max_20[i] or 
-                    close[i] > ema50_aligned[i]):
+                # Exit short: price crosses below KAMA
+                if close[i] <= kama_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -101,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_20_1dEMA50_Trend_Volume"
-timeframe = "6h"
+name = "4h_KAMA_BollingerBands_Volume"
+timeframe = "4h"
 leverage = 1.0
