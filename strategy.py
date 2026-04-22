@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h price action reverses at 12h VWAP when aligned with 1d trend and volume spike.
-# VWAP acts as dynamic support/resistance where institutional traders operate.
-# In trending markets, price pulls back to VWAP before continuing trend.
-# In ranging markets, VWAP acts as mean reversion level.
-# Combined with 1d trend filter and volume confirmation for high-probability entries.
-# Targets 20-35 trades/year with controlled risk.
+# Hypothesis: 1h mean-reversion strategy using 4h RSI and 1d trend filter
+# In bear markets (2025), RSI extremes on 4h with 1d downtrend filter provide high-probability short entries
+# RSI < 30 on 4h indicates oversold conditions, but we only short when 1d trend is down (price < EMA50)
+# Conversely, RSI > 70 on 4h with 1d uptrend (price > EMA50) for long entries
+# Volume confirmation (>1.5x 20-period average) filters low-quality signals
+# Designed for 1h timeframe targeting 15-30 trades/year with strict entry conditions to avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,35 +20,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for VWAP calculation (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 4h data for RSI calculation (ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h VWAP (typical price * volume / cumulative volume)
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
-    vwap_numerator = np.cumsum(typical_price_12h * volume_12h)
-    vwap_denominator = np.cumsum(volume_12h)
-    vwap_12h = vwap_numerator / vwap_denominator
+    # Calculate RSI(14) on 4h close
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align 12h VWAP to 4h timeframe
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    # Wilder's smoothing (equivalent to RMA)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 periods
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # 1d trend filter: EMA(50)
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_4h = 100 - (100 / (1 + rs))
+    rsi_4h[:13] = np.nan  # Not enough data for first 13 periods
+    
+    # Align 4h RSI to 1h timeframe
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    
+    # Load 1d data for trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    
+    # 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 2.5x 20-period average
+    # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -56,7 +68,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(vwap_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,41 +76,39 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price pulls back to VWAP support in uptrend with volume
-            if (close[i] > ema_50_1d_aligned[i] and  # Uptrend filter
-                low[i] <= vwap_12h_aligned[i] * 1.005 and  # Touch or slightly below VWAP
-                close[i] > vwap_12h_aligned[i] and  # Close above VWAP (confirmation)
-                volume[i] > 2.5 * vol_avg_20[i]):  # Volume spike
-                signals[i] = 0.25
+            # Long: RSI < 30 (oversold) on 4h + 1d uptrend + volume confirmation
+            if (rsi_4h_aligned[i] < 30 and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price rallies to VWAP resistance in downtrend with volume
-            elif (close[i] < ema_50_1d_aligned[i] and  # Downtrend filter
-                  high[i] >= vwap_12h_aligned[i] * 0.995 and  # Touch or slightly above VWAP
-                  close[i] < vwap_12h_aligned[i] and  # Close below VWAP (confirmation)
-                  volume[i] > 2.5 * vol_avg_20[i]):  # Volume spike
-                signals[i] = -0.25
+            # Short: RSI > 70 (overbought) on 4h + 1d downtrend + volume confirmation
+            elif (rsi_4h_aligned[i] > 70 and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i]):
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit conditions
+            # Exit: RSI returns to neutral zone (40-60) or trend reversal
             if position == 1:
-                # Exit long: price breaks below VWAP or trend reverses
-                if (close[i] < vwap_12h_aligned[i] * 0.995 or  # Clear break below VWAP
-                    close[i] < ema_50_1d_aligned[i]):  # Trend break
+                # Exit long: RSI > 50 or trend turns down
+                if (rsi_4h_aligned[i] > 50 or 
+                    close[i] < ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                # Exit short: price breaks above VWAP or trend reverses
-                if (close[i] > vwap_12h_aligned[i] * 1.005 or  # Clear break above VWAP
-                    close[i] > ema_50_1d_aligned[i]):  # Trend break
+                # Exit short: RSI < 50 or trend turns up
+                if (rsi_4h_aligned[i] < 50 or 
+                    close[i] > ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_VWAP_Pullback_12hVWAP_1dEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1h_RSI40_1dEMA50_Trend_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
