@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA trend filter and volume confirmation
-# Strategy uses Camarilla pivot levels from daily data to identify key support/resistance levels.
-# Breakouts above R1 or below S1 trigger entries, filtered by 12h EMA trend direction.
-# Volume confirmation (current volume > 1.5x 20-period average) filters false breakouts.
-# Designed for 4h timeframe targeting 20-40 trades/year. Works in bull markets by capturing
-# upward breakouts and in bear markets by avoiding false breakdowns via trend filter.
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and 1d volume confirmation
+# Williams Alligator uses three smoothed moving averages (Jaws: 13-period SMMA, Teeth: 8-period, Lips: 5-period)
+# When the three lines are intertwined (alligator sleeping), market is ranging.
+# When they diverge (alligator waking up), a trend is forming.
+# Direction determined by the order of the lines: if Lips > Teeth > Jaws = uptrend, reverse for downtrend.
+# Entry confirmed by 1d volume spike (> 1.5x 20-day average) to avoid false signals.
+# Works in bull markets by capturing uptrends and in bear markets by capturing downtrends.
+# Designed for 12h timeframe targeting 12-37 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,139 +22,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivot levels (ONCE before loop)
+    # Load 1d data for trend filter and volume confirmation (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Load 12h data for trend filter (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    close_12h = df_12h['close'].values
+    # Williams Alligator components (using 12h data)
+    # Jaws: 13-period SMMA shifted 8 bars
+    jaws = pd.Series(close).rolling(window=13, center=False).mean().shift(8).values
+    # Teeth: 8-period SMMA shifted 5 bars
+    teeth = pd.Series(close).rolling(window=8, center=False).mean().shift(5).values
+    # Lips: 5-period SMMA shifted 3 bars
+    lips = pd.Series(close).rolling(window=5, center=False).mean().shift(3).values
     
-    # Calculate 12h EMA(34) for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 20-period volume average for spike detection
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d volume 20-period average for spike detection
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Calculate Camarilla levels using previous day's OHLC
-        if i < 1:  # Need at least one day of data
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # Get previous day's OHLC (assuming daily data aligned to 4h)
-        prev_day_idx = i - 6  # Approximately 6*4h = 1 day back
-        if prev_day_idx < 0:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # For simplicity, we'll use the 1d data directly for Camarilla calculation
-        # In practice, we need to get the actual daily OHLC values
-        # Since we don't have direct access to previous day's OHLC in the loop,
-        # we'll use a simplified approach: calculate Camarilla from 1d data and align
-        
-        # Calculate Camarilla levels from 1d data
-        # We need to access the 1d OHLC data properly
-        # Let's get the 1d data values
-        if len(df_1d) > 0:
-            # Get the most recent completed daily bar
-            # For 4h data, we need to map to daily bars
-            day_index = i // 6  # 6 four-hour bars per day
-            if day_index >= len(df_1d) or day_index < 1:
-                if position != 0:
-                    signals[i] = 0.0
-                    position = 0
-                continue
-                    
-            # Get previous day's OHLC (completed day)
-            prev_day = day_index - 1
-            if prev_day < 0:
-                if position != 0:
-                    signals[i] = 0.0
-                    position = 0
-                continue
-                
-            # Get OHLC values for previous day
-            try:
-                # Access values from df_1d - assuming it has the standard columns
-                high_prev = df_1d['high'].iloc[prev_day]
-                low_prev = df_1d['low'].iloc[prev_day]
-                close_prev = df_1d['close'].iloc[prev_day]
-            except:
-                if position != 0:
-                    signals[i] = 0.0
-                    position = 0
-                continue
-            
-            # Calculate Camarilla levels
-            range_prev = high_prev - low_prev
-            if range_prev <= 0:
-                if position != 0:
-                    signals[i] = 0.0
-                    position = 0
-                continue
-                
-            # Camarilla levels
-            R1 = close_prev + (range_prev * 1.1 / 12)
-            S1 = close_prev - (range_prev * 1.1 / 12)
-            R2 = close_prev + (range_prev * 1.1 / 6)
-            S2 = close_prev - (range_prev * 1.1 / 6)
-            R3 = close_prev + (range_prev * 1.1 / 4)
-            S3 = close_prev - (range_prev * 1.1 / 4)
-            R4 = close_prev + (range_prev * 1.1 / 2)
-            S4 = close_prev - (range_prev * 1.1 / 2)
-        else:
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + 12h uptrend + volume spike
-            if (close[i] > R1 and 
-                close[i] > ema_34_12h_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i]):
+            # Long: Lips > Teeth > Jaws (alligator awake, uptrend) + 1d uptrend + 1d volume spike
+            if (lips[i] > teeth[i] and teeth[i] > jaws[i] and
+                close[i] > ema_50_1d_aligned[i] and
+                volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + 12h downtrend + volume spike
-            elif (close[i] < S1 and 
-                  close[i] < ema_34_12h_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
+            # Short: Jaws > Teeth > Lips (alligator awake, downtrend) + 1d downtrend + 1d volume spike
+            elif (jaws[i] > teeth[i] and teeth[i] > lips[i] and
+                  close[i] < ema_50_1d_aligned[i] and
+                  volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to opposite S1/R1 or trend reversal
+            # Exit conditions: alligator sleeping (lines intertwined) or trend reversal
             if position == 1:
-                # Exit on return to S1 or trend reversal
-                if (close[i] <= S1 or 
-                    close[i] < ema_34_12h_aligned[i]):
+                # Exit on alligator sleeping or trend reversal
+                if (lips[i] <= teeth[i] or teeth[i] <= jaws[i] or
+                    close[i] < ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on return to R1 or trend reversal
-                if (close[i] >= R1 or 
-                    close[i] > ema_34_12h_aligned[i]):
+                # Exit on alligator sleeping or trend reversal
+                if (teeth[i] <= lips[i] or jaws[i] <= teeth[i] or
+                    close[i] > ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -160,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_12hEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1dEMA50_1dVolSpike"
+timeframe = "12h"
 leverage = 1.0
