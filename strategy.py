@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot (R1/S1) breakout with 1d EMA(34) trend filter and volume confirmation.
-# Uses daily pivot levels for structure, daily EMA for trend direction, and volume spike for confirmation.
-# Long when price breaks above R1 in uptrend (close > daily EMA34) with volume spike.
-# Short when price breaks below S1 in downtrend (close < daily EMA34) with volume spike.
-# Exit on opposite pivot touch or trend reversal.
+# Hypothesis: 4h Williams %R (14) extreme reversal with 1d EMA(34) trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions; we look for reversals from extremes.
+# Long when %R crosses above -80 from below (oversold reversal) in uptrend (close > daily EMA34) with volume spike.
+# Short when %R crosses below -20 from above (overbought reversal) in downtrend (close < daily EMA34) with volume spike.
+# Exit when %R returns to neutral zone (-50) or trend reverses.
 # Designed for 4h timeframe to target 20-50 trades/year per symbol.
-# Works in bull/bear via trend filter + volatility-based entry levels.
+# Works in bull/bear via trend filter + momentum exhaustion signals.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,26 +21,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot and trend (ONCE before loop)
+    # Load 1d data for trend (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for each 1d bar
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    hl_range = high_1d - low_1d
-    r1 = close_1d + 1.1 * hl_range / 12
-    s1 = close_1d - 1.1 * hl_range / 12
     
     # 1d EMA(34) for trend direction
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align to 4h timeframe (waits for 1d bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Williams %R (14) on 4h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,22 +43,22 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend (close > EMA34) + volume spike
-            if (close[i] > r1_aligned[i] and 
+            # Long: Williams %R crosses above -80 from below + uptrend + volume spike
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
                 close[i] > ema_34_1d_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + downtrend (close < EMA34) + volume spike
-            elif (close[i] < s1_aligned[i] and 
+            # Short: Williams %R crosses below -20 from above + downtrend + volume spike
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
                   close[i] < ema_34_1d_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
@@ -74,15 +66,15 @@ def generate_signals(prices):
         else:
             # Exit conditions
             if position == 1:
-                # Exit on S1 touch or trend reversal
-                if (close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]):
+                # Exit when %R returns to neutral (-50) or trend reverses
+                if (williams_r[i] >= -50 or close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on R1 touch or trend reversal
-                if (close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]):
+                # Exit when %R returns to neutral (-50) or trend reverses
+                if (williams_r[i] <= -50 or close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -90,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
+name = "4h_WilliamsR_ExtremeReversal_1dEMA34_Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
