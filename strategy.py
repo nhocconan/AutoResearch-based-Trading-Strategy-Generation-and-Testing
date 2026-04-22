@@ -23,21 +23,19 @@ def generate_signals(prices):
     prev_close_1d[0] = np.nan
     
     pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1_1d = 2 * pp_1d - prev_low_1d
-    s1_1d = 2 * pp_1d - prev_high_1d
-    r2_1d = pp_1d + (prev_high_1d - prev_low_1d)
-    s2_1d = pp_1d - (prev_high_1d - prev_low_1d)
+    r2_1d = pp_1d + (high_1d - low_1d)  # R2 = PP + (High - Low)
+    s2_1d = pp_1d - (high_1d - low_1d)  # S2 = PP - (High - Low)
     
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe (primary timeframe)
+    # Align to 6h timeframe (primary timeframe)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike filter (20-period average on 4h data)
+    # Volume spike filter (20-period average on 6h data)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -87,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Spike"
-timeframe = "4h"
+name = "6h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Spike"
+timeframe = "6h"
 leverage = 1.0
