@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day KAMA direction with RSI and chop filter. Long when KAMA rising, RSI>50, and CHOP>61.8 (range). Short when KAMA falling, RSI<50, and CHOP>61.8.
-Exit when conditions reverse. Uses daily timeframe to reduce trade frequency and focus on higher probability setups. KAMA adapts to market noise, RSI filters momentum, and chop filter ensures we trade in ranging markets where mean reversion works. Designed to work in both bull and bear markets by adapting to regime.
+Hypothesis: 4-hour volume-weighted RSI with 1-day trend filter and volatility regime.
+Long when 4h VW-RSI < 30, 1-day EMA34 rising, and volatility low (ATR ratio < 0.8).
+Short when 4h VW-RSI > 70, 1-day EMA34 falling, and volatility low.
+Exit when VW-RSI returns to 50.
+Uses volume-weighted RSI for institutional bias, daily EMA for trend, and volatility filter to avoid whipsaws.
+Designed for low trade frequency with clear mean-reversion signals in ranging markets.
 """
 
 import numpy as np
@@ -16,99 +20,97 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1-day data for KAMA and RSI - ONCE before loop
+    # Load 1-day data for EMA trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
+    # Calculate VW-RSI (Volume Weighted RSI) on 4h data
+    # Typical price = (H + L + C) / 3
+    typical_price = (high + low + close) / 3.0
+    # Price change
+    delta = np.diff(typical_price, prepend=typical_price[0])
+    # Volume-weighted gains and losses
+    gains = np.where(delta > 0, delta * volume, 0.0)
+    losses = np.where(delta < 0, -delta * volume, 0.0)
+    # Smoothed average gains/losses (Wilder's smoothing)
+    avg_gain = np.zeros_like(gains)
+    avg_loss = np.zeros_like(losses)
+    # Initialize with first 14 period average
+    if len(gains) >= 14:
+        avg_gain[13] = np.mean(gains[1:15])  # Skip first (no change)
+        avg_loss[13] = np.mean(losses[1:15])
+        # Wilder smoothing: avg = (prev_avg * 13 + current) / 14
+        for i in range(14, len(gains)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gains[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + losses[i]) / 14
+    # Calculate RSI
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    vw_rsi = 100 - (100 / (1 + rs))
+    # Handle division by zero (when avg_loss = 0)
+    vw_rsi = np.where(avg_loss == 0, 100, vw_rsi)
+    # And when avg_gain = 0
+    vw_rsi = np.where(avg_gain == 0, 0, vw_rsi)
+    
+    # 1-day EMA34 for trend filter
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # KAMA calculation (adaptive moving average)
-    # ER = |Close - Close[10]| / Sum(|Close - Close[1]|, 10)
-    # SSC = [ER * (FastSC - SlowSC) + SlowSC]^2
-    # KAMA = KAMA[1] + SSC * (Close - KAMA[1])
-    # Using 10-period for efficiency, 2/30 for fast/slow SC
-    close_1d_series = pd.Series(close_1d)
-    change = abs(close_1d_series - close_1d_series.shift(10))
-    volatility = abs(close_1d_series - close_1d_series.shift(1)).rolling(10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    kama_1d = np.zeros(len(close_1d))
-    kama_1d[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if np.isnan(sc.iloc[i]):
-            kama_1d[i] = kama_1d[i-1]
-        else:
-            kama_1d[i] = kama_1d[i-1] + sc.iloc[i] * (close_1d[i] - kama_1d[i-1])
-    
-    # RSI calculation
-    delta = close_1d_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14, min_periods=14).mean()
-    avg_loss = loss.rolling(14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Chopiness Index calculation
-    # CHOP = 100 * log10(sum(ATR, 14) / (max(high,14) - min(low,14))) / log10(14)
+    # Volatility filter: ATR ratio (current ATR / 20-period ATR average) < 0.8
+    # Calculate ATR
     tr1 = high - low
-    tr2 = abs(high - close_1d_series.shift())
-    tr3 = abs(low - close_1d_series.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(14).sum()
-    max_high = high.rolling(14).max()
-    min_low = low.rolling(14).min()
-    chop = 100 * np.log10(atr / (max_high - min_low)) / np.log10(14)
-    
-    # Align indicators to lower timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop.values)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0  # First period has no previous close
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.zeros_like(tr)
+    if len(tr) >= 14:
+        atr[13] = np.mean(tr[1:15])
+        for i in range(14, len(tr)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    atr_ma_20 = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = np.where(atr_ma_20 > 0, atr / atr_ma_20, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after enough data
+    for i in range(40, n):  # Start after enough data for all indicators
         # Skip if data not ready
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(vw_rsi[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(atr_ratio[i]) or np.isnan(atr_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # KAMA direction: rising if current > previous
-        kama_rising = kama_1d_aligned[i] > kama_1d_aligned[i-1]
-        kama_falling = kama_1d_aligned[i] < kama_1d_aligned[i-1]
-        
-        # RSI conditions
-        rsi_over_50 = rsi_1d_aligned[i] > 50
-        rsi_under_50 = rsi_1d_aligned[i] < 50
-        
-        # Chop filter: chop > 61.8 indicates ranging market
-        chop_high = chop_aligned[i] > 61.8
+        vol_filter = atr_ratio[i] < 0.8  # Low volatility regime
         
         if position == 0:
-            # Long: KAMA rising, RSI>50, chop>61.8
-            if kama_rising and rsi_over_50 and chop_high:
+            # Long: VW-RSI oversold (<30), 1-day EMA34 rising, low volatility
+            if (vw_rsi[i] < 30 and 
+                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling, RSI<50, chop>61.8
-            elif kama_falling and rsi_under_50 and chop_high:
+            # Short: VW-RSI overbought (>70), 1-day EMA34 falling, low volatility
+            elif (vw_rsi[i] > 70 and 
+                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_filter):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Reverse conditions
+            # Exit: VW-RSI returns to neutral (50)
             exit_signal = False
             
             if position == 1:
-                # Exit long: KAMA falling OR RSI<50
-                if not kama_rising or not rsi_over_50:
+                # Exit long: VW-RSI crosses above 50
+                if vw_rsi[i] >= 50 and vw_rsi[i-1] < 50:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: KAMA rising OR RSI>50
-                if not kama_falling or not rsi_under_50:
+                # Exit short: VW-RSI crosses below 50
+                if vw_rsi[i] <= 50 and vw_rsi[i-1] > 50:
                     exit_signal = True
             
             if exit_signal:
@@ -119,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_KAMA_RSI_Chop"
-timeframe = "1d"
+name = "4H_VW_RSI_1dEMA34_VolFilter_MeanRev"
+timeframe = "4h"
 leverage = 1.0
