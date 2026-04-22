@@ -1,20 +1,40 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 1-day Exponential Moving Average (EMA) crossover with 1-week Exponential Moving Average (EMA) trend filter and volume confirmation.
-Only trade in the direction of the weekly EMA trend when the daily EMA21 crosses above/below the daily EMA50, with volume spike confirmation.
-Designed for low trade frequency (10-20 trades/year) by requiring multiple confirmations:
-trend alignment, EMA crossover, and volume spike. Works in both bull and bear markets
-by following the weekly EMA trend direction, which adapts to market conditions.
+Hypothesis: 12-hour Williams Fractal breakout with daily trend filter and volume confirmation.
+Only trade breakouts of daily Williams Fractal levels in the direction of the daily EMA34 trend.
+Williams Fractals identify key support/resistance levels that often act as breakout points.
+Combined with daily trend filter to avoid counter-trend trades and volume confirmation to
+ensure breakout validity. Designed for low trade frequency (12-25 trades/year) on 12h timeframe.
+Works in both bull and bear markets by following the daily trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def williams_fractals(high, low, n=2):
+    """Calculate Williams Fractals: bearish (peak) and bullish (tower) patterns"""
+    high = np.asarray(high)
+    low = np.asarray(low)
+    bearish = np.zeros(len(high), dtype=bool)
+    bullish = np.zeros(len(low), dtype=bool)
+    
+    for i in range(n, len(high) - n):
+        # Bearish fractal: highest high with n lower highs on each side
+        if all(high[i] >= high[i - j] for j in range(1, n + 1)) and \
+           all(high[i] >= high[i + j] for j in range(1, n + 1)):
+            bearish[i] = True
+        # Bullish fractal: lowest low with n higher lows on each side
+        if all(low[i] <= low[i - j] for j in range(1, n + 1)) and \
+           all(low[i] <= low[i + j] for j in range(1, n + 1)):
+            bullish[i] = True
+    
+    return bearish, bullish
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,65 +42,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA21 and EMA50 on daily
-    close_s = pd.Series(close)
-    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Load weekly data for EMA34 trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load daily data for Williams Fractals and EMA34 - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate EMA34 on weekly
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Williams Fractals on daily
+    bearish_fractal, bullish_fractal = williams_fractals(
+        df_1d['high'].values, 
+        df_1d['low'].values, 
+        n=2
+    )
     
-    # Align weekly EMA34 to daily
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Convert to price levels (0 where no fractal)
+    bearish_levels = np.where(bearish_fractal, df_1d['high'].values, 0.0)
+    bullish_levels = np.where(bullish_fractal, df_1d['low'].values, 0.0)
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Williams Fractals need 2 extra daily bars for confirmation (pattern completes 2 bars after center)
+    bearish_fractal_confirmed = align_htf_to_ltf(
+        prices, df_1d, bearish_levels, additional_delay_bars=2
+    )
+    bullish_fractal_confirmed = align_htf_to_ltf(
+        prices, df_1d, bullish_levels, additional_delay_bars=2
+    )
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike: current volume > 1.8x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema21[i]) or np.isnan(ema50[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bearish_fractal_confirmed[i]) or 
+            np.isnan(bullish_fractal_confirmed[i]) or 
+            np.isnan(ema34_aligned[i]) or 
+            np.isnan(vol_ma_30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.8 * vol_ma_30[i]
         
         if position == 0:
-            # Long: Weekly EMA34 uptrend + EMA21 crosses above EMA50 + volume spike
-            if (ema34_1w_aligned[i] > ema34_1w_aligned[i-1] and 
-                ema21[i] > ema50[i] and ema21[i-1] <= ema50[i-1] and vol_spike):
+            # Long: Price breaks above bearish fractal (resistance) + daily uptrend + volume spike
+            if (bearish_fractal_confirmed[i] > 0 and 
+                close[i] > bearish_fractal_confirmed[i] and 
+                ema34_aligned[i] > ema34_aligned[i-1] and 
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly EMA34 downtrend + EMA21 crosses below EMA50 + volume spike
-            elif (ema34_1w_aligned[i] < ema34_1w_aligned[i-1] and 
-                  ema21[i] < ema50[i] and ema21[i-1] >= ema50[i-1] and vol_spike):
+            # Short: Price breaks below bullish fractal (support) + daily downtrend + volume spike
+            elif (bullish_fractal_confirmed[i] > 0 and 
+                  close[i] < bullish_fractal_confirmed[i] and 
+                  ema34_aligned[i] < ema34_aligned[i-1] and 
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: EMA21 crosses back in opposite direction or weekly trend changes
+            # Exit: Price returns to opposite fractal level or trend reversal
             exit_signal = False
             
             if position == 1:
-                # Exit long: EMA21 crosses below EMA50 or weekly trend turns down
-                if (ema21[i] < ema50[i] and ema21[i-1] >= ema50[i-1]) or \
-                   (ema34_1w_aligned[i] < ema34_1w_aligned[i-1]):
+                # Exit long: Price breaks below bullish fractal (support) or daily trend turns down
+                if (bullish_fractal_confirmed[i] > 0 and 
+                    close[i] < bullish_fractal_confirmed[i]) or \
+                   ema34_aligned[i] < ema34_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: EMA21 crosses above EMA50 or weekly trend turns up
-                if (ema21[i] > ema50[i] and ema21[i-1] <= ema50[i-1]) or \
-                   (ema34_1w_aligned[i] > ema34_1w_aligned[i-1]):
+                # Exit short: Price breaks above bearish fractal (resistance) or daily trend turns up
+                if (bearish_fractal_confirmed[i] > 0 and 
+                    close[i] > bearish_fractal_confirmed[i]) or \
+                   ema34_aligned[i] > ema34_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -91,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA21_EMA50_Crossover_1wEMA34_Trend_Volume"
-timeframe = "1d"
+name = "12h_Williams_Fractal_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
