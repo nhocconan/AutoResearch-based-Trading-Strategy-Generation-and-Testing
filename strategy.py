@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 12-hour Williams Alligator with daily EMA trend and volume spike.
-This strategy uses the Williams Alligator (three SMAs) to identify trending markets.
-Long when price > Alligator teeth and green alignment; short when price < Alligator teeth and red alignment.
-Daily EMA50 filters for higher timeframe trend alignment. Volume spikes confirm momentum.
-Designed for 12h timeframe to target 12-37 trades/year, avoiding overtrading while capturing medium-term trends.
+Hypothesis: 12-hour Donchian channel breakout with weekly trend filter and volume confirmation.
+This strategy captures trend continuation in strong moves while avoiding whipsaws in ranging markets.
+The weekly EMA filter ensures we only trade in the direction of the higher timeframe trend,
+and volume spikes confirm institutional participation. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -22,21 +21,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly EMA20 for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) - all SMAs
-    close_series = pd.Series(close)
-    jaw = close_series.rolling(window=13, min_periods=13).mean().values  # Blue line (13)
-    teeth = close_series.rolling(window=8, min_periods=8).mean().values   # Red line (8)
-    lips = close_series.rolling(window=5, min_periods=5).mean().values    # Green line (5)
+    # Calculate 12-hour Donchian channel (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 12-period volume average for spike detection
+    vol_avg_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -44,10 +44,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Wait for Alligator to be fully calculated
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema50_aligned[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_avg_12[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,31 +64,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above Teeth, Lips > Teeth > Jaw (green alignment), price above daily EMA50
-            if (close[i] > teeth[i] and 
-                lips[i] > teeth[i] and 
-                teeth[i] > jaw[i] and 
-                close[i] > ema50_aligned[i]):
+            # Long: Price breaks above Donchian upper band with bullish weekly trend and volume spike
+            if (close[i] > high_max[i] and 
+                close[i] > ema20_1w_aligned[i] and  # Bullish weekly trend: price above weekly EMA20
+                volume[i] > 1.8 * vol_avg_12[i]):  # Volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below Teeth, Lips < Teeth < Jaw (red alignment), price below daily EMA50
-            elif (close[i] < teeth[i] and 
-                  lips[i] < teeth[i] and 
-                  teeth[i] < jaw[i] and 
-                  close[i] < ema50_aligned[i]):
+            # Short: Price breaks below Donchian lower band with bearish weekly trend and volume spike
+            elif (close[i] < low_min[i] and 
+                  close[i] < ema20_1w_aligned[i] and  # Bearish weekly trend: price below weekly EMA20
+                  volume[i] > 1.8 * vol_avg_12[i]):  # Volume spike
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Alligator lines cross (trend weakening) or price returns to Teeth
+            # Exit conditions: price returns to opposite Donchian band
             exit_signal = False
             
             if position == 1:
-                # Exit long: Lips cross below Teeth or price drops below Teeth
-                if lips[i] < teeth[i] or close[i] < teeth[i]:
+                # Exit long: price returns to or below Donchian lower band
+                if close[i] <= low_min[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Lips cross above Teeth or price rises above Teeth
-                if lips[i] > teeth[i] or close[i] > teeth[i]:
+                # Exit short: price returns to or above Donchian upper band
+                if close[i] >= high_max[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1dEMA50_Trend_Volume"
+name = "12h_Donchian_20_1wEMA20_Trend_Volume"
 timeframe = "12h"
 leverage = 1.0
