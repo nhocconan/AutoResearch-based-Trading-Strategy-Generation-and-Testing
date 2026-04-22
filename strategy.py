@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day Bollinger Band squeeze breakout with 1-week trend and volume confirmation.
-Long when price breaks above upper Bollinger Band during low volatility (squeeze) and 1w EMA50 rising.
-Short when price breaks below lower Bollinger Band during squeeze and 1w EMA50 falling.
-Exit when price returns to middle Bollinger Band or 1w EMA50 reverses.
-Bollinger squeeze identifies low volatility breakout setups; 1w EMA provides higher-timeframe trend filter;
-volume breakout confirms institutional participation. Designed for low trade frequency by requiring volatility contraction
-followed by expansion with trend alignment. Works in both bull and bear markets by following the 1w trend.
+Hypothesis: 4-hour Camarilla pivot level touch with 1-day trend filter and volume confirmation.
+Long when price touches or breaks above S3 with 1-day EMA34 rising and volume spike.
+Short when price touches or breaks below R3 with 1-day EMA34 falling and volume spike.
+Exit when price returns to mean (H4/L4) or trend reverses.
+Camarilla levels provide institutional support/resistance; EMA34 filters trend direction; volume confirms participation.
+Designed for low trade frequency by requiring confluence of price level, trend, and volume.
+Works in both bull and bear markets by following the daily trend and using mean-reversion exits at pivot levels.
 """
 
 import numpy as np
@@ -23,71 +23,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands: 20-period SMA, 2 standard deviations
-    bb_period = 20
-    bb_std = 2.0
+    # Calculate Camarilla levels for each bar using previous bar's OHLC
+    # H4 = close + 1.5 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    # H3 = close + 1.25 * (high - low)
+    # L3 = close - 1.25 * (high - low)
+    # S3 = close - 1.125 * (high - low)
+    # R3 = close + 1.125 * (high - low)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_bb + (bb_std_dev * bb_std)
-    lower_band = sma_bb - (bb_std_dev * bb_std)
-    middle_band = sma_bb
+    high_low_range = prev_high - prev_low
     
-    # Bollinger Band Width for squeeze detection: (Upper - Lower) / Middle
-    bb_width = (upper_band - lower_band) / middle_band
-    # Squeeze: BB Width below 20-period average (low volatility)
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
+    H4 = prev_close + 1.5 * high_low_range
+    L4 = prev_close - 1.5 * high_low_range
+    H3 = prev_close + 1.25 * high_low_range
+    L3 = prev_close - 1.25 * high_low_range
+    S3 = prev_close - 1.125 * high_low_range
+    R3 = prev_close + 1.125 * high_low_range
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > 1.5 * vol_ma_20
-    
-    # Load 1-week data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # 50-period EMA on 1w close for trend
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 34-period EMA on 1d close for trend
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(sma_bb[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(bb_width[i]) or np.isnan(bb_width_ma[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(S3[i]) or np.isnan(R3[i]) or np.isnan(H4[i]) or np.isnan(L4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        
         if position == 0:
-            # Long: Price breaks above upper BB during squeeze with volume surge and 1w EMA50 rising
-            if (close[i] > upper_band[i] and squeeze[i] and vol_surge[i] and 
-                ema50_1w_aligned[i] > ema50_1w_aligned[i-1]):
+            # Long: Price at or below S3 with rising 1d EMA34 and volume spike
+            if (close[i] <= S3[i] and ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower BB during squeeze with volume surge and 1w EMA50 falling
-            elif (close[i] < lower_band[i] and squeeze[i] and vol_surge[i] and 
-                  ema50_1w_aligned[i] < ema50_1w_aligned[i-1]):
+            # Short: Price at or above R3 with falling 1d EMA34 and volume spike
+            elif (close[i] >= R3[i] and ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to middle BB or 1w EMA50 reverses
+            # Exit: Price returns to mean (H4/L4) or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price <= middle band or 1w EMA50 turns down
-                if close[i] <= middle_band[i] or ema50_1w_aligned[i] < ema50_1w_aligned[i-1]:
+                # Exit long: Price reaches H4 or 1d EMA34 turns down
+                if close[i] >= H4[i] or ema34_1d_aligned[i] < ema34_1d_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price >= middle band or 1w EMA50 turns up
-                if close[i] >= middle_band[i] or ema50_1w_aligned[i] > ema50_1w_aligned[i-1]:
+                # Exit short: Price reaches L4 or 1d EMA34 turns up
+                if close[i] <= L4[i] or ema34_1d_aligned[i] > ema34_1d_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -98,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_BollingerSqueeze_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4H_Camarilla_S3R3_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
