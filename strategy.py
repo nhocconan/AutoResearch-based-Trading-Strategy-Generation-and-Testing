@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-hour Exponential Moving Average crossover with 4-hour trend filter and daily volume confirmation.
-Long when 1h EMA10 > EMA30 and 4h EMA50 rising with daily volume > 1.5x 20-day average.
-Short when 1h EMA10 < EMA30 and 4h EMA50 falling with daily volume > 1.5x 20-day average.
-Exit when EMA crossover reverses or 4h EMA50 changes direction.
-Uses higher timeframe for trend direction and volume for institutional confirmation to reduce false signals.
-Designed for low trade frequency by requiring multiple confirmations, targeting 15-35 trades/year.
+Hypothesis: 12-hour Donchian breakout with 1-day trend and volume confirmation.
+Long when price breaks above 20-period Donchian upper band and 1-day EMA34 rising with volume spike.
+Short when price breaks below 20-period Donchian lower band and 1-day EMA34 falling with volume spike.
+Exit when price returns to Donchian midpoint or 1-day EMA34 reverses.
+Donchian breakouts capture momentum; 1-day EMA provides higher-timeframe trend filter; volume spike confirms institutional participation.
+Designed for low trade frequency by requiring multiple confirmations. Works in both bull and bear markets by following the 1-day trend.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,77 +22,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1h EMA crossover: fast EMA10, slow EMA30
-    ema10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema30 = pd.Series(close).ewm(span=30, adjust=False, min_periods=30).mean().values
+    # Donchian channels: 20-period high/low
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    mid_20 = (high_20 + low_20) / 2.0
     
-    # 4h EMA50 for trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Daily volume confirmation: current volume > 1.5x 20-day average
+    # Load 1d data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # 34-period EMA on 1d close for trend
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(ema10[i]) or np.isnan(ema30[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(mid_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current hourly volume > 1.5x daily 20-day average
-        # Note: comparing hourly volume to daily average - this works because
-        # we're looking for unusually high hourly activity relative to daily norm
-        vol_spike = volume[i] > 1.5 * vol_ma_20_aligned[i]
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: EMA10 > EMA30 and 4h EMA50 rising with volume spike
-            if (ema10[i] > ema30[i] and 
-                ema50_4h_aligned[i] > ema50_4h_aligned[i-1] and vol_spike):
-                signals[i] = 0.20
+            # Long: Price breaks above upper Donchian band and 1d EMA34 rising with volume spike
+            if (close[i] > high_20[i] and ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike):
+                signals[i] = 0.30
                 position = 1
-            # Short: EMA10 < EMA30 and 4h EMA50 falling with volume spike
-            elif (ema10[i] < ema30[i] and 
-                  ema50_4h_aligned[i] < ema50_4h_aligned[i-1] and vol_spike):
-                signals[i] = -0.20
+            # Short: Price breaks below lower Donchian band and 1d EMA34 falling with volume spike
+            elif (close[i] < low_20[i] and ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike):
+                signals[i] = -0.30
                 position = -1
         else:
-            # Exit: EMA crossover reverses or 4h EMA50 changes direction
+            # Exit: Price returns to Donchian midpoint or 1d EMA34 reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: EMA10 <= EMA30 or 4h EMA50 turns down
-                if ema10[i] <= ema30[i] or ema50_4h_aligned[i] < ema50_4h_aligned[i-1]:
+                # Exit long: Price crosses below midpoint or 1d EMA34 turns down
+                if close[i] < mid_20[i] or ema34_1d_aligned[i] < ema34_1d_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: EMA10 >= EMA30 or 4h EMA50 turns up
-                if ema10[i] >= ema30[i] or ema50_4h_aligned[i] > ema50_4h_aligned[i-1]:
+                # Exit short: Price crosses above midpoint or 1d EMA34 turns up
+                if close[i] > mid_20[i] or ema34_1d_aligned[i] > ema34_1d_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "1H_EMA_Crossover_4hTrend_DailyVol"
-timeframe = "1h"
+name = "12H_DonchianBreakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
