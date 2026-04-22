@@ -1,23 +1,16 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 
 """
-Hypothesis: 12-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
-Trades breakouts above/below the 12-hour Donchian channel (20-period) when aligned with
-the daily EMA trend. Volume spike confirms institutional interest. Designed for low trade
-frequency (12-37/year) to minimize fee drag and work in both bull and bear markets by
-aligning with higher timeframe trend and using breakouts as momentum signals.
+Hypothesis: 4-hour Volume-Weighted Average Price (VWAP) Reversion with 12-hour Exponential Moving Average trend filter.
+Trades mean-reversion when price deviates significantly from VWAP, but only in the direction of the 12h EMA trend.
+Uses Bollinger Bands to identify overextended conditions. Designed for low trade frequency (15-30 trades/year)
+to minimize fee drag and work in both bull and bear markets by aligning with higher timeframe trend and using
+statistical mean-reversion at extreme deviations.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_donchian(high, low, period=20):
-    """Calculate Donchian channel upper and lower bands."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -29,57 +22,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12h data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Daily EMA for trend filter (34-period)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h EMA for trend filter (21-period)
+    close_12h = df_12h['close'].values
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
     
-    # Calculate 12-hour Donchian channel (20-period)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    # Calculate VWAP (typical price * volume) / volume
+    typical_price = (high + low + close) / 3
+    vwap = (typical_price * volume).cumsum() / volume.cumsum()
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Bollinger Bands (20, 2) around VWAP for mean reversion signals
+    vwap_series = pd.Series(vwap)
+    vwap_ma_20 = vwap_series.rolling(window=20, min_periods=20).mean().values
+    vwap_std_20 = vwap_series.rolling(window=20, min_periods=20).std().values
+    upper_band = vwap_ma_20 + 2.0 * vwap_std_20
+    lower_band = vwap_ma_20 - 2.0 * vwap_std_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(vwap_ma_20[i]) or 
+            np.isnan(vwap_std_20[i]) or np.isnan(vwap[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
-        
-        if position == 0 and vol_spike:
-            # Long: price breaks above Donchian upper with uptrend bias
-            if close[i] > donchian_upper[i] and close[i] > ema_34_1d_aligned[i]:
+        if position == 0:
+            # Long: price below lower Bollinger Band and uptrend bias (price > 12h EMA)
+            if close[i] < lower_band[i] and close[i] > ema_21_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower with downtrend bias
-            elif close[i] < donchian_lower[i] and close[i] < ema_34_1d_aligned[i]:
+            # Short: price above upper Bollinger Band and downtrend bias (price < 12h EMA)
+            elif close[i] > upper_band[i] and close[i] < ema_21_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to opposite Donchian level or trend reverses
+            # Exit: price returns to VWAP (mean reversion complete) or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below Donchian lower or closes below daily EMA
-                if close[i] < donchian_lower[i] or close[i] < ema_34_1d_aligned[i]:
+                # Exit long: price crosses above VWAP or closes below 12h EMA
+                if close[i] > vwap[i] or close[i] < ema_21_12h_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above Donchian upper or closes above daily EMA
-                if close[i] > donchian_upper[i] or close[i] > ema_34_1d_aligned[i]:
+                # Exit short: price crosses below VWAP or closes above 12h EMA
+                if close[i] < vwap[i] or close[i] > ema_21_12h_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -90,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_Volume_Breakout"
-timeframe = "12h"
+name = "4h_VWAP_MeanReversion_12hEMA21_Trend"
+timeframe = "4h"
 leverage = 1.0
