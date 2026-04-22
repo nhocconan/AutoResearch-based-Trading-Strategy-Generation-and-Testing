@@ -1,11 +1,7 @@
-#!/usr/bin/env python3
-"""
-Hypothesis: 6-hour Fisher Transform with 1-day trend filter and volume confirmation.
-Long when Fisher crosses above -1.5 (bullish reversal) + daily close > daily EMA50 + volume > 1.5x average.
-Short when Fisher crosses below +1.5 (bearish reversal) + daily close < daily EMA50 + volume > 1.5x average.
-Exit when Fisher crosses zero (momentum exhaustion).
-Designed for low trade frequency (~15-30/year) to minimize fee drag in both bull and bear markets.
-"""
+# 12h Donchian Breakout + 1d Trend + Volume Spike
+# Hypothesis: Breakouts on 12h with daily trend filter and volume confirmation capture strong moves
+# while avoiding false breakouts in chop. Trend filter reduces whipsaw in bear markets like 2022.
+# Volume surge confirms institutional participation. Designed for low trade frequency (~15-25/year).
 
 import numpy as np
 import pandas as pd
@@ -26,81 +22,68 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA34 for trend filter
     daily_close = df_1d['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    daily_ema34 = pd.Series(daily_close).ewm(span=34, min_periods=34, adjust=False).mean().values
+    daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
     
-    # Calculate Fisher Transform (10-period)
-    hl2 = (high + low) / 2
-    max_hl2 = pd.Series(hl2).rolling(window=10, min_periods=10).max()
-    min_hl2 = pd.Series(hl2).rolling(window=10, min_periods=10).min()
-    range_hl2 = max_hl2 - min_hl2
-    # Avoid division by zero
-    range_hl2 = np.where(range_hl2 == 0, 1e-10, range_hl2)
-    value = 2 * ((hl2 - min_hl2) / range_hl2 - 0.5)
-    # Clamp value to [-0.999, 0.999] for arctanh stability
-    value = np.clip(value, -0.999, 0.999)
-    fish = 0.5 * np.log((1 + value) / (1 - value))  # atanh
-    fish = pd.Series(fish).ewm(span=3, adjust=False).mean().values  # smooth
+    # Calculate 12h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    # Calculate average volume for confirmation
+    # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(10, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(fish[i]) or np.isnan(daily_ema50_aligned[i]) or 
-            np.isnan(avg_volume[i]) or volume[i] == 0):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(daily_ema34_aligned[i]) or np.isnan(avg_volume[i]) or volume[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        daily_close_val = None
-        daily_ema50_val = None
-        if i < len(daily_ema50_aligned):
-            daily_close_val = df_1d['close'].values[-1] if len(df_1d) > 0 else np.nan
-            daily_ema50_val = daily_ema50_aligned[i]
-        else:
-            daily_close_val = np.nan
-            daily_ema50_val = np.nan
-            
-        if np.isnan(daily_close_val) or np.isnan(daily_ema50_val):
+        # Get current daily close and EMA for trend
+        daily_close_val = df_1d['close'].iloc[-1] if len(df_1d) > 0 else np.nan
+        daily_ema34_val = daily_ema34_aligned[i]
+        
+        if np.isnan(daily_close_val) or np.isnan(daily_ema34_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        daily_trend_up = daily_close_val > daily_ema50_val
-        daily_trend_down = daily_close_val < daily_ema50_val
+        daily_trend_up = daily_close_val > daily_ema34_val
+        daily_trend_down = daily_close_val < daily_ema34_val
         
-        volume_confirm = volume[i] > 1.5 * avg_volume[i]
+        volume_confirm = volume[i] > 2.0 * avg_volume[i]
         
         if position == 0:
-            # Long: Fisher crosses above -1.5 + daily uptrend + volume confirmation
-            if (fish[i] > -1.5 and fish[i-1] <= -1.5 and 
+            # Long: price breaks above Donchian upper + daily uptrend + volume spike
+            if (high[i] > highest_high[i] and 
                 daily_trend_up and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Fisher crosses below +1.5 + daily downtrend + volume confirmation
-            elif (fish[i] < 1.5 and fish[i-1] >= 1.5 and 
+            # Short: price breaks below Donchian lower + daily downtrend + volume spike
+            elif (low[i] < lowest_low[i] and 
                   daily_trend_down and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: price returns to Donchian middle or trend fails
+            middle = (highest_high[i] + lowest_low[i]) / 2
             exit_signal = False
             
             if position == 1:
-                # Exit long: Fisher crosses above +1.5 or daily trend changes to down
-                if fish[i] >= 1.5 or not daily_trend_up:
+                # Exit long: price breaks below Donchian middle or daily trend turns down
+                if low[i] < middle or not daily_trend_up:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Fisher crosses below -1.5 or daily trend changes to up
-                if fish[i] <= -1.5 or not daily_trend_down:
+                # Exit short: price breaks above Donchian middle or daily trend turns up
+                if high[i] > middle or not daily_trend_down:
                     exit_signal = True
             
             if exit_signal:
@@ -111,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Fisher_DailyTrend_VolumeFilter"
-timeframe = "6h"
+name = "12H_Donchian_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
