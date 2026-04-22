@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,19 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA20 for trend filter
-    close_1w_series = pd.Series(df_1w['close'].values)
-    ema_20w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20w)
-    
-    # Load daily data for pivot points (ONCE before loop)
+    # Load daily data for pivot points and trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     # Previous day's high, low, close for Camarilla pivot points
@@ -39,12 +29,17 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2  # Resistance level 4
     s4 = close_1d - range_ * 1.1 / 2  # Support level 4
     
-    # Align all levels to 12h timeframe
+    # 1d EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume confirmation: 5-period average
-    vol_avg_5 = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
+    # Volume confirmation: 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,27 +47,28 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_20w_aligned[i]) or np.isnan(vol_avg_5[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R4 with volume spike AND above weekly EMA20 (uptrend)
-            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_5[i] and 
-                close[i] > ema_20w_aligned[i]):
+            # Long: Price breaks above R4 with volume spike AND above 1d EMA34 (uptrend)
+            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S4 with volume spike AND below weekly EMA20 (downtrend)
-            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_5[i] and 
-                  close[i] < ema_20w_aligned[i]):
+            # Short: Price breaks below S4 with volume spike AND below 1d EMA34 (downtrend)
+            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+                  close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
             if position == 1:
                 # Exit long: Price closes below S1 (calculated from previous day)
+                # Recalculate S1 for exit condition
                 if i > 0:
                     s1 = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
                     s1_series = pd.Series(np.full_like(close_1d, s1))
@@ -100,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R4_S4_Breakout_WeeklyEMA20_Trend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
