@@ -3,117 +3,115 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with daily ADX trend filter and volume confirmation.
-# Uses daily ADX to identify strong trends (ADX > 25) and only takes breakout trades
-# in the direction of the trend. Avoids false breakouts in ranging markets.
-# Designed to work in both bull and bear markets by following the trend.
-# Targets 20-40 trades/year with disciplined risk control.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + weekly pivot bias.
+# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Uses weekly pivot points (R1/S1, R2/S2) from higher timeframe to filter trades.
+# In bullish weekly bias (price > weekly pivot): only take long when Bull Power > 0 and rising.
+# In bearish weekly bias (price < weekly pivot): only take short when Bear Power > 0 and rising.
+# Designed to capture momentum in direction of higher timeframe trend while avoiding counter-trend trades.
+# Targets 12-37 trades/year (50-150 total over 4 years) with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for ADX calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data for pivot points (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate weekly pivot points (standard formula)
+    # P = (H + L + C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Calculate +DM and -DM
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Align weekly pivot data to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA alpha=1/14)
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    # Calculate EMA13 on 6h data for Elder Ray
+    close = prices['close'].values
+    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Calculate DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    plus_di = np.where(tr_smooth == 0, 0, plus_di)
-    minus_di = np.where(tr_smooth == 0, 0, minus_di)
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Donchian channels (20-period) on 4h data
+    # Calculate Elder Ray components
     high = prices['high'].values
     low = prices['low'].values
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    bull_power = high - ema13  # Higher = stronger bullish momentum
+    bear_power = ema13 - low   # Higher = stronger bearish momentum
     
-    # Calculate 20-period average volume for volume spike detection
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate rising momentum (current > previous)
+    bull_power_rising = bull_power > np.roll(bull_power, 1)
+    bear_power_rising = bear_power > np.roll(bear_power, 1)
+    bull_power_rising[0] = False
+    bear_power_rising[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma_20[i])):
+    for i in range(13, n):
+        # Skip if weekly pivot data not ready
+        if (np.isnan(pivot_1w_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or
+            np.isnan(ema13[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        adx_val = adx_aligned[i]
-        upper = donch_high[i]
-        lower = donch_low[i]
+        pivot = pivot_1w_aligned[i]
+        r1 = r1_1w_aligned[i]
+        s1 = s1_1w_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        bull_rising = bull_power_rising[i]
+        bear_rising = bear_power_rising[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = vol > 1.5 * vol_ma_20[i]
+        # Determine weekly bias
+        is_bullish_bias = price > pivot  # Above weekly pivot = bullish bias
+        is_bearish_bias = price < pivot  # Below weekly pivot = bearish bias
         
         if position == 0:
-            # Only trade in strong trends (ADX > 25)
-            if adx_val > 25:
-                # Long breakout
-                if price > upper and vol_spike:
-                    signals[i] = 0.25
-                    position = 1
-                # Short breakout
-                elif price < lower and vol_spike:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long only in bullish weekly bias with rising bull power
+            if is_bullish_bias and bull > 0 and bull_rising:
+                signals[i] = 0.25
+                position = 1
+            # Enter short only in bearish weekly bias with rising bear power
+            elif is_bearish_bias and bear > 0 and bear_rising:
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit conditions: opposite band touch or trend weakening
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on retracement to lower band or trend weakening
-                if price < lower or adx_val < 20:
+                # Exit when bull power fails or turns bearish
+                if bull <= 0 or not bull_rising:
+                    exit_signal = True
+                # Also exit if price hits weekly S1 (strong support)
+                elif price <= s1:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on retracement to upper band or trend weakening
-                if price > upper or adx_val < 20:
+                # Exit when bear power fails or turns bullish
+                if bear <= 0 or not bear_rising:
+                    exit_signal = True
+                # Also exit if price hits weekly R1 (strong resistance)
+                elif price >= r1:
                     exit_signal = True
             
             if exit_signal:
@@ -125,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_ADX_Trend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_WeeklyPivot_Bias"
+timeframe = "6h"
 leverage = 1.0
