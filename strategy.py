@@ -1,19 +1,52 @@
 #!/usr/bin/env python3
+
 """
-Hypothesis: 4-hour Bollinger Band Squeeze with 1-day ATR volatility regime filter and volume confirmation.
-Trades breakouts from low volatility periods (Bollinger Band width < 20th percentile) in the direction of
-the daily ATR trend (increasing volatility = trend continuation). Uses volume spike to confirm breakout
-strength. Designed for low trade frequency (15-30 trades/year) to minimize fee flood and work in both
-bull and bear markets by trading volatility expansions rather than directional bias.
+Hypothesis: 4-hour Donchian Breakout with 1-week ADX trend filter and volume confirmation.
+Trades breakouts of the 20-period Donchian channel in the direction of the weekly ADX trend (ADX>25).
+Uses volume spike to confirm institutional interest at breakout. Designed for low trade frequency
+(15-40 trades/year) to minimize fee decay and work in both bull and bear markets by requiring
+strong trends (ADX filter) and volume confirmation to avoid false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index (ADX)"""
+    plus_dm = np.zeros_like(high)
+    minus_dm = np.zeros_like(high)
+    tr = np.zeros_like(high)
+    
+    for i in range(1, len(high)):
+        plus_dm[i] = max(0, high[i] - high[i-1])
+        minus_dm[i] = max(0, low[i-1] - low[i])
+        plus_dm[i] = plus_dm[i] if plus_dm[i] > minus_dm[i] else 0
+        minus_dm[i] = minus_dm[i] if minus_dm[i] > plus_dm[i] else 0
+        
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = np.zeros_like(high)
+    atr[period] = np.mean(tr[1:period+1])
+    for i in range(period+1, len(high)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    
+    plus_di = 100 * np.where(atr != 0, 
+                            np.convolve(plus_dm, np.ones(period)/period, mode='full')[period-1:-period+1] / atr, 0)
+    minus_di = 100 * np.where(atr != 0,
+                             np.convolve(minus_dm, np.ones(period)/period, mode='full')[period-1:-period+1] / atr, 0)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, plus_di + minus_di, 1)
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.mean(dx[period:2*period])
+    for i in range(2*period, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,80 +54,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + bb_std * std
-    lower = sma - bb_std * std
-    bb_width = upper - lower
-    
-    # Daily ATR for volatility regime (14-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load weekly data for ADX trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly ADX for trend filter (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    adx_14_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_14_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_14_1w)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Donchian channel (20-period) for breakout signals
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Bollinger Band width percentile (20-period lookback)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
-    
-    # Volume spike: current volume > 1.8x 20-period average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(bb_width_percentile[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(upper[i]) or np.isnan(lower[i])):
+        if (np.isnan(adx_14_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: low volatility (BB width < 30th percentile) AND increasing volatility (ATR rising)
-        low_vol_regime = bb_width_percentile[i] < 0.30
-        vol_increasing = atr_14_1d_aligned[i] > atr_14_1d_aligned[i-1] if i > 0 else False
+        # Strong trend filter: weekly ADX > 25
+        strong_trend = adx_14_1w_aligned[i] > 25
         
         # Volume confirmation
-        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        if position == 0 and low_vol_regime and vol_increasing and vol_spike:
-            # Breakout direction: above upper band = long, below lower band = short
-            if close[i] > upper[i]:
+        if position == 0 and strong_trend and vol_spike:
+            # Long: price breaks above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.25
                 position = 1
-            elif close[i] < lower[i]:
+            # Short: price breaks below Donchian low
+            elif close[i] < donchian_low[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: volatility contraction (BB width expanding) or opposite band touch
+            # Exit: price returns to opposite Donchian level or trend weakens
             exit_signal = False
             
             if position == 1:
-                # Exit long: price touches lower band or volatility contracting
-                if close[i] < lower[i] or bb_width_percentile[i] > 0.70:
+                # Exit long: price breaks below Donchian low or ADX weakens
+                if close[i] < donchian_low[i] or adx_14_1w_aligned[i] < 20:
                     exit_signal = True
-            elif position == -1:
-                # Exit short: price touches upper band or volatility contracting
-                if close[i] > upper[i] or bb_width_percentile[i] > 0.70:
+            else:  # position == -1
+                # Exit short: price breaks above Donchian high or ADX weakens
+                if close[i] > donchian_high[i] or adx_14_1w_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -105,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BollingerSqueeze_ATRVolatilityRegime_Volume"
+name = "4h_Donchian20_ADX14_1w_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
