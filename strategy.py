@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot + Volume Spike + Chop Regime Filter.
-Long when price breaks above Camarilla R3 with volume spike and chop > 61.8 (range).
-Short when price breaks below Camarilla S3 with volume spike and chop > 61.8 (range).
-Exit when price crosses Camarilla H4/L4 or chop < 38.2 (trending).
-Camarilla levels provide institutional support/resistance; volume confirms participation;
-chop filter avoids trending markets where pivot breaks fail. Designed for 12h timeframe
-to capture major reversals in ranging markets (common in BTC/ETH 2025 bear/range).
+Hypothesis: 1h RSI mean-reversion with 4h trend filter and volume confirmation.
+Long when RSI < 30 (oversold), 4h EMA50 rising, and volume spike.
+Short when RSI > 70 (overbought), 4h EMA50 falling, and volume spike.
+Exit when RSI crosses 50 (mean reversion complete) or trend reverses.
+Uses 4h for trend direction to avoid counter-trend trades, 1h for precise entry timing.
+Session filter (08-20 UTC) reduces noise. Designed for low trade frequency by requiring multiple confirmations.
+Works in both bull and bear markets by following the 4h trend.
 """
 
 import numpy as np
@@ -18,101 +18,83 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate pivot points from previous day (need daily OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # RSI(14) - standard calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Load 4h data for trend filter - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # 50-period EMA on 4h close for trend
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Camarilla levels: based on previous day's range
-    R4 = prev_close + (prev_high - prev_low) * 1.5000
-    R3 = prev_close + (prev_high - prev_low) * 1.2500
-    R2 = prev_close + (prev_high - prev_low) * 1.1666
-    R1 = prev_close + (prev_high - prev_low) * 1.0833
-    PP = (prev_high + prev_low + prev_close) / 3
-    S1 = prev_close - (prev_high - prev_low) * 1.0833
-    S2 = prev_close - (prev_high - prev_low) * 1.1666
-    S3 = prev_close - (prev_high - prev_low) * 1.2500
-    S4 = prev_close - (prev_high - prev_low) * 1.5000
-    
-    # Align Camarilla levels to 12h timeframe (they change only at daily open)
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
-    H4_12h = align_htf_to_ltf(prices, df_1d, R4)
-    L4_12h = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Chopiness Index (14-period) to detect ranging markets
-    def true_range(high, low, close_prev):
-        tr1 = high - low
-        tr2 = np.abs(high - close_prev)
-        tr3 = np.abs(low - close_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    close_prev = np.roll(close, 1)
-    close_prev[0] = close[0]
-    tr = true_range(high, low, close_prev)
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Chop = 100 * log10(sum(TR14) / (ATR14 * 14)) / log10(14)
-    tr_sum14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(tr_sum14 / (atr14 * 14)) / np.log10(14)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC (pre-compute hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or np.isnan(H4_12h[i]) or 
-            np.isnan(L4_12h[i]) or np.isnan(chop[i]) or np.isnan(vol_ma_20[i])):
+    for i in range(14, n):
+        # Skip if data not ready or outside session
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(rsi[i]) or not (8 <= hours[i] <= 20)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume spike and chop > 61.8 (ranging market)
-            if close[i] > R3_12h[i] and vol_spike and chop[i] > 61.8:
-                signals[i] = 0.25
+            # Long: RSI < 30 (oversold), 4h EMA50 rising, volume spike
+            if (rsi[i] < 30 and 
+                ema50_4h_aligned[i] > ema50_4h_aligned[i-1] and vol_spike):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S3 with volume spike and chop > 61.8 (ranging market)
-            elif close[i] < S3_12h[i] and vol_spike and chop[i] > 61.8:
-                signals[i] = -0.25
+            # Short: RSI > 70 (overbought), 4h EMA50 falling, volume spike
+            elif (rsi[i] > 70 and 
+                  ema50_4h_aligned[i] < ema50_4h_aligned[i-1] and vol_spike):
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: price crosses H4/L4 or chop < 38.2 (trending market)
+            # Exit: RSI crosses 50 (mean reversion complete) or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below H4 or market starts trending
-                if close[i] < H4_12h[i] or chop[i] < 38.2:
+                # Exit long: RSI >= 50 or 4h EMA50 turns down
+                if rsi[i] >= 50 or ema50_4h_aligned[i] < ema50_4h_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above L4 or market starts trending
-                if close[i] > L4_12h[i] or chop[i] < 38.2:
+                # Exit short: RSI <= 50 or 4h EMA50 turns up
+                if rsi[i] <= 50 or ema50_4h_aligned[i] > ema50_4h_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12h_Camarilla_R3S3_Volume_ChopFilter"
-timeframe = "12h"
+name = "1h_RSI_MeanReversion_4hTrend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
