@@ -1,10 +1,3 @@
-# 4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume_Spike
-# Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
-# Breakouts above R1 or below S1 with volume confirmation and trend filter (price > EMA34) capture
-# institutional breakout moves. Works in both bull (breakouts continuation) and bear (false breakout reversals via mean reversion to pivot).
-# Volume spike filter reduces false breakouts. EMA34 trend filter ensures alignment with higher timeframe trend.
-# Target: 20-50 trades/year, low frequency to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -72,11 +65,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R1 with volume + above EMA34
             if price > r1 and vol > 2.0 * vol_ma and price > ema34:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 with volume + below EMA34
             elif price < s1 and vol > 2.0 * vol_ma and price < ema34:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
@@ -88,10 +81,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume_Spike"
+name = "4h_Pivot_R1_S1_Breakout_1dEMA34_Volume_Spike_v2"
 timeframe = "4h"
 leverage = 1.0
