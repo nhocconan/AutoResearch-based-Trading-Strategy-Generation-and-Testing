@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume spike
-    # Elder Ray measures bull/bear power relative to EMA13
+    # Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike
+    # Donchian breakout captures strong momentum moves
     # EMA50 on 1d filters for long-term trend direction
     # Volume spike (2x 20-period MA) confirms institutional participation
-    # Works in bull/bear: Elder Ray divergence + volume confirms trend strength
+    # Works in bull/bear: breakout + volume confirms trend, EMA filter avoids counter-trend
     
     # Price and volume data
     close = prices['close'].values
@@ -25,10 +25,9 @@ def generate_signals(prices):
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Elder Ray on 6h data (EMA13 for reference)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
+    # Donchian(20) on 12h data
+    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -40,9 +39,8 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
+            np.isnan(dc_high[i]) or 
+            np.isnan(dc_low[i]) or 
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -50,24 +48,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 AND rising + Bear Power < 0 AND volume spike + price above EMA50
-            if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and bear_power[i] < 0 and vol_spike[i] and close[i] > ema50_1d_aligned[i]:
+            # Long: Breakout above Donchian high + volume spike + price above EMA50
+            if close[i] > dc_high[i] and vol_spike[i] and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND falling + Bull Power < 0 AND volume spike + price below EMA50
-            elif bear_power[i] < 0 and bear_power[i] < bear_power[i-1] and bull_power[i] < 0 and vol_spike[i] and close[i] < ema50_1d_aligned[i]:
+            # Short: Breakdown below Donchian low + volume spike + price below EMA50
+            elif close[i] < dc_low[i] and vol_spike[i] and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Power signals weaken (trend losing momentum)
+            # Exit: Price returns to opposite Donchian level (reversal signal)
             if position == 1:
-                if bull_power[i] <= 0 or bull_power[i] < bull_power[i-1]:  # Bull power weakening
+                if close[i] < dc_low[i]:  # Price breaks below Donchian low
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if bear_power[i] >= 0 or bear_power[i] > bear_power[i-1]:  # Bear power weakening
+                if close[i] > dc_high[i]:  # Price breaks above Donchian high
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -75,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian_20_Breakout_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
