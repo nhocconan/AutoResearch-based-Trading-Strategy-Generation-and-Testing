@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,73 +13,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot points (ONCE before loop)
+    # Load 1d data for ATR and EMA (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Previous day's pivot points (standard)
+    # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    prev_high = high_1d
-    prev_low = low_1d
-    prev_close = close_1d
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, tr2)])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align pivot levels to 1d timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # 1d EMA(34) for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume confirmation: 20-period average with min_periods
-    vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Align indicators to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # 4h Donchian(20) breakout levels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 + volume spike (2x avg)
-            if close[i] > r1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
+            # Long: Price breaks above Donchian high + ATR filter + Uptrend
+            if (close[i] > highest_20[i] and 
+                atr_14_aligned[i] > 0 and  # volatility present
+                close[i] > ema_34_aligned[i] and  # uptrend filter
+                volume[i] > 1.5 * vol_avg_20[i]):  # volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike (2x avg)
-            elif close[i] < s1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
+            # Short: Price breaks below Donchian low + ATR filter + Downtrend
+            elif (close[i] < lowest_20[i] and 
+                  atr_14_aligned[i] > 0 and  # volatility present
+                  close[i] < ema_34_aligned[i] and  # downtrend filter
+                  volume[i] > 1.5 * vol_avg_20[i]):  # volume confirmation
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to pivot level (full exit)
+            # ATR-based trailing stop
             if position == 1:
-                # Exit long: Price closes below pivot
-                if close[i] < pivot_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                # Long position: trail from highest high since entry
+                if i > 0:
+                    # Update highest high since entry (simplified: use rolling max)
+                    highest_since_entry = np.maximum.accumulate(high[max(0, i-50):i+1])[-1] if i > 0 else high[i]
+                    if close[i] < highest_since_entry - 2.0 * atr_14_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above pivot
-                if close[i] > pivot_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                # Short position: trail from lowest low since entry
+                if i > 0:
+                    lowest_since_entry = np.minimum.accumulate(low[max(0, i-50):i+1])[-1] if i > 0 else low[i]
+                    if close[i] > lowest_since_entry + 2.0 * atr_14_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
     
     return signals
 
-name = "1D_Pivot_R1_S1_Breakout_Volume_Spike"
-timeframe = "1d"
+name = "4H_Donchian20_ATR_EMA_Volume_Breakout"
+timeframe = "4h"
 leverage = 1.0
