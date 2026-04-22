@@ -1,10 +1,3 @@
-# 12H_Camarilla_R4_S4_Breakout_1dEMA50_Trend_Volume_Session
-# Hypothesis: Breakouts of Camarilla R4/S4 levels with volume confirmation and 1-day EMA50 trend filter
-# Work in both bull/bear: Trend filter ensures trades align with higher timeframe direction, reducing whipsaw
-# Uses 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-# Volume > 2x average confirms breakout strength, reducing false signals
-# Exits on retracement to R1/S1 levels for defined risk/reward
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -38,27 +31,32 @@ def generate_signals(prices):
     r4 = close_1d + range_ * 1.1 / 2   # Resistance level 4
     s4 = close_1d - range_ * 1.1 / 2   # Support level 4
     
-    # Align all levels to 12h timeframe
+    # Align all levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 20-period average (slower for 4h to reduce trades)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Trend filter: 1d EMA50 (HTF trend)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        # Skip if data not ready
+        # Skip if data not ready or outside session
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R4_S4_Breakout_1dEMA50_Trend_Volume_Session"
-timeframe = "12h"
+name = "4H_Camarilla_R4_S4_Breakout_1dEMA50_Trend_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
