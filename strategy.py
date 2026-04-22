@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Williams Alligator with 1-day trend filter and volume spike.
-Long when price > Alligator teeth (green line) with rising 1-day EMA34 and volume spike.
-Short when price < Alligator teeth with falling 1-day EMA34 and volume spike.
-Exit when price crosses back below/above teeth.
-Williams Alligator identifies trend presence and direction; 1-day EMA34 filters for higher timeframe trend;
-volume spike confirms institutional participation. Designed for low trade frequency by requiring
-multiple confirmations. Works in both bull and bear markets by following the daily trend.
+Hypothesis: 1-day Bollinger Band squeeze breakout with 1-week ADX trend filter and volume confirmation.
+Long when price breaks above upper BB during low volatility (BBW < 20th percentile) with rising weekly ADX > 25 and volume spike.
+Short when price breaks below lower BB during low volatility with rising weekly ADX > 25 and volume spike.
+Exit when price returns to middle Bollinger Band (20-day SMA).
+Designed to capture explosive moves after consolidation periods, works in both bull and bear markets by filtering with weekly trend strength.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,76 +21,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for trend filter - ONCE before loop
+    # Load 1-day data for Bollinger Bands - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Williams Alligator (13,8,5 SMAs shifted)
-    # Jaw (blue): 13-period SMA, shifted 8 bars
-    # Teeth (red): 8-period SMA, shifted 5 bars
-    # Lips (green): 5-period SMA, shifted 3 bars
-    # We use the teeth (8-period SMA shifted 5) as the main trend line
-    
-    # Calculate SMAs
-    sma_5 = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    sma_8 = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    sma_13 = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    
-    # Apply shifts: Jaw (13) shifted 8, Teeth (8) shifted 5, Lips (5) shifted 3
-    jaw = np.roll(sma_13, 8)
-    teeth = np.roll(sma_8, 5)
-    lips = np.roll(sma_5, 3)
-    
-    # Fill shifted values with NaN for invalid periods
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
-    # 1-day EMA34 for trend filter
+    # Calculate Bollinger Bands (20, 2)
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    bb_width = (upper_bb - lower_bb) / sma20 * 100  # Percentage
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Calculate 20th percentile of BB width for squeeze condition (using expanding window)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_pct20 = bb_width_series.expanding(min_periods=20).quantile(0.20).values
+    
+    # Load 1-week data for ADX trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Calculate ADX (14) on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # DI values
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align indicators to 1-day timeframe
+    sma20_aligned = align_htf_to_ltf(prices, df_1d, sma20)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    bb_width_pct20_aligned = align_htf_to_ltf(prices, df_1d, bb_width_pct20)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):  # Start after enough data for SMA13
+    for i in range(30, n):  # Start after enough data for indicators
         # Skip if data not ready
-        if (np.isnan(teeth[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(sma20_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or np.isnan(bb_width_pct20_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Squeeze condition: BB width below 20th percentile
+        squeeze = bb_width[i] < bb_width_pct20_aligned[i]
+        
         # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        
+        # Weekly ADX rising (current > previous)
+        adx_rising = adx[i] > adx[i-1] if i > 0 else False
         
         if position == 0:
-            # Long: Price > teeth with rising 1-day EMA34 and volume spike
-            if (close[i] > teeth[i] and 
-                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike):
+            # Long: Price breaks above upper BB during squeeze with rising ADX > 25 and volume spike
+            if (squeeze and close[i] > upper_bb_aligned[i] and 
+                adx_aligned[i] > 25 and adx_rising and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < teeth with falling 1-day EMA34 and volume spike
-            elif (close[i] < teeth[i] and 
-                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike):
+            # Short: Price breaks below lower BB during squeeze with rising ADX > 25 and volume spike
+            elif (squeeze and close[i] < lower_bb_aligned[i] and 
+                  adx_aligned[i] > 25 and adx_rising and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back below/above teeth
+            # Exit: Price returns to middle Bollinger Band (20-day SMA)
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses below teeth
-                if close[i] < teeth[i]:
+                # Exit long: Price crosses below SMA20
+                if close[i] < sma20_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price crosses above teeth
-                if close[i] > teeth[i]:
+                # Exit short: Price crosses above SMA20
+                if close[i] > sma20_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -103,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Williams_Alligator_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1D_Bollinger_Squeeze_ADXTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
