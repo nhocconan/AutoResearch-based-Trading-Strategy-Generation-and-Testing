@@ -1,11 +1,11 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,7 +37,7 @@ def generate_signals(prices):
     r4 = r3 + (high_1d - low_1d)
     s4 = s3 - (high_1d - low_1d)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 6h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -75,26 +75,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 with volume spike AND volatility filter
-            if (close[i] > r3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and atr[i] > 0.5 * np.mean(atr[max(0,i-20):i+1])):
+            # Long: Price breaks above R4 with volume spike
+            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 with volume spike AND volatility filter
-            elif (close[i] < s3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and atr[i] > 0.5 * np.mean(atr[max(0,i-20):i+1])):
+            # Short: Price breaks below S4 with volume spike
+            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit: Price crosses back to opposite pivot level
             if position == 1:
-                # Exit long: Price closes below S3
-                if close[i] < s3_aligned[i]:
+                # Exit long: Price closes below R2
+                if close[i] < r2_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above R3
-                if close[i] > r3_aligned[i]:
+                # Exit short: Price closes above S2
+                if close[i] > s2_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Pivot_R3_S3_Breakout_Volume_VolatilityFilter"
-timeframe = "4h"
+name = "6H_Pivot_R4_S4_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
