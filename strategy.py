@@ -3,62 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
-# Williams Alligator uses three smoothed moving averages (Jaw: 13-period SMA shifted 8 bars forward,
-# Teeth: 8-period SMA shifted 5 bars forward, Lips: 5-period SMA shifted 3 bars forward).
-# In trending markets, these lines are well-separated and ordered.
-# In ranging markets, they intertwine.
-# We use 1d EMA50 for trend direction (bullish if price > EMA50, bearish if price < EMA50).
-# Entry: Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA50 AND volume spike.
-# Entry: Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA50 AND volume spike.
-# Exit: When Alligator lines re-intertwine (Lips crosses Teeth or Jaw) OR volume drops.
-# Designed to catch strong trends while avoiding chop. Targets 15-30 trades/year on 12h.
+# Hypothesis: 1d KAMA trend + weekly Bollinger Band squeeze + volume confirmation.
+# Uses weekly Bollinger Band width to detect low volatility (squeeze) conditions.
+# When squeeze occurs, trade in direction of daily KAMA with volume confirmation.
+# Designed to work in both bull and bear markets by capturing breakouts from low volatility.
+# Targets 10-25 trades/year with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for EMA50 trend filter (once before loop)
+    # Load weekly data for Bollinger Band squeeze (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20
+    
+    # Bollinger Band squeeze: BB width below 20-period average
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    bb_squeeze = bb_width < bb_width_ma
+    
+    # Align BB squeeze to daily timeframe
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1w, bb_squeeze)
+    
+    # Load daily data for KAMA
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate KAMA (2, 10, 30)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, 10))
+    volatility = np.sum(np.abs(np.diff(close_1d, 1)), axis=0)
+    er = np.zeros_like(close_1d)
+    er[10:] = change[10:] / volatility[10:]
+    er[volatility == 0] = 0
     
-    # Calculate Williams Alligator components on 12h data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
     
-    # Jaw: 13-period SMMA shifted 8 bars forward
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Teeth: 8-period SMMA shifted 5 bars forward
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)
+    # Align KAMA to daily timeframe (already daily, but align for consistency)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Lips: 5-period SMMA shifted 3 bars forward
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)
+    # Calculate daily ATR for stop loss
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Convert to numpy arrays, filling NaN with 0 for alignment
-    jaw = jaw.fillna(0).values
-    teeth = teeth.fillna(0).values
-    lips = lips.fillna(0).values
+    # Align ATR to daily timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Calculate 20-period average volume for volume spike detection
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily volume moving average
+    volume_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or 
+        if (np.isnan(bb_squeeze_aligned[i]) or 
+            np.isnan(kama_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,52 +93,57 @@ def generate_signals(prices):
             continue
         
         price = prices['close'].iloc[i]
-        vol = volume[i]
+        vol = volume_1d[i]  # Use daily volume for volume confirmation
         vol_ma = vol_ma_20[i]
-        ema50 = ema50_1d_aligned[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        kama_val = kama_aligned[i]
+        bb_squeeze_val = bb_squeeze_aligned[i]
+        atr_val = atr_aligned[i]
         
         # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = vol > 1.5 * vol_ma
-        
-        # Alligator alignment conditions
-        bullish_alignment = lips_val > teeth_val > jaw_val
-        bearish_alignment = lips_val < teeth_val < jaw_val
+        vol_confirm = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Look for new entries
-            if bullish_alignment and price > ema50 and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            elif bearish_alignment and price < ema50 and vol_spike:
-                signals[i] = -0.25
-                position = -1
+            # Enter only during Bollinger Band squeeze with volume confirmation
+            if bb_squeeze_val and vol_confirm:
+                if price > kama_val:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price
+                elif price < kama_val:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price
         
         elif position != 0:
-            # Check for exit conditions
+            # Exit conditions: stop loss or mean reversion
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit if Alligator lines re-intertwine (Lips crosses below Teeth or Jaw)
-                if lips_val <= teeth_val or lips_val <= jaw_val:
+                # Stop loss: 2 * ATR below entry
+                if price < entry_price - 2.0 * atr_val:
+                    exit_signal = True
+                # Mean reversion: price returns to KAMA
+                elif price <= kama_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit if Alligator lines re-intertwine (Lips crosses above Teeth or Jaw)
-                if lips_val >= teeth_val or lips_val >= jaw_val:
+                # Stop loss: 2 * ATR above entry
+                if price > entry_price + 2.0 * atr_val:
+                    exit_signal = True
+                # Mean reversion: price returns to KAMA
+                elif price >= kama_val:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12h_WilliamsAlligator_TrendFilter_Volume"
-timeframe = "12h"
+name = "1d_KAMA_BBSqueeze_Volume"
+timeframe = "1d"
 leverage = 1.0
