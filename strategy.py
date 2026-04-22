@@ -1,3 +1,10 @@
+# State your hypothesis in a comment at the top (strategy type, timeframe, why it should work in BOTH bull AND bear)
+# Hypothesis: 4h volume-weighted RSI (VW-RSI) with 12h EMA trend filter and Bollinger Band mean reversion
+# Works in bull markets: buys oversold dips in uptrend (VW-RSI < 30, price near lower BB, 12h EMA up)
+# Works in bear markets: sells overbought rallies in downtrend (VW-RSI > 70, price near upper BB, 12h EMA down)
+# Volume-weighted RSI filters low-volume noise, Bollinger Bands provide dynamic support/resistance
+# Tight entry conditions (VW-RSI extremes + BB touch + trend alignment) target ~25-40 trades/year
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -8,77 +15,73 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: Daily EMA34 trend + Camarilla S1/R1 breakout with volume confirmation
-    # Uses tighter breakout levels (S1/R1) for more reliable signals, reducing false breakouts
-    # Works in bull markets (buy S1 breakout) and bear markets (sell R1 breakdown)
-    # Volume surge filters low-probability breakouts
+    # Load 12h data once for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Load daily data once
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 12h EMA50 trend filter
+    ema_12h_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
     
-    # Daily EMA34 trend filter
-    ema_1d_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
-    
-    # Daily Camarilla pivot levels (S1, R1 only - tighter levels)
-    range_1d = high_1d - low_1d
-    close_prev = close_1d
-    s1_1d = close_prev - (range_1d * 1.0 / 6)
-    r1_1d = close_prev + (range_1d * 1.0 / 6)
-    
-    # Align daily levels to 12h
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    
-    # 12h ATR for volatility filter
+    # 4h data for calculations
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volume = prices['volume'].values
     
-    # Volume filter (20-period MA surge)
-    vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 2.0 * vol_ma20
+    # Volume-weighted RSI (14-period)
+    # Calculate price changes
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Volume-weighted gain/loss
+    vol_gain = gain * volume
+    vol_loss = loss * volume
+    
+    # Smoothed volume-weighted RS
+    avg_vol_gain = pd.Series(vol_gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_vol_loss = pd.Series(vol_loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_vol_gain / (avg_vol_loss + 1e-10)
+    vw_rsi = 100 - (100 / (1 + rs))
+    
+    # Bollinger Bands (20-period, 2 std)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(s1_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or
-            np.isnan(ema_1d_34_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_12h_50_aligned[i]) or np.isnan(vw_rsi[i]) or
+            np.isnan(sma_20[i]) or np.isnan(std_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above S1 with volume surge AND daily EMA34 uptrend
-            if close[i] > s1_1d_aligned[i] and vol_surge[i] and close[i] > ema_1d_34_aligned[i]:
+            # Long: VW-RSI oversold (<30), price at or below lower BB, 12h EMA uptrend
+            if vw_rsi[i] < 30 and close[i] <= lower_bb[i] and close[i] > ema_12h_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below R1 with volume surge AND daily EMA34 downtrend
-            elif close[i] < r1_1d_aligned[i] and vol_surge[i] and close[i] < ema_1d_34_aligned[i]:
+            # Short: VW-RSI overbought (>70), price at or above upper BB, 12h EMA downtrend
+            elif vw_rsi[i] > 70 and close[i] >= upper_bb[i] and close[i] < ema_12h_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to EMA34 level (dynamic stop)
+            # Exit: VW-RSI returns to neutral zone (40-60) OR price crosses 12h EMA
             if position == 1:
-                if close[i] < ema_1d_34_aligned[i]:
+                if vw_rsi[i] > 40 or close[i] < ema_12h_50_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema_1d_34_aligned[i]:
+                if vw_rsi[i] < 60 or close[i] > ema_12h_50_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -86,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_S1_R1_Breakout_1dEMA34_Trend_VolumeSurge_v1"
-timeframe = "12h"
+name = "4h_VW_RSI_BB_MeanReversion_12hEMA50_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
