@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Donchian Breakout with Weekly Trend Filter and Volume Confirmation.
-Long when price breaks above 20-day high during weekly uptrend with volume spike.
-Short when price breaks below 20-day low during weekly downtrend with volume spike.
-Exit when price returns to Donchian midpoint or weekly trend reverses.
-Designed for low trade frequency (10-20 trades/year) with strong trend alignment and volume confirmation.
-Works in both bull and bear markets by following the weekly trend.
+Hypothesis: 6-hour Ehlers Fisher Transform with 12-hour trend filter and volume confirmation.
+Long when Fisher crosses above -1.5 during 12-hour uptrend with volume spike.
+Short when Fisher crosses below +1.5 during 12-hour downtrend with volume spike.
+Exit when Fisher crosses back through zero or trend reverses.
+Designed for low-to-moderate trade frequency by requiring multiple confirmations.
+Works in both bull and bear markets by following the 12-hour trend.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,71 +22,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-day high/low) - using daily data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Ehlers Fisher Transform on 6h prices (length=10)
+    def ehlers_fisher_transform(price_series, length=10):
+        n = len(price_series)
+        if n < length:
+            return np.full(n, np.nan), np.full(n, np.nan)
+        
+        # Normalize price to [-1, 1] range over lookback period
+        highest = np.maximum.accumulate(price_series)
+        lowest = np.minimum.accumulate(price_series)
+        range_val = highest - lowest
+        range_val = np.where(range_val == 0, 1, range_val)  # avoid division by zero
+        
+        value1 = 2 * ((price_series - lowest) / range_val - 0.5)
+        value1 = np.clip(value1, -0.999, 0.999)  # avoid log(0)
+        
+        # Smooth with exponential moving average
+        alpha = 2.0 / (length + 1)
+        value2 = np.zeros(n)
+        value2[0] = value1[0]
+        for i in range(1, n):
+            value2[i] = alpha * value1[i] + (1 - alpha) * value2[i-1]
+        
+        # Fisher transform
+        fish = 0.5 * np.log((1 + value2) / (1 - value2))
+        fish = np.where(np.isnan(value2) | np.isinf(value2), np.nan, fish)
+        
+        # Signal line (3-period EMA of Fisher)
+        signal = np.zeros(n)
+        signal[0] = fish[0] if not np.isnan(fish[0]) else 0
+        for i in range(1, n):
+            if np.isnan(fish[i]):
+                signal[i] = signal[i-1]
+            else:
+                signal[i] = alpha * fish[i] + (1 - alpha) * signal[i-1]
+        
+        return fish, signal
+    
+    fish, fish_signal = ehlers_fisher_transform(close, length=10)
+    
+    # Load 12-hour data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 20-period EMA on 12h close for trend
+    close_12h = df_12h['close'].values
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
-    # 20-period high/low for Donchian channels
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Align Donchian levels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    
-    # Weekly trend filter: 21-period EMA on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 1.8x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema21_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(fish[i]) or np.isnan(fish_signal[i]) or 
+            np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_ma_30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.8 * vol_ma_30[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high + weekly uptrend + volume spike
-            if close[i] > donchian_high_aligned[i] and ema21_1w_aligned[i] > ema21_1w_aligned[i-1] and vol_spike:
+            # Long: Fisher crosses above -1.5 + 12h uptrend + volume spike
+            if fish[i] > -1.5 and fish_signal[i] <= -1.5 and ema20_12h_aligned[i] > ema20_12h_aligned[i-1] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + weekly downtrend + volume spike
-            elif close[i] < donchian_low_aligned[i] and ema21_1w_aligned[i] < ema21_1w_aligned[i-1] and vol_spike:
+            # Short: Fisher crosses below +1.5 + 12h downtrend + volume spike
+            elif fish[i] < 1.5 and fish_signal[i] >= 1.5 and ema20_12h_aligned[i] < ema20_12h_aligned[i-1] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to Donchian midpoint or weekly trend reverses
+            # Exit: Fisher crosses back through zero or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price below midpoint or weekly trend turns down
-                if close[i] < donchian_mid_aligned[i] or ema21_1w_aligned[i] < ema21_1w_aligned[i-1]:
+                # Exit long: Fisher crosses below zero or 12h trend turns down
+                if fish[i] < 0 and fish_signal[i] >= 0 or ema20_12h_aligned[i] < ema20_12h_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price above midpoint or weekly trend turns up
-                if close[i] > donchian_mid_aligned[i] or ema21_1w_aligned[i] > ema21_1w_aligned[i-1]:
+                # Exit short: Fisher crosses above zero or 12h trend turns up
+                if fish[i] > 0 and fish_signal[i] <= 0 or ema20_12h_aligned[i] > ema20_12h_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -97,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Daily_Donchian_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6H_Ehlers_Fisher_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
