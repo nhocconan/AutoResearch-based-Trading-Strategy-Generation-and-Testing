@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h RSI(2) mean reversion with 1d EMA200 trend filter and volume confirmation
-    # RSI(2) captures extreme short-term reversals (<10 oversold, >90 overbought)
-    # 1d EMA200 ensures trading with the higher timeframe trend
-    # Volume spike confirms institutional participation
-    # This combination works in both bull (buy dips) and bear (sell rallies) markets
+    # Hypothesis: 4h Keltner Channel breakout with 1d ADX trend filter and volume confirmation
+    # Keltner Channel identifies volatility-based breakouts (ATR-based channels)
+    # ADX > 25 filters for trending markets to avoid whipsaws in ranging conditions
+    # Volume spike confirms institutional participation in the breakout
+    # This combination works in both bull/bear by capturing strong trending moves
     
     # Price and volume data
     close = prices['close'].values
@@ -20,34 +20,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA200 trend filter (higher timeframe)
+    # Load 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # RSI(2) calculation
-    def rsi(series, period):
-        delta = np.diff(series, prepend=series[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
+    # Calculate ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First TR is just high-low
         
-        avg_gain = np.zeros_like(series)
-        avg_loss = np.zeros_like(series)
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
         
-        # Initialize first average
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
+        # Smoothed values using Wilder's smoothing (similar to RSI)
+        def wilders_smoothing(data, period):
+            result = np.full_like(data, np.nan)
+            if len(data) >= period:
+                # First value is simple average
+                result[period-1] = np.nanmean(data[:period])
+                # Subsequent values: smoothed
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]):
+                        result[i] = (result[i-1] * (period-1) + data[i]) / period
+                    else:
+                        result[i] = np.nan
+            return result
         
-        # Wilder smoothing
-        for i in range(period+1, len(series)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        atr = wilders_smoothing(tr, period)
+        dm_plus_smooth = wilders_smoothing(dm_plus, period)
+        dm_minus_smooth = wilders_smoothing(dm_minus, period)
         
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi_values = 100 - (100 / (1 + rs))
-        return rsi_values
+        # Avoid division by zero
+        di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+        di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+        
+        dx = np.where((di_plus + di_minus) != 0, 
+                      100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+        adx = wilders_smoothing(dx, period)
+        return adx
     
-    rsi2 = rsi(close, 2)
+    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    
+    # Keltner Channel (20-period EMA, 2*ATR)
+    def calculate_atr(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        def wilders_smoothing(data, period):
+            result = np.full_like(data, np.nan)
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    if not np.isnan(result[i-1]):
+                        result[i] = (result[i-1] * (period-1) + data[i]) / period
+                    else:
+                        result[i] = np.nan
+            return result
+        
+        return wilders_smoothing(tr, period)
+    
+    atr_14 = calculate_atr(high, low, close, 14)
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    upper_keltner = ema20 + 2 * atr_14
+    lower_keltner = ema20 - 2 * atr_14
     
     # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,9 +107,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi2[i]) or 
+        if (np.isnan(ema20[i]) or np.isnan(atr_14[i]) or np.isnan(upper_keltner[i]) or 
+            np.isnan(lower_keltner[i]) or np.isnan(adx_14_1d_aligned[i]) or 
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,24 +118,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI(2) oversold (<10) + volume spike + price above 1d EMA200
-            if rsi2[i] < 10 and vol_spike[i] and close[i] > ema200_1d_aligned[i]:
+            # Long: Close above upper Keltner + ADX > 25 (trending) + volume spike
+            if close[i] > upper_keltner[i] and adx_14_1d_aligned[i] > 25 and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) overbought (>90) + volume spike + price below 1d EMA200
-            elif rsi2[i] > 90 and vol_spike[i] and close[i] < ema200_1d_aligned[i]:
+            # Short: Close below lower Keltner + ADX > 25 (trending) + volume spike
+            elif close[i] < lower_keltner[i] and adx_14_1d_aligned[i] > 25 and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI(2) returns to neutral (50) or trend reversal vs 1d EMA200
+            # Exit: Close crosses back inside Keltner Channel or ADX weakens (< 20)
             if position == 1:
-                if rsi2[i] > 50 or close[i] < ema200_1d_aligned[i]:
+                if close[i] < ema20[i] or adx_14_1d_aligned[i] < 20:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if rsi2[i] < 50 or close[i] > ema200_1d_aligned[i]:
+                if close[i] > ema20[i] or adx_14_1d_aligned[i] < 20:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -91,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI2_MeanReversion_1dEMA200_Trend_VolumeConfirm_v1"
+name = "4h_Keltner_Breakout_1dADX_Trend_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
