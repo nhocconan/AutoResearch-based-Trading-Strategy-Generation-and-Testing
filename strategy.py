@@ -3,89 +3,77 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend + weekly Bollinger Band squeeze + volume confirmation.
-# Uses weekly Bollinger Band width to detect low volatility (squeeze) conditions.
-# When squeeze occurs, trade in direction of daily KAMA with volume confirmation.
-# Designed to work in both bull and bear markets by capturing breakouts from low volatility.
-# Targets 10-25 trades/year with disciplined risk control.
+# Hypothesis: 4h Williams Alligator with Fractal Filter + Volume Spike + Daily Trend Filter.
+# Uses Williams Alligator (Jaw/Teeth/Lips) to identify trend direction and strength.
+# Adds Williams Fractals for entry confirmation and daily EMA for trend filter.
+# Designed to work in both bull and bear markets by trading with the trend only.
+# Targets 20-40 trades/year with strict entry conditions to avoid overtrading.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for Bollinger Band squeeze (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20
-    
-    # Bollinger Band squeeze: BB width below 20-period average
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_squeeze = bb_width < bb_width_ma
-    
-    # Align BB squeeze to daily timeframe
-    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1w, bb_squeeze)
-    
-    # Load daily data for KAMA
+    # Load daily data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate KAMA (2, 10, 30)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, 10))
-    volatility = np.sum(np.abs(np.diff(close_1d, 1)), axis=0)
-    er = np.zeros_like(close_1d)
-    er[10:] = change[10:] / volatility[10:]
-    er[volatility == 0] = 0
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # Calculate Williams Alligator on 4h data
+    median_price = (prices['high'].values + prices['low'].values) / 2
     
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Jaw (13-period SMMA, shifted 8 bars)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)
+    jaw[:8] = np.nan
     
-    # Align KAMA to daily timeframe (already daily, but align for consistency)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Teeth (8-period SMMA, shifted 5 bars)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan
     
-    # Calculate daily ATR for stop loss
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Lips (5-period SMMA, shifted 3 bars)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan
     
-    # Align ATR to daily timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Calculate Williams Fractals on 4h data
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Daily volume moving average
-    volume_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    bearish_fractal = np.zeros(n)
+    bullish_fractal = np.zeros(n)
+    
+    for i in range(2, n-2):
+        # Bearish fractal: high[i] is highest of high[i-2:i+3]
+        if (high[i] > high[i-1] and high[i] > high[i-2] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            bearish_fractal[i] = high[i]
+        
+        # Bullish fractal: low[i] is lowest of low[i-2:i+3]
+        if (low[i] < low[i-1] and low[i] < low[i-2] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            bullish_fractal[i] = low[i]
+    
+    # Align Fractals to ensure proper timing (no look-ahead)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), bullish_fractal, additional_delay_bars=2)
+    
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bb_squeeze_aligned[i]) or 
-            np.isnan(kama_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -93,57 +81,65 @@ def generate_signals(prices):
             continue
         
         price = prices['close'].iloc[i]
-        vol = volume_1d[i]  # Use daily volume for volume confirmation
+        vol = volume[i]
         vol_ma = vol_ma_20[i]
-        kama_val = kama_aligned[i]
-        bb_squeeze_val = bb_squeeze_aligned[i]
-        atr_val = atr_aligned[i]
+        
+        # Trend filter: price above/below daily EMA34
+        uptrend = price > ema_34_1d_aligned[i]
+        downtrend = price < ema_34_1d_aligned[i]
+        
+        # Alligator alignment: all lines in proper order
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        
+        # Alligator sleeping (intertwined) - no trade
+        alligator_sleeping = (abs(jaw_val - teeth_val) < (jaw_val * 0.001) and 
+                             abs(teeth_val - lips_val) < (teeth_val * 0.001))
+        
+        # Alligator awake and eating: proper alignment
+        # Bullish: Lips > Teeth > Jaw
+        bullish_alignment = lips_val > teeth_val > jaw_val
+        # Bearish: Jaw > Teeth > Lips
+        bearish_alignment = jaw_val > teeth_val > lips_val
         
         # Volume filter: current volume > 1.5 * 20-period average
-        vol_confirm = vol > 1.5 * vol_ma
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter only during Bollinger Band squeeze with volume confirmation
-            if bb_squeeze_val and vol_confirm:
-                if price > kama_val:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-                elif price < kama_val:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
+            # Look for fractal confirmation with trend and Alligator alignment
+            if (bullish_fractal_aligned[i] > 0 and uptrend and 
+                bullish_alignment and not alligator_sleeping and vol_spike):
+                signals[i] = 0.25
+                position = 1
+            elif (bearish_fractal_aligned[i] > 0 and downtrend and 
+                  bearish_alignment and not alligator_sleeping and vol_spike):
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit conditions: stop loss or mean reversion
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Stop loss: 2 * ATR below entry
-                if price < entry_price - 2.0 * atr_val:
-                    exit_signal = True
-                # Mean reversion: price returns to KAMA
-                elif price <= kama_val:
+                # Exit on bearish fractal or Alligator death (Lips < Jaw)
+                if (bearish_fractal_aligned[i] > 0 or lips_val < jaw_val):
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Stop loss: 2 * ATR above entry
-                if price > entry_price + 2.0 * atr_val:
-                    exit_signal = True
-                # Mean reversion: price returns to KAMA
-                elif price >= kama_val:
+                # Exit on bullish fractal or Alligator death (Jaw < Lips)
+                if (bullish_fractal_aligned[i] > 0 or jaw_val < lips_val):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
                 # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1d_KAMA_BBSqueeze_Volume"
-timeframe = "1d"
+name = "4h_Alligator_Fractal_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
