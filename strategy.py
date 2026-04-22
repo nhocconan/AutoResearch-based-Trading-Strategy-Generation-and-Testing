@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Camarilla R1/S1 breakout with 1-day EMA34 trend and volume spike.
-Long when price breaks above R1 with 1-day EMA34 rising and volume spike.
-Short when price breaks below S1 with 1-day EMA34 falling and volume spike.
-Exit when price retests pivot point (PP).
-Camarilla pivot levels provide intraday support/resistance; 1-day EMA34 filters trend direction;
-volume spike confirms institutional participation. Designed for low trade frequency by requiring
-multiple confirmations and using H1-level pivot levels. Works in both bull and bear markets
-by following the daily trend.
+Hypothesis: 1-day ADX (trend strength) + 1-week Donchian breakout (trend direction) with volume confirmation.
+Long when weekly price breaks above Donchian high with daily ADX > 25 and volume spike.
+Short when weekly price breaks below Donchian low with daily ADX > 25 and volume spike.
+Exit when price crosses back below/above Donchian mid-line or ADX weakens (<20).
+Uses weekly trend structure with daily momentum filter to avoid whipsaws in ranging markets.
+Designed for low trade frequency by requiring multiple confirmations and weekly breakouts.
+Works in both bull and bear markets by following the dominant weekly trend.
 """
 
 import numpy as np
@@ -24,75 +23,114 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Camarilla pivot levels - ONCE before loop
+    # Load weekly data for Donchian channels - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Donchian high and low (20-period)
+    donch_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high_20 + donch_low_20) / 2.0
+    
+    # Align to daily timeframe
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1w, donch_mid)
+    
+    # Load daily data for ADX - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    # We need previous day's H, L, C to calculate today's levels
-    # Since we're using daily data, we shift by 1 to get previous day's values
+    # Calculate daily ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot levels using previous day's data
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align to 4h timeframe (each day's levels apply to the entire next day)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Directional Movement
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Smoothed values (Wilder's smoothing)
+    def WilderSmoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    tr14 = WilderSmoothing(tr, 14)
+    plus_dm14 = WilderSmoothing(plus_dm, 14)
+    minus_dm14 = WilderSmoothing(minus_dm, 14)
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm14 / tr14
+    minus_di = 100 * minus_dm14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = WilderSmoothing(dx, 14)
+    
+    # Align to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after enough data for EMA34
+    for i in range(50, n):  # Start after enough data for ADX
         # Skip if data not ready
-        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Price breaks above R1 with 1-day EMA34 rising and volume spike
-            if (close[i] > r1_1d_aligned[i] and 
-                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike):
+            # Long: Price breaks above weekly Donchian high with daily ADX > 25 and volume spike
+            if (close[i] > donch_high_20_aligned[i] and 
+                adx_aligned[i] > 25 and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with 1-day EMA34 falling and volume spike
-            elif (close[i] < s1_1d_aligned[i] and 
-                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike):
+            # Short: Price breaks below weekly Donchian low with daily ADX > 25 and volume spike
+            elif (close[i] < donch_low_20_aligned[i] and 
+                  adx_aligned[i] > 25 and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price retests pivot point (PP)
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses below PP
-                if close[i] < pp_1d_aligned[i]:
+                # Exit long: Price crosses below weekly Donchian mid-line OR ADX weakens (<20)
+                if (close[i] < donch_mid_aligned[i] or adx_aligned[i] < 20):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price crosses above PP
-                if close[i] > pp_1d_aligned[i]:
+                # Exit short: Price crosses above weekly Donchian mid-line OR ADX weakens (<20)
+                if (close[i] > donch_mid_aligned[i] or adx_aligned[i] < 20):
                     exit_signal = True
             
             if exit_signal:
@@ -103,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1D_ADX_WeeklyDonchianBreakout_Volume"
+timeframe = "1d"
 leverage = 1.0
