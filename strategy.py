@@ -3,70 +3,51 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + Donchian(20) breakout with volume confirmation.
-# In trending regimes (CHOP < 38.2), trade breakouts in direction of trend.
-# In ranging regimes (CHOP > 61.8), fade reversals at Donchian bands.
-# Uses 12h trend filter (EMA50) to avoid counter-trend trades.
-# Designed for low trade frequency (<30/year) to minimize fee drag in choppy markets like 2025.
-# Works in bull (trend breakouts) and bear (mean reversion in range) markets.
+# Hypothesis: 1h volume-weighted RSI with 4h trend filter and session filter.
+# Long when RSI < 30 (oversold) + price > 4h EMA20 (uptrend) + volume > 1.5x average + during active session (08-20 UTC)
+# Short when RSI > 70 (overbought) + price < 4h EMA20 (downtrend) + volume > 1.5x average + during active session
+# Exit when RSI crosses back to neutral (40-60 range) or volume drops below average.
+# Uses discrete position sizing (0.20) to minimize churn. Target: 15-35 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 4h data for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 4h EMA20 for trend filter
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Calculate Choppiness Index (14-period)
-    high = prices['high'].values
-    low = prices['low'].values
+    # Calculate RSI(14) on 1h closes
     close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    # ATR(14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chop = 100 * np.log10(tr_sum / (atr * 14)) / np.log10(14)
-    # Handle division by zero or invalid values
-    chop = np.where((atr * 14) > 0, chop, 50.0)
-    
-    # Donchian channels (20-period)
-    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Wilder's smoothing
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(chop[i]) or 
-            np.isnan(dc_high[i]) or 
-            np.isnan(dc_low[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
+        if (np.isnan(ema20_4h_aligned[i]) or 
+            np.isnan(rsi[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,63 +57,47 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        chop_val = chop[i]
-        upper = dc_high[i]
-        lower = dc_low[i]
-        trend = ema50_12h_aligned[i]
+        rsi_val = rsi[i]
+        ema20 = ema20_4h_aligned[i]
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # Volume filter: current volume > 1.5 * 20-day average
+        # Volume filter: current volume > 1.5 * 20-period average
         vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            if chop_val < 38.2:  # Trending regime
-                # Long: price breaks above Donchian high + volume spike + above 12h EMA50
-                if price > upper and vol_spike and price > trend:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price breaks below Donchian low + volume spike + below 12h EMA50
-                elif price < lower and vol_spike and price < trend:
-                    signals[i] = -0.25
-                    position = -1
-            elif chop_val > 61.8:  # Ranging regime
-                # Long: price reverses up from Donchian low + volume spike
-                if price < lower * 1.005 and price > lower and vol_spike:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price reverses down from Donchian high + volume spike
-                elif price > upper * 0.995 and price < upper and vol_spike:
-                    signals[i] = -0.25
-                    position = -1
+            # Long conditions: RSI oversold + uptrend + volume spike + session
+            if rsi_val < 30 and price > ema20 and vol_spike and in_session:
+                signals[i] = 0.20
+                position = 1
+            # Short conditions: RSI overbought + downtrend + volume spike + session
+            elif rsi_val > 70 and price < ema20 and vol_spike and in_session:
+                signals[i] = -0.20
+                position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: RSI returns to neutral range or volume drops
             exit_signal = False
             
             if position == 1:  # long position
-                if chop_val < 38.2:  # trending: exit on Donchian low break
-                    if price < lower:
-                        exit_signal = True
-                else:  # ranging: exit on Donchian high touch or volume dry
-                    if price > upper * 0.995 or vol < 0.8 * vol_ma:
-                        exit_signal = True
+                # Exit when RSI > 40 or volume drops
+                if rsi_val > 40 or vol < vol_ma:
+                    exit_signal = True
             
             elif position == -1:  # short position
-                if chop_val < 38.2:  # trending: exit on Donchian high break
-                    if price > upper:
-                        exit_signal = True
-                else:  # ranging: exit on Donchian low touch or volume dry
-                    if price < lower * 1.005 or vol < 0.8 * vol_ma:
-                        exit_signal = True
+                # Exit when RSI < 60 or volume drops
+                if rsi_val < 60 or vol < vol_ma:
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_Chop_Donchian_Breakout_12hEMA50_Volume"
-timeframe = "4h"
+name = "1h_VolumeWeightedRSI_4hEMA20_Session"
+timeframe = "1h"
 leverage = 1.0
