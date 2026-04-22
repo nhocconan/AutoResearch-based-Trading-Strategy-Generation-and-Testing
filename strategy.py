@@ -3,84 +3,85 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h Williams %R with 1d EMA trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions; combines with trend filter to avoid counter-trend trades
+# Works in both bull and bear markets by trading pullbacks in trending markets
+# Target: 50-150 total trades over 4 years (12-37/year)
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
-    # Load daily data for ATR and volume filter
+    # Load 1d data once for EMA and Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 10-day ATR for volatility filter
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
-    tr = np.concatenate([[np.nan], tr2])
-    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Calculate Williams %R (14-period) on daily data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 20-day volume average
-    vol_ma20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Load 4h data for trend filter (HMA21)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    hma21_4h = calculate_hma(close_4h, 21)
-    hma21_aligned = align_htf_to_ltf(prices, df_4h, hma21_4h)
+    # Align to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align daily indicators to 1h
-    atr10_aligned = align_htf_to_ltf(prices, df_1d, atr10)
-    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20)
+    # Volume spike filter (20-period average on 6h data)
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(30, n):
         # Skip if any data is not ready
-        if (np.isnan(atr10_aligned[i]) or 
-            np.isnan(vol_ma20_aligned[i]) or 
-            np.isnan(hma21_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        atr = atr10_aligned[i]
-        vol_ma = vol_ma20_aligned[i]
-        hma = hma21_aligned[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        williams_r_val = williams_r_aligned[i]
+        ema34 = ema34_aligned[i]
         
-        # Volatility filter: ATR > 0 and volume > 1.5 * 20-day average
-        vol_filter = volume > 1.5 * vol_ma
+        # Volume filter: current volume > 1.5 * 20-day average
+        vol_spike = vol > 1.5 * vol_ma
         
-        # Trend filter: price above/below HMA21
-        above_hma = price > hma
-        below_hma = price < hma
-        
-        # Entry conditions
         if position == 0:
-            # Long: price above HMA + volatility filter
-            if above_hma and vol_filter:
-                signals[i] = 0.20
+            # Long conditions: Williams %R oversold (< -80) + volume spike + price > EMA34 (uptrend)
+            if williams_r_val < -80 and vol_spike and price > ema34:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below HMA + volatility filter
-            elif below_hma and vol_filter:
-                signals[i] = -0.20
+            # Short conditions: Williams %R overbought (> -20) + volume spike + price < EMA34 (downtrend)
+            elif williams_r_val > -20 and vol_spike and price < ema34:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses HMA or volatility drops
+            # Exit conditions: Williams %R returns to neutral range or trend changes
             exit_signal = False
             
             if position == 1:  # long position
-                if price < hma or volume < 0.7 * vol_ma:
+                # Exit when Williams %R rises above -50 (neutral) or trend turns down
+                if williams_r_val > -50 or price < ema34:
                     exit_signal = True
             
             elif position == -1:  # short position
-                if price > hma or volume < 0.7 * vol_ma:
+                # Exit when Williams %R falls below -50 (neutral) or trend turns up
+                if williams_r_val < -50 or price > ema34:
                     exit_signal = True
             
             if exit_signal:
@@ -88,37 +89,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-def calculate_hma(series, period):
-    """Calculate Hull Moving Average"""
-    if len(series) < period:
-        return np.full_like(series, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    wma_half = np.full_like(series, np.nan)
-    for i in range(half_period - 1, len(series)):
-        wma_half[i] = np.nansum(series[i - half_period + 1:i + 1] * np.arange(1, half_period + 1)) / (half_period * (half_period + 1) / 2)
-    
-    # WMA of full period
-    wma_full = np.full_like(series, np.nan)
-    for i in range(period - 1, len(series)):
-        wma_full[i] = np.nansum(series[i - period + 1:i + 1] * np.arange(1, period + 1)) / (period * (period + 1) / 2)
-    
-    # Raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final WMA of raw HMA with sqrt period
-    hma = np.full_like(series, np.nan)
-    for i in range(sqrt_period - 1, len(series)):
-        hma[i] = np.nansum(raw_hma[i - sqrt_period + 1:i + 1] * np.arange(1, sqrt_period + 1)) / (sqrt_period * (sqrt_period + 1) / 2)
-    
-    return hma
-
-name = "1h_HMA21_Volatility_Filter"
-timeframe = "1h"
+name = "6h_WilliamsR_EMA34_Volume"
+timeframe = "6h"
 leverage = 1.0
