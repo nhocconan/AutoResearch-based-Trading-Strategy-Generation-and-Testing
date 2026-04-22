@@ -8,79 +8,112 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike
-    # Donchian channels identify breakout points with clear support/resistance
-    # EMA34 on 1d filters for medium-term trend direction to avoid counter-trend trades
-    # Volume spike (2x 20-period MA) confirms institutional participation
-    # Works in bull/bear: breaks through key levels with trend and volume confirmation
+    # Hypothesis: 1h mean reversion with 4h trend filter and 1d volatility filter
+    # In choppy/mean-reverting markets (2025+), price reverts to VWAP after deviations
+    # 4h trend filter ensures we only trade counter-trend in strong trends
+    # 1d volatility filter avoids low-volatility chop where mean reversion fails
+    # Works in bull/bear: mean reversion occurs in all regimes when volatility is sufficient
     
     # Price and volume data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    typical_price = (high + low + close) / 3
     
-    # Load 1d data for EMA34 trend filter
+    # Calculate VWAP (20-period)
+    pv = typical_price * volume
+    cum_pv = np.nancumsum(pv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
+    
+    # Calculate standard deviation of price from VWAP (20-period)
+    price_dev = typical_price - vwap
+    price_dev_sq = price_dev ** 2
+    # Manual rolling variance to avoid DataFrame
+    var = np.full_like(price_dev_sq, np.nan)
+    for i in range(20, len(price_dev_sq)):
+        var[i] = np.nanmean(price_dev_sq[i-20:i])
+    std_dev = np.sqrt(var)
+    
+    # Z-score: how many standard deviations price is from VWAP
+    zscore = np.divide(price_dev, std_dev, out=np.full_like(price_dev, np.nan), where=std_dev!=0)
+    
+    # Load 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # Load 1d data for volatility filter (ATR ratio)
     df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Load 1d data for Donchian channel calculation (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels for each 1d bar (using previous 20 periods)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = high_1d[0] - close_1d[0]
+    tr3[0] = low_1d[0] - close_1d[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align Donchian levels to 12h timeframe (using previous day's levels)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # ATR (14-period)
+    atr = np.full_like(tr, np.nan)
+    for i in range(14, len(tr)):
+        atr[i] = np.nanmean(tr[i-14:i])
     
-    # Volume spike filter (20-period)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
+    # ATR ratio: current ATR vs 50-period average (volatility filter)
+    atr_ma50 = np.full_like(atr, np.nan)
+    for i in range(50, len(atr)):
+        atr_ma50[i] = np.nanmean(atr[i-50:i])
+    atr_ratio = np.divide(atr, atr_ma50, out=np.full_like(atr, np.nan), where=atr_ma50!=0)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(zscore[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(atr_ratio[i]) or
+            hours[i] < 8 or hours[i] > 20):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above Donchian high with volume spike and price above 1d EMA34 (uptrend)
-            if close[i] > donchian_high_aligned[i] and vol_spike[i] and close[i] > ema34_1d_aligned[i]:
-                signals[i] = 0.25
+            # Long: Price significantly below VWAP (zscore < -2) in uptrend (price > EMA50_4h)
+            # Only trade mean reversion when volatility is sufficient (atr_ratio > 0.8)
+            if zscore[i] < -2.0 and close[i] > ema50_4h_aligned[i] and atr_ratio[i] > 0.8:
+                signals[i] = 0.20
                 position = 1
-            # Short: Break below Donchian low with volume spike and price below 1d EMA34 (downtrend)
-            elif close[i] < donchian_low_aligned[i] and vol_spike[i] and close[i] < ema34_1d_aligned[i]:
-                signals[i] = -0.25
+            # Short: Price significantly above VWAP (zscore > 2) in downtrend (price < EMA50_4h)
+            elif zscore[i] > 2.0 and close[i] < ema50_4h_aligned[i] and atr_ratio[i] > 0.8:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: Return to opposite Donchian level (low for longs, high for shorts)
+            # Exit: Return to VWAP (zscore crosses zero) or opposite extreme
             if position == 1:
-                if close[i] < donchian_low_aligned[i]:
+                if zscore[i] > 0:  # Price crossed back above VWAP
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if close[i] > donchian_high_aligned[i]:
+                if zscore[i] < 0:  # Price crossed back below VWAP
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "12h_Donchian_20_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "1h_VWAP_MeanReversion_4hEMA50_Trend_1dATRRatio_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
