@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Williams Alligator with 1-week trend filter, volume confirmation, and session filter
-# Uses Williams Alligator (Jaw, Teeth, Lips) to identify trend direction and entry points
-# Jaw (13-period SMMA shifted 8 bars), Teeth (8-period SMMA shifted 5 bars), Lips (5-period SMMA shifted 3 bars)
-# Long: Lips > Teeth > Jaw + price > Lips + volume spike + weekly uptrend
-# Short: Lips < Teeth < Jaw + price < Lips + volume spike + weekly downtrend
-# Target: 10-20 trades/year per symbol to avoid fee drag, works in bull/bear via weekly trend filter
+# Hypothesis: 6h Williams Fractal breakout with 12h EMA trend filter and volume confirmation
+# Long when price breaks above bearish fractal resistance in uptrend (price > 12h EMA50)
+# Short when price breaks below bullish fractal support in downtrend (price < 12h EMA50)
+# Uses volume spike (2x 20-period average) to confirm breakouts
+# Williams Fractals identified on 12h timeframe for better structure
+# Target: 15-25 trades/year per symbol, works in bull/bear via trend filter
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,96 +20,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Williams Alligator calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 12-hour data for Williams Fractals and EMA
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate SMMA (Smoothed Moving Average) - similar to RMA/Wilder's smoothing
-    def smma(source, length):
-        if length <= 0:
-            return np.full_like(source, np.nan, dtype=np.float64)
-        result = np.full_like(source, np.nan, dtype=np.float64)
-        # First value is simple average
-        if len(source) >= length:
-            result[length-1] = np.mean(source[:length])
-            # Subsequent values: (prev * (length-1) + current) / length
-            for i in range(length, len(source)):
-                if not np.isnan(result[i-1]):
-                    result[i] = (result[i-1] * (length-1) + source[i]) / length
-        return result
+    # Calculate Williams Fractals on 12h data
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-2] and high[n+1] < high[n]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-2] and low[n+1] > low[n]
+    n_12h = len(high_12h)
+    bearish_fractal = np.full(n_12h, np.nan)
+    bullish_fractal = np.full(n_12h, np.nan)
     
-    # Calculate Williams Alligator components on daily data
-    lips = smma(close_1d, 5)   # 5-period SMMA
-    teeth = smma(close_1d, 8)  # 8-period SMMA
-    jaw = smma(close_1d, 13)   # 13-period SMMA
+    for i in range(2, n_12h - 2):
+        # Bearish fractal (peak)
+        if (high_12h[i-2] < high_12h[i-1] and 
+            high_12h[i] > high_12h[i-1] and 
+            high_12h[i] > high_12h[i+1] and 
+            high_12h[i+1] > high_12h[i+2]):
+            bearish_fractal[i] = high_12h[i]
+        
+        # Bullish fractal (trough)
+        if (low_12h[i-2] > low_12h[i-1] and 
+            low_12h[i] < low_12h[i-1] and 
+            low_12h[i] < low_12h[i+1] and 
+            low_12h[i+1] < low_12h[i+2]):
+            bullish_fractal[i] = low_12h[i]
     
-    # Shift the lines as per Alligator specification
-    lips_shifted = np.roll(lips, 3)   # Shifted 3 bars forward
-    teeth_shifted = np.roll(teeth, 5) # Shifted 5 bars forward
-    jaw_shifted = np.roll(jaw, 8)     # Shifted 8 bars forward
+    # Calculate 50-period EMA on 12h close for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema_50 = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Set initial values to NaN due to shifting
-    lips_shifted[:3] = np.nan
-    teeth_shifted[:5] = np.nan
-    jaw_shifted[:8] = np.nan
-    
-    # Calculate weekly trend filter using EMA on weekly data
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume spike filter (20-period on daily)
+    # Volume spike filter (20-period on 6h)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > 2.0 * vol_ma20
     
-    # Session filter: 08-20 UTC (applied to daily data, so check if we're in session for the day)
+    # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Align all indicators to daily timeframe
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align indicators to 6-hour timeframe
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_12h, bullish_fractal, additional_delay_bars=2)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(jaw_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) + price > Lips + volume spike + weekly uptrend
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
-                close[i] > lips_aligned[i] and vol_spike[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: Price breaks above bearish fractal resistance + volume spike + uptrend (price > EMA50)
+            if (close[i] > bearish_fractal_aligned[i] and vol_spike[i] and close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw (bearish alignment) + price < Lips + volume spike + weekly downtrend
-            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
-                  close[i] < lips_aligned[i] and vol_spike[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: Price breaks below bullish fractal support + volume spike + downtrend (price < EMA50)
+            elif (close[i] < bullish_fractal_aligned[i] and vol_spike[i] and close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back below/above Teeth (middle line)
+            # Exit: Price returns to opposite fractal level
             if position == 1:
-                if close[i] < teeth_aligned[i]:
+                if close[i] < bullish_fractal_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > teeth_aligned[i]:
+                if close[i] > bearish_fractal_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -117,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Williams_Alligator_Trend_Volume_Session"
-timeframe = "1d"
+name = "6h_Williams_Fractal_Breakout_Trend_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
