@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Donchian Breakout with 12-hour EMA trend filter and volume confirmation.
-Trades breakouts above/below 20-period Donchian channels when aligned with 12-hour EMA trend.
-Uses volume spike (2x 20-period average) to confirm institutional interest. Designed for low
-trade frequency (20-50 trades/year) to minimize fee drag and work in both bull and bear markets
-by following higher timeframe trend while using price channel breakouts for entry.
+1D Weekly Donchian Breakout with Volume Confirmation and ATR Filter
+Trades breakouts of weekly Donchian channels (20-period) in the direction of the weekly EMA trend.
+Uses volume spike to confirm institutional interest and ATR filter to avoid whipsaws.
+Designed for low trade frequency (7-25/year) to minimize fee drift and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,45 +21,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12-hour data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load weekly data for Donchian and EMA - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 12-hour EMA for trend filter (50-period)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Weekly EMA for trend filter (34-period)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # ATR filter (weekly ATR to avoid whipsaws)
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
+    
+    # Volume spike: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 0 and vol_spike:
-            # Long: price breaks above upper Donchian channel with uptrend bias
-            if close[i] > high_20[i] and close[i] > ema_50_12h_aligned[i]:
+            # Long: price breaks above weekly Donchian high with uptrend bias
+            if close[i] > donchian_high_aligned[i] and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian channel with downtrend bias
-            elif close[i] < low_20[i] and close[i] < ema_50_12h_aligned[i]:
+            # Short: price breaks below weekly Donchian low with downtrend bias
+            elif close[i] < donchian_low_aligned[i] and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -68,12 +80,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below lower Donchian or closes below 12h EMA
-                if close[i] < low_20[i] or close[i] < ema_50_12h_aligned[i]:
+                # Exit long: price crosses below weekly Donchian low or closes below weekly EMA
+                if close[i] < donchian_low_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above upper Donchian or closes above 12h EMA
-                if close[i] > high_20[i] or close[i] > ema_50_12h_aligned[i]:
+                # Exit short: price crosses above weekly Donchian high or closes above weekly EMA
+                if close[i] > donchian_high_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -84,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_12hEMA50_Volume"
-timeframe = "4h"
+name = "1D_Weekly_Donchian_Breakout_1wEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
