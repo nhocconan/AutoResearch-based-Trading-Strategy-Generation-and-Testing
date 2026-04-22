@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Volume-Weighted Average Price (VWAP) with 1-day trend filter.
-Long when price crosses above VWAP, 1-day EMA50 is rising, and volume is above average.
-Short when price crosses below VWAP, 1-day EMA50 is falling, and volume is above average.
-Exit when price crosses back across VWAP or volume dries up.
-VWAP provides dynamic intraday support/resistance; 1-day EMA50 filters higher timeframe trend.
-Designed for low trade frequency by requiring volume confirmation and trend alignment.
-Works in both bull and bear markets by following daily trend while using 4h VWAP for entries.
+Hypothesis: Daily KAMA trend with weekly RSI filter and volume confirmation.
+Long when KAMA is rising, weekly RSI < 60, and volume > 1.5x average.
+Short when KAMA is falling, weekly RSI > 40, and volume > 1.5x average.
+Exit when KAMA reverses direction.
+KAMA adapts to market noise, reducing whipsaws in ranging markets.
+Weekly RSI prevents overextended entries. Volume confirms conviction.
+Designed for low trade frequency (<15/year) with strong trend capture.
+Works in bull markets via trend following and in bear markets via short signals.
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,66 +24,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for EMA50 trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate KAMA (close, 10, 2, 30)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Load weekly data for RSI filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # VWAP calculation (typical price * volume) / cumulative volume
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.nancumsum(pv)
-    cum_vol = np.nancumsum(volume)
-    vwap = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
-    
-    # Average volume (20-period) for confirmation
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after enough data for VWAP and volume average
+    for i in range(30, n):  # Start after enough data for indicators
         # Skip if data not ready
-        if (np.isnan(vwap[i]) or np.isnan(avg_volume[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or volume[i] == 0):
+        if (np.isnan(kama[i]) or np.isnan(kama[i-1]) or 
+            np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price crosses above VWAP, volume above average, and 1-day EMA50 rising
-            if (close[i] > vwap[i] and close[i-1] <= vwap[i-1] and 
-                volume[i] > avg_volume[i] and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):
+            # Long: KAMA rising, weekly RSI < 60, volume > 1.5x average
+            if (kama[i] > kama[i-1] and 
+                rsi_1w_aligned[i] < 60 and 
+                volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price crosses below VWAP, volume above average, and 1-day EMA50 falling
-            elif (close[i] < vwap[i] and close[i-1] >= vwap[i-1] and 
-                  volume[i] > avg_volume[i] and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):
+            # Short: KAMA falling, weekly RSI > 40, volume > 1.5x average
+            elif (kama[i] < kama[i-1] and 
+                  rsi_1w_aligned[i] > 40 and 
+                  volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
-            exit_signal = False
-            
-            if position == 1:
-                # Exit long: Price crosses back below VWAP OR volume drops below average
-                if (close[i] < vwap[i] and close[i-1] >= vwap[i-1]) or \
-                   (volume[i] < avg_volume[i] * 0.5):  # Volume drops significantly
-                    exit_signal = True
-            else:  # position == -1
-                # Exit short: Price crosses back above VWAP OR volume drops below average
-                if (close[i] > vwap[i] and close[i-1] <= vwap[i-1]) or \
-                   (volume[i] < avg_volume[i] * 0.5):  # Volume drops significantly
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit when KAMA reverses direction
+            if position == 1 and kama[i] < kama[i-1]:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1 and kama[i] > kama[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_VWAP_1dEMA50_Trend_Volume"
-timeframe = "4h"
+name = "Daily_KAMA_WeeklyRSI_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
