@@ -1,3 +1,10 @@
+# [73930] Hypothesis: 1d timeframe with 1h HTF trend filter + volume spike + volatility regime
+# Uses 1h EMA50 for trend, 1d close > EMA50 for long bias, < EMA50 for short bias
+# Entry on 1d close breaking ATR-based bands with volume confirmation
+# Volatility regime filter: only trade when ATR(14) > ATR(50) (expanding volatility)
+# Target: 50-100 trades over 4 years (~12-25/year) to avoid fee drag
+# Works in bull/bear: trend filter adapts, volatility regime avoids chop
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -8,27 +15,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Daily data for pivot points and EMA
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1h data for trend filter (HTF relative to 1d)
+    df_1h = get_htf_data(prices, '1h')
+    close_1h = df_1h['close'].values
     
-    # Pivot point calculation
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # 1h EMA50 for trend
+    ema_50_1h = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_50_1h)
     
-    # Daily EMA34 for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # 4h ATR(14) for volatility filter
+    # 1d ATR for volatility bands and regime
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -37,44 +32,55 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
+    # Volatility regime: expanding volatility (trending market)
+    vol_expanding = atr_14 > atr_50
+    
+    # ATR-based bands (1.5 * ATR)
+    upper_band = close + 1.5 * atr_14
+    lower_band = close - 1.5 * atr_14
     
     # Volume filter
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 2.0 * vol_ma20  # Strong volume surge
+    vol_surge = prices['volume'].values > 1.5 * vol_ma20  # Moderate volume surge
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema_34_4h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_50_1h_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(atr_50[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above S1 with volume surge, above daily EMA34
-            if (close[i] > s1_4h[i] and vol_surge[i] and close[i] > ema_34_4h[i]):
+            # Long: Close > upper band + volume surge + expanding vol + above 1h EMA50
+            if (close[i] > upper_band[i] and vol_surge[i] and vol_expanding[i] and 
+                close[i] > ema_50_1h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below R1 with volume surge, below daily EMA34
-            elif (close[i] < r1_4h[i] and vol_surge[i] and close[i] < ema_34_4h[i]):
+            # Short: Close < lower band + volume surge + expanding vol + below 1h EMA50
+            elif (close[i] < lower_band[i] and vol_surge[i] and vol_expanding[i] and 
+                  close[i] < ema_50_1h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses opposite level or volatility drops
+            # Exit: Close crosses back through mid-price or volatility contracts
+            mid_price = (upper_band[i] + lower_band[i]) / 2
             if position == 1:
-                if close[i] < pivot_4h[i] or atr[i] < 0.3 * atr[i]:  # Strong volatility drop
+                if close[i] < mid_price[i] or not vol_expanding[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > pivot_4h[i] or atr[i] < 0.3 * atr[i]:  # Strong volatility drop
+                if close[i] > mid_price[i] or not vol_expanding[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -82,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PivotBreakout_VolumeSurge_EMA34Trend_v1"
-timeframe = "4h"
+name = "1d_VolatilityBreakout_VolumeSurge_EMA50Trend_v1"
+timeframe = "1d"
 leverage = 1.0
