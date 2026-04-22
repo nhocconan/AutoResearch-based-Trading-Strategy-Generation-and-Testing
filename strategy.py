@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 6-hour Trend-Following Strategy with Daily ADX and Volume Confirmation.
-Uses daily ADX (>25) to identify trending markets, 6-hour EMA crossover (34/89) for entry,
-and volume spike (>1.5x 20-period average) for confirmation. Exits when ADX weakens (<20)
-or EMA crossover reverses. Designed for low trade frequency (15-25 trades/year) to work in
-both bull and bear markets by only trading strong trends confirmed by volume.
+Hypothesis: 4-hour Donchian Breakout with 12-hour EMA Trend and Volume Filter.
+Trades breakouts above/below 4-hour Donchian channels only when aligned with 12-hour EMA trend direction.
+Requires volume confirmation to reduce false breakouts. Designed for low trade frequency (20-40 trades/year)
+to minimize fee drag and capture strong trending moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -22,58 +21,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for ADX trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12-hour data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12-hour EMA for trend filter (50-period)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    # 4-hour Donchian channels (20-period)
+    # We need to calculate this on 4h data, so we use the prices array directly
+    # Since prices is 4h, we can compute rolling max/min
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    
-    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        alpha = 1.0 / period
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    tr_smooth = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 6h EMA crossover: fast (34) and slow (89)
-    ema_fast = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_slow = pd.Series(close).ewm(span=89, adjust=False, min_periods=89).mean().values
-    
-    # Volume spike: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -81,38 +45,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(ema_fast[i]) or 
-            np.isnan(ema_slow[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(high_max_20[i]) or 
+            np.isnan(low_min_20[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend and volume conditions
-        strong_trend = adx_aligned[i] > 25
-        weak_trend = adx_aligned[i] < 20
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        if position == 0:
-            # Enter long: EMA fast > slow, strong trend, volume spike
-            if ema_fast[i] > ema_slow[i] and strong_trend and vol_spike:
+        if position == 0 and vol_filter:
+            # Long breakout: price breaks above upper Donchian channel with uptrend bias
+            if close[i] > high_max_20[i] and close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: EMA fast < slow, strong trend, volume spike
-            elif ema_fast[i] < ema_slow[i] and strong_trend and vol_spike:
+            # Short breakout: price breaks below lower Donchian channel with downtrend bias
+            elif close[i] < low_min_20[i] and close[i] < ema_50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: trend weakens or EMA crossover reverses
+            # Exit: price returns to opposite Donchian level or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: EMA fast < slow OR trend weakens
-                if ema_fast[i] < ema_slow[i] or weak_trend:
+                # Exit long: price breaks below lower Donchian channel or closes below 12h EMA
+                if close[i] < low_min_20[i] or close[i] < ema_50_12h_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: EMA fast > slow OR trend weakens
-                if ema_fast[i] > ema_slow[i] or weak_trend:
+                # Exit short: price breaks above upper Donchian channel or closes above 12h EMA
+                if close[i] > high_max_20[i] or close[i] > ema_50_12h_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -123,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_EMA_Crossover_Volume"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
