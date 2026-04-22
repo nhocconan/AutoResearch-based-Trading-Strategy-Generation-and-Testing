@@ -8,11 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot S1/R1 breakout with 1d EMA34 trend filter and volume spike
-    # Camarilla pivot levels provide strong intraday support/resistance. Breakouts above R1 or below S1
-    # with volume confirmation indicate institutional participation. 1d EMA34 ensures alignment with
-    # higher timeframe trend. This combination reduces false breakouts and works in both bull and bear
-    # markets by filtering counter-trend moves. Target: 50-150 total trades over 4 years.
+    # Hypothesis: 1d KAMA direction + RSI + chop filter
+    # KAMA adapts to market noise, reducing whipsaw in choppy markets.
+    # RSI identifies overbought/oversold conditions for mean reversion.
+    # Chop filter identifies trending vs ranging markets to apply appropriate logic.
+    # This combination aims to capture trends while avoiding false signals in low volatility.
+    # Target: 7-25 trades/year on 1d timeframe to minimize fee drag.
     
     # Price and volume data
     close = prices['close'].values
@@ -20,32 +21,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivots and EMA34
+    # Load 1d data for KAMA, RSI, and chop calculation
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # S1 = C - (H - L) * 1.1 / 12
-    # R1 = C + (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    # Calculate KAMA ( Kaufman Adaptive Moving Average )
+    def calculate_kama(close, length=10, fast=2, slow=30):
+        # Calculate change and volatility
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change) > 1 else np.zeros_like(change)
+        # Avoid division by zero
+        volatility = np.where(volatility == 0, 1, volatility)
+        # Efficiency ratio
+        er = change / volatility
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # Initialize KAMA
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    # Calculate RSI (Relative Strength Index)
+    def calculate_rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        # Use exponential moving average for average gain/loss
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[0] = gain[0]
+        avg_loss[0] = loss[0]
+        for i in range(1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
+        # Avoid division by zero
+        rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Chopiness Index
+    def calculate_chop(high, low, close, length=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
+        
+        # Sum of True Range over period
+        atr_sum = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            atr_sum[i] = np.sum(tr[i-length+1:i+1])
+        
+        # Highest high and lowest low over period
+        highest_high = np.zeros_like(close)
+        lowest_low = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            highest_high[i] = np.max(high[i-length+1:i+1])
+            lowest_low[i] = np.min(low[i-length+1:i+1])
+        
+        # Chop calculation
+        # Avoid division by zero
+        hh_ll = highest_high - lowest_low
+        hh_ll = np.where(hh_ll == 0, 1, hh_ll)
+        chop = 100 * np.log10(atr_sum / hh_ll) / np.log10(length)
+        return chop
     
-    # Volume spike filter (20-period)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_ma20  # Require 1.5x volume for confirmation
+    # Calculate indicators on 1d data
+    kama_1d = calculate_kama(close_1d, length=10, fast=2, slow=30)
+    rsi_1d = calculate_rsi(close_1d, length=14)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, length=14)
+    
+    # Align 1d indicators to lower timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -54,10 +108,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    for i in range(34, n):  # Start after EMA warmup
+    for i in range(50, n):  # Start after warmup period
         # Skip if data not ready or outside session
-        if (np.isnan(s1_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]) or
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -65,24 +118,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Breakout above R1 with volume + price above 1d EMA34 (uptrend)
-            if close[i] > r1_1d_aligned[i] and vol_spike[i] and close[i] > ema34_1d_aligned[i]:
+            # Long conditions: Price above KAMA (uptrend), RSI not overbought, and trending market (low chop)
+            if close[i] > kama_aligned[i] and rsi_aligned[i] < 70 and chop_aligned[i] < 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below S1 with volume + price below 1d EMA34 (downtrend)
-            elif close[i] < s1_1d_aligned[i] and vol_spike[i] and close[i] < ema34_1d_aligned[i]:
+            # Short conditions: Price below KAMA (downtrend), RSI not oversold, and trending market (low chop)
+            elif close[i] < kama_aligned[i] and rsi_aligned[i] > 30 and chop_aligned[i] < 61.8:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to opposite Camarilla level or trend reversal vs 1d EMA34
+            # Exit conditions: Trend reversal or overextended RSI
             if position == 1:
-                if close[i] < s1_1d_aligned[i] or close[i] < ema34_1d_aligned[i]:
+                if close[i] < kama_aligned[i] or rsi_aligned[i] > 80:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > r1_1d_aligned[i] or close[i] > ema34_1d_aligned[i]:
+                if close[i] > kama_aligned[i] or rsi_aligned[i] < 20:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -90,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_S1_R1_Breakout_1dEMA34_Volume_Session_v1"
-timeframe = "12h"
+name = "1d_KAMA_RSI_Chop_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
