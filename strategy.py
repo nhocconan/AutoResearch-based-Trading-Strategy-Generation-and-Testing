@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Donchian(40) breakout with 1-week EMA(34) trend filter and volume spike confirmation.
-Trades breakouts in the direction of the weekly trend only when volume exceeds 1.8x the 20-period average.
-Uses fixed position sizing (0.25) to limit risk and reduce trade frequency.
-Targets 15-30 trades/year (60-120 total over 4 years) to minimize fee drag and improve generalization.
-Works in both bull and bear markets by aligning with higher timeframe trend and requiring strong volume confirmation.
+Hypothesis: 1-day Donchian(20) breakout with 1-week EMA(34) trend filter and volume spike confirmation.
+Trades breakouts in the direction of the weekly trend only when volume exceeds 2x the 20-period average.
+Uses fixed position sizing (0.25) to manage risk and minimize fee churn.
+Targets 7-25 trades/year (30-100 total over 4 years) with disciplined entry/exit.
+Designed to work in both bull and bear markets by aligning with higher timeframe trend.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,24 +22,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for Donchian channel - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 40:
+    # Load 1d data for Donchian channel - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h Donchian Channel (40-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=40, min_periods=40).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=40, min_periods=40).min().values
+    # Calculate 1d Donchian Channel (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Align Donchian levels
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Load 1w data for trend filter - ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # 1w EMA for trend filter (34-period)
@@ -47,13 +47,13 @@ def generate_signals(prices):
     ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume spike: current volume > 1.8x 20-period average
+    # Volume spike: current volume > 2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
             np.isnan(ema_34_1w_aligned[i])):
@@ -63,7 +63,7 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0 and vol_spike:
             # Long: price breaks above Donchian high, above 1w EMA (uptrend)
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_40_1wEMA34_Volume"
-timeframe = "4h"
+name = "1d_Donchian_20_1wEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
