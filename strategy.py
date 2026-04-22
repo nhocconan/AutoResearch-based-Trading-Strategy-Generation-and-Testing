@@ -13,12 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot points and weekly for trend (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for trend and daily for pivot points (ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2 or len(df_1w) < 1:
+    if len(df_1w) < 1 or len(df_1d) < 2:
         return np.zeros(n)
+    
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Previous day's pivot points (standard)
     high_1d = df_1d['high'].values
@@ -32,15 +37,10 @@ def generate_signals(prices):
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to daily timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -85,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Pivot_R1_S1_Breakout_1W_EMA50_Trend_Volume_Spike"
-timeframe = "4h"
+name = "1D_Pivot_R1_S1_Breakout_1W_EMA50_Trend_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
