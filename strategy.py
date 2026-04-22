@@ -5,83 +5,97 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Weekly ATR for volatility regime filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data for regime filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range for weekly ATR
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    atr_ma_1w = pd.Series(atr_1w).rolling(window=50, min_periods=50).mean().values
+    # Daily ATR calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # Daily ATR for entry trigger and stop
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
+    # 4h ATR for volatility
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily SMA for trend direction
-    sma = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # 4h EMA for trend (fast and slow)
+    ema_fast = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_slow = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
     
-    # Align weekly ATR and its MA to daily timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    atr_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
+    # Align daily indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any data is not ready
-        if (np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(atr_ma_1w_aligned[i]) or 
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(atr_ma_1d_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(sma[i])):
+            np.isnan(ema_fast[i]) or 
+            np.isnan(ema_slow[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
+        vol = volume[i]
         atr_val = atr[i]
-        sma_val = sma[i]
-        atr_1w = atr_1w_aligned[i]
-        atr_ma_1w = atr_ma_1w_aligned[i]
+        ema_fast_val = ema_fast[i]
+        ema_slow_val = ema_slow[i]
+        atr_1d = atr_1d_aligned[i]
+        atr_ma_1d = atr_ma_1d_aligned[i]
         
-        # Volatility regime: only trade when weekly ATR is elevated (trending market)
-        vol_regime = atr_1w > atr_ma_1w
+        # Volume filter: current volume above 20-period average
+        vol_ma = np.mean(volume[max(0, i-19):i+1]) if i >= 19 else 0
+        vol_filter = vol > vol_ma * 1.5 if vol_ma > 0 else False
         
-        if position == 0 and vol_regime:
-            # Long: price breaks above SMA + 1.5*ATR with rising volatility
-            if price > sma_val + 1.5 * atr_val and atr_val > atr[i-1]:
+        # Trend filter: EMA alignment
+        bullish_trend = ema_fast_val > ema_slow_val
+        bearish_trend = ema_fast_val < ema_slow_val
+        
+        # Volatility regime: trade only when daily ATR is elevated (trending market)
+        vol_regime = atr_1d > atr_ma_1d
+        
+        # Entry conditions
+        if position == 0 and vol_regime and vol_filter:
+            # Long: bullish trend + price above fast EMA + volatility expansion
+            if bullish_trend and price > ema_fast_val and atr_val > atr[i-1]:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price breaks below SMA - 1.5*ATR with rising volatility
-            elif price < sma_val - 1.5 * atr_val and atr_val > atr[i-1]:
+            # Short: bearish trend + price below fast EMA + volatility expansion
+            elif bearish_trend and price < ema_fast_val and atr_val > atr[i-1]:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
+        # Exit conditions
         elif position != 0:
-            # Exit: mean reversion to SMA or volatility collapse
-            mean_rev = (position == 1 and price < sma_val) or (position == -1 and price > sma_val)
-            vol_collapse = atr_val < 0.5 * atr[i-1]  # Sharp drop in volatility
+            # Exit on trend reversal or volatility collapse
+            trend_reversal = (position == 1 and ema_fast_val < ema_slow_val) or \
+                            (position == -1 and ema_fast_val > ema_slow_val)
+            vol_collapse = atr_val < 0.5 * atr[i-1]  # Sharp volatility drop
             
-            if mean_rev or vol_collapse:
+            if trend_reversal or vol_collapse:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyATRTrend_FilteredBreakout_v1"
-timeframe = "1d"
+name = "4h_EMA_Volatility_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
