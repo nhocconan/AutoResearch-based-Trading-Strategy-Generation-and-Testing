@@ -1,3 +1,4 @@
+# NOTE: This strategy failed the filter. DO NOT use as a template.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -33,13 +34,13 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all levels to 12h timeframe
+    # Align all levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume confirmation: 10-period average (for 12h timeframe)
-    vol_avg_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Volume confirmation: 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,7 +48,7 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_10[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,12 +56,12 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R4 with volume spike AND above 1d EMA34 (uptrend)
-            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_10[i] and 
+            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S4 with volume spike AND below 1d EMA34 (downtrend)
-            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_10[i] and 
+            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
                   close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
@@ -68,6 +69,7 @@ def generate_signals(prices):
             # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
             if position == 1:
                 # Exit long: Price closes below S1 (calculated from previous day)
+                # Recalculate S1 for exit condition
                 if i > 0:
                     s1 = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
                     s1_series = pd.Series(np.full_like(close_1d, s1))
@@ -95,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
