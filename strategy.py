@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: Daily Kamas (KAMA) with RSI filter and weekly trend alignment.
-Long when KAMA turns up and RSI > 50, short when KAMA turns down and RSI < 50.
-Trades only during weekly uptrend/downtrend to avoid whipsaws. Uses KAMA's adaptive smoothing
-to reduce noise and capture trends while minimizing false signals in choppy markets.
-Designed for low trade frequency (10-30 trades/year) by requiring trend alignment and
-momentum confirmation, suitable for 1d timeframe in both bull and bear markets.
+12H Camarilla Pivot Breakout with 1D Trend Filter and Volume Confirmation
+Breakout from Camarilla R3/S3 levels on 12h timeframe, filtered by 1d EMA trend and volume spike.
+Exits at Camarilla H4/L4 or trend reversal.
+Designed for 12-37 trades/year with tight entry criteria to minimize fee drag.
+Works in both bull and bear markets by following the 1d trend.
 """
 
 import numpy as np
@@ -23,82 +22,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) parameters
-    fast_ema = 2
-    slow_ema = 30
-    lookback = 10
+    # Calculate Camarilla pivot levels on 12h timeframe
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    close_series = pd.Series(close)
     
-    # Calculate Efficiency Ratio and smoothing constant
-    change = np.abs(np.diff(close, n=lookback))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.zeros_like(close)
-    er[lookback:] = change[lookback:] / volatility[lookback:]
-    er[volatility == 0] = 0
+    # Daily high, low, close from previous period
+    ph = high_series.shift(1)  # Previous high
+    pl = low_series.shift(1)   # Previous low
+    pc = close_series.shift(1) # Previous close
     
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Calculate pivot and ranges
+    pivot = (ph + pl + pc) / 3
+    range_val = ph - pl
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Camarilla levels
+    r3 = pivot + (range_val * 1.1 / 2)
+    s3 = pivot - (range_val * 1.1 / 2)
+    h4 = pivot + (range_val * 1.1)
+    l4 = pivot - (range_val * 1.1)
     
-    # RSI (14-period)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # Neutral before enough data
-    
-    # Load weekly data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1-day data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 20-period EMA on weekly close for trend
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # 34-period EMA on 1d close for trend
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(35, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema20_1w_aligned[i])):
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(h4[i]) or np.isnan(l4[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # KAMA direction: slope of KAMA
-        kama_up = kama[i] > kama[i-1]
-        kama_down = kama[i] < kama[i-1]
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: KAMA turning up + RSI > 50 + weekly uptrend
-            if kama_up and rsi[i] > 50 and ema20_1w_aligned[i] > ema20_1w_aligned[i-1]:
+            # Long: price breaks above R3 + 1d uptrend + volume spike
+            if close[i] > r3[i] and ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turning down + RSI < 50 + weekly downtrend
-            elif kama_down and rsi[i] < 50 and ema20_1w_aligned[i] < ema20_1w_aligned[i-1]:
+            # Short: price breaks below S3 + 1d downtrend + volume spike
+            elif close[i] < s3[i] and ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: KAMA direction changes or RSI crosses 50
+            # Exit: price reaches H4/L4 or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: KAMA turns down or RSI < 50
-                if kama_down or rsi[i] < 50:
+                # Exit long: price reaches H4 or 1d trend turns down
+                if close[i] >= h4[i] or ema34_1d_aligned[i] < ema34_1d_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: KAMA turns up or RSI > 50
-                if kama_up or rsi[i] > 50:
+                # Exit short: price reaches L4 or 1d trend turns up
+                if close[i] <= l4[i] or ema34_1d_aligned[i] > ema34_1d_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -109,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Daily_KAMA_RSI_WeeklyTrend"
-timeframe = "1d"
+name = "12H_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
