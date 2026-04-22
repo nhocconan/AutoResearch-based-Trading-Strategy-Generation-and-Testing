@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d ADX trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions (below -80 for long, above -20 for short)
-# 1d ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranges
-# Volume spike confirms momentum behind the move
-# Target: 20-30 trades/year per symbol (80-120 total) to avoid fee drag
-# Works in both bull and bear markets by only trading with the daily trend
+# Hypothesis: 4h Camarilla R4/S4 breakout with volume spike and 1d EMA trend filter
+# Uses wider R4/S4 levels to reduce noise and false breakouts, with 1d EMA for trend alignment
+# Volume spike confirms breakout strength. Target: 20-30 trades/year per symbol (80-120 total)
+# Trades only in direction of daily trend to avoid counter-trend losses in choppy markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,65 +18,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Williams %R calculation and ADX trend filter
+    # Load 1-day data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams %R calculation (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Calculate daily range
+    daily_range = high_1d - low_1d
     
-    # ADX calculation (14-period) for trend strength
-    # +DM = max(0, High_t - High_{t-1})
-    # -DM = max(0, Low_{t-1} - Low_t)
-    # TR = max(High-Low, |High-Prev Close|, |Low-Prev Close|)
-    # +DM14 = smoothed +DM, -DM14 = smoothed -DM, TR14 = smoothed TR
-    # +DI14 = 100 * +DM14 / TR14, -DI14 = 100 * -DM14 / TR14
-    # DX = 100 * |+DI14 - -DI14| / (+DI14 + -DI14)
-    # ADX = smoothed DX
-    
-    # Calculate +DM and -DM
-    high_diff = np.diff(high_1d, prepend=high_1d[0])
-    low_diff = -np.diff(low_1d, prepend=low_1d[0])  # negative of diff so low_{t-1} - low_t
-    
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
-    
-    # True Range
+    # Calculate Camarilla levels for previous day (R4/S4 - wider levels for fewer false signals)
     prev_close = np.roll(close_1d, 1)
-    prev_close[0] = close_1d[0]  # avoid NaN on first element
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - prev_close)
-    tr3 = np.abs(low_1d - prev_close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_range = np.roll(daily_range, 1)
     
-    # Smoothing with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            # Wilder's smoothing: today = alpha * current + (1-alpha) * yesterday
-            for i in range(period, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
+    # Set first day values to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_range[0] = np.nan
     
-    plus_dm14 = wilders_smoothing(plus_dm, 14)
-    minus_dm14 = wilders_smoothing(minus_dm, 14)
-    tr14 = wilders_smoothing(tr, 14)
+    # Calculate Camarilla R4 and S4 from previous day (widest bands)
+    r4 = prev_close + (prev_range * 1.1 / 2)
+    s4 = prev_close - (prev_range * 1.1 / 2)
     
-    # Avoid division by zero
-    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
-    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
-    
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilders_smoothing(dx, 14)
+    # Calculate 34-period EMA on 1d close for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume spike filter (20-period on 4h)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -89,40 +56,41 @@ def generate_signals(prices):
     in_session = (hours >= 8) & (hours <= 20)
     
     # Align indicators to 4-hour timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma20[i]) or not in_session[i]):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R below -80 (oversold) + ADX > 25 (trending) + volume spike
-            if (williams_r_aligned[i] < -80 and adx_aligned[i] > 25 and vol_spike[i]):
+            # Long: Price breaks above R4 + volume spike + uptrend (price > 1d EMA34)
+            if (close[i] > r4_aligned[i] and vol_spike[i] and close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R above -20 (overbought) + ADX > 25 (trending) + volume spike
-            elif (williams_r_aligned[i] > -20 and adx_aligned[i] > 25 and vol_spike[i]):
+            # Short: Price breaks below S4 + volume spike + downtrend (price < 1d EMA34)
+            elif (close[i] < s4_aligned[i] and vol_spike[i] and close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Williams %R returns to neutral territory (-50) or ADX weakens
+            # Exit: Price returns to opposite S4/R4 level
             if position == 1:
-                if williams_r_aligned[i] > -50 or adx_aligned[i] < 20:
+                if close[i] < s4_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if williams_r_aligned[i] < -50 or adx_aligned[i] < 20:
+                if close[i] > r4_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -130,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_ADX25_Volume_Spike_Session"
+name = "4h_Camarilla_R4_S4_Breakout_1dEMA34_Volume_Session"
 timeframe = "4h"
 leverage = 1.0
