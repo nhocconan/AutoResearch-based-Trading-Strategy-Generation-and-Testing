@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian channel breakout with 1d ADX filter and volume confirmation.
-Long when price breaks above Donchian upper with strong ADX trend and volume spike.
-Short when price breaks below Donchian lower with strong ADX trend and volume spike.
+Hypothesis: 4h Donchian breakout (20) with 1d ADX filter and volume confirmation.
+Long when price breaks above Donchian upper with strong ADX (trend) and volume spike.
+Short when price breaks below Donchian lower with strong ADX and volume spike.
 Exit when price crosses Donchian middle or ADX weakens.
 Uses 1d ADX for trend strength filter to avoid whipsaws in ranging markets.
-Designed for low trade frequency (12-37/year) to minimize fee drag.
+Designed for low trade frequency (20-40/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -26,14 +26,13 @@ def generate_signals(prices):
     if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate Donchian Channel (20-period) on 12h
+    # Calculate Donchian Channel (20-period) on 4h
     lookback = 20
     dc_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     dc_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     dc_middle = (dc_upper + dc_lower) / 2.0
     
     # Calculate 1d ADX (14-period)
-    # ADX requires +DI, -DI, and TR
     high_d = pd.Series(df_daily['high'].values)
     low_d = pd.Series(df_daily['low'].values)
     close_d = pd.Series(df_daily['close'].values)
@@ -57,10 +56,10 @@ def generate_signals(prices):
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     adx_d = dx.rolling(window=14, min_periods=14).mean()
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_daily, adx_d.values)
     
-    # Calculate 12h volume average (20-period)
+    # Calculate 4h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -122,7 +121,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_DonchianBreakout_1dADX_Volume"
-timeframe = "12h"
+name = "4H_DonchianBreakout_1dADX_Volume"
+timeframe = "4h"
 leverage = 1.0
 #%%
