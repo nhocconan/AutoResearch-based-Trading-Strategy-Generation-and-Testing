@@ -13,35 +13,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for Donchian(20) - ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly Donchian(20) channels
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    upper_20 = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
-    
-    # Align weekly Donchian channels to 6h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_weekly, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_weekly, lower_20)
-    
-    # Load daily data for pivot calculation
+    # Load daily data for Donchian(20) and ATR(14) - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate daily pivot points (based on previous daily bar)
+    # Calculate daily Donchian(20) channels
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
-    close_daily_prev = df_daily['close'].values
-    pp = (high_daily + low_daily + close_daily_prev) / 3.0
-    pp_aligned = align_htf_to_ltf(prices, df_daily, pp)
+    upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 6h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily ATR(14) for volatility filter
+    tr1 = high_daily - low_daily
+    tr2 = np.abs(high_daily - np.roll(close, 1))
+    tr3 = np.abs(low_daily - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align Donchian channels and ATR to 12h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
+    atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
+    
+    # Load weekly data for ATR-based volatility regime filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 14:
+        return np.zeros(n)
+    
+    # Calculate weekly ATR(14)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
+    tr1_w = high_weekly - low_weekly
+    tr2_w = np.abs(high_weekly - np.roll(close_weekly, 1))
+    tr3_w = np.abs(low_weekly - np.roll(close_weekly, 1))
+    tr1_w[0] = tr2_w[0] = tr3_w[0] = 0
+    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
+    atr_weekly = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate ATR ratio: weekly ATR / daily ATR (volatility regime)
+    atr_ratio = atr_weekly / np.roll(atr_14, 24)  # Approximate weekly ATR from daily (14*24 hours)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_weekly, atr_ratio)
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -52,7 +66,7 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(vol_avg_20[i])):
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,28 +83,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above weekly Donchian upper AND price > daily pivot with volume
+            # Long: Price breaks above upper Donchian(20) AND high volatility regime (expanding ATR)
             if (close[i] > upper_20_aligned[i] and 
-                close[i] > pp_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i]):
+                atr_ratio_aligned[i] > 1.2):  # Volatility expansion regime
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly Donchian lower AND price < daily pivot with volume
+            # Short: Price breaks below lower Donchian(20) AND high volatility regime
             elif (close[i] < lower_20_aligned[i] and 
-                  close[i] < pp_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
+                  atr_ratio_aligned[i] > 1.2):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to the opposite weekly Donchian channel or daily pivot
+            # Exit: Price returns to the opposite Donchian channel OR volatility contracts
             if position == 1:
-                if close[i] < lower_20_aligned[i] or close[i] < pp_aligned[i]:
+                if (close[i] < lower_20_aligned[i] or 
+                    atr_ratio_aligned[i] < 0.8):  # Volatility contraction
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > upper_20_aligned[i] or close[i] > pp_aligned[i]:
+                if (close[i] > upper_20_aligned[i] or 
+                    atr_ratio_aligned[i] < 0.8):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -98,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WeeklyDonchian20_DailyPivot_Trend_Volume_Session"
-timeframe = "6h"
+name = "12H_Donchian20_VolatilityRegime_Expansion"
+timeframe = "12h"
 leverage = 1.0
