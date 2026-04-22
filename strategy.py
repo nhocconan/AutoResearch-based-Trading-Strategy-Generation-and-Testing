@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation
-# Donchian channel breakouts capture trend momentum with clear entry/exit rules.
-# 12h EMA provides trend filter to align with higher timeframe momentum.
-# Volume confirmation ensures breakouts have institutional participation.
-# Works in both bull and bear markets by following trend direction with proper risk controls.
+# Hypothesis: 4h Williams Alligator with 1d VWAP trend filter and volume confirmation
+# Williams Alligator (Jaw, Teeth, Lips) identifies trend direction through SMAs.
+# VWAP confirms institutional interest. Volume spike validates breakout strength.
+# Works in trending markets by following Alligator alignment. VWAP acts as dynamic support/resistance.
+# Discrete position sizing (0.25) reduces churn while maintaining exposure.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,67 +19,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Donchian channel and EMA trend (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load 1d data for VWAP and Alligator components (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-period) for 12h
-    # Upper = max(high, lookback=20)
-    # Lower = min(low, lookback=20)
-    high_series = pd.Series(high_12h)
-    low_series = pd.Series(low_12h)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 1d VWAP
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
+    vwap_denominator = np.cumsum(volume_1d)
+    vwap_1d = np.divide(vwap_numerator, vwap_denominator, out=np.full_like(vwap_numerator, np.nan), where=vwap_denominator!=0)
     
-    # Align Donchian levels to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    # Williams Alligator components (13,8,5 periods shifted)
+    # Jaw: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars  
+    # Lips: 5-period SMMA shifted 3 bars
+    def smma(arr, period):
+        sma = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) >= period:
+            sma[period-1] = np.nanmean(arr[:period])
+            for i in range(period, len(arr)):
+                sma[i] = (sma[i-1] * (period-1) + arr[i]) / period
+        return sma
     
-    # 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    jaw_raw = smma(close_1d, 13)
+    teeth_raw = smma(close_1d, 8)
+    lips_raw = smma(close_1d, 5)
     
-    # Volume confirmation: 20-period average on 4h
+    # Apply shifts: Jaw(-8), Teeth(-5), Lips(-3)
+    jaw_shifted = np.roll(jaw_raw, 8)
+    teeth_shifted = np.roll(teeth_raw, 5)
+    lips_shifted = np.roll(lips_raw, 3)
+    # Set invalid shifted values to NaN
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
+    
+    # Align to 4h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
+    
+    # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to avoid index issues
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above Donchian upper + above 12h EMA + volume spike
-            if close[i] > donchian_upper_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
+            # Long: Lips > Teeth > Jaw (bullish alignment) + price > VWAP + volume spike
+            if lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i] and close[i] > vwap_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian lower + below 12h EMA + volume spike
-            elif close[i] < donchian_lower_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
+            # Short: Lips < Teeth < Jaw (bearish alignment) + price < VWAP + volume spike
+            elif lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i] and close[i] < vwap_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses 12h EMA in opposite direction
+            # Exit: Alligator alignment breaks or price crosses VWAP
             if position == 1:
-                # Exit long: Close below 12h EMA
-                if close[i] < ema_50_12h_aligned[i]:
+                # Exit long: Bearish alignment OR price below VWAP
+                if (lips_aligned[i] < teeth_aligned[i] or teeth_aligned[i] < jaw_aligned[i] or close[i] < vwap_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Close above 12h EMA
-                if close[i] > ema_50_12h_aligned[i]:
+                # Exit short: Bullish alignment OR price above VWAP
+                if (lips_aligned[i] > teeth_aligned[i] or teeth_aligned[i] > jaw_aligned[i] or close[i] > vwap_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -87,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_12hEMA50_VolumeConfirmation"
+name = "4h_WilliamsAlligator_1dVWAP_Trend_VolumeConfirmation"
 timeframe = "4h"
 leverage = 1.0
