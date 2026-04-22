@@ -3,105 +3,100 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Fractal breakout with 12h EMA trend filter and volume spike
-# Long when price breaks above bearish fractal in uptrend (close > 12h EMA50) with volume spike (>2x 20-period avg)
-# Short when price breaks below bullish fractal in downtrend (close < 12h EMA50) with volume spike
-# Exit when price retouches the last opposite fractal or trend reverses
-# Williams Fractals identify potential reversal points; breakouts from these levels with volume and trend confirmation
-# capture strong moves. Designed for low trade frequency (~20-40/year) to minimize fee drain.
+# Hypothesis: 1h Williams %R with 4h trend and 1d volatility filter
+# Long when Williams %R crosses above -80 in uptrend (close > 4h EMA50) and low volatility (ATR ratio < 1.2)
+# Short when Williams %R crosses below -20 in downtrend (close < 4h EMA50) and low volatility
+# Exit when Williams %R crosses opposite threshold or volatility spikes
+# Designed for low trade frequency (~20-40/year) to minimize fee drain. Works in range markets via mean reversion and in trends via trend filter.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 50-period EMA on 12h close for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 50-period EMA on 4h close for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Load 1d data for Williams Fractals
+    # Load 1d data for volatility filter (ATR)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams Fractals
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n] > high[n+2]
-    # Bullish fractal: high[n-2] > high[n-1] < high[n] and high[n] < high[n+1] and high[n] < high[n+2]
-    n_1d = len(high_1d)
-    bearish_fractal = np.full(n_1d, np.nan)
-    bullish_fractal = np.full(n_1d, np.nan)
+    # Calculate 14-period ATR on 1d
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
+    tr = np.concatenate([[np.nan], tr2])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(2, n_1d - 2):
-        if (high_1d[i-2] < high_1d[i-1] and 
-            high_1d[i] > high_1d[i-1] and 
-            high_1d[i] > high_1d[i+1] and 
-            high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        
-        if (high_1d[i-2] > high_1d[i-1] and 
-            high_1d[i] < high_1d[i-1] and 
-            high_1d[i] < high_1d[i+1] and 
-            high_1d[i] < high_1d[i+2]):
-            bullish_fractal[i] = high_1d[i]
+    # Calculate 50-period ATR average for volatility regime
+    atr_ma_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio_1d = atr_14_1d / atr_ma_50_1d
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
     
-    # Align fractals to 4h timeframe with 2-bar delay for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Calculate Williams %R (14-period) on 1h closes
+    high_1h = prices['high'].values
+    low_1h = prices['low'].values
+    close_1h = prices['close'].values
     
-    # Calculate 20-period average volume for volume spike detection
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    highest_high = pd.Series(high_1h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1h) / (highest_high - lowest_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(williams_r[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        bear_fractal = bearish_fractal_aligned[i]
-        bull_fractal = bullish_fractal_aligned[i]
-        ema_val = ema_50_12h_aligned[i]
+        wr = williams_r[i]
+        ema_val = ema_50_4h_aligned[i]
+        vol_ratio = atr_ratio_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
-        vol_spike = vol > 2.0 * vol_ma
+        # Williams %R signals
+        wr_cross_up = wr > -80 and williams_r[i-1] <= -80
+        wr_cross_down = wr < -20 and williams_r[i-1] >= -20
+        
+        # Volatility filter: low volatility regime (ATR ratio < 1.2)
+        low_vol = vol_ratio < 1.2
         
         if position == 0:
-            # Long conditions: price breaks above bearish fractal + uptrend + volume spike
-            if price > bear_fractal and price > ema_val and vol_spike:
-                signals[i] = 0.25
+            # Long conditions: Williams %R crosses above -80 + uptrend + low volatility
+            if wr_cross_up and price > ema_val and low_vol:
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: price breaks below bullish fractal + downtrend + volume spike
-            elif price < bull_fractal and price < ema_val and vol_spike:
-                signals[i] = -0.25
+            # Short conditions: Williams %R crosses below -20 + downtrend + low volatility
+            elif wr_cross_down and price < ema_val and low_vol:
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price retouches opposite fractal or trend reverses
+            # Exit conditions: Williams %R crosses opposite threshold or volatility spikes
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price touches or crosses bullish fractal or trend turns down
-                if price <= bull_fractal or price < ema_val:
+                # Exit when Williams %R crosses below -20 or volatility spikes
+                if wr_cross_down or vol_ratio >= 1.5:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price touches or crosses bearish fractal or trend turns up
-                if price >= bear_fractal or price > ema_val:
+                # Exit when Williams %R crosses above -80 or volatility spikes
+                if wr_cross_up or vol_ratio >= 1.5:
                     exit_signal = True
             
             if exit_signal:
@@ -109,10 +104,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_WilliamsFractal_Breakout_12hEMA50_Volume"
-timeframe = "4h"
+name = "1h_WilliamsR_4hEMA50_1dATR_Volatility"
+timeframe = "1h"
 leverage = 1.0
