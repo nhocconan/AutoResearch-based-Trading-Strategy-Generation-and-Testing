@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Choppiness Index regime filter with 1-week EMA trend and volume confirmation
-# Choppiness Index (CHOP) > 61.8 indicates ranging market (mean reversion opportunity)
-# CHOP < 38.2 indicates trending market (trend following)
-# In ranging markets: buy near lower Bollinger Band, sell near upper Bollinger Band
-# In trending markets: follow 1-week EMA direction
-# Volume confirmation (>1.3x 20-period average) filters false signals
-# Designed for 1d timeframe targeting 15-25 trades/year to minimize fee drag in choppy 2025 market
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels provide high-probability support/resistance in ranging markets.
+# 1d EMA34 filter ensures we only trade breakouts in the direction of the daily trend.
+# Volume confirmation (>1.5x 20-period average) filters false breakouts.
+# Designed for 4h timeframe targeting 20-40 trades/year with strong performance in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,40 +19,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for trend filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data for Camarilla pivots and EMA trend (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1-week EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Camarilla R1, S1 levels from previous day's range
+    # R1 = Close + 1.1 * (High - Low) / 12
+    # S1 = Close - 1.1 * (High - Low) / 12
+    camarilla_range = (high_1d - low_1d)
+    r1 = close_1d + 1.1 * camarilla_range / 12
+    s1 = close_1d - 1.1 * camarilla_range / 12
     
-    # Choppiness Index (14) - measures ranging vs trending markets
-    # CHOP = 100 * log10(sum(ATR(14) over 14 periods) / (log10(highest high - lowest low over 14 periods)))
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])  # align with original index
+    # Align Camarilla levels to 4h timeframe (using previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    
-    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range14 = highest_high14 - lowest_low14
-    
-    # Avoid division by zero
-    range14 = np.where(range14 == 0, 1e-10, range14)
-    
-    chop = 100 * np.log10(sum_atr14 / range14) / np.log10(14)
-    
-    # Bollinger Bands (20, 2) for mean reversion in ranging markets
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2 * std20
-    lower_band = sma20 - 2 * std20
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,50 +50,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Ranging market (CHOP > 61.8): mean reversion at Bollinger Bands
-            if chop[i] > 61.8:
-                # Long near lower Bollinger Band
-                if close[i] <= lower_band[i] and volume[i] > 1.3 * vol_avg_20[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short near upper Bollinger Band
-                elif close[i] >= upper_band[i] and volume[i] > 1.3 * vol_avg_20[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # Trending market (CHOP < 38.2): follow 1-week EMA trend
-            elif chop[i] < 38.2:
-                # Long in uptrend
-                if close[i] > ema_50_1w_aligned[i] and volume[i] > 1.3 * vol_avg_20[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short in downtrend
-                elif close[i] < ema_50_1w_aligned[i] and volume[i] > 1.3 * vol_avg_20[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Break above R1 + 1d uptrend + volume confirmation
+            if (close[i] > r1_aligned[i] and      # break above Camarilla R1
+                close[i] > ema_34_1d_aligned[i] and  # price above 1d EMA (uptrend)
+                volume[i] > 1.5 * vol_avg_20[i]):   # volume spike
+                signals[i] = 0.25
+                position = 1
+            # Short: Break below S1 + 1d downtrend + volume confirmation
+            elif (close[i] < s1_aligned[i] and   # break below Camarilla S1
+                  close[i] < ema_34_1d_aligned[i] and  # price below 1d EMA (downtrend)
+                  volume[i] > 1.5 * vol_avg_20[i]):   # volume spike
+                signals[i] = -0.25
+                position = -1
         else:
-            # Exit conditions
+            # Exit: price returns to opposite Camarilla level or trend reversal
             if position == 1:
-                # Exit long: opposite Bollinger Band or trend reversal
-                if (chop[i] > 61.8 and close[i] >= upper_band[i]) or \
-                   (chop[i] < 38.2 and close[i] < ema_50_1w_aligned[i]):
+                # Exit long: price returns to S1 or trend turns down
+                if (close[i] < s1_aligned[i] or 
+                    close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: opposite Bollinger Band or trend reversal
-                if (chop[i] > 61.8 and close[i] <= lower_band[i]) or \
-                   (chop[i] < 38.2 and close[i] > ema_50_1w_aligned[i]):
+                # Exit short: price returns to R1 or trend turns up
+                if (close[i] > r1_aligned[i] or 
+                    close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -113,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ChopRegime_EMA50_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
