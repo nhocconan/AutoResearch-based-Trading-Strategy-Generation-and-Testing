@@ -3,15 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA(8)/EMA(21) crossover with 4h ADX(14) trend filter and 1d volume confirmation.
-# Uses 4h ADX to filter for trending markets (ADX > 25) and 1h EMA crossover for entry timing.
-# 1d volume spike confirms institutional interest. Only trades during 08-20 UTC session.
-# Designed for 1h timeframe to target 15-35 trades/year per symbol.
-# Works in bull/bear via ADX trend filter - only takes trades when trend is strong.
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Uses weekly Donchian channels for trend direction and 6h Donchian breakouts for entry.
+# Long when 6h price breaks above 6h Donchian(20) high and weekly trend is up.
+# Short when 6h price breaks below 6h Donchian(20) low and weekly trend is down.
+# Weekly trend defined as price above/below weekly EMA(20).
+# Volume confirmation reduces false breakouts.
+# Designed for 6h timeframe to target 12-37 trades/year per symbol.
+# Works in bull/bear via weekly trend filter.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,110 +22,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Load weekly data for trend filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Load 4h data for ADX trend filter (ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly EMA(20) for trend direction
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    weekly_uptrend = close_1w > ema_20_1w
+    weekly_downtrend = close_1w < ema_20_1w
     
-    # Calculate ADX(14) on 4h data
-    # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Align weekly trend to 6h timeframe
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
-    # Directional Movement
-    up_move = high_4h - np.roll(high_4h, 1)
-    down_move = np.roll(low_4h, 1) - low_4h
-    up_move[0] = 0
-    down_move[0] = 0
+    # Calculate 6h Donchian(20) channels
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothing (Wilder's smoothing = EMA with alpha=1/period)
-    def WilderMA(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) >= period:
-            # First value is simple average
-            result[period-1] = np.nansum(arr[:period]) / period
-            # Subsequent values: Wilder smoothing
-            alpha = 1.0 / period
-            for i in range(period, len(arr)):
-                result[i] = alpha * arr[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_4h = WilderMA(tr, 14)
-    plus_di_4h = 100 * WilderMA(plus_dm, 14) / np.where(atr_4h == 0, 1, atr_4h)
-    minus_di_4h = 100 * WilderMA(minus_dm, 14) / np.where(atr_4h == 0, 1, atr_4h)
-    dx_4h = 100 * np.abs(plus_di_4h - minus_di_4h) / np.where((plus_di_4h + minus_di_4h) == 0, 1, (plus_di_4h + minus_di_4h))
-    adx_4h = WilderMA(dx_4h, 14)
-    
-    # Load 1d data for volume confirmation (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    
-    # 1d volume MA(20) for spike detection
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > 1.5 * vol_ma20_1d  # Volume spike threshold
-    
-    # Align 4h ADX and 1d volume spike to 1h timeframe
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    
-    # 1h EMA(8) and EMA(21) for entry timing
-    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Volume confirmation (20-period average)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.5 * vol_ma20  # Moderate threshold for balance
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(adx_4h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
-            np.isnan(ema_8[i]) or np.isnan(ema_21[i]) or
-            not in_session[i]):
+    for i in range(20, n):
+        # Skip if data not ready
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(vol_ma20[i]) or np.isnan(weekly_uptrend_aligned[i]) or 
+            np.isnan(weekly_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: EMA(8) crosses above EMA(21) + ADX > 25 (strong trend) + volume spike
-            if (ema_8[i] > ema_21[i] and ema_8[i-1] <= ema_21[i-1] and
-                adx_4h_aligned[i] > 25 and vol_spike_1d_aligned[i]):
-                signals[i] = 0.20
+            # Long: 6h breakout above Donchian high + weekly uptrend + volume spike
+            if (close[i] > high_roll[i] and 
+                weekly_uptrend_aligned[i] > 0.5 and 
+                vol_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: EMA(8) crosses below EMA(21) + ADX > 25 (strong trend) + volume spike
-            elif (ema_8[i] < ema_21[i] and ema_8[i-1] >= ema_21[i-1] and
-                  adx_4h_aligned[i] > 25 and vol_spike_1d_aligned[i]):
-                signals[i] = -0.20
+            # Short: 6h breakdown below Donchian low + weekly downtrend + volume spike
+            elif (close[i] < low_roll[i] and 
+                  weekly_downtrend_aligned[i] > 0.5 and 
+                  vol_spike[i]):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit on opposite Donchian touch or trend reversal
             if position == 1:
-                # Exit on EMA(8) cross below EMA(21) or ADX weakening
-                if (ema_8[i] < ema_21[i] and ema_8[i-1] >= ema_21[i-1]) or adx_4h_aligned[i] < 20:
+                # Exit on Donchian low touch or weekly trend turns down
+                if (close[i] < low_roll[i] or weekly_downtrend_aligned[i] > 0.5):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                # Exit on EMA(8) cross above EMA(21) or ADX weakening
-                if (ema_8[i] > ema_21[i] and ema_8[i-1] <= ema_21[i-1]) or adx_4h_aligned[i] < 20:
+                # Exit on Donchian high touch or weekly trend turns up
+                if (close[i] > high_roll[i] or weekly_uptrend_aligned[i] > 0.5):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA8_21_Crossover_4hADX25_1dVolumeSpike"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
