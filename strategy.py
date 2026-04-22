@@ -1,141 +1,124 @@
+# 1d_KAMA_Direction_RSI_Filter_v1
+# Hypothesis: Daily trend following using KAMA for trend direction with RSI filter and volume confirmation.
+# KAMA adapts to market noise - slow in ranging markets, fast in trending markets.
+# Long when KAMA turns up, RSI > 50, and volume above average.
+# Short when KAMA turns down, RSI < 50, and volume above average.
+# Designed for low trade frequency (~8-15/year) with strong trend capture in both bull and bear markets.
+# Uses daily timeframe to avoid noise and reduce whipsaw.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d ADX trend filter and volume confirmation
-# Long when Alligator jaws (13-period SMMA) above teeth (8-period SMMA) and lips (5-period SMMA) + ADX > 25 + volume spike
-# Short when jaws below teeth and lips + ADX > 25 + volume spike
-# Exit when Alligator lines converge (jaws between teeth and lips) or ADX < 20
-# Designed for low trade frequency (~10-30/year) with strong trend-following edge in both bull and bear markets
-# Uses Williams Alligator for trend identification and ADX for trend strength confirmation
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for ADX calculation
+    # Load daily data for KAMA and RSI calculation
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
+    # Calculate KAMA (Kaufman Adaptive Moving Average) with ER=10, FC=2, SC=30
+    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))  # |close[t] - close[t-10]|
+    volatility = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    # Avoid division by zero
+    er = np.zeros_like(close_1d)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smoothing Constants
+    sc = 2  # fast SC
+    ss = 30  # slow SC
+    fc = er * (sc - ss) + ss  # smoothing constant
+    fc = np.clip(fc, ss, sc)  # bound between slow and fast
     
-    # Smoothed values (14-period)
-    def WilderSmooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + fc[i] * (close_1d[i] - kama[i-1])
     
-    tr14 = WilderSmooth(tr, 14)
-    plus_dm14 = WilderSmooth(plus_dm, 14)
-    minus_dm14 = WilderSmooth(minus_dm, 14)
+    # Calculate RSI(14) on daily
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm14 / tr14
-    minus_di = 100 * minus_dm14 / tr14
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = WilderSmooth(dx, 14)
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = 50  # neutral before enough data
     
-    # Williams Alligator on 12h timeframe
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # Align KAMA and RSI to daily timeframe (no alignment needed as we're using 1d data on 1d timeframe)
+    kama_aligned = kama
+    rsi_aligned = rsi
     
-    # Smoothed Moving Average (SMMA) - Wilder's smoothing
-    def SMMA(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    # Alligator lines: Jaw (13, 8), Teeth (8, 5), Lips (5, 3)
-    jaw = SMMA(SMMA(high, 13) + SMMA(low, 13), 2) / 2  # (SMMA(H,13) + SMMA(L,13))/2
-    teeth = SMMA(SMMA(high, 8) + SMMA(low, 8), 2) / 2
-    lips = SMMA(SMMA(high, 5) + SMMA(low, 5), 2) / 2
-    
-    # Calculate 20-period average volume for volume spike detection
-    volume = prices['volume'].values
-    vol_ma_20 = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_ma_20[:19] = np.nan  # Not enough data for first 19 periods
+    # Calculate 20-day average volume for volume confirmation
+    volume = df_1d['volume'].values
+    vol_ma_20 = np.zeros_like(volume)
+    for i in range(20, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(30, n):  # start after KAMA and RSI warmup
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or 
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close_1d[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx_aligned[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
         
-        # Volume filter: current volume > 1.8 * 20-day average
-        vol_spike = vol > 1.8 * vol_ma
-        
-        # Alligator conditions
-        jaws_above_teeth = jaw_val > teeth_val
-        teeth_above_lips = teeth_val > lips_val
-        jaws_below_teeth = jaw_val < teeth_val
-        teeth_below_lips = teeth_val < lips_val
-        
-        # Convergence (jaws between teeth and lips)
-        converged = (jaw_val > teeth_val and jaw_val < lips_val) or \
-                   (jaw_val < teeth_val and jaw_val > lips_val)
+        # Volume filter: current volume > 1.5 * 20-day average
+        vol_confirm = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long conditions: jaws > teeth > lips + ADX > 25 + volume spike
-            if jaws_above_teeth and teeth_above_lips and adx_val > 25 and vol_spike:
+            # Long: KAMA turning up, RSI > 50, volume confirmation
+            if i > 0 and kama_val > kama_aligned[i-1] and rsi_val > 50 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: jaws < teeth < lips + ADX > 25 + volume spike
-            elif jaws_below_teeth and teeth_below_lips and adx_val > 25 and vol_spike:
+            # Short: KAMA turning down, RSI < 50, volume confirmation
+            elif i > 0 and kama_val < kama_aligned[i-1] and rsi_val < 50 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: Alligator lines converge or ADX < 20
+            # Exit: KAMA reverses direction
             exit_signal = False
             
-            if converged or adx_val < 20:
-                exit_signal = True
+            if position == 1:  # long position
+                # Exit when KAMA turns down
+                if i > 0 and kama_val < kama_aligned[i-1]:
+                    exit_signal = True
+            
+            elif position == -1:  # short position
+                # Exit when KAMA turns up
+                if i > 0 and kama_val > kama_aligned[i-1]:
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -146,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1dADX_Volume"
-timeframe = "12h"
+name = "1d_KAMA_Direction_RSI_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
