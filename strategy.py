@@ -48,7 +48,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First TR is just high-low
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly pivot levels and ATR to 4h timeframe
+    # Align weekly pivot levels and ATR to 6h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_daily, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, df_daily, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_daily, weekly_s1)
@@ -58,7 +58,7 @@ def generate_signals(prices):
     weekly_s3_aligned = align_htf_to_ltf(prices, df_daily, weekly_s3)
     atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
     
-    # Calculate 4h volume average (20-period)
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_WeeklyPivot_R1S1_Volume_ATR_Filter_v3"
-timeframe = "4h"
+name = "6H_WeeklyPivot_R1S1_Volume_ATR_Filter_v3"
+timeframe = "6h"
 leverage = 1.0
