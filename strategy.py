@@ -1,14 +1,11 @@
-# Solution
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian breakout with 1-day volatility filter and volume confirmation.
-Long when price breaks above Donchian upper band, ATR ratio > 1.5, and volume > 1.5x SMA volume.
-Short when price breaks below Donchian lower band, ATR ratio > 1.5, and volume > 1.5x SMA volume.
-Exit when price crosses opposite Donchian band or ATR ratio falls below 0.8.
-Donchian channels provide clear breakout levels; volatility filter ensures breakouts occur during
-expanding volatility; volume confirmation adds conviction. Designed for low trade frequency by requiring
-multiple confirmations and using 4h timeframe. Works in both bull and bear markets by capturing
-breakouts in either direction with strict entry conditions.
+Hypothesis: 4-hour Camarilla Pivot (R1/S1) breakout with 1-day EMA34 trend filter and volume confirmation.
+Long when price breaks above R1 with EMA34 rising and volume > 1.5x average.
+Short when price breaks below S1 with EMA34 falling and volume > 1.5x average.
+Exit when price returns to the mean (Pivot point) or reverses at opposite level.
+Camarilla levels provide precise intraday support/resistance; daily EMA filters trend; volume avoids false breakouts.
+Designed for low trade frequency by requiring multiple confirmations. Works in both bull and bear markets by following daily trend.
 """
 
 import numpy as np
@@ -25,67 +22,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ATR calculation - ONCE before loop
+    # Load 1-day data for EMA34 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 14-day ATR
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    atr_14 = np.zeros_like(tr)
-    atr_14[:14] = np.nan
-    for i in range(14, len(tr)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Calculate Camarilla pivot levels from previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # Previous day's typical price (shift by 1)
+    prev_typical = np.roll(typical_price, 1)
+    prev_typical[0] = np.nan  # First value invalid
     
-    # Donchian channels (20 periods) on 4h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_20
-    donchian_lower = low_20
+    # Previous day's range
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_range = prev_high - prev_low
     
-    # Volume confirmation: volume > 1.5x 20-period SMA volume
-    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels
+    # R1 = close + (range * 1.1/12)
+    # S1 = close - (range * 1.1/12)
+    R1 = prev_typical + (prev_range * 1.1 / 12)
+    S1 = prev_typical - (prev_range * 1.1 / 12)
+    Pivot = prev_typical  # Central pivot point
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(20, n):  # Start after enough data for volume MA
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(volume_sma[i]) or np.isnan(atr_14_aligned[i]) or atr_14_aligned[i] == 0):
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(Pivot[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate current ATR ratio (current volatility vs 1-day ATR)
-        # Use 4-period high-low range as proxy for current volatility
-        if i >= 3:
-            curr_range = np.max(high[i-3:i+1]) - np.min(low[i-3:i+1])
-            atr_ratio = curr_range / atr_14_aligned[i] if atr_14_aligned[i] > 0 else 0
-        else:
-            atr_ratio = 0
-        
         if position == 0:
-            # Long: Price breaks above upper band, ATR ratio > 1.5, volume > 1.5x SMA
-            if (close[i] > donchian_upper[i] and 
-                atr_ratio > 1.5 and 
-                volume[i] > 1.5 * volume_sma[i]):
+            # Long: Price breaks above R1, EMA34 rising, volume confirmation
+            if (close[i] > R1[i] and 
+                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower band, ATR ratio > 1.5, volume > 1.5x SMA
-            elif (close[i] < donchian_lower[i] and 
-                  atr_ratio > 1.5 and 
-                  volume[i] > 1.5 * volume_sma[i]):
+            # Short: Price breaks below S1, EMA34 falling, volume confirmation
+            elif (close[i] < S1[i] and 
+                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -93,14 +86,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls below lower band OR ATR ratio falls below 0.8
-                if (close[i] < donchian_lower[i] or 
-                    atr_ratio < 0.8):
+                # Exit long: Price returns to pivot or breaks below S1 (reversal)
+                if (close[i] <= Pivot[i] or 
+                    close[i] < S1[i]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises above upper band OR ATR ratio falls below 0.8
-                if (close[i] > donchian_upper[i] or 
-                    atr_ratio < 0.8):
+                # Exit short: Price returns to pivot or breaks above R1 (reversal)
+                if (close[i] >= Pivot[i] or 
+                    close[i] > R1[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -111,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian_Breakout_1dATR_Volume"
+name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
