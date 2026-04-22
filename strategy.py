@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Bollinger Band Squeeze Breakout with Weekly Trend Filter and Volume Confirmation.
-Buy when price breaks above upper Bollinger Band during low volatility (squeeze) and weekly trend is up.
-Sell when price breaks below lower Bollinger Band during low volatility and weekly trend is down.
-Uses Bollinger Band width to detect low volatility regimes, with breakouts capturing explosive moves.
-Works in both bull and bear markets by following the weekly trend direction, avoiding counter-trend trades.
+Hypothesis: 4-hour Camarilla R1/S1 breakout with 1-day EMA34 trend and volume spike.
+Long when price breaks above R1 with 1-day EMA34 rising and volume spike.
+Short when price breaks below S1 with 1-day EMA34 falling and volume spike.
+Exit when price retests pivot point (PP).
+Camarilla pivot levels provide intraday support/resistance; 1-day EMA34 filters trend direction;
+volume spike confirms institutional participation. Designed for low trade frequency by requiring
+multiple confirmations and using H1-level pivot levels. Works in both bull and bear markets
+by following the daily trend.
 """
 
 import numpy as np
@@ -21,67 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    basis = close_series.rolling(window=20, min_periods=20).mean().values
-    dev = close_series.rolling(window=20, min_periods=20).std().values
-    upper = basis + 2 * dev
-    lower = basis - 2 * dev
-    
-    # Bollinger Band Width for squeeze detection (low volatility)
-    bb_width = (upper - lower) / basis
-    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
-    squeeze_condition = bb_width < 0.5 * bb_width_ma  # Width less than 50% of its MA
-    
-    # Load weekly data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1-day data for Camarilla pivot levels - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 50-period EMA on weekly close for trend
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate Camarilla pivot levels from previous day
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    # We need previous day's H, L, C to calculate today's levels
+    # Since we're using daily data, we shift by 1 to get previous day's values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Calculate pivot levels using previous day's data
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    
+    # Align to 4h timeframe (each day's levels apply to the entire next day)
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):  # Start after enough data for EMA34
         # Skip if data not ready
-        if (np.isnan(basis[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(squeeze_condition[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Price breaks above upper BB during squeeze and weekly uptrend
-            if close[i] > upper[i] and squeeze_condition[i] and ema50_1w_aligned[i] > ema50_1w_aligned[i-1] and vol_confirm:
+            # Long: Price breaks above R1 with 1-day EMA34 rising and volume spike
+            if (close[i] > r1_1d_aligned[i] and 
+                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower BB during squeeze and weekly downtrend
-            elif close[i] < lower[i] and squeeze_condition[i] and ema50_1w_aligned[i] < ema50_1w_aligned[i-1] and vol_confirm:
+            # Short: Price breaks below S1 with 1-day EMA34 falling and volume spike
+            elif (close[i] < s1_1d_aligned[i] and 
+                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to middle band (mean reversion) or trend changes
+            # Exit: Price retests pivot point (PP)
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses below basis or weekly trend turns down
-                if close[i] < basis[i] or ema50_1w_aligned[i] < ema50_1w_aligned[i-1]:
+                # Exit long: Price crosses below PP
+                if close[i] < pp_1d_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price crosses above basis or weekly trend turns up
-                if close[i] > basis[i] or ema50_1w_aligned[i] > ema50_1w_aligned[i-1]:
+                # Exit short: Price crosses above PP
+                if close[i] > pp_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -92,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Daily_BollingerBand_Squeeze_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
