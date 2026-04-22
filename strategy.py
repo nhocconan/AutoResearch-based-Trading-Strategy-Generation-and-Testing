@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Bollinger Band squeeze breakout with 1-day trend filter and volume confirmation.
-Long when price breaks above upper BB during low volatility (BBW < 50th percentile) with 1-day EMA50 up and volume spike.
-Short when price breaks below lower BB during low volatility with 1-day EMA50 down and volume squeeze.
-Exit when price re-enters the Bollinger Bands.
-Uses volatility contraction/expansion to capture breakouts with low false signals.
-Works in both bull and bear markets by following daily trend direction.
+Hypothesis: Daily Donchian(20) breakout with weekly EMA20 trend filter and volume confirmation.
+Long when price breaks above 20-day high with rising weekly EMA20 and volume spike.
+Short when price breaks below 20-day low with falling weekly EMA20 and volume spike.
+Exit when price returns to the 20-day midpoint.
+Designed for low trade frequency by requiring multiple confirmations and using daily/weekly timeframes.
+Works in both bull and bear markets by following the weekly trend.
 """
 
 import numpy as np
@@ -22,75 +22,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for EMA50 trend filter - ONCE before loop
+    # Load daily data for Donchian channels - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Load weekly data for EMA20 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Bollinger Band Width for squeeze detection
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    # Percentile lookback for squeeze definition (50th percentile = median)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).rank(pct=True).values
-    
-    # 1-day EMA50 for trend filter
+    # Calculate daily Donchian channels (20-period high/low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: current volume > 1.5x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # 20-day high and low (using previous day's data to avoid look-ahead)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
+    mid_20 = (high_20 + low_20) / 2.0
+    
+    # Align daily Donchian levels to 15m timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    mid_20_aligned = align_htf_to_ltf(prices, df_1d, mid_20)
+    
+    # Calculate weekly EMA20 for trend filter
+    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after enough data for indicators
+    for i in range(30, n):  # Start after enough data for indicators
         # Skip if data not ready
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width_percentile[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_30[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or np.isnan(mid_20_aligned[i]) or
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility squeeze condition (low volatility environment)
-        volatility_squeeze = bb_width_percentile[i] < 0.5  # Below 50th percentile
-        
         # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma_30[i]
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Price breaks above upper BB during low volatility with 1-day EMA50 up and volume spike
-            if (close[i] > bb_upper[i] and 
-                volatility_squeeze and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and 
-                vol_spike):
+            # Long: Price breaks above 20-day high with rising weekly EMA20 and volume spike
+            if (close[i] > high_20_aligned[i] and 
+                ema20_1w_aligned[i] > ema20_1w_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower BB during low volatility with 1-day EMA50 down and volume spike
-            elif (close[i] < bb_lower[i] and 
-                  volatility_squeeze and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and 
-                  vol_spike):
+            # Short: Price breaks below 20-day low with falling weekly EMA20 and volume spike
+            elif (close[i] < low_20_aligned[i] and 
+                  ema20_1w_aligned[i] < ema20_1w_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price re-enters the Bollinger Bands
+            # Exit: Price returns to 20-day midpoint
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses below upper BB (or re-enters bands)
-                if close[i] < bb_middle[i]:
+                # Exit long: Price crosses below midpoint
+                if close[i] < mid_20_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price crosses above lower BB (or re-enters bands)
-                if close[i] > bb_middle[i]:
+                # Exit short: Price crosses above midpoint
+                if close[i] > mid_20_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_BollingerSqueeze_Breakout_1dEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1D_Donchian_20_1wEMA20_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
