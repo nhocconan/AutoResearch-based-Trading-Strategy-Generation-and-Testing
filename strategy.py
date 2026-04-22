@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation
-# RSI < 30 for long, RSI > 70 for short in ranging markets.
-# 4h EMA(50) filter ensures trades align with higher timeframe trend.
-# Volume > 1.3x 20-period average confirms momentum.
-# Session filter (08-20 UTC) reduces noise.
-# Target: 15-35 trades/year per symbol to avoid fee drag.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
+# Weekly pivot (from 1w) provides directional bias from higher timeframe structure.
+# Donchian breakout captures momentum in direction of weekly trend.
+# Volume confirmation (>1.5x 20-period average) filters false breakouts.
+# Designed for 6h timeframe targeting 15-30 trades/year (~60-120 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,27 +19,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (pre-compute)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Load 4h data for trend filter (ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load weekly data for pivot points (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot points: P = (H + L + C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    
+    # Align weekly pivots to 6h
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Donchian Channel (20) on 6h data
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,46 +50,49 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_avg_20[i]) or not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or
+            np.isnan(s1_1w_aligned[i]) or np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold + 4h uptrend + volume confirmation
-            if (rsi[i] < 30 and 
-                close[i] > ema_50_4h_aligned[i] and 
-                volume[i] > 1.3 * vol_avg_20[i]):
-                signals[i] = 0.20
+            # Long: Donchian breakout above upper band + price above weekly R1 + volume confirmation
+            if (close[i] > highest_20[i-1] and  # breakout above previous period's high
+                close[i] > r1_1w_aligned[i] and   # price above weekly R1 (bullish bias)
+                volume[i] > 1.5 * vol_avg_20[i]): # volume spike
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought + 4h downtrend + volume confirmation
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  volume[i] > 1.3 * vol_avg_20[i]):
-                signals[i] = -0.20
+            # Short: Donchian breakout below lower band + price below weekly S1 + volume confirmation
+            elif (close[i] < lowest_20[i-1] and   # breakout below previous period's low
+                  close[i] < s1_1w_aligned[i] and  # price below weekly S1 (bearish bias)
+                  volume[i] > 1.5 * vol_avg_20[i]): # volume spike
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral range or trend reversal
+            # Exit: price returns to opposite pivot level or opposite Donchian band
             if position == 1:
-                # Exit long: RSI > 50 or trend turns down
-                if (rsi[i] > 50 or close[i] < ema_50_4h_aligned[i]):
+                # Exit long: price returns to weekly S1 or below lower Donchian band
+                if (close[i] < s1_1w_aligned[i] or 
+                    close[i] < lowest_20[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                # Exit short: RSI < 50 or trend turns up
-                if (rsi[i] < 50 or close[i] > ema_50_4h_aligned[i]):
+                # Exit short: price returns to weekly R1 or above upper Donchian band
+                if (close[i] > r1_1w_aligned[i] or 
+                    close[i] > highest_20[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI14_4hEMA50_VolumeConfirm_Session"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
