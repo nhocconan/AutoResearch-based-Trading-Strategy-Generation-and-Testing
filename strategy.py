@@ -3,62 +3,40 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator (Jaw/Teeth/Lips) with 1d trend filter and volume confirmation
-# Long when Lips > Teeth > Jaw (bullish alignment) + price > 1d EMA50 + volume spike
-# Short when Lips < Teeth < Jaw (bearish alignment) + price < 1d EMA50 + volume spike
-# Exit when Alligator alignment breaks or price crosses 1d EMA50
-# Williams Alligator catches trend changes early; EMA50 filters counter-trend moves
-# Volume spike confirms institutional participation. Designed for low frequency (15-30/year)
-# Works in bull markets via trend following, in bear via short signals on alignment breakdown
+# Hypothesis: 12h Williams %R with 1-week EMA50 trend filter and volume confirmation
+# Long when Williams %R crosses above -80 (oversold) + price > weekly EMA50 + volume spike
+# Short when Williams %R crosses below -20 (overbought) + price < weekly EMA50 + volume spike
+# Exit when Williams %R returns to opposite extreme or trend reverses
+# Designed for low trade frequency (~15-35/year) with strong edge in both bull and bear markets
+# Williams %R identifies reversals, weekly EMA50 filters trend, volume confirms strength
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for EMA trend filter
+    # Load weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Load daily data for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Williams Alligator on 6h data (Smoothed Median with periods)
-    # Jaw: Blue line - 13-period SMMA, shifted 8 bars forward
-    # Teeth: Red line - 8-period SMMA, shifted 5 bars forward  
-    # Lips: Green line - 5-period SMMA, shifted 3 bars forward
-    median = (prices['high'].values + prices['low'].values) / 2
-    
-    def smma(arr, period):
-        """Smoothed Moving Average - similar to Wilder's smoothing"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: (prev*(period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw_raw = smma(median, 13)
-    teeth_raw = smma(median, 8)
-    lips_raw = smma(median, 5)
-    
-    # Shift forward as per Alligator definition (Jaw +8, Teeth +5, Lips +3)
-    jaw = np.full_like(jaw_raw, np.nan)
-    teeth = np.full_like(teeth_raw, np.nan)
-    lips = np.full_like(lips_raw, np.nan)
-    
-    if len(jaw) > 8:
-        jaw[8:] = jaw_raw[:-8]
-    if len(teeth) > 5:
-        teeth[5:] = teeth_raw[:-5]
-    if len(lips) > 3:
-        lips[3:] = lips_raw[:-3]
+    # Calculate 14-period Williams %R
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -69,8 +47,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,36 +58,34 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        
-        # Alligator alignment conditions
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        wr = williams_r_aligned[i]
+        ema_val = ema_50_1w_aligned[i]
         
         # Volume filter: current volume > 2.0 * 20-day average
         vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long conditions: bullish alignment + uptrend + volume spike
-            if bullish_alignment and price > ema_50_aligned[i] and vol_spike:
+            # Long conditions: Williams %R crosses above -80 (oversold) + uptrend + volume spike
+            if wr > -80 and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: bearish alignment + downtrend + volume spike
-            elif bearish_alignment and price < ema_50_aligned[i] and vol_spike:
+            # Short conditions: Williams %R crosses below -20 (overbought) + downtrend + volume spike
+            elif wr < -20 and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: alignment breaks or price crosses EMA50
+            # Exit conditions: Williams %R returns to opposite extreme or trend reverses
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when bullish alignment breaks or price < EMA50
-                if not bullish_alignment or price < ema_50_aligned[i]:
+                # Exit when Williams %R returns above -20 or trend turns down
+                if wr >= -20 or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when bearish alignment breaks or price > EMA50
-                if not bearish_alignment or price > ema_50_aligned[i]:
+                # Exit when Williams %R returns below -80 or trend turns up
+                if wr <= -80 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -120,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
