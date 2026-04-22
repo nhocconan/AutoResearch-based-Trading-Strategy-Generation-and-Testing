@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation
-    # RSI < 30 for long, > 70 for short in trend direction (4h EMA50)
-    # Volume spike (2x 20-period MA) confirms momentum
-    # Works in bull/bear: mean reversion in trends with volume confirmation
+    # Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
+    # Weekly pivot provides institutional direction from higher timeframe
+    # Donchian breakout captures momentum with weekly bias
+    # Volume spike confirms institutional participation
+    # Works in bull/bear: breaks with weekly trend and volume confirmation
     
     # Price and volume data
     close = prices['close'].values
@@ -19,74 +20,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI (14-period) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Load weekly data for pivot direction (primary HTF)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly pivot points (using previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
+    
+    # Weekly pivot point and support/resistance levels
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly bias: above/below pivot
+    weekly_bias = np.where(close_1w > pivot_1w, 1, -1)  # 1 = bullish bias, -1 = bearish bias
+    
+    # Align weekly bias to 6h timeframe
+    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias.astype(float))
+    
+    # Load daily data for Donchian calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Donchian channels (20-period) on daily data
+    # Upper band: highest high of last 20 days
+    # Lower band: lowest low of last 20 days
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20
-    
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or 
+        if (np.isnan(weekly_bias_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Skip if outside session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         if position == 0:
-            # Long: RSI oversold (<30) with volume spike and price above 4h EMA50 (uptrend)
-            if rsi[i] < 30 and vol_spike[i] and close[i] > ema50_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: Break above Donchian high with weekly bullish bias and volume spike
+            if close[i] > donchian_high_aligned[i] and weekly_bias_aligned[i] > 0 and vol_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) with volume spike and price below 4h EMA50 (downtrend)
-            elif rsi[i] > 70 and vol_spike[i] and close[i] < ema50_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: Break below Donchian low with weekly bearish bias and volume spike
+            elif close[i] < donchian_low_aligned[i] and weekly_bias_aligned[i] < 0 and vol_spike[i]:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral zone (40-60)
+            # Exit: Return to opposite Donchian level
             if position == 1:
-                if rsi[i] > 40:
+                if close[i] < donchian_low_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if rsi[i] < 60:
+                if close[i] > donchian_high_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI_MeanReversion_4hEMA50_Trend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Donchian_20_Breakout_WeeklyPivot_Direction_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
