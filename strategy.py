@@ -8,11 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume spike
-    # Donchian breakouts capture momentum in trending markets
-    # Weekly pivot direction filters for higher timeframe bias
+    # Hypothesis: 12h Choppiness Index regime filter + Donchian(20) breakout with volume confirmation
+    # Choppiness Index > 61.8 = ranging market (mean reversion at Donchian bands)
+    # Choppiness Index < 38.2 = trending market (breakout continuation)
+    # In ranging markets: fade Donchian breakouts (sell at upper band, buy at lower band)
+    # In trending markets: follow Donchian breakouts (buy breakouts, sell breakdowns)
     # Volume spike (2x 20-period MA) confirms institutional participation
-    # Works in bull/bear: breaks through key levels with trend and volume confirmation
+    # Works in bull/bear: adapts to market regime
     
     # Price and volume data
     close = prices['close'].values
@@ -20,33 +22,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 6h data for Donchian calculation
-    df_6h = get_htf_data(prices, '6h')
     # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(df_6h['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_6h['low']).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Load 1w data for weekly pivot calculation (using Monday's OHLC)
-    df_1w = get_htf_data(prices, '1w')
-    # Weekly pivot point calculation
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Weekly support/resistance levels
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    # Calculate Choppiness Index (14-period)
+    atr = pd.Series(np.maximum(high - low,
+                               np.maximum(np.abs(high - np.roll(close, 1)),
+                                          np.abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean().values
+    atr[0] = high[0] - low[0]
     
-    # Align weekly levels to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    range_hl = highest_high - lowest_low
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    
+    chop = 100 * np.log10(atr * 14 / range_hl) / np.log10(14)
     
     # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,11 +50,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
+        if (np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or 
+            np.isnan(chop[i]) or 
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,24 +60,41 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above Donchian high with volume spike and price above weekly pivot (bullish bias)
-            if close[i] > donchian_high_aligned[i] and vol_spike[i] and close[i] > weekly_pivot_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: Break below Donchian low with volume spike and price below weekly pivot (bearish bias)
-            elif close[i] < donchian_low_aligned[i] and vol_spike[i] and close[i] < weekly_pivot_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # Determine market regime based on Choppiness Index
+            if chop[i] > 61.8:  # Ranging market - mean reversion
+                # Sell at upper Donchian band, buy at lower Donchian band
+                if close[i] >= high_max[i] and vol_spike[i]:
+                    signals[i] = -0.25  # Short at resistance
+                    position = -1
+                elif close[i] <= low_min[i] and vol_spike[i]:
+                    signals[i] = 0.25   # Long at support
+                    position = 1
+            else:  # Trending market (chop < 38.2) or transition - follow breakouts
+                # Buy breakouts, sell breakdowns
+                if close[i] > high_max[i] and vol_spike[i]:
+                    signals[i] = 0.25   # Long breakout
+                    position = 1
+                elif close[i] < low_min[i] and vol_spike[i]:
+                    signals[i] = -0.25  # Short breakdown
+                    position = -1
         else:
-            # Exit: Return to opposite Donchian level
-            if position == 1:
-                if close[i] < donchian_low_aligned[i]:
+            # Exit conditions
+            if position == 1:  # Long position
+                # Exit on reversal to opposite Donchian band or loss of momentum
+                if close[i] < low_min[i]:  # Reached opposite band
+                    signals[i] = 0.0
+                    position = 0
+                elif chop[i] > 61.8 and close[i] < high_max[i] * 0.995:  # Lost momentum in ranging market
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            else:  # position == -1
-                if close[i] > donchian_high_aligned[i]:
+            else:  # position == -1, Short position
+                # Exit on reversal to opposite Donchian band or loss of momentum
+                if close[i] > high_max[i]:  # Reached opposite band
+                    signals[i] = 0.0
+                    position = 0
+                elif chop[i] > 61.8 and close[i] > low_min[i] * 1.005:  # Lost momentum in ranging market
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -94,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_20_Breakout_WeeklyPivot_Direction_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Chop_Regime_Donchian20_BreakoutFade_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
