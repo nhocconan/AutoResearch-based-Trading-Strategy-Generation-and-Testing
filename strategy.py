@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,74 +13,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend (ONCE before loop)
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Load 1d data for pivot points (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Load daily data for support/resistance levels
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Previous day's high, low, close for Camarilla pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla pivot levels (R1/S1 and R4/S4)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
+    r1 = close_1d + range_ * 1.1 / 12  # Resistance level 1
+    s1 = close_1d - range_ * 1.1 / 12  # Support level 1
+    r4 = close_1d + range_ * 1.1 / 2   # Resistance level 4
+    s4 = close_1d - range_ * 1.1 / 2   # Support level 4
+    
+    # Align all levels to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: 10-period average
+    vol_avg_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    
+    # Trend filter: 1w EMA20 (HTF trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    
-    # Weekly trend: EMA50 on weekly close
-    weekly_close = df_weekly['close'].values
-    ema_50_weekly = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
-    
-    # Daily pivot points for support/resistance
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
-    
-    # Pivot point calculation (standard)
-    pivot = (daily_high + daily_low + daily_close) / 3
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
-    r2 = pivot + (daily_high - daily_low)
-    s2 = pivot - (daily_high - daily_low)
-    
-    # Align pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_daily, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_daily, s2)
-    
-    # Volume confirmation: 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC (avoid low liquidity periods)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_50_weekly_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(vol_avg_20[i]) or not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg_10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above weekly EMA50 (uptrend) and breaks above R1 with volume
-            if (close[i] > ema_50_weekly_aligned[i] and 
-                close[i] > r1_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i]):
+            # Long: Price breaks above R4 with volume AND above 1w EMA20 (uptrend)
+            if (close[i] > r4_aligned[i] and volume[i] > 1.5 * vol_avg_10[i] and 
+                close[i] > ema_20_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly EMA50 (downtrend) and breaks below S1 with volume
-            elif (close[i] < ema_50_weekly_aligned[i] and 
-                  close[i] < s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
+            # Short: Price breaks below S4 with volume AND below 1w EMA20 (downtrend)
+            elif (close[i] < s4_aligned[i] and volume[i] > 1.5 * vol_avg_10[i] and 
+                  close[i] < ema_20_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite pivot level
+            # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
             if position == 1:
                 if not np.isnan(s1_aligned[i]) and close[i] < s1_aligned[i]:
                     signals[i] = 0.0
@@ -96,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WeeklyEMA50_Trend_DailyPivot_R1S1_Breakout_Volume"
-timeframe = "6h"
+name = "1D_Camarilla_R4_S4_Breakout_1wEMA20_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
