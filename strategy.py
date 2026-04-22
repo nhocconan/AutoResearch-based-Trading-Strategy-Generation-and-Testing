@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Bollinger Band breakout with daily trend filter and volume confirmation.
-Only trade long when price breaks above upper Bollinger Band with daily trend up and volume spike;
-short when price breaks below lower Bollinger Band with daily trend down and volume spike.
-Exit when price returns to middle band or volatility expands. Designed for moderate trade frequency
-(15-35 trades/year) by requiring multiple confirmations: volatility breakout, trend alignment, and volume.
-Works in both bull and bear markets by following the daily trend.
+Hypothesis: 4-hour Donchian channel breakout with 12-hour trend filter and volume confirmation.
+Only trade long when price breaks above 20-period Donchian upper channel during 12-hour uptrend with volume spike.
+Short when price breaks below 20-period Donchian lower channel during 12-hour downtrend with volume spike.
+Exit when price returns to the Donchian middle or trend reverses.
+Designed for moderate trade frequency (20-50 trades/year) by requiring trend alignment and volume confirmation.
+Works in both bull and bear markets by following the 12-hour trend.
 """
 
 import numpy as np
@@ -23,71 +23,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on 4h
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb.std
-    bb_width = bb_upper - bb_lower
+    # Donchian Channel (20-period) on 4h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Bollinger Band width percentile (50-period lookback) for volatility filter
-    bb_width_pct = pd.Series(bb_width).rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
-    
-    # Load daily data for trend filter - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    # Load 12-hour data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Daily EMA34 for trend direction
-    daily_close = df_daily['close'].values
-    ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    # 12-period EMA on 12h close for trend
+    close_12h = df_12h['close'].values
+    ema12_12h = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema12_12h_aligned = align_htf_to_ltf(prices, df_12h, ema12_12h)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(bb_width_pct[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(ema34_daily_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema12_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility expansion filter: avoid breakouts in high volatility
-        vol_expansion = bb_width_pct[i] > 0.7
-        
         # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 0:
-            # Long: volatility contraction + price breaks above upper band + daily uptrend + volume spike
-            if (not vol_expansion) and close[i] > bb_upper[i] and ema34_daily_aligned[i] > ema34_daily_aligned[i-1] and vol_spike:
+            # Long: price breaks above upper Donchian + 12h uptrend + volume spike
+            if close[i] > donchian_upper[i] and ema12_12h_aligned[i] > ema12_12h_aligned[i-1] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: volatility contraction + price breaks below lower band + daily downtrend + volume spike
-            elif (not vol_expansion) and close[i] < bb_lower[i] and ema34_daily_aligned[i] < ema34_daily_aligned[i-1] and vol_spike:
+            # Short: price breaks below lower Donchian + 12h downtrend + volume spike
+            elif close[i] < donchian_lower[i] and ema12_12h_aligned[i] < ema12_12h_aligned[i-1] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: volatility expansion or price returns to middle band
+            # Exit: price returns to middle or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: volatility expansion or price closes below middle band
-                if vol_expansion or close[i] < bb_middle[i]:
+                # Exit long: price below middle or 12h trend turns down
+                if close[i] < donchian_middle[i] or ema12_12h_aligned[i] < ema12_12h_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: volatility expansion or price closes above middle band
-                if vol_expansion or close[i] > bb_middle[i]:
+                # Exit short: price above middle or 12h trend turns up
+                if close[i] > donchian_middle[i] or ema12_12h_aligned[i] > ema12_12h_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -98,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Bollinger_Breakout_DailyTrend_Volume"
+name = "4H_Donchian_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
