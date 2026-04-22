@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Camarilla Pivot Point Reversal with 12-hour Trend Filter and Volume Spike.
-Long when price touches S1 support and reverses up in an uptrend (12h EMA50 rising) with volume spike.
-Short when price touches R1 resistance and reverses down in a downtrend (12h EMA50 falling) with volume spike.
-Camarilla levels provide precise intraday support/resistance; 12h EMA filters for higher-timeframe trend;
-volume spike confirms institutional interest. Designed for low trade frequency by requiring confluence of 3 conditions.
-Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+Hypothesis: 1d RSI(2) + 1w Trend Filter with Volume Confirmation.
+Long when RSI(2) < 10 (oversold) and 1w EMA50 rising with volume spike.
+Short when RSI(2) > 90 (overbought) and 1w EMA50 falling with volume spike.
+Exit when RSI(2) crosses above 50 (for longs) or below 50 (for shorts).
+This targets mean reversion in daily timeframe with weekly trend filter to avoid counter-trend trades.
+Works in both bull and bear markets by following weekly trend direction.
+Low trade frequency expected due to strict RSI(2) thresholds.
 """
 
 import numpy as np
@@ -17,62 +18,48 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels for the current day
-    # Using previous day's OHLC
-    pivots_high = np.full(n, np.nan)
-    pivots_low = np.full(n, np.nan)
-    camarilla_R1 = np.full(n, np.nan)
-    camarilla_S1 = np.full(n, np.nan)
-    
-    # Group by date to get previous day's OHLC
-    dates = pd.to_datetime(prices['open_time']).date
-    unique_dates = np.unique(dates)
-    
-    for i, date in enumerate(unique_dates):
-        # Find indices for this date
-        date_mask = (dates == date)
-        if not np.any(date_mask):
-            continue
+    # RSI(2) calculation
+    def rsi(close_prices, period=2):
+        if len(close_prices) < period + 1:
+            return np.full_like(close_prices, np.nan, dtype=float)
+        delta = np.diff(close_prices)
+        up = np.where(delta > 0, delta, 0)
+        down = np.where(delta < 0, -delta, 0)
         
-        idx = np.where(date_mask)[0]
-        start_idx = idx[0]
-        end_idx = idx[-1]
+        # Wilder's smoothing (alpha = 1/period)
+        def wilders_smoothing(x, period):
+            if len(x) < period:
+                return np.full_like(x, np.nan, dtype=float)
+            result = np.full_like(x, np.nan, dtype=float)
+            result[period-1] = np.mean(x[:period])
+            for i in range(period, len(x)):
+                result[i] = (result[i-1] * (period-1) + x[i]) / period
+            return result
         
-        # Get previous day's data (if exists)
-        if i > 0:
-            prev_date = unique_dates[i-1]
-            prev_mask = (dates == prev_date)
-            if np.any(prev_mask):
-                prev_idx = np.where(prev_mask)[0]
-                prev_high = np.max(high[prev_idx])
-                prev_low = np.min(low[prev_idx])
-                prev_close = close[prev_idx[-1]]  # last close of previous day
-                
-                # Calculate Camarilla levels
-                range_val = prev_high - prev_low
-                camarilla_R1_val = prev_close + (range_val * 1.1 / 12)
-                camarilla_S1_val = prev_close - (range_val * 1.1 / 12)
-                
-                # Apply to current day
-                pivots_high[start_idx:end_idx+1] = prev_high
-                pivots_low[start_idx:end_idx+1] = prev_low
-                camarilla_R1[start_idx:end_idx+1] = camarilla_R1_val
-                camarilla_S1[start_idx:end_idx+1] = camarilla_S1_val
+        up_smoothed = wilders_smoothing(up, period)
+        down_smoothed = wilders_smoothing(down, period)
+        
+        rs = np.where(down_smoothed != 0, up_smoothed / down_smoothed, 0)
+        rsi_vals = 100 - (100 / (1 + rs))
+        # Prepend NaN for the first element (since diff reduces length by 1)
+        return np.concatenate([[np.nan], rsi_vals])
     
-    # Load 12h data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    rsi2 = rsi(close, 2)
+    
+    # Load 1w data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 50-period EMA on 12h close for trend
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 50-period EMA on 1w close for trend
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -82,8 +69,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(camarilla_R1[i]) or np.isnan(camarilla_S1[i])):
+        if (np.isnan(rsi2[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,29 +79,27 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price touches S1 and reverses up, in uptrend with volume spike
-            if (low[i] <= camarilla_S1[i] and close[i] > camarilla_S1[i] and  # touched S1 and closed above
-                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and  # 12h uptrend
-                vol_spike):
+            # Long: RSI(2) < 10 (oversold) and 1w EMA50 rising with volume spike
+            if (rsi2[i] < 10 and 
+                ema50_1w_aligned[i] > ema50_1w_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches R1 and reverses down, in downtrend with volume spike
-            elif (high[i] >= camarilla_R1[i] and close[i] < camarilla_R1[i] and  # touched R1 and closed below
-                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and  # 12h downtrend
-                  vol_spike):
+            # Short: RSI(2) > 90 (overbought) and 1w EMA50 falling with volume spike
+            elif (rsi2[i] > 90 and 
+                  ema50_1w_aligned[i] < ema50_1w_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price reaches opposite Camarilla level or trend changes
+            # Exit: RSI(2) crosses above 50 (for longs) or below 50 (for shorts)
             exit_signal = False
             
             if position == 1:
-                # Exit long: price reaches R1 or 12h trend turns down
-                if high[i] >= camarilla_R1[i] or ema50_12h_aligned[i] < ema50_12h_aligned[i-1]:
+                # Exit long: RSI(2) >= 50
+                if rsi2[i] >= 50:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price reaches S1 or 12h trend turns up
-                if low[i] <= camarilla_S1[i] or ema50_12h_aligned[i] > ema50_12h_aligned[i-1]:
+                # Exit short: RSI(2) <= 50
+                if rsi2[i] <= 50:
                     exit_signal = True
             
             if exit_signal:
@@ -126,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_Pivot_Reversal_12hTrend_Volume"
-timeframe = "4h"
+name = "1D_RSI2_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
