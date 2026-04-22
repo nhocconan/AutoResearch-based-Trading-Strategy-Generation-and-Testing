@@ -30,19 +30,11 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
-    r3 = prev_high + 2 * (pivot - prev_low)
-    s3 = prev_low - 2 * (prev_high - pivot)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 1h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,49 +44,41 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R2 with volume confirmation (stronger breakout)
-            if close[i] > r2_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above R1 + volume spike
+            if close[i] > r1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S2 with volume confirmation
-            elif close[i] < s2_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below S1 + volume spike
+            elif close[i] < s1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
+                signals[i] = -0.20
                 position = -1
-            # Fade at R3/S3: reversal when price reaches extreme levels
-            elif close[i] >= r3_aligned[i] and volume[i] > vol_avg_20[i]:
-                signals[i] = -0.25
-                position = -1
-            elif close[i] <= s3_aligned[i] and volume[i] > vol_avg_20[i]:
-                signals[i] = 0.25
-                position = 1
         else:
-            # Exit conditions
+            # Exit: Price crosses back below/above pivot (full exit)
             if position == 1:
-                # Exit long: Price closes below R1 (breakout failed) or hits S1 (reversal)
-                if close[i] < r1_aligned[i] or close[i] <= s1_aligned[i]:
+                # Exit long: Price closes below pivot
+                if close[i] < pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                # Exit short: Price closes above S1 (breakdown failed) or hits R1 (reversal)
-                if close[i] > s1_aligned[i] or close[i] >= r1_aligned[i]:
+                # Exit short: Price closes above pivot
+                if close[i] > pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "6H_Camarilla_R2_S2_Breakout_R3S3_Fade"
-timeframe = "6h"
+name = "1H_Pivot_R1_S1_Breakout_Volume_Spike"
+timeframe = "1h"
 leverage = 1.0
