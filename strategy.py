@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend filter and volume confirmation
-# Camarilla pivot levels provide strong support/resistance zones. Breakouts from R1/S1
-# with volume confirmation and aligned daily trend capture momentum moves.
-# Works in bull markets by capturing upward breakouts and in bear markets by capturing
-# breakdowns below S1. Targeting 20-40 trades/year to avoid fee drag.
+# Hypothesis: 1d Bollinger Band squeeze breakout with 1w trend filter and 1d volume confirmation
+# Bollinger Band squeeze (BB width at 20-period low) indicates low volatility and imminent breakout.
+# Direction determined by 1w EMA34 trend (bullish if close > EMA34, bearish if close < EMA34).
+# Entry confirmed by 1d volume spike (> 1.5x 20-day average) to avoid false breakouts.
+# Works in bull markets by capturing breakouts upward and in bear markets by avoiding false breakdowns
+# via trend filter and requiring volume confirmation. Designed for 1d timeframe targeting 10-25 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,74 +20,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivots and trend (ONCE before loop)
+    # Load 1d data for BB calculations and volume confirmation (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for each day (based on previous day)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    hl_range_1d = high_1d - low_1d
-    r1_1d = close_1d + hl_range_1d * 1.1 / 12
-    s1_1d = close_1d - hl_range_1d * 1.1 / 12
+    # Load 1w data for trend filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    close_1w = df_1w['close'].values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # 1d volume 20-period average for spike confirmation
+    # 1d volume 20-period average for spike detection
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    
+    # Bollinger Bands (20, 2) on 1d data
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20_1d + 2 * std_20_1d
+    lower_bb = sma_20_1d - 2 * std_20_1d
+    bb_width = upper_bb - lower_bb
+    
+    # Bollinger Band squeeze: BB width at 20-period low
+    bb_width_low_20 = pd.Series(bb_width).rolling(window=20, min_periods=20).min().values
+    bb_squeeze = bb_width <= bb_width_low_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(sma_20_1d[i]) or np.isnan(std_20_1d[i]) or
+            np.isnan(bb_width_low_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R1 + uptrend + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
+            # Long: BB squeeze + 1w uptrend + 1d volume spike
+            if (bb_squeeze[i] and 
+                close_1d[i] > ema_34_1w_aligned[i] and 
+                volume_1d[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + downtrend + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
+            # Short: BB squeeze + 1w downtrend + 1d volume spike
+            elif (bb_squeeze[i] and 
+                  close_1d[i] < ema_34_1w_aligned[i] and 
+                  volume_1d[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: return to VWAP-like level (midpoint of H-L) or trend reversal
-            # Use intraday midpoint as dynamic exit
+            # Exit conditions: price returns to SMA20 or trend reversal
             if position == 1:
-                # Exit on return to daily midpoint or trend reversal
-                if (close[i] < (high_1d[i//16] + low_1d[i//16])/2 if i//16 < len(high_1d) else close[i] < ema_34_1d_aligned[i]) or \
-                   close[i] < ema_34_1d_aligned[i]:
+                # Exit on return to SMA20 or trend reversal
+                if (close_1d[i] <= sma_20_1d[i] or 
+                    close_1d[i] < ema_34_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on return to daily midpoint or trend reversal
-                if (close[i] > (high_1d[i//16] + low_1d[i//16])/2 if i//16 < len(high_1d) else close[i] > ema_34_1d_aligned[i]) or \
-                   close[i] > ema_34_1d_aligned[i]:
+                # Exit on return to SMA20 or trend reversal
+                if (close_1d[i] >= sma_20_1d[i] or 
+                    close_1d[i] > ema_34_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -94,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_BBSqueeze_1wEMA34_1dVolSpike"
+timeframe = "1d"
 leverage = 1.0
