@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,7 +33,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all levels to 6h timeframe
+    # Align all levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
@@ -65,30 +65,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
+            # Exit: Price closes back to previous day's close (simple reversion)
             if position == 1:
-                # Exit long: Price closes below S1 (calculated from previous day)
-                # Recalculate S1 for exit condition
-                if i > 0:
-                    s1 = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
-                    s1_series = pd.Series(np.full_like(close_1d, s1))
-                    s1_aligned_exit = align_htf_to_ltf(prices, df_1d, s1_series.values)[i]
-                else:
-                    s1_aligned_exit = np.nan
-                if not np.isnan(s1_aligned_exit) and close[i] < s1_aligned_exit:
+                # Exit long: Price closes below previous day's close
+                if not np.isnan(close_1d[i-1]) and close[i] < close_1d[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above R1 (calculated from previous day)
-                if i > 0:
-                    r1 = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
-                    r1_series = pd.Series(np.full_like(close_1d, r1))
-                    r1_aligned_exit = align_htf_to_ltf(prices, df_1d, r1_series.values)[i]
-                else:
-                    r1_aligned_exit = np.nan
-                if not np.isnan(r1_aligned_exit) and close[i] > r1_aligned_exit:
+                # Exit short: Price closes above previous day's close
+                if not np.isnan(close_1d[i-1]) and close[i] > close_1d[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -96,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "4H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
