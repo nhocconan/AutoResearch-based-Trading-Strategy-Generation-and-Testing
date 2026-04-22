@@ -8,13 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Choppiness Index regime filter + Donchian(20) breakout with volume confirmation
-    # Choppiness Index > 61.8 = ranging market (mean reversion at Donchian bands)
-    # Choppiness Index < 38.2 = trending market (breakout continuation)
-    # In ranging markets: fade Donchian breakouts (sell at upper band, buy at lower band)
-    # In trending markets: follow Donchian breakouts (buy breakouts, sell breakdowns)
+    # Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation
+    # Donchian channels provide clear breakout levels with built-in trend following
+    # 12h EMA50 filters for intermediate-term trend direction to avoid counter-trend trades
     # Volume spike (2x 20-period MA) confirms institutional participation
-    # Works in bull/bear: adapts to market regime
+    # Works in bull/bear: breaks through key levels with trend and volume confirmation
     
     # Price and volume data
     close = prices['close'].values
@@ -22,24 +20,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Load 12h data for EMA50 trend
+    df_12h = get_htf_data(prices, '12h')
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
     # Calculate Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate Choppiness Index (14-period)
-    atr = pd.Series(np.maximum(high - low,
-                               np.maximum(np.abs(high - np.roll(close, 1)),
-                                          np.abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean().values
-    atr[0] = high[0] - low[0]
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    range_hl = highest_high - lowest_low
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    
-    chop = 100 * np.log10(atr * 14 / range_hl) / np.log10(14)
+    # Highest high and lowest low over past 20 periods
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,9 +39,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or 
-            np.isnan(chop[i]) or 
+        if (np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,41 +49,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Determine market regime based on Choppiness Index
-            if chop[i] > 61.8:  # Ranging market - mean reversion
-                # Sell at upper Donchian band, buy at lower Donchian band
-                if close[i] >= high_max[i] and vol_spike[i]:
-                    signals[i] = -0.25  # Short at resistance
-                    position = -1
-                elif close[i] <= low_min[i] and vol_spike[i]:
-                    signals[i] = 0.25   # Long at support
-                    position = 1
-            else:  # Trending market (chop < 38.2) or transition - follow breakouts
-                # Buy breakouts, sell breakdowns
-                if close[i] > high_max[i] and vol_spike[i]:
-                    signals[i] = 0.25   # Long breakout
-                    position = 1
-                elif close[i] < low_min[i] and vol_spike[i]:
-                    signals[i] = -0.25  # Short breakdown
-                    position = -1
+            # Long: Break above 20-period high with volume spike and price above 12h EMA50 (uptrend)
+            if close[i] > highest_high[i] and vol_spike[i] and close[i] > ema50_12h_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: Break below 20-period low with volume spike and price below 12h EMA50 (downtrend)
+            elif close[i] < lowest_low[i] and vol_spike[i] and close[i] < ema50_12h_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         else:
-            # Exit conditions
-            if position == 1:  # Long position
-                # Exit on reversal to opposite Donchian band or loss of momentum
-                if close[i] < low_min[i]:  # Reached opposite band
-                    signals[i] = 0.0
-                    position = 0
-                elif chop[i] > 61.8 and close[i] < high_max[i] * 0.995:  # Lost momentum in ranging market
+            # Exit: Return to opposite Donchian level (low for longs, high for shorts)
+            if position == 1:
+                if close[i] < lowest_low[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            else:  # position == -1, Short position
-                # Exit on reversal to opposite Donchian band or loss of momentum
-                if close[i] > high_max[i]:  # Reached opposite band
-                    signals[i] = 0.0
-                    position = 0
-                elif chop[i] > 61.8 and close[i] > low_min[i] * 1.005:  # Lost momentum in ranging market
+            else:  # position == -1
+                if close[i] > highest_high[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -102,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Chop_Regime_Donchian20_BreakoutFade_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_Donchian_20_Breakout_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
