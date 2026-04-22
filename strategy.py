@@ -1,111 +1,92 @@
+# 6h_WeeklyPivot_R2_S2_Breakout_1dEMA50_Volume
+# Hypothesis: Weekly pivot levels (R2/S2) provide strong support/resistance. Breakouts above R2 or below S2 with volume confirmation and alignment to daily EMA50 trend yield high-probability trades. Weekly pivots filter noise, daily EMA50 ensures trend alignment, volume confirms breakout strength. Works in bull/bear by following trend.
+# Target: 50-150 total trades over 4 years (12-37/year). Size: 0.25.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: Daily candlestick patterns combined with weekly trend filter and volume confirmation
-# This strategy targets swing trading on daily timeframe with low trade frequency (~10-20 trades/year)
-# Uses: Daily Engulfing candle pattern + Weekly EMA50 trend filter + Volume spike confirmation
-# Designed to work in both bull and bear markets by following the weekly trend direction
-# Engulfing patterns signal strong reversals, weekly EMA prevents counter-trend trades
-# Volume spike confirms institutional participation
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data once for Engulfing patterns
-    df_daily = get_htf_data(prices, '1d')
-    daily_open = df_daily['open'].values
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
-    daily_volume = df_daily['volume'].values
+    # Load daily data once for EMA50
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Load weekly data once for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    weekly_close = df_weekly['close'].values
+    # Load weekly data once for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily Engulfing patterns
-    # Bullish engulfing: current green candle completely engulfs previous red candle
-    # Bearish engulfing: current red candle completely engulfs previous green candle
-    bullish_engulf = (
-        (daily_close > daily_open) &  # current candle is green
-        (daily_open < daily_close.shift(1)) &  # current open below previous close
-        (daily_close > daily_open.shift(1)) &  # current close above previous open
-        (daily_open < daily_close.shift(1)) &  # redundant but clear
-        (daily_close > daily_open.shift(1))
-    )
+    # Calculate weekly pivot points (R2, S2)
+    pp_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r2_1w = pp_1w + range_1w  # R2 = PP + (High - Low)
+    s2_1w = pp_1w - range_1w  # S2 = PP - (High - Low)
     
-    bearish_engulf = (
-        (daily_close < daily_open) &  # current candle is red
-        (daily_open > daily_close.shift(1)) &  # current open above previous close
-        (daily_close < daily_open.shift(1)) &  # current close below previous open
-        (daily_open > daily_close.shift(1)) &  # redundant but clear
-        (daily_close < daily_open.shift(1))
-    )
+    # Align weekly pivots to 6h
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Calculate weekly EMA50 for trend filter
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily patterns to lower timeframe
-    bullish_engulf_aligned = align_htf_to_ltf(prices, df_daily, bullish_engulf.astype(float))
-    bearish_engulf_aligned = align_htf_to_ltf(prices, df_daily, bearish_engulf.astype(float))
-    
-    # Align weekly EMA50 to lower timeframe
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema50)
-    
-    # Volume spike filter (20-day average on daily data)
-    vol_ma_20 = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_20)
+    # Volume spike filter (24-period average on 6h)
+    volume = prices['volume'].values
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any data is not ready
-        if (np.isnan(bullish_engulf_aligned[i]) or 
-            np.isnan(bearish_engulf_aligned[i]) or 
-            np.isnan(weekly_ema50_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        volume = prices['volume'].iloc[i]
-        bullish = bullish_engulf_aligned[i] > 0.5
-        bearish = bearish_engulf_aligned[i] > 0.5
-        weekly_ema = weekly_ema50_aligned[i]
-        vol_ma = vol_ma_20_aligned[i]
+        vol = volume[i]
+        vol_ma = vol_ma_24[i]
+        r2 = r2_aligned[i]
+        s2 = s2_aligned[i]
+        ema50 = ema50_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-day average
-        vol_spike = volume > 2.0 * vol_ma
+        # Volume filter: current volume > 2.0 * 24-period average
+        vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: bullish engulfing + price above weekly EMA50 + volume spike
-            if bullish and price > weekly_ema and vol_spike:
+            # Long conditions: price breaks above R2 + volume spike + price > EMA50
+            if price > r2 and vol_spike and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish engulfing + price below weekly EMA50 + volume spike
-            elif bearish and price < weekly_ema and vol_spike:
+            # Short conditions: price breaks below S2 + volume spike + price < EMA50
+            elif price < s2 and vol_spike and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: opposite engulfing pattern or price crosses weekly EMA50
+            # Exit conditions: price crosses back through weekly PP or volume dries up
+            pp_1w_today = (high_1w[i // 28] + low_1w[i // 28] + close_1w[i // 28]) / 3 if i >= 28 else pp_1w[0]
+            pp_aligned_today = align_htf_to_ltf(prices, df_1w, np.full_like(pp_1w, pp_1w_today))[i] if i >= 28 else pp_1w[0]
+            
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on bearish engulfing or price crosses below weekly EMA50
-                if bearish or price < weekly_ema:
+                # Exit when price crosses below weekly PP or volume dries up
+                if price < pp_aligned_today or vol < 0.5 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on bullish engulfing or price crosses above weekly EMA50
-                if bullish or price > weekly_ema:
+                # Exit when price crosses above weekly PP or volume dries up
+                if price > pp_aligned_today or vol < 0.5 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -117,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Daily_Engulfing_WeeklyEMA50_Volume"
-timeframe = "1d"
+name = "6h_WeeklyPivot_R2_S2_Breakout_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
