@@ -8,15 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA40 for trend filter (no look-ahead)
-    ema40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
-    
-    # Load daily data for pivot calculation
+    # Load 1d data once
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -31,29 +23,32 @@ def generate_signals(prices):
     prev_close_1d[0] = np.nan
     
     pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r4_1d = pp_1d + 3 * (high_1d - low_1d)  # R4 = PP + 3*(H-L)
-    s4_1d = pp_1d - 3 * (high_1d - low_1d)  # S4 = PP - 3*(H-L)
+    r1_1d = 2 * pp_1d - prev_low_1d
+    s1_1d = 2 * pp_1d - prev_high_1d
     
-    # Align to 6h timeframe
-    ema40_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align to 12h timeframe (primary timeframe)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike filter (24-period average on 6h data)
+    # Volume spike filter (20-period average on 12h data)
     volume = prices['volume'].values
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if any data is not ready
-        if (np.isnan(ema40_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,20 +56,20 @@ def generate_signals(prices):
         
         price = prices['close'].iloc[i]
         vol = volume[i]
-        vol_ma = vol_ma_24[i]
-        ema40 = ema40_aligned[i]
+        vol_ma = vol_ma_20[i]
         pp = pp_aligned[i]
-        r4 = r4_aligned[i]
-        s4 = s4_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        ema34 = ema34_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R4 with volume + above weekly EMA40
-            if price > r4 and vol > 2.5 * vol_ma and price > ema40:
-                signals[i] = 0.25
+            # Long: price breaks above R1 with volume + above EMA34
+            if price > r1 and vol > 2.0 * vol_ma and price > ema34:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below S4 with volume + below weekly EMA40
-            elif price < s4 and vol > 2.5 * vol_ma and price < ema40:
-                signals[i] = -0.25
+            # Short: price breaks below S1 with volume + below EMA34
+            elif price < s1 and vol > 2.0 * vol_ma and price < ema34:
+                signals[i] = -0.30
                 position = -1
         
         elif position != 0:
@@ -86,10 +81,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "6h_Pivot_R4_S4_Breakout_1wEMA40_Volume_Spike"
-timeframe = "6h"
+name = "12h_Pivot_R1_S1_Breakout_1dEMA34_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
