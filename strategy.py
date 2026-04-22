@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla Pivot Point S1/S3 breakout with 1d trend filter and volume confirmation.
-Long when price breaks above S3 with bullish 1d trend and volume spike.
-Short when price breaks below S1 with bearish 1d trend and volume spike.
-Exit when price returns to pivot point (P) or trend weakens.
-Uses 1d EMA34 for trend filter to avoid whipsaws in ranging markets.
-Designed for low trade frequency (20-40/year) to minimize fee drag.
+Hypothesis: 4h Donchian channel breakout with 1d ADX trend filter and volume confirmation.
+Long when price breaks above upper band with ADX > 25 and volume spike.
+Short when price breaks below lower band with ADX > 25 and volume spike.
+Exit when price returns to middle band or ADX drops below 20.
+Designed for low trade frequency (15-25/year) to minimize fee drift.
+Works in bull (breakouts) and bear (breakdowns) via ADX filter.
 """
 import numpy as np
 import pandas as pd
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,45 +21,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter - ONCE before loop
+    # Load daily data for ADX - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 35:
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_d = pd.Series(df_daily['close'].values)
-    ema34_d = close_d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align EMA34 to 4h timeframe
-    ema34_aligned = align_htf_to_ltf(prices, df_daily, ema34_d)
-    
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    # HLC of previous day (using daily data shifted by 1)
-    # We'll calculate for each 4h bar using the most recent completed daily candle
+    # Calculate ADX (14)
     high_d = df_daily['high'].values
     low_d = df_daily['low'].values
     close_d = df_daily['close'].values
     
-    # Calculate pivot and levels for each day
-    pivot_d = (high_d + low_d + close_d) / 3.0
-    range_d = high_d - low_d
+    # True Range
+    tr1 = high_d - low_d
+    tr2 = np.abs(high_d - np.roll(close_d, 1))
+    tr3 = np.abs(low_d - np.roll(close_d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Camarilla levels
-    s1_d = close_d - (range_d * 1.1 / 12)
-    s2_d = close_d - (range_d * 1.1 / 6)
-    s3_d = close_d - (range_d * 1.1 / 4)
-    r1_d = close_d + (range_d * 1.1 / 12)
-    r2_d = close_d + (range_d * 1.1 / 6)
-    r3_d = close_d + (range_d * 1.1 / 4)
+    # Directional Movement
+    up_move = high_d - np.roll(high_d, 1)
+    down_move = np.roll(low_d, 1) - low_d
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Align all levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_daily, pivot_d)
-    s1_aligned = align_htf_to_ltf(prices, df_daily, s1_d)
-    s2_aligned = align_htf_to_ltf(prices, df_daily, s2_d)
-    s3_aligned = align_htf_to_ltf(prices, df_daily, s3_d)
-    r1_aligned = align_htf_to_ltf(prices, df_daily, r1_d)
-    r2_aligned = align_htf_to_ltf(prices, df_daily, r2_d)
-    r3_aligned = align_htf_to_ltf(prices, df_daily, r3_d)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    def _wilder_smooth(arr, period):
+        smoothed = np.zeros_like(arr)
+        smoothed[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
+        return smoothed
+    
+    tr14 = _wilder_smooth(tr, 14)
+    plus_dm14 = _wilder_smooth(plus_dm, 14)
+    minus_dm14 = _wilder_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di14 = np.where(tr14 != 0, (plus_dm14 / tr14) * 100, 0)
+    minus_di14 = np.where(tr14 != 0, (minus_dm14 / tr14) * 100, 0)
+    
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
+    adx = _wilder_smooth(dx, 14)
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    
+    # Calculate Donchian channels (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    mid_20 = (high_20 + low_20) / 2.0
     
     # Calculate 4h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,12 +84,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after volume lookback
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(ema34_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,16 +104,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above S3 with bullish 1d trend and volume spike
-            if (close[i] > s3_aligned[i] and 
-                close[i] > ema34_aligned[i] and  # Bullish trend: price above EMA34
-                volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+            # Long: Price breaks above upper band with strong trend and volume
+            if (close[i] > high_20[i] and 
+                adx_aligned[i] > 25 and 
+                volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with bearish 1d trend and volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_aligned[i] and  # Bearish trend: price below EMA34
-                  volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+            # Short: Price breaks below lower band with strong trend and volume
+            elif (close[i] < low_20[i] and 
+                  adx_aligned[i] > 25 and 
+                  volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -109,12 +121,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to pivot OR trend turns bearish
-                if close[i] <= pivot_aligned[i] or close[i] < ema34_aligned[i]:
+                # Exit long: price returns to middle OR trend weakens
+                if close[i] < mid_20[i] or adx_aligned[i] < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to pivot OR trend turns bullish
-                if close[i] >= pivot_aligned[i] or close[i] > ema34_aligned[i]:
+                # Exit short: price returns to middle OR trend weakens
+                if close[i] > mid_20[i] or adx_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -125,7 +137,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_S1S3_1dEMA34_Trend_Volume"
+name = "4H_Donchian_ADX25_Volume"
 timeframe = "4h"
 leverage = 1.0
 #%%
