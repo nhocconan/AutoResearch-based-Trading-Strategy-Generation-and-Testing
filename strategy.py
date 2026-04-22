@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend filter and volatility
+    # Load 1d data for trend filter and volatility filter
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA34 for trend filter
@@ -28,11 +28,9 @@ def generate_signals(prices):
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align daily ATR to 4h timeframe
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -68,23 +66,23 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volatility filter: daily ATR > 0.5 * 20-period average ATR (avoid low volatility chop)
+        # Volatility filter: daily ATR > 0.6 * 20-period average (avoid low volatility chop)
         atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
-        vol_filter = atr_daily > 0.5 * atr_ma_20
+        vol_filter = atr_daily > 0.6 * atr_ma_20
         
-        # Volume filter: current volume > 1.5 * 20-period average volume
-        vol_spike = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 1.6 * 20-period average volume
+        vol_spike = vol > 1.6 * vol_ma
         
         # Trend filter: price above/below 1d EMA34
         uptrend = price > ema34_1d_val
         downtrend = price < ema34_1d_val
         
         if position == 0:
-            # Long: price breaks above 4h Donchian high + 1d uptrend + volatility filter + volume spike
+            # Long: price breaks above 12h Donchian high + 1d uptrend + volatility filter + volume spike
             if price > donch_high_val and uptrend and vol_filter and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low + 1d downtrend + volatility filter + volume spike
+            # Short: price breaks below 12h Donchian low + 1d downtrend + volatility filter + volume spike
             elif price < donch_low_val and downtrend and vol_filter and vol_spike:
                 signals[i] = -0.25
                 position = -1
@@ -112,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_ATRVolFilter_VolSpike_v2"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_ATRVolFilter_VolSpike"
+timeframe = "12h"
 leverage = 1.0
