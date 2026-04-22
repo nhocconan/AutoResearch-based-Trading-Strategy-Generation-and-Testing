@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h RSI mean reversion with Bollinger Bands and volume confirmation.
-In ranging markets, price tends to revert to the mean after reaching extreme RSI levels.
-Bollinger Bands provide dynamic support/resistance, and volume spikes confirm reversal signals.
-Designed for low trade frequency (<50/year) to minimize fee drag in bear markets.
+Hypothesis: 12-hour Williams %R mean reversion with 1-week trend filter and volume confirmation.
+In overbought conditions (%R > -20) with bearish weekly trend, short.
+In oversold conditions (%R < -80) with bullish weekly trend, long.
+Volume surge confirms the reversal signal.
+Designed for low trade frequency (12-37/year) to minimize fee drift.
 """
 import numpy as np
 import pandas as pd
@@ -11,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,38 +20,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    # Load weekly data for trend filter - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 14:
         return np.zeros(n)
     
-    # Calculate RSI (14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Williams %R (14-period) on 12h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate Bollinger Bands (20, 2.0) on 4h
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2.0 * bb_std
-    bb_lower = bb_middle - 2.0 * bb_std
+    # Calculate weekly EMA12 trend
+    ema12_weekly = pd.Series(df_weekly['close'].values).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema12_aligned = align_htf_to_ltf(prices, df_weekly, ema12_weekly)
     
-    # Calculate 1d RSI for trend filter
-    delta_daily = np.diff(df_daily['close'].values, prepend=df_daily['close'].values[0])
-    gain_daily = np.where(delta_daily > 0, delta_daily, 0)
-    loss_daily = np.where(delta_daily < 0, -delta_daily, 0)
-    avg_gain_daily = pd.Series(gain_daily).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_daily = pd.Series(loss_daily).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_daily = avg_gain_daily / (avg_loss_daily + 1e-10)
-    rsi_daily = 100 - (100 / (1 + rs_daily))
-    rsi_daily_aligned = align_htf_to_ltf(prices, df_daily, rsi_daily)
-    
-    # Calculate 4h volume average (20-period)
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -59,10 +43,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(14, n):  # Start after Williams %R warmup
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(rsi_daily_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema12_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,30 +63,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI oversold (<30), price near BB lower band, bullish daily RSI (>50), volume spike
-            if (rsi[i] < 30 and 
-                close[i] <= bb_lower[i] * 1.02 and  # Within 2% of lower BB
-                rsi_daily_aligned[i] > 50 and 
-                volume[i] > 1.5 * vol_avg_20[i]):
+            # Long: Oversold (%R < -80) with bullish weekly trend and volume
+            if (williams_r[i] < -80 and 
+                close[i] > ema12_aligned[i] and  # Price above weekly EMA = bullish trend
+                volume[i] > 2.0 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70), price near BB upper band, bearish daily RSI (<50), volume spike
-            elif (rsi[i] > 70 and 
-                  close[i] >= bb_upper[i] * 0.98 and  # Within 2% of upper BB
-                  rsi_daily_aligned[i] < 50 and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
+            # Short: Overbought (%R > -20) with bearish weekly trend and volume
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema12_aligned[i] and  # Price below weekly EMA = bearish trend
+                  volume[i] > 2.0 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral (40-60) or price reaches opposite BB
+            # Exit: Williams %R returns to neutral zone (-50)
             if position == 1:
-                if rsi[i] > 50 or close[i] >= bb_upper[i]:
+                if williams_r[i] > -50:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if rsi[i] < 50 or close[i] <= bb_lower[i]:
+                if williams_r[i] < -50:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -110,7 +92,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_RSI_MeanReversion_BB_Volume"
-timeframe = "4h"
+name = "12H_WilliamsR_1wEMA12Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 #%%
