@@ -8,36 +8,37 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for pivot calculation (HTF)
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data for trend filter and volatility
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot points from 12h data (using previous day's OHLC)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    open_12h = df_12h['open'].values
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Pivot point = (H + L + C) / 3
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    # Resistance 1 = (2 * P) - L
-    r1 = (2 * pivot) - low_12h
-    # Support 1 = (2 * P) - H
-    s1 = (2 * pivot) - high_12h
-    # Resistance 2 = P + (H - L)
-    r2 = pivot + (high_12h - low_12h)
-    # Support 2 = P - (H - L)
-    s2 = pivot - (high_12h - low_12h)
+    # Calculate 1d ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Load 6h data for price and volume
+    # Align daily ATR to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Calculate 4h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Price array
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -49,65 +50,57 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(atr_14_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
+        atr_daily = atr_14_aligned[i]
+        ema34_1d_val = ema34_1d_aligned[i]
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume filter: current volume > 1.3 * 20-period average volume
-        vol_filter = vol > 1.3 * vol_ma
+        # Volatility filter: daily ATR > 0.5 * 20-period average ATR (avoid low volatility chop)
+        atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
+        vol_filter = atr_daily > 0.5 * atr_ma_20
+        
+        # Volume filter: current volume > 1.5 * 20-period average volume
+        vol_spike = vol > 1.5 * vol_ma
+        
+        # Trend filter: price above/below 1d EMA34
+        uptrend = price > ema34_1d_val
+        downtrend = price < ema34_1d_val
         
         if position == 0:
-            # Long: price breaks above R2 with volume (breakout continuation)
-            if price > r2_val and vol_filter:
+            # Long: price breaks above 4h Donchian high + 1d uptrend + volatility filter + volume spike
+            if price > donch_high_val and uptrend and vol_filter and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 with volume (breakout continuation)
-            elif price < s2_val and vol_filter:
-                signals[i] = -0.25
-                position = -1
-            # Long fade: price touches S1 and reverses up with volume
-            elif price <= s1_val and vol_filter and i > 100 and close[i-1] > s1_val:
-                signals[i] = 0.25
-                position = 1
-            # Short fade: price touches R1 and reverses down with volume
-            elif price >= r1_val and vol_filter and i > 100 and close[i-1] < r1_val:
+            # Short: price breaks below 4h Donchian low + 1d downtrend + volatility filter + volume spike
+            elif price < donch_low_val and downtrend and vol_filter and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit: price crosses back through opposite Donchian level or volatility drops or volume drops
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on break below S1 (mean reversion failure) or volume drop
-                if price < s1_val or not vol_filter:
-                    exit_signal = True
-                # Exit on reaching R2 (take profit)
-                elif price >= r2_val:
+                # Exit on breakdown below Donchian low or volatility collapse or volume drop
+                if price < donch_low_val or not vol_filter or not vol_spike:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on break above R1 (mean reversion failure) or volume drop
-                if price > r1_val or not vol_filter:
-                    exit_signal = True
-                # Exit on reaching S2 (take profit)
-                elif price <= s2_val:
+                # Exit on breakout above Donchian high or volatility collapse or volume drop
+                if price > donch_high_val or not vol_filter or not vol_spike:
                     exit_signal = True
             
             if exit_signal:
@@ -119,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_CamarillaPivot_S1R1_S2R2_BreakoutFade"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_ATRVolFilter_VolSpike_v2"
+timeframe = "4h"
 leverage = 1.0
