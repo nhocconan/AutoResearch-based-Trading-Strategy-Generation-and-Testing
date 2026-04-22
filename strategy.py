@@ -3,97 +3,58 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Supertrend + 1d Williams %R + volume confirmation
-# Long when Supertrend up, Williams %R < -80 (oversold), volume spike
-# Short when Supertrend down, Williams %R > -20 (overbought), volume spike
-# Exit when Supertrend reverses or Williams %R returns to neutral range
-# Supertrend captures trend direction, Williams %R identifies mean-reversion entries
-# Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
-# Target: 15-30 trades/year with high win rate in trending markets
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA trend filter and volume spike
+# Long when price breaks above R1, 12h EMA50 rising, volume > 2x 20-period average
+# Short when price breaks below S1, 12h EMA50 falling, volume > 2x 20-period average
+# Exit when price returns to Camarilla Pivot point or 12h EMA trend reverses
+# Camarilla levels provide precise intraday support/resistance, EMA50 filters trend direction,
+# volume spike confirms breakout strength. Designed for low trade frequency (~20-40/year)
+# with edge in both trending and ranging markets through volatility expansion breakouts.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Williams %R
+    # Load daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period Williams %R
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Camarilla levels (based on previous day)
+    # R4 = close + ((high - low) * 1.5000)
+    # R3 = close + ((high - low) * 1.2500)
+    # R2 = close + ((high - low) * 1.1666)
+    # R1 = close + ((high - low) * 1.0833)
+    # PP = (high + low + close) / 3
+    # S1 = close - ((high - low) * 1.0833)
+    # S2 = close - ((high - low) * 1.1666)
+    # S3 = close - ((high - low) * 1.2500)
+    # S4 = close - ((high - low) * 1.5000)
     
-    # Calculate Supertrend on 1d data (ATR=10, multiplier=3.0)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Shift by 1 to use previous day's levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = prev_high[1] if len(prev_high) > 1 else prev_high[0]
+    prev_low[0] = prev_low[1] if len(prev_low) > 1 else prev_low[0]
+    prev_close[0] = prev_close[1] if len(prev_close) > 1 else prev_close[0]
     
-    # ATR
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    camarilla_r1 = prev_close + ((prev_high - prev_low) * 1.0833)
+    camarilla_s1 = prev_close - ((prev_high - prev_low) * 1.0833)
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high_1d + low_1d) / 2 + 3.0 * atr
-    basic_lb = (high_1d + low_1d) / 2 - 3.0 * atr
+    # Load 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Final Upper and Lower Bands
-    final_ub = np.zeros_like(basic_ub)
-    final_lb = np.zeros_like(basic_lb)
-    
-    for i in range(len(close_1d)):
-        if i == 0:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
-        else:
-            if close_1d[i-1] <= final_ub[i-1]:
-                final_ub[i] = min(basic_ub[i], final_ub[i-1])
-            else:
-                final_ub[i] = basic_ub[i]
-                
-            if close_1d[i-1] >= final_lb[i-1]:
-                final_lb[i] = max(basic_lb[i], final_lb[i-1])
-            else:
-                final_lb[i] = basic_lb[i]
-    
-    # Supertrend
-    supertrend = np.zeros_like(close_1d)
-    trend_up = np.ones_like(close_1d, dtype=bool)  # True for uptrend
-    
-    for i in range(len(close_1d)):
-        if i == 0:
-            supertrend[i] = final_ub[i]
-            trend_up[i] = True
-        else:
-            if trend_up[i-1]:
-                if close_1d[i] <= final_ub[i]:
-                    trend_up[i] = False
-                    supertrend[i] = final_lb[i]
-                else:
-                    trend_up[i] = True
-                    supertrend[i] = final_ub[i]
-            else:
-                if close_1d[i] >= final_lb[i]:
-                    trend_up[i] = True
-                    supertrend[i] = final_ub[i]
-                else:
-                    trend_up[i] = False
-                    supertrend[i] = final_lb[i]
-    
-    # Align to 6h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    # Align all indicators to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
@@ -104,9 +65,10 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(supertrend_aligned[i]) or 
-            np.isnan(trend_up_aligned[i]) or 
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(camarilla_pp_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -116,35 +78,40 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        williams_r_val = williams_r_aligned[i]
-        supertrend_val = supertrend_aligned[i]
-        trend_up_val = trend_up_aligned[i] > 0.5  # Convert back to boolean
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        pp = camarilla_pp_aligned[i]
+        ema = ema_50_aligned[i]
         
         # Volume filter: current volume > 2.0 * 20-day average
         vol_spike = vol > 2.0 * vol_ma
         
+        # EMA trend: rising if current > previous, falling if current < previous
+        ema_rising = ema > ema_50_aligned[i-1] if i > 0 else False
+        ema_falling = ema < ema_50_aligned[i-1] if i > 0 else False
+        
         if position == 0:
-            # Long conditions: Supertrend up, Williams %R < -80 (oversold), volume spike
-            if trend_up_val and williams_r_val < -80 and vol_spike:
+            # Long conditions: price breaks above R1, EMA rising, volume spike
+            if price > r1 and ema_rising and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Supertrend down, Williams %R > -20 (overbought), volume spike
-            elif not trend_up_val and williams_r_val > -20 and vol_spike:
+            # Short conditions: price breaks below S1, EMA falling, volume spike
+            elif price < s1 and ema_falling and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: Supertrend reverses or Williams %R returns to neutral
+            # Exit conditions: price returns to pivot or EMA trend reverses
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when trend turns down or Williams %R exceeds -20
-                if not trend_up_val or williams_r_val > -20:
+                # Exit when price returns to pivot or EMA starts falling
+                if price <= pp or not ema_rising:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when trend turns up or Williams %R goes below -80
-                if trend_up_val or williams_r_val < -80:
+                # Exit when price returns to pivot or EMA starts rising
+                if price >= pp or not ema_falling:
                     exit_signal = True
             
             if exit_signal:
@@ -156,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Supertrend_WilliamsR_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
