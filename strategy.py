@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Williams %R Extreme with 1w trend filter and volume confirmation.
-Long when Williams %R < -80 (oversold) with bullish 1w trend (price > EMA50) and volume spike.
-Short when Williams %R > -20 (overbought) with bearish 1w trend (price < EMA50) and volume spike.
-Exit when Williams %R returns to -50 (mean reversion).
-Uses 1w EMA50 for trend filter to capture long-term trend and avoid whipsaws.
-Designed for low trade frequency (7-25/year) to minimize fee drag.
+Hypothesis: 6h Ichimoku Cloud breakout with weekly trend filter and volume confirmation.
+Long when price breaks above Kumo (cloud) with weekly trend bullish (price > weekly Kijun-Sen) and volume spike.
+Short when price breaks below Kumo with weekly trend bearish (price < weekly Kijun-Sen) and volume spike.
+Exit when price re-enters the cloud.
+Ichimoku provides dynamic support/resistance and trend direction, effective in both trending and ranging markets.
+Weekly filter ensures alignment with higher timeframe trend to avoid counter-trend whipsaws.
+Designed for low trade frequency (12-30/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,26 +22,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load weekly data for trend filter - ONCE before loop
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 26:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly Ichimoku components for trend filter
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
     
-    # Align EMA50 to 1d timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    tenkan_sen_w = (pd.Series(high_w).rolling(window=9, min_periods=9).max() + 
+                    pd.Series(low_w).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    kijun_sen_w = (pd.Series(high_w).rolling(window=26, min_periods=26).max() + 
+                   pd.Series(low_w).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a_w = ((tenkan_sen_w + kijun_sen_w) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    senkou_span_b_w = ((pd.Series(high_w).rolling(window=52, min_periods=52).max() + 
+                        pd.Series(low_w).rolling(window=52, min_periods=52).min()) / 2)
     
-    # Calculate Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Align weekly components to 6h timeframe
+    kijun_sen_w_aligned = align_htf_to_ltf(prices, df_w, kijun_sen_w.values)
+    senkou_span_a_w_aligned = align_htf_to_ltf(prices, df_w, senkou_span_a_w.values)
+    senkou_span_b_w_aligned = align_htf_to_ltf(prices, df_w, senkou_span_b_w.values)
     
-    # Calculate 1d volume average (20-period)
+    # Calculate 6h Ichimoku components for entry signals
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    kijun_sen = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    senkou_span_b = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
+                      pd.Series(low).rolling(window=52, min_periods=52).min()) / 2)
+    
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -49,10 +70,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after Williams %R lookback
+    for i in range(52, n):  # Start after Senkou B lookback
         # Skip if data not ready
-        if (np.isnan(ema50_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(kijun_sen_w_aligned[i]) or np.isnan(senkou_span_a_w_aligned[i]) or 
+            np.isnan(senkou_span_b_w_aligned[i]) or np.isnan(tenkan_sen[i]) or 
+            np.isnan(kijun_sen[i]) or np.isnan(senkou_span_a[i]) or 
+            np.isnan(senkou_span_b[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +91,34 @@ def generate_signals(prices):
                 position = 0
             continue
         
+        # Determine cloud boundaries (Senkou Span A and B)
+        upper_cloud = np.maximum(senkou_span_a[i], senkou_span_b[i])
+        lower_cloud = np.minimum(senkou_span_a[i], senkou_span_b[i])
+        
         if position == 0:
-            # Long: Williams %R < -80 (oversold) with bullish 1w trend and volume spike
-            if (williams_r[i] < -80 and 
-                close[i] > ema50_aligned[i] and  # Bullish trend: price above EMA50
+            # Long: Price breaks above cloud with bullish weekly trend and volume spike
+            if (close[i] > upper_cloud and 
+                close[i] > kijun_sen_w_aligned[i] and  # Weekly trend bullish: price above weekly Kijun-sen
                 volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) with bearish 1w trend and volume spike
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema50_aligned[i] and  # Bearish trend: price below EMA50
+            # Short: Price breaks below cloud with bearish weekly trend and volume spike
+            elif (close[i] < lower_cloud and 
+                  close[i] < kijun_sen_w_aligned[i] and  # Weekly trend bearish: price below weekly Kijun-sen
                   volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Williams %R returns to -50 (mean reversion)
+            # Exit conditions: price re-enters the cloud
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R returns to -50 from below
-                if williams_r[i] >= -50:
+                # Exit long: price falls back into cloud
+                if close[i] <= upper_cloud:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R returns to -50 from above
-                if williams_r[i] <= -50:
+                # Exit short: price rises back into cloud
+                if close[i] >= lower_cloud:
                     exit_signal = True
             
             if exit_signal:
@@ -102,7 +129,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_WilliamsR_Extreme_1wEMA50_Trend_Volume"
-timeframe = "1d"
+name = "6H_Ichimoku_Cloud_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 #%%
