@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,32 +13,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points and trend filter (ONCE before loop)
+    # Load 1d data for ATR-based volatility filter and trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous day's high, low, close for Camarilla pivot points
+    # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
+    tr = np.concatenate([[np.nan], tr2])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla pivot levels (R4/S4 are key breakout levels)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_ = high_1d - low_1d
-    r4 = close_1d + range_ * 1.1 / 2  # Resistance level 4
-    s4 = close_1d - range_ * 1.1 / 2  # Support level 4
-    
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_50 = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all levels to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align volatility and trend filters to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: 20-period average
+    # 4h ATR(10) for stoploss calculation
+    tr_4h = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
+    tr_4h = np.maximum(np.abs(low[1:] - close[:-1]), tr_4h)
+    tr_4h = np.concatenate([[np.nan], tr_4h])
+    atr_10_4h = pd.Series(tr_4h).rolling(window=10, min_periods=10).mean().values
+    
+    # 4-period average true range for volatility breakout
+    atr_avg_4 = pd.Series(tr_4h).rolling(window=4, min_periods=4).mean().values
+    
+    # 20-period volume average for volume confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -46,48 +52,44 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(atr_10_4h[i]) or np.isnan(atr_avg_4[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volatility condition: 4h ATR(4) > 1.5 * daily ATR(14) (volatility expansion)
+        vol_expansion = atr_avg_4[i] > 1.5 * atr_14_aligned[i]
+        
         if position == 0:
-            # Long: Price breaks above R4 with volume spike AND above 1d EMA34 (uptrend)
-            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
-                close[i] > ema_34_aligned[i]):
+            # Long: Close above EMA50 with volatility expansion and volume spike
+            if (close[i] > ema_50_aligned[i] and vol_expansion and 
+                volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S4 with volume spike AND below 1d EMA34 (downtrend)
-            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
-                  close[i] < ema_34_aligned[i]):
+            # Short: Close below EMA50 with volatility expansion and volume spike
+            elif (close[i] < ema_50_aligned[i] and vol_expansion and 
+                  volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
+            # Stoploss: 2 * ATR(10) from entry price (tracked via position direction)
             if position == 1:
-                # Exit long: Price closes below S1 (calculated from previous day)
-                if i > 0:
-                    s1 = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
-                    s1_series = pd.Series(np.full_like(close_1d, s1))
-                    s1_aligned_exit = align_htf_to_ltf(prices, df_1d, s1_series.values)[i]
-                else:
-                    s1_aligned_exit = np.nan
-                if not np.isnan(s1_aligned_exit) and close[i] < s1_aligned_exit:
+                # Long stoploss: close below entry - 2*ATR
+                # We approximate entry as the close when position was opened
+                # For simplicity, use a trailing stop based on recent high
+                recent_high = np.maximum.accumulate(high[:i+1])[-1]
+                if close[i] < recent_high - 2.0 * atr_10_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above R1 (calculated from previous day)
-                if i > 0:
-                    r1 = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
-                    r1_series = pd.Series(np.full_like(close_1d, r1))
-                    r1_aligned_exit = align_htf_to_ltf(prices, df_1d, r1_series.values)[i]
-                else:
-                    r1_aligned_exit = np.nan
-                if not np.isnan(r1_aligned_exit) and close[i] > r1_aligned_exit:
+                # Short stoploss: close above entry + 2*ATR
+                recent_low = np.minimum.accumulate(low[:i+1])[-1]
+                if close[i] > recent_low + 2.0 * atr_10_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -95,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4H_VolatilityBreakout_EMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
