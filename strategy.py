@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Daily ATR for volatility regime filter (HTF)
+    # 1d ATR for volatility regime filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -22,7 +22,7 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # 12h ATR for entry trigger and stop
+    # 1h ATR for entry trigger
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -33,12 +33,16 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h SMA for trend direction
+    # 1h SMA for trend direction
     sma = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
-    # Align daily ATR and its MA to 12h timeframe
+    # Align daily ATR and its MA to 1h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    
+    # Precompute session mask (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,6 +54,13 @@ def generate_signals(prices):
             np.isnan(atr_ma_1d_aligned[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(sma[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Skip if outside session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,12 +78,12 @@ def generate_signals(prices):
         if position == 0 and vol_regime:
             # Long: price breaks above SMA + 1.5*ATR with rising volatility
             if price > sma_val + 1.5 * atr_val and atr_val > atr[i-1]:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = price
             # Short: price breaks below SMA - 1.5*ATR with rising volatility
             elif price < sma_val - 1.5 * atr_val and atr_val > atr[i-1]:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = price
         
@@ -86,10 +97,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12h_AverageTrueRangeTrend_FilteredBreakout_v1"
-timeframe = "12h"
+name = "1h_1dATRRegime_SMA_RiseBreakout_v1"
+timeframe = "1h"
 leverage = 1.0
