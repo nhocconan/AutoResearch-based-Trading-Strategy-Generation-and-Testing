@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Load 1d data once
@@ -29,7 +29,7 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -47,7 +47,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any data is not ready
         if (np.isnan(pp_aligned[i]) or 
             np.isnan(r1_aligned[i]) or 
@@ -78,11 +78,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R1 + volume spike + above EMA34 + normal vol
             if price > r1 and vol_spike and price > ema34 and vol_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: price breaks below S1 + volume spike + below EMA34 + normal vol
             elif price < s1 and vol_spike and price < ema34 and vol_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position != 0:
@@ -100,10 +100,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_1dEMA34_Volume_Filter"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_Breakout_1dEMA34_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
