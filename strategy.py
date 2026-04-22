@@ -10,14 +10,13 @@ def generate_signals(prices):
     
     # Load 12h data for trend filter (HTF)
     df_12h = get_htf_data(prices, '12h')
-    # Load 1d data for volatility filter
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate 12h EMA20 for trend filter
     ema20_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
-    # Calculate 1d ATR for volatility filter
+    # Load 1d data for ATR volatility filter
+    df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -34,7 +33,7 @@ def generate_signals(prices):
     # Align daily ATR to 4h timeframe
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Load 4h data for Donchian channels
     df_4h = get_htf_data(prices, '4h')
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
@@ -45,7 +44,7 @@ def generate_signals(prices):
     donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
     donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
     
-    # Price array
+    # Price and volume arrays
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -68,36 +67,37 @@ def generate_signals(prices):
         atr_daily = atr_14_aligned[i]
         ema20_12h_val = ema20_12h_aligned[i]
         price = close[i]
+        vol = volume[i]
         
-        # Volatility filter: daily ATR > 0.5 * 20-period average (avoid low volatility chop)
-        atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
-        vol_filter = atr_daily > 0.5 * atr_ma_20
+        # Volume filter: current volume > 1.5 * 20-period average volume
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
+        vol_filter = vol > 1.5 * vol_ma_20
         
         # Trend filter: price above/below 12h EMA20
         uptrend = price > ema20_12h_val
         downtrend = price < ema20_12h_val
         
         if position == 0:
-            # Long: price breaks above 4h Donchian high + 12h uptrend + volatility filter
+            # Long: price breaks above 4h Donchian high + 12h uptrend + volume filter
             if price > donch_high_val and uptrend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low + 12h downtrend + volatility filter
+            # Short: price breaks below 4h Donchian low + 12h downtrend + volume filter
             elif price < donch_low_val and downtrend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price crosses back through opposite Donchian level or volatility drops
+            # Exit: price crosses back through opposite Donchian level or volume drops
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on breakdown below Donchian low or volatility collapse
+                # Exit on breakdown below Donchian low or volume filter fails
                 if price < donch_low_val or not vol_filter:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on breakout above Donchian high or volatility collapse
+                # Exit on breakout above Donchian high or volume filter fails
                 if price > donch_high_val or not vol_filter:
                     exit_signal = True
             
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hEMA20_ATRVolFilter"
+name = "4h_Donchian20_12hEMA20_VolFilter"
 timeframe = "4h"
 leverage = 1.0
