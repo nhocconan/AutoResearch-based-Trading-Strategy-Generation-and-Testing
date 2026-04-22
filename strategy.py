@@ -1,4 +1,4 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,53 +13,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for weekly pivot calculation - ONCE before loop
+    # Load daily data for Donchian(20) - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from daily data
-    # Weekly pivot uses: (Weekly High + Weekly Low + Weekly Close) / 3
-    # We'll approximate with daily data using 5-day rolling window
+    # Calculate Donchian(20) channels from daily data
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
     
-    # Weekly high, low, close (5-day rolling)
-    weekly_high = pd.Series(high_daily).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_daily).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(close_daily).rolling(window=5, min_periods=5).last().values
+    # Align Donchian channels to 4h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
     
-    # Weekly pivot point
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    
-    # Weekly support and resistance levels
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
-    
-    # Align weekly pivot levels to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_daily, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_daily, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_daily, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_daily, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_daily, weekly_s2)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_daily, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_daily, weekly_s3)
-    
-    # Calculate 6h ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 4h volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -69,8 +39,8 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,26 +57,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above weekly pivot with volatility filter
-            if (close[i] > weekly_pivot_aligned[i] and 
-                atr[i] > 0.01 * close[i]):  # Minimum volatility filter
+            # Long: Price breaks above upper Donchian(20) with volume
+            if (close[i] > upper_20_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly pivot with volatility filter
-            elif (close[i] < weekly_pivot_aligned[i] and 
-                  atr[i] > 0.01 * close[i]):
+            # Short: Price breaks below lower Donchian(20) with volume
+            elif (close[i] < lower_20_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back through weekly pivot
+            # Exit: Price returns to the opposite Donchian channel
             if position == 1:
-                if close[i] < weekly_pivot_aligned[i]:
+                if close[i] < lower_20_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > weekly_pivot_aligned[i]:
+                if close[i] > upper_20_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -114,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WeeklyPivot_Volatility_Filter"
-timeframe = "6h"
+name = "4H_Donchian20_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
