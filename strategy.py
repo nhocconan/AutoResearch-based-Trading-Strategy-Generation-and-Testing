@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot S1/R1 breakout with 1d EMA34 trend filter and volume confirmation
-# Camarilla pivots identify key intraday support/resistance levels where reversals/breakouts occur.
-# 1d EMA34 filter ensures we trade in direction of daily trend, reducing counter-trend trades.
-# Volume confirmation (>1.5x 20-period average) filters false breakouts.
-# Designed for 4h timeframe targeting 20-40 trades/year, works in both bull and bear markets.
+# Hypothesis: 4h Choppiness Index regime filter + 1d EMA(34) trend filter + volume confirmation
+# Choppiness Index identifies ranging vs trending markets (range: >61.8, trend: <38.2)
+# In trending regimes, we follow 1d EMA(34) direction with breakout entries
+# Volume confirmation (>1.5x 20-period avg) filters false signals
+# Designed for 4h timeframe targeting 20-40 trades/year with low churn
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,35 +19,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivots and trend filter (ONCE before loop)
+    # Load 1d data for EMA trend filter (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
     close_1d = df_1d['close'].values
+    
+    # 1d EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Typical price = (H + L + C)/3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
-    # We only need S1 and R1 for entries
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Choppiness Index (14-period) on 4h data
+    atr_14 = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=14, min_periods=14).mean().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop_num = np.log(atr_14 * 14) / np.log(2)
+    chop_den = np.log(highest_high_14 - lowest_low_14)
+    chop = 100 * chop_num / chop_den
     
-    # Calculate S1 and R1 for each day
-    # R1 = C + ((H-L) * 1.1/6)
-    # S1 = C - ((H-L) * 1.1/6)
-    camarilla_range = (high_1d - low_1d) * 1.1 / 6
-    r1_levels = close_1d + camarilla_range
-    s1_levels = close_1d - camarilla_range
-    
-    # Align S1/R1 levels to 4h timeframe (previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_levels)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_levels)
+    # Donchian Channel (20) for breakout entries
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,40 +50,39 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop[i]) or np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Long: Break above R1 + 1d uptrend + volume confirmation
-            if (close[i] > r1_aligned[i] and      # break above R1 resistance
-                close[i] > ema_34_1d_aligned[i] and  # price above 1d EMA (uptrend)
-                volume[i] > 1.5 * vol_avg_20[i]):   # volume spike
+        # Regime filter: only trade in trending markets (Choppiness < 38.2)
+        is_trending = chop[i] < 38.2
+        
+        if position == 0 and is_trending:
+            # Long: Uptrend (price > 1d EMA) + breakout above upper Donchian + volume
+            if (close[i] > ema_34_1d_aligned[i] and
+                close[i] > highest_20[i-1] and
+                volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 + 1d downtrend + volume confirmation
-            elif (close[i] < s1_aligned[i] and   # break below S1 support
-                  close[i] < ema_34_1d_aligned[i] and  # price below 1d EMA (downtrend)
-                  volume[i] > 1.5 * vol_avg_20[i]):   # volume spike
+            # Short: Downtrend (price < 1d EMA) + breakout below lower Donchian + volume
+            elif (close[i] < ema_34_1d_aligned[i] and
+                  close[i] < lowest_20[i-1] and
+                  volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to opposite Camarilla level or trend reversal
+            # Exit conditions: trend reversal or chop increases (range market)
             if position == 1:
-                # Exit long: price returns to S1 or trend turns down
-                if (close[i] < s1_aligned[i] or 
-                    close[i] < ema_34_1d_aligned[i]):
+                if (close[i] < ema_34_1d_aligned[i] or chop[i] > 61.8):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            else:  # position == -1
-                # Exit short: price returns to R1 or trend turns up
-                if (close[i] > r1_aligned[i] or 
-                    close[i] > ema_34_1d_aligned[i]):
+            elif position == -1:
+                if (close[i] > ema_34_1d_aligned[i] or chop[i] > 61.8):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -98,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_S1R1_1dEMA34_VolumeConfirm"
+name = "4h_Chop_Regime_1dEMA34_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
