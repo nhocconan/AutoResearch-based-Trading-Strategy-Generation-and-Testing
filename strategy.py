@@ -3,91 +3,93 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with weekly trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions; weekly trend ensures directional bias
-# Volume confirms breakout strength. Designed for mean reversion in ranging markets and
-# trend continuation in trending markets, suitable for both bull and bear regimes.
-# Target: 15-30 trades/year to stay within fee limits.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Weekly trend: EMA 34 on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Daily Williams %R (14-period)
+    # Daily ATR for volatility regime filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # True Range for daily ATR
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # 12h volume: ratio of current volume to 20-period average
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
-    
-    # 12h price
+    # 4h ATR for entry trigger and stop
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 4h SMA for trend direction
+    sma = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    
+    # Align daily ATR and its MA to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any data is not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(williams_r_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(atr_ma_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(sma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend bias
-        bullish_trend = close[i] > ema_34_1w_aligned[i]
-        bearish_trend = close[i] < ema_34_1w_aligned[i]
+        price = close[i]
+        atr_val = atr[i]
+        sma_val = sma[i]
+        atr_1d = atr_1d_aligned[i]
+        atr_ma_1d = atr_ma_1d_aligned[i]
         
-        # Volume confirmation: above average volume
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volatility regime: only trade when daily ATR is elevated (trending market)
+        vol_regime = atr_1d > atr_ma_1d
         
-        if position == 0 and vol_confirm:
-            # Long: oversold in bullish trend or extreme oversold
-            if (bullish_trend and williams_r_aligned[i] < -80) or williams_r_aligned[i] < -90:
+        if position == 0 and vol_regime:
+            # Long: price breaks above SMA + 1.5*ATR with rising volatility
+            if price > sma_val + 1.5 * atr_val and atr_val > atr[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought in bearish trend or extreme overbought
-            elif (bearish_trend and williams_r_aligned[i] > -20) or williams_r_aligned[i] > -10:
+                entry_price = price
+            # Short: price breaks below SMA - 1.5*ATR with rising volatility
+            elif price < sma_val - 1.5 * atr_val and atr_val > atr[i-1]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
-        elif position == 1:
-            # Exit long: overbought or trend change
-            if williams_r_aligned[i] > -20 or close[i] < ema_34_1w_aligned[i]:
+        elif position != 0:
+            # Exit: mean reversion to SMA or volatility collapse
+            mean_rev = (position == 1 and price < sma_val) or (position == -1 and price > sma_val)
+            vol_collapse = atr_val < 0.5 * atr[i-1]  # Sharp drop in volatility
+            
+            if mean_rev or vol_collapse:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: oversold or trend change
-            if williams_r_aligned[i] < -80 or close[i] > ema_34_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12h_WilliamsR_WeeklyTrend_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_AverageTrueRangeTrend_FilteredBreakout_v1"
+timeframe = "4h"
 leverage = 1.0
