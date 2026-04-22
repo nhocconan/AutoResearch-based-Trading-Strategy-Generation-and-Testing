@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 1-hour EMA21 trend following with 4-hour ATR-based range filter and volume spike.
-Only trade in the direction of the EMA21 trend (up or down) when price breaks above/below
-the 4-hour ATR-based upper/lower bounds with volume confirmation. Uses 4h ATR to define
-volatility-adjusted breakout levels, avoiding false breakouts in low volatility periods.
-Designed for low trade frequency (15-35 trades/year) by requiring multiple confirmations:
-trend alignment, volatility breakout, and volume spike. Works in both bull and bear markets
-by following the EMA21 trend direction, which adapts to market conditions.
+Hypothesis: 6-hour Donchian(20) breakout with weekly trend filter (1w EMA50) and volume confirmation.
+Trade in direction of weekly EMA50 trend when price breaks Donchian(20) channel on 6m with volume spike.
+Weekly trend provides directional bias to avoid whipsaws in sideways markets, while Donchian breakout captures
+momentum moves. Volume confirmation filters false breakouts. Designed for low trade frequency (12-30/year).
+Works in bull markets (follow weekly uptrend longs) and bear markets (follow weekly downtrend shorts).
 """
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,51 +22,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA21 on 1h for trend direction
-    close_s = pd.Series(close)
-    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Load 4h data for ATR-based range - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
+    # Load weekly data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate ATR(14) on 4h
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Weekly EMA50 for trend direction
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Donchian(20) on 6m: highest high / lowest low of last 20 periods
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h EMA20 as middle reference
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Upper and lower bands: EMA20 ± 1.5 * ATR
-    upper_band = ema20_4h + 1.5 * atr_14
-    lower_band = ema20_4h - 1.5 * atr_14
-    
-    # Align to 1h
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    upper_band_aligned = align_htf_to_ltf(prices, df_4h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_4h, lower_band)
-    
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(ema21[i]) or np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,35 +55,35 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: EMA21 uptrend + price breaks above upper band + volume spike
-            if ema21[i] > ema21[i-1] and close[i] > upper_band_aligned[i] and vol_spike:
-                signals[i] = 0.20
+            # Long: weekly uptrend + price breaks above Donchian high + volume spike
+            if ema50_1w_aligned[i] > ema50_1w_aligned[i-1] and close[i] > highest_20[i] and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: EMA21 downtrend + price breaks below lower band + volume spike
-            elif ema21[i] < ema21[i-1] and close[i] < lower_band_aligned[i] and vol_spike:
-                signals[i] = -0.20
+            # Short: weekly downtrend + price breaks below Donchian low + volume spike
+            elif ema50_1w_aligned[i] < ema50_1w_aligned[i-1] and close[i] < lowest_20[i] and vol_spike:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: EMA21 trend reversal or price returns to middle band
+            # Exit: weekly trend reversal or price returns to opposite Donchian band
             exit_signal = False
             
             if position == 1:
-                # Exit long: EMA21 turns down or price closes below EMA20
-                if ema21[i] < ema21[i-1] or close[i] < ema20_4h_aligned[i]:
+                # Exit long: weekly turns down OR price closes below Donchian low
+                if ema50_1w_aligned[i] < ema50_1w_aligned[i-1] or close[i] < lowest_20[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: EMA21 turns up or price closes above EMA20
-                if ema21[i] > ema21[i-1] or close[i] > ema20_4h_aligned[i]:
+                # Exit short: weekly turns up OR price closes above Donchian high
+                if ema50_1w_aligned[i] > ema50_1w_aligned[i-1] or close[i] > highest_20[i]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_EMA21_Trend_4hATRBreakout_Volume"
-timeframe = "1h"
+name = "6h_Donchian20_1wEMA50Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
