@@ -1,87 +1,106 @@
+# 6h Donchian breakout with weekly pivot direction and volume confirmation
+# Long: price breaks above 6h Donchian high (20) + price > weekly pivot + volume spike
+# Short: price breaks below 6h Donchian low (20) + price < weekly pivot + volume spike
+# Exit: price crosses back through Donchian midpoint or volume drops
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets
+# Target: 15-35 trades/year to minimize fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d EMA trend filter.
-# Long when price breaks above 20-period Donchian high + volume spike + price > 1d EMA50
-# Short when price breaks below 20-period Donchian low + volume spike + price < 1d EMA50
-# Exit when price crosses back through midpoint or volume drops below 70% of average.
-# Uses tight entry conditions to limit trades (~30/year) and reduce fee drag.
-# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load weekly data for pivot calculation
+    df_w = get_htf_data(prices, '1w')
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate 1d EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly pivot point (standard)
+    # PP = (H+L+C)/3
+    pp_w = (high_w + low_w + close_w) / 3
     
-    # Calculate 4h Donchian channels (20-period)
-    high = prices['high'].values
-    low = prices['low'].values
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Load daily data for volume context (optional filter)
+    df_d = get_htf_data(prices, '1d')
+    volume_d = df_d['volume'].values
+    
+    # Calculate Donchian channels (20-period) on 6h data
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    
+    # Upper band: highest high of last 20 periods
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 periods
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # Middle line: average of upper and lower
     donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Volume spike filter (20-period average)
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike filter (20-period average on 6h data)
+    volume_6h = prices['volume'].values
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align weekly pivot to 6h
+    pp_w_aligned = align_htf_to_ltf(prices, df_w, pp_w)
+    
+    # Align daily volume average (for context)
+    vol_ma_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_d_aligned = align_htf_to_ltf(prices, df_d, vol_ma_d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or 
-            np.isnan(ema50_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(pp_w_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or 
+            np.isnan(vol_ma_d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        vol = volume[i]
+        price = close_6h[i]
+        vol = volume_6h[i]
         vol_ma = vol_ma_20[i]
+        vol_ma_d = vol_ma_d_aligned[i]
         upper = donchian_high[i]
         lower = donchian_low[i]
-        midpoint = donchian_mid[i]
-        ema50 = ema50_aligned[i]
+        mid = donchian_mid[i]
+        pp = pp_w_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-day average (tight filter)
-        vol_spike = vol > 2.0 * vol_ma
+        # Volume filter: current volume > 1.5 * 20-day average AND above daily average
+        vol_spike = vol > 1.5 * vol_ma and vol > vol_ma_d
         
         if position == 0:
-            # Long conditions: price breaks above Donchian high + volume spike + price > EMA50
-            if price > upper and vol_spike and price > ema50:
+            # Long conditions: break above Donchian high + above weekly pivot + volume spike
+            if price > upper and price > pp and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian low + volume spike + price < EMA50
-            elif price < lower and vol_spike and price < ema50:
+            # Short conditions: break below Donchian low + below weekly pivot + volume spike
+            elif price < lower and price < pp and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses back through midpoint or volume drops significantly
+            # Exit conditions: price crosses back through Donchian midpoint or volume dries up
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price crosses below midpoint or volume drops
-                if price < midpoint or vol < 0.7 * vol_ma:
+                # Exit when price crosses below midpoint or volume drops significantly
+                if price < mid or vol < 0.6 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price crosses above midpoint or volume drops
-                if price > midpoint or vol < 0.7 * vol_ma:
+                # Exit when price crosses above midpoint or volume drops significantly
+                if price > mid or vol < 0.6 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -93,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_EMA50_Trend"
-timeframe = "4h"
+name = "6h_Donchian_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
