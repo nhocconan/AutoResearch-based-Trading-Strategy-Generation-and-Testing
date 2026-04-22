@@ -8,119 +8,91 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h KAMA direction + RSI + Chop regime filter
-    # KAMA adapts to market noise - effective in both trending and ranging markets.
-    # RSI(14) provides mean reversion signals when combined with trend filter.
-    # Chop index > 61.8 identifies ranging markets where mean reversion works.
-    # This combination should work in both bull (trend following) and bear (mean reversion) markets.
+    # Hypothesis: 1h breakout of 4h Bollinger Bands with volume confirmation and 1d EMA50 trend filter
+    # Bollinger Bands provide dynamic support/resistance. Breakouts with volume confirm
+    # institutional participation. 1d EMA50 ensures alignment with higher timeframe trend.
+    # This combination reduces false breakouts and improves win rate in both bull and bear markets.
+    # Focus on 1h timeframe with strict entry conditions to limit trades to 15-37/year.
     
+    # Price and volume data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) - 20 period
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else np.abs(np.diff(close, prepend=close[0]))
-    # Proper volatility calculation for ER
-    volatility = np.zeros_like(close)
-    for i in range(1, len(close)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    # Load 4h data for Bollinger Bands
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Avoid division by zero
-    er = np.zeros_like(close)
-    for i in range(len(close)):
-        if volatility[i] > 0:
-            er[i] = np.abs(close[i] - close[i-1]) / volatility[i] if i > 0 else 0
-        else:
-            er[i] = 0
+    # Calculate 4h Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma_4h = pd.Series(close_4h).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_4h = pd.Series(close_4h).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_4h + (std_4h * bb_std)
+    lower_bb = sma_4h - (std_4h * bb_std)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Align Bollinger Bands to 1h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_4h, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_4h, lower_bb)
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Load 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index (14 period)
-    # Chop = 100 * log10(sum(ATR) / (log10(highest-high-lowest-low) * n))
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(np.roll(high, 1) - close)
-    tr3 = np.abs(np.roll(low, 1) - close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero and log of zero
-    range_hl = highest_high - lowest_low
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    
-    chop = np.zeros_like(close)
-    for i in range(len(close)):
-        if range_hl[i] > 0 and sum_atr[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr[i] / (range_hl[i] * 14)) / np.log10(10)
-        else:
-            chop[i] = 50  # neutral value
-    
-    # Volume confirmation (20-period average)
+    # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.5 * vol_ma20  # Require 1.5x volume for confirmation
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(14, n):  # Start after warmup
-        # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(vol_ma20[i])):
+    for i in range(50, n):  # Start after EMA warmup
+        # Skip if data not ready or outside session
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above KAMA (uptrend) + RSI < 40 (oversold) + Chop > 61.8 (ranging) + Volume confirmation
-            if close[i] > kama[i] and rsi[i] < 40 and chop[i] > 61.8 and volume[i] > vol_ma20[i]:
-                signals[i] = 0.25
+            # Long: Breakout above upper BB with volume + price above 1d EMA50 (uptrend)
+            if close[i] > upper_bb_aligned[i] and vol_spike[i] and close[i] > ema50_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price below KAMA (downtrend) + RSI > 60 (overbought) + Chop > 61.8 (ranging) + Volume confirmation
-            elif close[i] < kama[i] and rsi[i] > 60 and chop[i] > 61.8 and volume[i] > vol_ma20[i]:
-                signals[i] = -0.25
+            # Short: Breakdown below lower BB with volume + price below 1d EMA50 (downtrend)
+            elif close[i] < lower_bb_aligned[i] and vol_spike[i] and close[i] < ema50_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: Reverse signals or Chop < 38.2 (trending market)
+            # Exit: Price returns to middle BB or trend reversal vs 1d EMA50
+            middle_bb = sma_4h  # Middle Bollinger Band
+            middle_bb_aligned = align_htf_to_ltf(prices, df_4h, middle_bb)
             if position == 1:
-                if close[i] < kama[i] or rsi[i] > 60 or chop[i] < 38.2:
+                if close[i] < middle_bb_aligned[i] or close[i] < ema50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if close[i] > kama[i] or rsi[i] < 40 or chop[i] < 38.2:
+                if close[i] > middle_bb_aligned[i] or close[i] > ema50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_KAMA_RSI_Chop_Volume_Regime_v1"
-timeframe = "4h"
+name = "1h_Bollinger_Breakout_4hBB_1dEMA50_Volume_Session_v1"
+timeframe = "1h"
 leverage = 1.0
