@@ -1,4 +1,3 @@
-# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -58,12 +57,12 @@ def generate_signals(prices):
             # Long: Price breaks above R4 with volume spike AND above 1d EMA34 (uptrend)
             if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
                 close[i] > ema_34_aligned[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S4 with volume spike AND below 1d EMA34 (downtrend)
             elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
                   close[i] < ema_34_aligned[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
@@ -79,7 +78,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
                 # Exit short: Price closes above R1 (calculated from previous day)
                 if i > 0:
@@ -92,10 +91,10 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
-name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
+name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume_v2"
 timeframe = "12h"
 leverage = 1.0
