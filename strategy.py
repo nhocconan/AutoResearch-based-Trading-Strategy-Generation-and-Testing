@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 12-hour Donchian(20) breakout with 1-week trend filter and volume confirmation.
-Donchian breakouts capture breakout momentum. Weekly trend filter ensures we only trade
-in the direction of the major trend, reducing counter-trend trades. Volume confirmation
-filters out false breakouts. This should work in both bull and bear regimes by adapting
-to the weekly trend. Target: 15-30 trades/year per symbol.
+Hypothesis: 4-hour Relative Strength Index (RSI) with 1-day volume-weighted average price (VWAP) trend filter and 1-day volatility regime filter.
+RSI provides mean-reversion signals at extremes while VWAP trend filter ensures trades align with the daily institutional flow.
+Volatility regime filter (using ATR ratio) avoids choppy markets where mean reversion fails.
+This combination should work in both bull and bear markets by adapting to daily trend and volatility conditions.
+Target: 20-35 trades/year per symbol.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,29 +22,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily VWAP for trend filter
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
+    vwap_1d = (np.cumsum(typical_price_1d * df_1d['volume'].values) / 
+               np.cumsum(df_1d['volume'].values))
     
-    # Determine weekly trend: price above/below EMA34
-    bullish_trend = close_1w > ema_34_1w
-    bearish_trend = close_1w < ema_34_1w
+    # Calculate daily ATR for volatility regime filter
+    high_low_1d = df_1d['high'].values - df_1d['low'].values
+    high_close_1d = np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
+    low_close_1d = np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))
+    true_range_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
+    atr_1d = pd.Series(true_range_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly trend to 12h timeframe
-    bullish_aligned = align_htf_to_ltf(prices, df_1w, bullish_trend.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1w, bearish_trend.astype(float))
+    # Calculate 4-period RSI for 4h timeframe
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=4, min_periods=4).mean().values
+    avg_loss = pd.Series(loss).rolling(window=4, min_periods=4).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align daily indicators to 4h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 12h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h ATR for volatility regime (current volatility)
+    high_low = high - low
+    high_close = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    low_close = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_4h = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
+    
+    # Volatility regime: current 4h ATR vs daily ATR (normalized)
+    vol_regime = atr_4h / atr_aligned  # < 1 = low vol, > 1 = high vol
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -52,11 +68,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_avg_20[i]) or
-            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(atr_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_regime[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,31 +87,34 @@ def generate_signals(prices):
                 position = 0
             continue
         
+        # Volatility regime filter: trade only in low to normal volatility (avoid extreme volatility)
+        # vol_regime between 0.5 and 2.0 (ATR ratio)
+        if vol_regime[i] < 0.5 or vol_regime[i] > 2.0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         if position == 0:
-            # Long: Donchian breakout above, bullish weekly trend, volume spike
-            if (high[i] > donchian_high[i-1] and    # Break above upper band
-                bullish_aligned[i] > 0.5 and        # Bullish weekly trend
-                volume[i] > 2.0 * vol_avg_20[i]):   # Volume spike
+            # Long: RSI oversold (< 30) AND price below VWAP (mean reversion to VWAP)
+            if (rsi[i] < 30 and close[i] < vwap_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout below, bearish weekly trend, volume spike
-            elif (low[i] < donchian_low[i-1] and    # Break below lower band
-                  bearish_aligned[i] > 0.5 and      # Bearish weekly trend
-                  volume[i] > 2.0 * vol_avg_20[i]): # Volume spike
+            # Short: RSI overbought (> 70) AND price above VWAP (mean reversion to VWAP)
+            elif (rsi[i] > 70 and close[i] > vwap_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to middle of Donchian channel or opposite breakout
-            middle = (donchian_high[i] + donchian_low[i]) / 2
+            # Exit conditions: RSI returns to neutral zone (40-60) OR price crosses VWAP
             exit_signal = False
             
             if position == 1:
-                # Exit long: price drops below middle OR breaks below lower band
-                if (close[i] < middle or low[i] < donchian_low[i]):
+                # Exit long: RSI >= 40 OR price crosses above VWAP
+                if (rsi[i] >= 40 or close[i] >= vwap_aligned[i]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price rises above middle OR breaks above upper band
-                if (close[i] > middle or high[i] > donchian_high[i]):
+                # Exit short: RSI <= 60 OR price crosses below VWAP
+                if (rsi[i] <= 60 or close[i] <= vwap_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -107,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_VWAP_MeanReversion_VolRegime"
+timeframe = "4h"
 leverage = 1.0
