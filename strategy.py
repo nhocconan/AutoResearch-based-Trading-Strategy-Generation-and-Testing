@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: Weekly EMA50 trend filter with daily price action and volume confirmation
-# Uses 1w EMA50 for trend direction, 1d price closes for entry/exit, and volume filter
-# Designed to work in both bull and bear markets by following the weekly trend
-# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,29 +13,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for EMA50 - ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50
-    close_weekly = df_weekly['close'].values
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align weekly EMA50 to daily timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
-    
-    # Load daily data for price and volume averages
+    # Load daily data for weekly pivot calculation - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 10:
         return np.zeros(n)
     
-    # Calculate daily volume average (20-period)
-    volume_daily = df_daily['volume'].values
-    vol_avg_20 = pd.Series(volume_daily).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly pivot points from daily data
+    # Weekly pivot uses: (Weekly High + Weekly Low + Weekly Close) / 3
+    # We'll approximate with daily data using 5-day rolling window
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Align daily volume average to 1d timeframe (no additional delay needed)
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20)
+    # Weekly high, low, close (5-day rolling)
+    weekly_high = pd.Series(high_daily).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(low_daily).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(close_daily).rolling(window=5, min_periods=5).last().values
+    
+    # Weekly pivot point
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    
+    # Weekly support and resistance levels
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    
+    # Align weekly pivot levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_daily, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_daily, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_daily, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_daily, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_daily, weekly_s2)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_daily, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_daily, weekly_s3)
+    
+    # Calculate 6h ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -50,8 +69,8 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(ema50_aligned[i]) or np.isnan(vol_avg_20_aligned[i]) or 
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,26 +87,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above weekly EMA50 with volume confirmation
-            if (close[i] > ema50_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20_aligned[i]):
+            # Long: Price above weekly pivot with volatility filter
+            if (close[i] > weekly_pivot_aligned[i] and 
+                atr[i] > 0.01 * close[i]):  # Minimum volatility filter
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly EMA50 with volume confirmation
-            elif (close[i] < ema50_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20_aligned[i]):
+            # Short: Price below weekly pivot with volatility filter
+            elif (close[i] < weekly_pivot_aligned[i] and 
+                  atr[i] > 0.01 * close[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back below/above weekly EMA50
+            # Exit: Price crosses back through weekly pivot
             if position == 1:
-                if close[i] < ema50_aligned[i]:
+                if close[i] < weekly_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema50_aligned[i]:
+                if close[i] > weekly_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -95,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_WeeklyEMA50_Volume_Session"
-timeframe = "1d"
+name = "6H_WeeklyPivot_Volatility_Filter"
+timeframe = "6h"
 leverage = 1.0
