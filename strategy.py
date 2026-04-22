@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R with 1d trend filter and volume confirmation.
-Long when Williams %R < -80 (oversold) and price above 1d EMA50 with above-average volume.
-Short when Williams %R > -20 (overbought) and price below 1d EMA50 with above-average volume.
-Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
-Williams %R identifies exhaustion points; trend filter ensures direction alignment; volume confirms institutional participation.
-Works in both bull and bear markets by capturing reversals at extremes with trend and volume confirmation.
+Hypothesis: 1-day ADX with 1-week trend filter for trend-following in trending markets and mean-reversion in ranging markets.
+- Long when ADX(14) > 25 (trending) and price > EMA(50) or ADX(14) < 20 (ranging) and price < Bollinger Lower Band(20,2)
+- Short when ADX(14) > 25 (trending) and price < EMA(50) or ADX(14) < 20 (ranging) and price > Bollinger Upper Band(20,2)
+- Uses 1-week EMA(50) for trend direction and 1-day Bollinger Bands for mean reversion.
+- Designed to work in both bull (trend follow) and bear/range (mean revert) markets.
+- Target: 20-60 trades over 4 years (5-15/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -14,64 +14,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    
-    # Load 1-day data for trend filter and volume confirmation - ONCE before loop
+    # Load 1-day data for ADX and Bollinger Bands - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1-day EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Load 1-week data for EMA trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # 1-day average volume for confirmation
-    volume_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Calculate 1-day ADX (14)
+    plus_dm = np.zeros(len(df_1d))
+    minus_dm = np.zeros(len(df_1d))
+    tr = np.zeros(len(df_1d))
+    
+    for i in range(1, len(df_1d)):
+        high_diff = df_1d['high'].iloc[i] - df_1d['high'].iloc[i-1]
+        low_diff = df_1d['low'].iloc[i-1] - df_1d['low'].iloc[i]
+        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
+        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
+        tr[i] = max(df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+                    abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+                    abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1]))
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Calculate 1-day Bollinger Bands (20,2)
+    sma_20 = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    
+    # Calculate 1-week EMA(50) for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False).mean().values
+    
+    # Align all indicators to 1-day timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]):
+        if (np.isnan(adx_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
+            np.isnan(bb_lower_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Oversold + above 1d EMA50 + above-average volume
-            if williams_r[i] < -80 and close[i] > ema_50_1d_aligned[i] and volume[i] > avg_vol_1d_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: Overbought + below 1d EMA50 + above-average volume
-            elif williams_r[i] > -20 and close[i] < ema_50_1d_aligned[i] and volume[i] > avg_vol_1d_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # Entry conditions
+            if adx_aligned[i] > 25:  # Trending market
+                # Trend following: go with 1-week EMA direction
+                if close[i] > ema_50_1w_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < ema_50_1w_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            else:  # Ranging market (ADX < 25)
+                # Mean reversion: fade Bollinger Bands
+                if close[i] < bb_lower_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] > bb_upper_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R crosses above -50 (recovering from oversold)
-                if williams_r[i] > -50:
+                # Exit long: ADX drops below 20 (trend weakening) OR price crosses 1-week EMA
+                if adx_aligned[i] < 20 or close[i] < ema_50_1w_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R crosses below -50 (declining from overbought)
-                if williams_r[i] < -50:
+                # Exit short: ADX drops below 20 OR price crosses 1-week EMA
+                if adx_aligned[i] < 20 or close[i] > ema_50_1w_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -82,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_WilliamsR_1dTrend_Volume"
-timeframe = "4h"
+name = "1D_ADX_Trend_Range_Switch"
+timeframe = "1d"
 leverage = 1.0
