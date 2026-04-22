@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Chaikin Money Flow (CMF) with 1-day trend filter and volume confirmation.
-Long when CMF > 0.1 and 1-day EMA(34) trend is up and 1-day volume > 50-day average volume.
-Short when CMF < -0.1 and 1-day EMA(34) trend is down and 1-day volume > 50-day average volume.
-Exit when CMF crosses zero or volume filter fails.
-CMF measures institutional money flow, EMA trend filters for direction, volume confirms participation.
-Designed for 4h timeframe to target 20-50 trades/year per symbol with strong edge in both bull and bear markets.
+Hypothesis: 1-day Donchian breakout with 1-week trend filter and volume confirmation.
+Long when price breaks above Donchian(20) high, weekly EMA(21) is rising, and daily volume > 20-day average.
+Short when price breaks below Donchian(20) low, weekly EMA(21) is falling, and daily volume > 20-day average.
+Exit when price crosses back below Donchian(20) midpoint (for longs) or above midpoint (for shorts).
+Uses weekly trend to filter direction and volume to confirm institutional participation.
+Works in bull markets via breakouts and in bear via short breakdowns with trend alignment.
+Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,61 +23,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for trend and volume filters - ONCE before loop
+    # Load daily data for Donchian and volume filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1-day EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_prev = np.roll(ema_34_1d, 1)
-    ema_34_1d_prev[0] = ema_34_1d[0]  # avoid NaN
-    ema_trend_up = ema_34_1d > ema_34_1d_prev
-    ema_trend_down = ema_34_1d < ema_34_1d_prev
-    ema_trend_up_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_up)
-    ema_trend_down_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_down)
+    # Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # 1-day volume and its 50-day average for volume filter
-    volume_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(volume_1d).rolling(window=50, min_periods=50).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    volume_filter = volume_1d > avg_vol_1d_aligned
+    # Daily volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    avg_vol_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Chaikin Money Flow (CMF) calculation for 4h period
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    mfm = np.zeros_like(close)
-    hl_range = high - low
-    # Avoid division by zero
-    valid_range = hl_range != 0
-    mfm[valid_range] = ((close[valid_range] - low[valid_range]) - (high[valid_range] - close[valid_range])) / hl_range[valid_range]
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    mfv = mfm * volume
-    # CMF = 20-period sum of MFV / 20-period sum of Volume
-    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = np.zeros_like(close)
-    vol_sum_valid = vol_sum != 0
-    cmf[vol_sum_valid] = mfv_sum[vol_sum_valid] / vol_sum[vol_sum_valid]
+    # Load weekly data for EMA trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    
+    # Align all HTF data to lower timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if np.isnan(cmf[i]) or np.isnan(ema_trend_up_aligned[i]) or np.isnan(ema_trend_down_aligned[i]) or np.isnan(volume_filter[i]):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(avg_vol_20_aligned[i]) or
+            np.isnan(ema_21_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: CMF > 0.1, uptrend, and volume confirmation
-            if cmf[i] > 0.1 and ema_trend_up_aligned[i] and volume_filter[i]:
+            # Long: Price breaks above Donchian high, weekly EMA rising, volume above average
+            if (close[i] > donchian_high_aligned[i] and 
+                ema_21_1w_aligned[i] > ema_21_1w_aligned[i-1] and
+                volume[i] > avg_vol_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: CMF < -0.1, downtrend, and volume confirmation
-            elif cmf[i] < -0.1 and ema_trend_down_aligned[i] and volume_filter[i]:
+            # Short: Price breaks below Donchian low, weekly EMA falling, volume above average
+            elif (close[i] < donchian_low_aligned[i] and 
+                  ema_21_1w_aligned[i] < ema_21_1w_aligned[i-1] and
+                  volume[i] > avg_vol_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -84,12 +85,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: CMF crosses below zero or volume filter fails
-                if cmf[i] < 0 or not volume_filter[i]:
+                # Exit long: Price crosses below Donchian midpoint
+                if close[i] < donchian_mid_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: CMF crosses above zero or volume filter fails
-                if cmf[i] > 0 or not volume_filter[i]:
+                # Exit short: Price crosses above Donchian midpoint
+                if close[i] > donchian_mid_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -100,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_CMF_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "1D_Donchian_20_1wEMA21_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
