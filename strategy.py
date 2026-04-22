@@ -36,10 +36,10 @@ def generate_signals(prices):
     tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Load 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume spike detection (20-period average)
     volume = prices['volume'].values
@@ -55,13 +55,13 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all HTF data to 4h timeframe
+    # Align all HTF data to daily timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,7 +74,7 @@ def generate_signals(prices):
             np.isnan(r2_aligned[i]) or 
             np.isnan(s2_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i]) or 
             np.isnan(atr[i])):
             if position != 0:
@@ -90,17 +90,17 @@ def generate_signals(prices):
         r2 = r2_aligned[i]
         s2 = s2_aligned[i]
         atr_1d = atr_1d_aligned[i]
-        ema50_4h = ema50_4h_aligned[i]
+        ema50_1w = ema50_1w_aligned[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume + above 4h EMA50 + volatility filter
-            if price > r2 and vol > 1.5 * vol_ma and price > ema50_4h and atr_1d > 0:
+            # Long: price breaks above R2 with volume + above weekly EMA50 + volatility filter
+            if price > r2 and vol > 1.5 * vol_ma and price > ema50_1w and atr_1d > 0:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S2 with volume + below 4h EMA50 + volatility filter
-            elif price < s2 and vol > 1.5 * vol_ma and price < ema50_4h and atr_1d > 0:
+            # Short: price breaks below S2 with volume + below weekly EMA50 + volatility filter
+            elif price < s2 and vol > 1.5 * vol_ma and price < ema50_1w and atr_1d > 0:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -123,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_R1_S1_Breakout_4hEMA50_Volume_ATRStop"
-timeframe = "4h"
+name = "1d_WeeklyEMA50_Pivot_R2_S2_Breakout_Volume_ATRStop"
+timeframe = "1d"
 leverage = 1.0
