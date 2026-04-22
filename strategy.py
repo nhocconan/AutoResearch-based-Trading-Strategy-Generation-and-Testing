@@ -3,40 +3,59 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend filter and volume spike
-# Long when price breaks above R1 in uptrend (close > 1d EMA34) with volume spike (>2x 20-period avg)
-# Short when price breaks below S1 in downtrend (close < 1d EMA34) with volume spike
-# Exit when price retouches the pivot point (PP) or trend reverses
-# Designed for low trade frequency (~20-40/year) to minimize fee drain. Works in bull/bear by
-# combining structure-based breakouts with trend filtering and volume confirmation.
+# Hypothesis: 12h KAMA direction with 1d RSI filter and volume spike
+# Long when KAMA is rising (bullish trend) and RSI < 40 (pullback in uptrend) with volume spike
+# Short when KAMA is falling (bearish trend) and RSI > 60 (bounce in downtrend) with volume spike
+# Exit when KAMA direction changes or RSI reaches extreme levels (70/30)
+# Designed for low trade frequency (~15-30/year) on 12h timeframe to minimize fee drain.
+# KAMA adapts to market efficiency, reducing whipsaw in choppy markets.
+# Works in bull/bear by trading pullbacks in the direction of the trend.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla levels and trend filter
+    # Load 1d data for RSI and volume context
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate 14-period RSI on 1d close
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.fillna(50).values  # fill NaN with 50 for periods < 14
     
-    # Calculate 34-period EMA on 1d close for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate KAMA on 12h close
+    close = prices['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    # Handle edge cases for first 10 values
+    er = np.full_like(change, np.nan, dtype=float)
+    er[10:] = change[10:] / volatility[10:]
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan, dtype=float)
+    kama[9] = close[9]  # seed
+    for i in range(10, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Align 1d levels and EMA to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -47,10 +66,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,36 +77,35 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        pp_val = pp_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_val = ema_34_aligned[i]
+        kama_val = kama[i]
+        kama_prev = kama[i-1]
+        rsi_val = rsi_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
-        vol_spike = vol > 2.0 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-period average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: price breaks above R1 + uptrend + volume spike
-            if price > r1_val and price > ema_val and vol_spike:
+            # Long conditions: KAMA rising (bullish) + RSI < 40 (pullback) + volume spike
+            if kama_val > kama_prev and rsi_val < 40 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S1 + downtrend + volume spike
-            elif price < s1_val and price < ema_val and vol_spike:
+            # Short conditions: KAMA falling (bearish) + RSI > 60 (bounce) + volume spike
+            elif kama_val < kama_prev and rsi_val > 60 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price retouches PP or trend reverses
+            # Exit conditions: KAMA direction changes or RSI reaches extreme
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price touches or crosses PP or trend turns down
-                if price <= pp_val or price < ema_val:
+                # Exit when KAMA turns down or RSI > 70 (overbought)
+                if kama_val < kama_prev or rsi_val > 70:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price touches or crosses PP or trend turns up
-                if price >= pp_val or price > ema_val:
+                # Exit when KAMA turns up or RSI < 30 (oversold)
+                if kama_val > kama_prev or rsi_val < 30:
                     exit_signal = True
             
             if exit_signal:
@@ -101,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "12h_KAMA_RSI_Volume"
+timeframe = "12h"
 leverage = 1.0
