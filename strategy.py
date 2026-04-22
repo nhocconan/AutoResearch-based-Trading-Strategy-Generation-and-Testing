@@ -1,67 +1,48 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 6-hour Ichimoku Cloud breakout with daily trend filter and volume confirmation.
-Long when price breaks above Kumo cloud and Tenkan/Kijun cross bullish with daily uptrend;
-Short when price breaks below Kumo cloud and Tenkan/Kijun cross bearish with daily downtrend.
-Uses volume spike for confirmation to avoid false breakouts. Designed for low trade frequency
-(12-37 trades/year) by requiring multiple confirmations: Ichimoku breakout, cross, trend alignment.
-Works in both bull and bear markets by following daily trend direction.
+Hypothesis: Weekly Bollinger Band squeeze with daily trend filter and volume confirmation.
+Only trade long when price breaks above upper Bollinger Band during low volatility (squeeze)
+and daily trend is up; short when price breaks below lower Bollinger Band during squeeze
+and daily trend is down. Uses Bollinger Band width percentile to detect squeeze conditions,
+avoiding false breakouts in high volatility periods. Designed for low trade frequency
+(12-37 trades/year) by requiring multiple confirmations: volatility squeeze, price breakout,
+and trend alignment. Works in both bull and bear markets by following the daily trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
-    """Calculate Ichimoku components"""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max() + 
-                  pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min()) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high).rolling(window=kijun, min_periods=kijun).max() + 
-                 pd.Series(low).rolling(window=kijun, min_periods=kijun).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    senkou_span_b = (pd.Series(high).rolling(window=senkou, min_periods=senkou).max() + 
-                     pd.Series(low).rolling(window=senkou, min_periods=senkou).min()) / 2
-    
-    return tenkan_sen.values, kijun_sen.values, senkou_span_a.values, senkou_span_b.values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku on 6h
-    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
+    # Bollinger Bands (20, 2) on weekly
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # Kumo cloud boundaries (shifted forward by kijun period)
-    # Senkou spans are plotted kijun periods ahead
-    senkou_a_shifted = np.roll(senkou_a, -kijun)
-    senkou_b_shifted = np.roll(senkou_b, -kijun)
-    # Fill the gap at the end with NaN
-    senkou_a_shifted[-kijun:] = np.nan
-    senkou_b_shifted[-kijun:] = np.nan
+    # Bollinger Band width percentile (50-period lookback) for squeeze detection
+    bb_width_pct = pd.Series(bb_width).rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
     
-    # Kumo top and bottom
-    kumo_top = np.maximum(senkou_a_shifted, senkou_b_shifted)
-    kumo_bottom = np.minimum(senkou_a_shifted, senkou_b_shifted)
-    
-    # Daily trend filter - ONCE before loop
+    # Load daily data for trend filter - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    if len(df_daily) < 10:
         return np.zeros(n)
     
+    # Daily EMA34 for trend direction
     daily_close = df_daily['close'].values
     ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
@@ -72,47 +53,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or
-            np.isnan(ema34_daily_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bb_width_pct[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or np.isnan(ema34_daily_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Squeeze condition: Bollinger Band width in lower 30th percentile
+        squeeze = bb_width_pct[i] < 0.3
+        
         # Volume confirmation
         vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Ichimoku signals
-        price_above_kumo = close[i] > kumo_top[i]
-        price_below_kumo = close[i] < kumo_bottom[i]
-        tk_cross_bullish = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        tk_cross_bearish = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
-        daily_uptrend = ema34_daily_aligned[i] > ema34_daily_aligned[i-1]
-        daily_downtrend = ema34_daily_aligned[i] < ema34_daily_aligned[i-1]
-        
         if position == 0:
-            # Long: price breaks above Kumo + TK bullish cross + daily uptrend + volume spike
-            if price_above_kumo and tk_cross_bullish and daily_uptrend and vol_spike:
+            # Long: squeeze + price breaks above upper band + daily uptrend + volume spike
+            if squeeze and close[i] > bb_upper[i] and ema34_daily_aligned[i] > ema34_daily_aligned[i-1] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Kumo + TK bearish cross + daily downtrend + volume spike
-            elif price_below_kumo and tk_cross_bearish and daily_downtrend and vol_spike:
+            # Short: squeeze + price breaks below lower band + daily downtrend + volume spike
+            elif squeeze and close[i] < bb_lower[i] and ema34_daily_aligned[i] < ema34_daily_aligned[i-1] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to Kumo or TK cross reverses
+            # Exit: volatility expansion (end of squeeze) or price returns to middle band
             exit_signal = False
             
             if position == 1:
-                # Exit long: price closes below Kumo or TK bearish cross
-                if close[i] < kumo_top[i] or (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]):
+                # Exit long: volatility expansion or price closes below middle band
+                if bb_width_pct[i] > 0.7 or close[i] < bb_middle[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price closes above Kumo or TK bullish cross
-                if close[i] > kumo_bottom[i] or (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]):
+                # Exit short: volatility expansion or price closes above middle band
+                if bb_width_pct[i] > 0.7 or close[i] > bb_middle[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -123,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Ichimoku_Kumo_Breakout_DailyTrend_Volume"
-timeframe = "6h"
+name = "Weekly_Bollinger_Squeeze_DailyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
