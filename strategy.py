@@ -1,7 +1,10 @@
-# 4h_PriceAction_Reversal - Looking for rejection of daily extremes with volume confirmation
-# Works in bull/bear markets by fading extreme price action at key daily levels
-# Uses 1d high/low rejection with 4h price action and volume confirmation
-# Designed for 4-8 trades per month per symbol (48-96/year) to avoid fee drag
+# 6h_Pivots_DonchianBreakout_1dTrend_VolumeSpike
+# Hypothesis: On 6H timeframe, combine daily pivot points (from 1D data) as support/resistance with
+# 6H Donchian breakouts filtered by 1D EMA50 trend and volume spikes. This creates a strategy that
+# captures breakouts from key daily levels in trending markets while avoiding chop.
+# Works in bull/bear: In bull markets, buy breakouts above daily R1/R2 in uptrend; in bear markets,
+# sell breakdowns below daily S1/S2 in downtrend. Volume spikes confirm institutional interest.
+# Target: 15-30 trades/year per symbol (60-120 over 4 years) to stay well under 300 trade limit.
 
 #!/usr/bin/env python3
 import numpy as np
@@ -10,112 +13,108 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for key levels
+    # Load 1D data for pivots, trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily high and low
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Calculate daily pivot points (standard formula)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align daily levels to 4h timeframe (wait for daily close)
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    # Pivot point and support/resistance levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    # Calculate 4h ATR for volatility filtering
+    # Align daily pivot levels to 6H timeframe (wait for daily close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Calculate 1D EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate 6H Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Price and volume arrays
     close = prices['close'].values
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Price and volume
-    close_prices = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period average volume for volume filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(daily_high_aligned[i]) or 
-            np.isnan(daily_low_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        dh = daily_high_aligned[i]
-        dl = daily_low_aligned[i]
-        atr_val = atr[i]
-        price = close_prices[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
+        ema50_1d_val = ema50_1d_aligned[i]
+        pivot_val = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
+        price = close[i]
         vol = volume[i]
-        vol_ma_val = vol_ma[i]
+        vol_ma = vol_ma_20[i]
         
-        # Volume filter: above average volume
-        vol_filter = vol > vol_ma_val
+        # Volume filter: current volume > 1.8 * 20-period average volume (strict to reduce trades)
+        vol_spike = vol > 1.8 * vol_ma
         
-        # Distance from daily levels in ATR units
-        dist_to_high = (dh - price) / atr_val if atr_val > 0 else 0
-        dist_to_low = (price - dl) / atr_val if atr_val > 0 else 0
+        # Trend filter: price above/below 1D EMA50
+        uptrend = price > ema50_1d_val
+        downtrend = price < ema50_1d_val
         
         if position == 0:
-            # Long setup: price near daily low, rejecting downward
-            # Look for rejection candle: close > open and near low
-            if i > 0:
-                open_price = prices['open'].iloc[i]
-                close_price = close_prices[i]
-                is_bullish = close_price > open_price
-                near_low = dist_to_low < 0.5  # Within 0.5 ATR of daily low
-                
-                if is_bullish and near_low and vol_filter:
-                    signals[i] = 0.25
-                    position = 1
-            
-            # Short setup: price near daily high, rejecting upward
-            # Look for rejection candle: close < open and near high
-            if i > 0:
-                open_price = prices['open'].iloc[i]
-                close_price = close_prices[i]
-                is_bearish = close_price < open_price
-                near_high = dist_to_high < 0.5  # Within 0.5 ATR of daily high
-                
-                if is_bearish and near_high and vol_filter:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price breaks above 6H Donchian high AND above daily R1 (resistance) 
+            # AND in uptrend AND volume spike
+            if price > donch_high_val and price > r1_val and uptrend and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below 6H Donchian low AND below daily S1 (support) 
+            # AND in downtrend AND volume spike
+            elif price < donch_low_val and price < s1_val and downtrend and vol_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit: price crosses back through opposite Donchian level or trend changes
             exit_signal = False
             
-            if position == 1:  # Long position
-                # Exit if price reaches daily high or reverses
-                if price >= dh or (i > 0 and close_prices[i] < prices['open'].iloc[i]):
+            if position == 1:  # long position
+                # Exit on breakdown below Donchian low or trend turns down
+                if price < donch_low_val or not uptrend:
                     exit_signal = True
             
-            elif position == -1:  # Short position
-                # Exit if price reaches daily low or reverses
-                if price <= dl or (i > 0 and close_prices[i] > prices['open'].iloc[i]):
-                    exit_signal = True
-            
-            # Also exit if volatility drops significantly
-            if i >= 20:
-                atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values[i]
-                if atr_val < 0.5 * atr_ma:
+            elif position == -1:  # short position
+                # Exit on breakout above Donchian high or trend turns up
+                if price > donch_high_val or not downtrend:
                     exit_signal = True
             
             if exit_signal:
@@ -127,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PriceAction_Reversal_DailyLevels"
-timeframe = "4h"
+name = "6h_Pivots_DonchianBreakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
