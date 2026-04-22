@@ -43,12 +43,12 @@ def generate_signals(prices):
     s1 = close_prev - (range_val * 1.1 / 12)
     r1 = close_prev + (range_val * 1.1 / 12)
     
-    # Align all levels to 4h timeframe
+    # Align all levels to 12h timeframe
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Calculate 4h volume average (20-period)
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
