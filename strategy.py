@@ -3,63 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Choppiness Index with 1w RSI filter and volume confirmation.
-# Choppiness Index > 61.8 indicates ranging market (mean reversion opportunity).
-# Combined with 1w RSI < 40 for long or > 60 for short, and volume spikes (>1.5x 20-period avg),
-# this captures mean reversion moves in ranging markets while avoiding strong trends.
-# Designed for low trade frequency (~15-25/year) to minimize fee decay.
-# Works in both bull and bear markets by adapting to ranging conditions.
+# Hypothesis: 4h Bollinger Bands squeeze breakout with 1d EMA34 trend filter and volume spike confirmation.
+# This strategy exploits volatility contraction (Bollinger Bands squeeze) followed by breakout.
+# The Bollinger Band Width (BBW) percentile identifies squeeze conditions (low volatility).
+# When BBW is at a 20-period low and price breaks above/below the Bollinger Bands with volume confirmation (>1.5x 20-period average),
+# it signals a high-probability breakout. The 1d EMA34 filter ensures we only take trades in the direction of the higher timeframe trend.
+# Designed for low trade frequency (~20-30/year) to minimize fee decay. Works in both bull and bear markets by following higher timeframe trend.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for RSI filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for EMA34 calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 14-period RSI on weekly close
-    delta = pd.Series(close_1w).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1w = (100 - (100 / (1 + rs))).values
+    # Calculate 34-period EMA on 1d close for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align weekly RSI to 12h timeframe (waits for weekly bar to close)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Align 1d EMA to 4h timeframe (waits for 1d bar to close)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 14-period Choppiness Index on 12h high/low/close
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Bollinger Bands (20, 2) on 4h close
+    close = prices['close'].values
+    bb_mid = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Set first TR to high-low (no previous close)
-    tr[0] = tr1[0]
-    
-    # Sum of True Range over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index formula: 100 * log10(TR_sum / (HH - LL)) / log10(14)
-    # Avoid division by zero
-    hl_range = hh - ll
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)  # small value to prevent div by zero
-    chop = 100 * np.log10(tr_sum / hl_range) / np.log10(14)
-    
-    # Align Choppiness Index to 12h timeframe (no additional delay needed)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # Calculate Bollinger Band Width (BBW) and its 20-period percentile rank for squeeze detection
+    bb_width = (bb_upper - bb_lower) / bb_mid
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=20, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -68,10 +46,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(rsi_1w_aligned[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(bb_mid[i]) or 
+            np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or 
+            np.isnan(bb_width_percentile[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -81,37 +62,39 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        chop_val = chop_aligned[i]
-        rsi_val = rsi_1w_aligned[i]
+        bb_width_pctl = bb_width_percentile[i]
+        ema_val = ema_34_aligned[i]
+        bb_up = bb_upper[i]
+        bb_low = bb_lower[i]
+        
+        # Squeeze condition: BBW at 20-period low (bottom 20% of range)
+        squeeze = bb_width_pctl <= 0.2
         
         # Volume filter: current volume > 1.5 * 20-period average
         vol_spike = vol > 1.5 * vol_ma
         
-        # Choppiness conditions: > 61.8 = ranging (mean reversion opportunity)
-        ranging = chop_val > 61.8
-        
         if position == 0:
-            # Long conditions: ranging market + RSI oversold + price near low + volume spike
-            if ranging and rsi_val < 40 and price <= ll[i] * 1.02 and vol_spike:
+            # Long conditions: squeeze breakout above upper BB + uptrend + volume spike
+            if squeeze and price > bb_up and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: ranging market + RSI overbought + price near high + volume spike
-            elif ranging and rsi_val > 60 and price >= hh[i] * 0.98 and vol_spike:
+            # Short conditions: squeeze breakout below lower BB + downtrend + volume spike
+            elif squeeze and price < bb_low and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: volatility expansion (end of squeeze) or opposite BB break
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when RSI returns to neutral or chop drops (trending begins) or price reaches high
-                if rsi_val >= 50 or chop_val < 50 or price >= hh[i]:
+                # Exit when squeeze ends (volatility expands) or price breaks below lower BB
+                if not squeeze or price < bb_low:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when RSI returns to neutral or chop drops (trending begins) or price reaches low
-                if rsi_val <= 50 or chop_val < 50 or price <= ll[i]:
+                # Exit when squeeze ends (volatility expands) or price breaks above upper BB
+                if not squeeze or price > bb_up:
                     exit_signal = True
             
             if exit_signal:
@@ -123,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Choppiness_RSI_Volume_MeanReversion"
-timeframe = "12h"
+name = "4h_BollingerSqueeze_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
