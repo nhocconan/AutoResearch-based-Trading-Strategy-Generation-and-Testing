@@ -8,12 +8,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend filter
+    # Load 1w data for primary trend filter (weekly trend)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Load 1d data for volatility filter (daily ATR)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1w EMA10 for primary trend filter
+    ema10_1w = pd.Series(df_1w['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
     
     # Calculate 1d ATR for volatility filter
     high_1d = df_1d['high'].values
@@ -29,10 +32,10 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily ATR to 4h timeframe
+    # Align daily ATR to daily timeframe (same timeframe as prices)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate daily Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -53,7 +56,7 @@ def generate_signals(prices):
         if (np.isnan(donch_high[i]) or 
             np.isnan(donch_low[i]) or 
             np.isnan(atr_14_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(ema10_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -63,7 +66,7 @@ def generate_signals(prices):
         donch_high_val = donch_high[i]
         donch_low_val = donch_low[i]
         atr_daily = atr_14_aligned[i]
-        ema50_1d_val = ema50_1d_aligned[i]
+        ema10_1w_val = ema10_1w_aligned[i]
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
@@ -75,16 +78,16 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5 * 20-period average volume
         vol_spike = vol > 1.5 * vol_ma
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = price > ema50_1d_val
-        downtrend = price < ema50_1d_val
+        # Trend filter: price above/below 1w EMA10
+        uptrend = price > ema10_1w_val
+        downtrend = price < ema10_1w_val
         
         if position == 0:
-            # Long: price breaks above 4h Donchian high + 1d uptrend + volatility filter + volume spike
+            # Long: price breaks above daily Donchian high + 1w uptrend + volatility filter + volume spike
             if price > donch_high_val and uptrend and vol_filter and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low + 1d downtrend + volatility filter + volume spike
+            # Short: price breaks below daily Donchian low + 1w downtrend + volatility filter + volume spike
             elif price < donch_low_val and downtrend and vol_filter and vol_spike:
                 signals[i] = -0.25
                 position = -1
@@ -112,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_ATRVolFilter_VolSpike"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA10_ATRVolFilter_VolSpike"
+timeframe = "1d"
 leverage = 1.0
