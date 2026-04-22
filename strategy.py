@@ -8,41 +8,48 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1D Donchian breakout with 1W EMA50 trend filter and volume confirmation
-    # Works in bull/bear via trend filter: only take long in uptrend, short in downtrend.
-    # Donchian breakouts capture momentum; EMA50 filters trend; volume confirms.
-    # Targets ~10-20 trades/year to minimize fee drag.
+    # Hypothesis: 4-hour Bollinger Bands breakout with 1-day ATR filter and volume confirmation
+    # Works in bull/bear via ATR-based volatility filter: only trade when volatility is elevated.
+    # Bollinger breakouts capture momentum; ATR filter avoids low-volatility chop; volume confirms.
+    # Targets ~20-30 trades/year to minimize fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1D data for Donchian calculation
+    # Bollinger Bands on 4h (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + bb_std * bb_std_dev
+    lower_band = sma - bb_std * bb_std_dev
+    
+    # 1-day ATR for volatility filter (14-period)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Load 1W data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # First element will be invalid due to roll, handled by min_periods
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) on 1D using previous day's data to avoid look-ahead
-    # For each 1D bar, use previous 20 days' high/low
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
+    # ATR-based volatility filter: only trade when ATR > 20-period SMA of ATR
+    atr_ma = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    vol_filter = atr_14 > atr_ma  # Trade only when volatility is above average
     
-    # Align Donchian levels to 1D timeframe (already aligned, just need to handle shift)
-    # Since we shifted in calculation, we need to align the shifted arrays
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align ATR filter to 4h timeframe
+    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
     
-    # Volume spike filter (20-period on 1D)
+    # Volume confirmation (20-period on 4h)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
+    vol_spike = volume > 1.5 * vol_ma20  # Require 1.5x volume for confirmation
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -53,8 +60,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready or outside session
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma20[i]) or
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(vol_filter_aligned[i]) or np.isnan(vol_ma20[i]) or
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -62,24 +69,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price closes above Donchian high with volume + price above 1W EMA50 (uptrend)
-            if close[i] > donchian_high_aligned[i] and vol_spike[i] and close[i] > ema50_1w_aligned[i]:
+            # Long: Close crosses above upper Bollinger Band with volatility filter + volume spike
+            if close[i] > upper_band[i] and vol_filter_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price closes below Donchian low with volume + price below 1W EMA50 (downtrend)
-            elif close[i] < donchian_low_aligned[i] and vol_spike[i] and close[i] < ema50_1w_aligned[i]:
+            # Short: Close crosses below lower Bollinger Band with volatility filter + volume spike
+            elif close[i] < lower_band[i] and vol_filter_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to opposite Donchian level or trend reversal vs 1W EMA50
+            # Exit: Close returns to middle Bollinger Band (SMA) or volatility drops
             if position == 1:
-                if close[i] < donchian_low_aligned[i] or close[i] < ema50_1w_aligned[i]:
+                if close[i] < sma[i] or not vol_filter_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donchian_high_aligned[i] or close[i] > ema50_1w_aligned[i]:
+                if close[i] > sma[i] or not vol_filter_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -87,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_20_Breakout_1wEMA50_Volume_Session_v1"
-timeframe = "1d"
+name = "4h_Bollinger_Breakout_ATRVolFilter_Volume_Session_v1"
+timeframe = "4h"
 leverage = 1.0
