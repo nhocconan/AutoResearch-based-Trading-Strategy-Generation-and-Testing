@@ -1,29 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams Alligator with 1d momentum filter and volume confirmation.
-Long when jaw (13-period SMMA) crosses above teeth (8-period SMMA) with bullish momentum.
-Short when jaw crosses below teeth with bearish momentum.
-Exit when teeth crosses jaw in opposite direction.
-Uses 1d ROC for momentum filter to avoid whipsaws and targets 20-40 trades/year.
-Williams Alligator uses smoothed moving averages for smoother trend signals.
+Hypothesis: 12h Donchian channel breakout with 1d ADX filter and volume confirmation.
+Long when price breaks above Donchian upper with strong ADX trend and volume spike.
+Short when price breaks below Donchian lower with strong ADX trend and volume spike.
+Exit when price crosses Donchian middle or ADX weakens.
+Uses 1d ADX for trend strength filter to avoid whipsaws in ranging markets.
+Designed for low trade frequency (12-37/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def _smma(series, period):
-    """Smoothed Moving Average (SMMA) - Wilder's smoothing"""
-    if len(series) < period:
-        return np.full_like(series, np.nan, dtype=float)
-    smma = np.full_like(series, np.nan, dtype=float)
-    smma[period-1] = np.mean(series[:period])
-    for i in range(period, len(series)):
-        smma[i] = (smma[i-1] * (period-1) + series[i]) / period
-    return smma
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,32 +21,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for momentum filter - ONCE before loop
+    # Load daily data for ADX filter - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate Williams Alligator (6-period jaw, 5-period teeth, 3-period lips)
-    # Using 6, 5, 3 periods for smoother signals on 6h timeframe
-    jaw_period = 6   # SMMA of median price
-    teeth_period = 5 # SMMA of median price
+    # Calculate Donchian Channel (20-period) on 12h
+    lookback = 20
+    dc_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    dc_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    dc_middle = (dc_upper + dc_lower) / 2.0
     
-    median_price = (high + low) / 2.0
-    jaw = _smma(median_price, jaw_period)
-    teeth = _smma(median_price, teeth_period)
+    # Calculate 1d ADX (14-period)
+    # ADX requires +DI, -DI, and TR
+    high_d = pd.Series(df_daily['high'].values)
+    low_d = pd.Series(df_daily['low'].values)
+    close_d = pd.Series(df_daily['close'].values)
     
-    # Calculate 1d ROC (10-period) for momentum filter
-    close_d = df_daily['close'].values
-    roc_d = np.full_like(close_d, np.nan, dtype=float)
-    roc_d[10:] = (close_d[10:] - close_d[:-10]) / close_d[:-10] * 100
+    # True Range
+    tr1 = high_d - low_d
+    tr2 = abs(high_d - close_d.shift(1))
+    tr3 = abs(low_d - close_d.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_d = tr.rolling(window=14, min_periods=14).mean()
     
-    # Align ROC to 6h timeframe
-    roc_aligned = align_htf_to_ltf(prices, df_daily, roc_d)
+    # Directional Movement
+    up_move = high_d.diff()
+    down_move = -low_d.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Calculate 6h volume average (20-period)
-    vol_avg_20 = np.full_like(volume, np.nan, dtype=float)
-    for i in range(20, len(volume)):
-        vol_avg_20[i] = np.mean(volume[i-20:i])
+    # Smoothed values
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr_d)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr_d)
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_d = dx.rolling(window=14, min_periods=14).mean()
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx_d.values)
+    
+    # Calculate 12h volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -64,10 +69,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(jaw_period, teeth_period, 20), n):
+    for i in range(lookback, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(roc_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,16 +89,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Jaw crosses above teeth with positive momentum and volume
-            if (jaw[i] > teeth[i] and jaw[i-1] <= teeth[i-1] and  # Bullish crossover
-                roc_aligned[i] > 0 and                           # Positive momentum
-                volume[i] > 1.5 * vol_avg_20[i]):                # Volume spike
+            # Long: Price breaks above Donchian upper with strong ADX and volume
+            if (close[i] > dc_upper[i] and 
+                adx_aligned[i] > 25 and  # Strong trend
+                volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaw crosses below teeth with negative momentum and volume
-            elif (jaw[i] < teeth[i] and jaw[i-1] >= teeth[i-1] and  # Bearish crossover
-                  roc_aligned[i] < 0 and                           # Negative momentum
-                  volume[i] > 1.5 * vol_avg_20[i]):                # Volume spike
+            # Short: Price breaks below Donchian lower with strong ADX and volume
+            elif (close[i] < dc_lower[i] and 
+                  adx_aligned[i] > 25 and  # Strong trend
+                  volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -101,12 +106,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: jaw crosses below teeth (bearish crossover)
-                if jaw[i] < teeth[i] and jaw[i-1] >= teeth[i-1]:
+                # Exit long: price crosses below middle OR ADX weakens
+                if close[i] < dc_middle[i] or adx_aligned[i] < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: jaw crosses above teeth (bullish crossover)
-                if jaw[i] > teeth[i] and jaw[i-1] <= teeth[i-1]:
+                # Exit short: price crosses above middle OR ADX weakens
+                if close[i] > dc_middle[i] or adx_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -117,7 +122,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsAlligator_1dROC_Volume"
-timeframe = "6h"
+name = "12H_DonchianBreakout_1dADX_Volume"
+timeframe = "12h"
 leverage = 1.0
 #%%
