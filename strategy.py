@@ -3,39 +3,38 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian channel (20) breakout with volume confirmation and 1-week EMA50 trend filter.
-# Long when price breaks above upper band + volume spike + price > weekly EMA50
-# Short when price breaks below lower band + volume spike + price < weekly EMA50
-# Exit when price crosses back through the middle band or volume drops below 70% of average.
-# Designed for 1d timeframe with 1h trend filter to reduce whipsaw and improve trend alignment.
-# Target: 15-25 trades/year to minimize fee drag and capture major trend moves.
+# Hypothesis: 12h Williams %R (14) overbought/oversold with volume spike and 1d trend filter.
+# Long when %R < -80 (oversold) + volume spike + price > 1d EMA50
+# Short when %R > -20 (overbought) + volume spike + price < 1d EMA50
+# Exit when %R crosses back above -50 (for longs) or below -50 (for shorts)
+# Williams %R identifies reversals in ranging markets; works in both bull (buy dips) and bear (sell rallies).
+# Target: 20-30 trades/year to avoid excessive fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Donchian calculation
+    # Load 1d data for EMA50
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period)
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    middle_20 = (upper_20 + lower_20) / 2
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Load weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Williams %R (14) calculation
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Align indicators to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    middle_aligned = align_htf_to_ltf(prices, df_1d, middle_20)
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Values range from -100 to 0
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
@@ -46,49 +45,45 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or 
-            np.isnan(middle_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or 
+        if (np.isnan(ema50_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        upper = upper_aligned[i]
-        lower = lower_aligned[i]
-        middle = middle_aligned[i]
+        wr = williams_r[i]
         ema50 = ema50_aligned[i]
         
-        # Volume filter: current volume > 1.7 * 20-day average
-        vol_spike = vol > 1.7 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: price breaks above upper band + volume spike + price > weekly EMA50
-            if price > upper and vol_spike and price > ema50:
+            # Long conditions: Williams %R < -80 (oversold) + volume spike + price > EMA50
+            if wr < -80 and vol_spike and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower band + volume spike + price < weekly EMA50
-            elif price < lower and vol_spike and price < ema50:
+            # Short conditions: Williams %R > -20 (overbought) + volume spike + price < EMA50
+            elif wr > -20 and vol_spike and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses back through middle band or volume dries up
+            # Exit conditions: Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price crosses below middle band or volume dries up
-                if price < middle or vol < 0.7 * vol_ma:
+                # Exit when Williams %R crosses above -50 (momentum fading)
+                if wr > -50:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price crosses above middle band or volume dries up
-                if price > middle or vol < 0.7 * vol_ma:
+                # Exit when Williams %R crosses below -50 (momentum fading)
+                if wr < -50:
                     exit_signal = True
             
             if exit_signal:
@@ -100,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_Volume_1wEMA50"
-timeframe = "1d"
+name = "12h_WilliamsR_OversoldOverbought_Volume_EMA50"
+timeframe = "12h"
 leverage = 1.0
