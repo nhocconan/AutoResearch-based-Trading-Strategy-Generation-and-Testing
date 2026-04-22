@@ -8,15 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Daily data for pivot points
+    # Daily data for pivot points and EMA
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -31,16 +23,20 @@ def generate_signals(prices):
     s2 = pivot - (high_1d - low_1d) * 1.1 / 6
     s3 = pivot - (high_1d - low_1d) * 1.1 / 4
     
-    # Align to 12h timeframe (primary)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    # Daily EMA34 for trend filter
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 12h ATR(14) for volatility filter and stop
+    # Align to 4h timeframe (primary)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # 4h ATR(14) for volatility filter and stop
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -61,40 +57,40 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(r2_12h[i]) or np.isnan(r3_12h[i]) or
-            np.isnan(s1_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(s3_12h[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(r3_4h[i]) or
+            np.isnan(s1_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(s3_4h[i]) or
+            np.isnan(ema_34_4h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above S3 with volume surge, above weekly EMA50
-            if (close[i] > s3_12h[i] and vol_surge[i] and close[i] > ema_50_1w_aligned[i]):
-                signals[i] = 0.25
+            # Long: Price breaks above S3 with volume surge, above daily EMA34
+            if (close[i] > s3_4h[i] and vol_surge[i] and close[i] > ema_34_4h[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below R3 with volume surge, below weekly EMA50
-            elif (close[i] < r3_12h[i] and vol_surge[i] and close[i] < ema_50_1w_aligned[i]):
-                signals[i] = -0.25
+            # Short: Price breaks below R3 with volume surge, below daily EMA34
+            elif (close[i] < r3_4h[i] and vol_surge[i] and close[i] < ema_34_4h[i]):
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit: Price crosses opposite level or volatility drops significantly
             if position == 1:
-                if close[i] < pivot_12h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
+                if close[i] < pivot_4h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
-                if close[i] > pivot_12h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
+                if close[i] > pivot_4h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1wEMA50_Trend_VolumeSurge_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSurge_v1"
+timeframe = "4h"
 leverage = 1.0
