@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Bollinger Band squeeze breakout with 1-day trend filter.
-Long when Bollinger Bands width < 20th percentile (squeeze) and price breaks above upper band, with 1-day EMA50 uptrend.
-Short when Bollinger Bands width < 20th percentile and price breaks below lower band, with 1-day EMA50 downtrend.
-Exit when price crosses the middle Bollinger Band (20-period SMA).
-Bollinger squeeze indicates low volatility primed for expansion; breakout captures the move.
-EMA50 filter ensures trading with the higher timeframe trend to avoid counter-trend whipsaws.
-Works in bull markets by catching breakouts in uptrends and in bear markets by catching breakdowns in downtrends.
+Hypothesis: 4h Donchian Breakout with 1d EMA Trend Filter and Volume Spike.
+Long when price breaks above Donchian Upper Band (20) and price > 1d EMA34 and volume > 1.5x average volume.
+Short when price breaks below Donchian Lower Band (20) and price < 1d EMA34 and volume > 1.5x average volume.
+Exit when price crosses the Donchian Middle Band (20-period average of high/low).
+Uses price channel breakouts for trend following, EMA for trend filter, and volume to confirm institutional participation.
+Designed to work in both bull and bear markets by filtering with higher timeframe trend.
 """
 
 import numpy as np
@@ -18,68 +17,63 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_mult = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + bb_mult * std
-    lower = sma - bb_mult * std
-    bb_width = upper - lower
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    middle_band = (highest_high + lowest_low) / 2.0
     
-    # Bollinger Band width percentile (lookback 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=1).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Load 1-day EMA50 for trend filter - ONCE before loop
+    # Load 1-day EMA for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike filter: current volume > 1.5x 20-period average
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(bb_period, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(sma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(bb_width_percentile[i]) or np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bollinger squeeze (<20th percentile) + break above upper band + 1-day EMA50 uptrend
-            if (bb_width_percentile[i] < 20 and 
-                close[i] > upper[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long: Price breaks above upper band, above 1d EMA, and volume spike
+            if (close[i] > highest_high[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bollinger squeeze (<20th percentile) + break below lower band + 1-day EMA50 downtrend
-            elif (bb_width_percentile[i] < 20 and 
-                  close[i] < lower[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: Price breaks below lower band, below 1d EMA, and volume spike
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit when price crosses the middle Bollinger Band (SMA)
+            # Exit conditions: price crosses middle band
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses below SMA
-                if close[i] < sma[i]:
+                # Exit long: Price falls below middle band
+                if close[i] < middle_band[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price crosses above SMA
-                if close[i] > sma[i]:
+                # Exit short: Price rises above middle band
+                if close[i] > middle_band[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -90,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_BB_Squeeze_Breakout_1dEMA50_Trend"
+name = "4H_Donchian_Breakout_1dEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
