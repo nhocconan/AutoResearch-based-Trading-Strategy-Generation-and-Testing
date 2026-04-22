@@ -3,109 +3,108 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Choppiness Index regime filter + Weekly RSI mean reversion.
-# Choppiness Index (CHOP) > 61.8 indicates ranging market (mean revert),
-# CHOP < 38.2 indicates trending market (trend follow). Weekly RSI extremes
-# (>70 or <30) provide entry signals in the direction of mean reversion during
-# ranging markets. This avoids trending whipsaws and focuses on mean reversion
-# in chop, which works in both bull and bear markets. Low trade frequency
-# expected due to dual regime + RSI extreme filter.
+# Hypothesis: 6h Williams Alligator with 1d EMA50 trend filter and volume confirmation.
+# Williams Alligator consists of three SMAs (Jaw=13, Teeth=8, Lips=5) that act as dynamic support/resistance.
+# In trending markets, the lines diverge (Green > Red > Blue for uptrend, reverse for downtrend).
+# Combining with 1d EMA50 ensures alignment with higher timeframe trend, while volume spikes confirm momentum.
+# Designed for low trade frequency (~20-40/year) to minimize fee decay. Works in both bull and bear markets
+# by requiring trend alignment and avoiding choppy conditions where Alligator lines intertwine.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for RSI (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 14-period RSI on weekly close
-    delta = pd.Series(close_1w).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = rsi_1w.fillna(50).values  # fill NaN with neutral 50
-    
-    # Load daily data for Choppiness Index
+    # Load 1d data for EMA50 trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period Choppiness Index on daily data
-    # True Range = max(high-low, abs(high-previous_close), abs(low-previous_close))
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR is just high-low
+    # Calculate 50-period EMA on 1d close for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Sum of True Range over 14 periods
-    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    # Align 1d EMA50 to 6h timeframe (waits for 1d bar to close)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Highest high and lowest low over 14 periods
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    # Williams Alligator components on 6h timeframe
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Chop = 100 * log10(TR_sum / (max_high - min_low)) / log10(14)
-    # Avoid division by zero
-    range_14 = max_high_14 - min_low_14
-    range_14 = np.where(range_14 == 0, 1e-10, range_14)  # small epsilon
-    chop = 100 * np.log10(tr_sum_14 / range_14) / np.log10(14)
-    chop = chop.fillna(50).values  # fill NaN with neutral 50
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)  # shift forward 8 bars
+    jaw[:8] = np.nan  # first 8 values invalid after shift
     
-    # Align weekly RSI and daily Chop to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Teeth: 8-period SMMA, shifted 5 bars forward
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)  # shift forward 5 bars
+    teeth[:5] = np.nan  # first 5 values invalid after shift
+    
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)  # shift forward 3 bars
+    lips[:3] = np.nan  # first 3 values invalid after shift
+    
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(jaw[i]) or 
+            np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        rsi_val = rsi_1w_aligned[i]
-        chop_val = chop_aligned[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema_val = ema_50_aligned[i]
         
-        # Regime filters
-        ranging_market = chop_val > 61.8  # CHOP > 61.8 = ranging (mean revert)
-        trending_market = chop_val < 38.2  # CHOP < 38.2 = trending (avoid)
+        # Volume filter: current volume > 2.0 * 20-period average (strict filter for low frequency)
+        vol_spike = vol > 2.0 * vol_ma
+        
+        # Alligator alignment: Jaw > Teeth > Lips for uptrend, reverse for downtrend
+        # Add small epsilon to avoid equality issues
+        epsilon = 1e-8
+        jaw_gt_teeth = jaw_val > teeth_val + epsilon
+        teeth_gt_lips = teeth_val > lips_val + epsilon
+        jaw_lt_teeth = jaw_val < teeth_val - epsilon
+        teeth_lt_lips = teeth_val < lips_val - epsilon
         
         if position == 0:
-            # Only trade in ranging markets
-            if ranging_market:
-                # Long when weekly RSI is oversold (<30)
-                if rsi_val < 30:
-                    signals[i] = 0.25
-                    position = 1
-                # Short when weekly RSI is overbought (>70)
-                elif rsi_val > 70:
-                    signals[i] = -0.25
-                    position = -1
+            # Long conditions: Alligator aligned up + uptrend + volume spike
+            if jaw_gt_teeth and teeth_gt_lips and price > ema_val and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # Short conditions: Alligator aligned down + downtrend + volume spike
+            elif jaw_lt_teeth and teeth_lt_lips and price < ema_val and vol_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
             # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when RSI returns to neutral (50) or market starts trending
-                if rsi_val >= 50 or not ranging_market:
+                # Exit when Alligator alignment breaks down or trend breaks
+                if not (jaw_gt_teeth and teeth_gt_lips) or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when RSI returns to neutral (50) or market starts trending
-                if rsi_val <= 50 or not ranging_market:
+                # Exit when Alligator alignment breaks up or trend breaks
+                if not (jaw_lt_teeth and teeth_lt_lips) or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -117,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Choppiness_WeeklyRSI_MeanRev"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
