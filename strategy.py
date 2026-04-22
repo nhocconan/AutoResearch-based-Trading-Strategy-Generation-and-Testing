@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 12-hour Williams %R with volume confirmation and ADX trend filter
-# Williams %R identifies overbought/oversold conditions with mean-reversion potential.
-# Volume filter confirms institutional participation at extreme levels.
-# ADX filter ensures we only trade in trending markets to avoid whipsaws in range-bound periods.
-# Designed for 4h timeframe targeting 15-35 trades/year with strong performance in both bull and bear markets.
+# Hypothesis: 1h RSI(14) pullback to 4h EMA(50) with 1d trend filter and volume confirmation
+# RSI < 30 in uptrend or > 70 in downtrend identifies overextended moves ready for mean reversion.
+# 4h EMA50 provides dynamic support/resistance in trending markets.
+# 1d EMA100 filter ensures trades align with higher timeframe trend.
+# Volume > 1.5x 20-period average confirms momentum behind the move.
+# Designed for 1h timeframe targeting 15-30 trades/year with controlled risk in bull/bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,108 +20,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Williams %R and ADX (ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Calculate RSI(14) - well-established momentum oscillator
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Load 4h data for EMA(50) dynamic support/resistance (ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Williams %R (14-period)
-    def calculate_williams_r(high, low, close, period=14):
-        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-        return wr.fillna(0).values
+    # Load 1d data for EMA(100) trend filter (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 100:
+        return np.zeros(n)
     
-    wr_12h = calculate_williams_r(high_12h, low_12h, close_12h, 14)
-    wr_12h_aligned = align_htf_to_ltf(prices, df_12h, wr_12h)
+    close_1d = df_1d['close'].values
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Calculate ADX (14-period) for trend strength
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            elif plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            else:
-                minus_dm[i] = 0
-            
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth with Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(high)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean() / atr)
-        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean() / atr)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean()
-        return adx.fillna(0).values
-    
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(wr_12h_aligned[i]) or np.isnan(adx_12h_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(ema_100_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + strong trend (ADX > 25) + volume spike
-            if (wr_12h_aligned[i] < -80 and 
-                adx_12h_aligned[i] > 25 and 
-                volume[i] > 1.8 * vol_avg_20[i]):
-                signals[i] = 0.25
+            # Long: RSI < 30 (oversold) + price above 4h EMA50 + 1d uptrend + volume confirmation
+            if (rsi[i] < 30 and 
+                close[i] > ema_50_4h_aligned[i] and 
+                close[i] > ema_100_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: Williams %R overbought (> -20) + strong trend (ADX > 25) + volume spike
-            elif (wr_12h_aligned[i] > -20 and 
-                  adx_12h_aligned[i] > 25 and 
-                  volume[i] > 1.8 * vol_avg_20[i]):
-                signals[i] = -0.25
+            # Short: RSI > 70 (overbought) + price below 4h EMA50 + 1d downtrend + volume confirmation
+            elif (rsi[i] > 70 and 
+                  close[i] < ema_50_4h_aligned[i] and 
+                  close[i] < ema_100_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i]):
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: Williams %R returns to neutral range or trend weakens
+            # Exit: RSI returns to neutral zone (40-60) or price crosses 4h EMA50
             if position == 1:
-                # Exit long: Williams %R returns above -50 or ADX falls below 20
-                if (wr_12h_aligned[i] > -50 or 
-                    adx_12h_aligned[i] < 20):
+                # Exit long: RSI > 40 or price breaks below 4h EMA50
+                if (rsi[i] > 40 or 
+                    close[i] < ema_50_4h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                # Exit short: Williams %R returns below -50 or ADX falls below 20
-                if (wr_12h_aligned[i] < -50 or 
-                    adx_12h_aligned[i] < 20):
+                # Exit short: RSI < 60 or price breaks above 4h EMA50
+                if (rsi[i] < 60 or 
+                    close[i] > ema_50_4h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_WilliamsR_12hADX25_VolumeConfirmation"
-timeframe = "4h"
+name = "1h_RSI14_Pullback_4hEMA50_1dEMA100_Volume"
+timeframe = "1h"
 leverage = 1.0
