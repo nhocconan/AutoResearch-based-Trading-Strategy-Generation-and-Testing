@@ -13,120 +13,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for ATR and ATR ratio (volatility filter)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data for trend and volatility filter (ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 30:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 7-day and 30-day ATR from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # 12h ATR(14) for volatility filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_12h = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # ATR ratio (ATR(7)/ATR(30)) - volatility filter
-    atr_ratio = np.where(atr_30 > 0, atr_7 / atr_30, 0)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # 6h Donchian(20) breakout levels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Load weekly data for Supertrend (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate Supertrend on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # ATR for Supertrend (using 10-period)
-    tr1w = high_1w - low_1w
-    tr2w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2w[0] = tr1w[0]
-    tr3w[0] = tr1w[0]
-    trw = np.maximum(tr1w, np.maximum(tr2w, tr3w))
-    atr_1w = pd.Series(trw).rolling(window=10, min_periods=10).mean().values
-    
-    # Supertrend calculation
-    upperband = (high_1w + low_1w) / 2 + 3.0 * atr_1w
-    lowerband = (high_1w + low_1w) / 2 - 3.0 * atr_1w
-    
-    # Initialize Supertrend
-    supertrend = np.zeros_like(close_1w)
-    direction = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_1w)):
-        if close_1w[i] > upperband[i-1]:
-            direction[i] = 1
-        elif close_1w[i] < lowerband[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            if direction[i] == -1 and upperband[i] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lowerband[i]
-        else:
-            supertrend[i] = upperband[i]
-    
-    # Align Supertrend direction to daily timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1w, direction)
-    
-    # Volume confirmation: 20-day average volume from daily data
-    vol_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_20_aligned = align_htf_to_ltf(prices, df_1d, vol_20)
+    # Volume confirmation: 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
-            np.isnan(vol_20_aligned[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]) or
+            np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Uptrend (Supertrend direction = 1) + Low volatility (ATR ratio < 0.8) + Volume spike
-            if (supertrend_aligned[i] == 1 and 
-                atr_ratio_aligned[i] < 0.8 and
-                volume[i] > 1.5 * vol_20_aligned[i]):
+            # Long: Price breaks above Donchian high + 12h uptrend + volume spike + volatility filter
+            if (close[i] > donch_high[i] and 
+                close[i] > ema_12h_aligned[i] and
+                volume[i] > 1.5 * vol_avg_20[i] and
+                atr_12h_aligned[i] > 0.5 * atr_12h_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Downtrend (Supertrend direction = -1) + Low volatility (ATR ratio < 0.8) + Volume spike
-            elif (supertrend_aligned[i] == -1 and 
-                  atr_ratio_aligned[i] < 0.8 and
-                  volume[i] > 1.5 * vol_20_aligned[i]):
+            # Short: Price breaks below Donchian low + 12h downtrend + volume spike + volatility filter
+            elif (close[i] < donch_low[i] and 
+                  close[i] < ema_12h_aligned[i] and
+                  volume[i] > 1.5 * vol_avg_20[i] and
+                  atr_12h_aligned[i] > 0.5 * atr_12h_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Trend reversal or volatility expansion
+            # Exit: Price crosses back to opposite Donchian level
             if position == 1:
-                # Exit long: Downtrend or high volatility
-                if supertrend_aligned[i] == -1 or atr_ratio_aligned[i] >= 1.2:
+                # Exit long: Price closes below Donchian low
+                if close[i] < donch_low[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Uptrend or high volatility
-                if supertrend_aligned[i] == 1 or atr_ratio_aligned[i] >= 1.2:
+                # Exit short: Price closes above Donchian high
+                if close[i] > donch_high[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -134,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Supertrend_ATR_Volume_Filter"
-timeframe = "1d"
+name = "6H_Donchian20_Breakout_12hTrend_Volume_Volatility"
+timeframe = "6h"
 leverage = 1.0
