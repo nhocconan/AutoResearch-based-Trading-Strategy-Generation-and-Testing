@@ -5,69 +5,71 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian breakout with 1d ATR filter and volume surge
-    # Works in bull and bear markets: breakouts capture directional moves, ATR filters volatility regime
-    # Volume surge confirms breakout strength, reducing false signals
+    # Hypothesis: 4h Williams %R reversal with 1d EMA50 trend filter and volume confirmation
+    # Williams %R identifies overbought/oversold conditions; reversals from extremes capture mean reversion
+    # Works in both bull and bear markets: buys oversold dips in uptrends, sells overbought rallies in downtrends
+    # Volume surge confirms reversal strength, EMA50 filters trend direction to avoid counter-trend trades
     
     # Load daily data once
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily ATR(14) for volatility filter
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - low_1d[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low_1d[1:] - high_1d[:-1]))
-    tr = np.concatenate([[np.nan], tr1])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Daily EMA50 trend filter
+    ema_1d_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    # 12h Donchian channels (20-period)
+    # 4h Williams %R (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate Donchian upper and lower bands
-    upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Williams %R: -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Volume filter (20-period MA surge)
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 1.8 * vol_ma20
+    vol_surge = prices['volume'].values > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(vol_ma20[i]) or np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(ema_1d_50_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Donchian breakout above upper band with volume surge AND ATR above median (volatile market)
-            if close[i] > upper[i] and vol_surge[i] and atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[max(0, i-100):i+1]):
+            # Long: Williams %R crosses above -80 (oversold reversal) with volume surge AND daily EMA50 uptrend
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and vol_surge[i] and close[i] > ema_1d_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown below lower band with volume surge AND ATR above median
-            elif close[i] < lower[i] and vol_surge[i] and atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[max(0, i-100):i+1]):
+            # Short: Williams %R crosses below -20 (overbought reversal) with volume surge AND daily EMA50 downtrend
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and vol_surge[i] and close[i] < ema_1d_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to opposite Donchian band or ATR drops below median (low volatility)
+            # Exit: Williams %R returns to neutral zone (-50) or opposite extreme
             if position == 1:
-                if close[i] < lower[i] or atr_1d_aligned[i] < np.nanmedian(atr_1d_aligned[max(0, i-100):i+1]):
+                if williams_r[i] < -50:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > upper[i] or atr_1d_aligned[i] < np.nanmedian(atr_1d_aligned[max(0, i-100):i+1]):
+                if williams_r[i] > -50:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -75,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dATR_VolumeSurge_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_Reversal_1dEMA50_Trend_VolumeSurge_v1"
+timeframe = "4h"
 leverage = 1.0
