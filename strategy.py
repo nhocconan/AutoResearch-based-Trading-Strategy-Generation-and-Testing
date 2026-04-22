@@ -8,9 +8,11 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian channel breakout with 1d EMA34 trend and volume confirmation
-    # Works in both bull and bear markets: breakouts from volatility contraction capture directional moves
-    # Donchian channel identifies price extremes, volume surge confirms breakout strength, EMA34 filters trend direction
+    # Hypothesis: 6h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation
+    # Williams %R identifies overbought/oversold conditions for mean reversion
+    # Works in both bull and bear markets: fades extremes in ranging markets, 
+    # but only in direction of higher timeframe trend to avoid fighting momentum
+    # Volume surge confirms momentum exhaustion at extremes
     
     # Load daily data once
     df_1d = get_htf_data(prices, '1d')
@@ -22,51 +24,47 @@ def generate_signals(prices):
     ema_1d_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
-    # 12h Donchian channel (20-period)
-    high = prices['high'].values
-    low = prices['low'].values
+    # Williams %R (14 period) - measures overbought/oversold
+    high_14 = pd.Series(prices['high'].values).rolling(window=14, min_periods=14).max().values
+    low_14 = pd.Series(prices['low'].values).rolling(window=14, min_periods=14).min().values
     close = prices['close'].values
-    
-    # Calculate Donchian upper and lower channels
-    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    williams_r = -100 * (high_14 - close) / (high_14 - low_14)
     
     # Volume filter (20-period MA surge)
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 1.5 * vol_ma20
+    vol_surge = prices['volume'].values > 1.8 * vol_ma20
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(200, n):
+    for i in range(14, n):
         # Skip if data not ready
-        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(donch_upper[i]) or 
-            np.isnan(donch_lower[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(high_14[i]) or np.isnan(low_14[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Donchian breakout above upper band with volume surge AND daily EMA34 uptrend
-            if close[i] > donch_upper[i] and vol_surge[i] and close[i] > ema_1d_34_aligned[i]:
+            # Long: Williams %R oversold (-80 or below) with volume surge AND daily EMA34 uptrend
+            if williams_r[i] <= -80 and vol_surge[i] and close[i] > ema_1d_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout below lower band with volume surge AND daily EMA34 downtrend
-            elif close[i] < donch_lower[i] and vol_surge[i] and close[i] < ema_1d_34_aligned[i]:
+            # Short: Williams %R overbought (-20 or above) with volume surge AND daily EMA34 downtrend
+            elif williams_r[i] >= -20 and vol_surge[i] and close[i] < ema_1d_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to Donchian middle (average of upper/lower) or opposite band touch
-            donch_middle = (donch_upper[i] + donch_lower[i]) / 2
+            # Exit: Williams %R returns to neutral range (-50) or opposite extreme touched
             if position == 1:
-                if close[i] < donch_middle:
+                if williams_r[i] >= -50:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donch_middle:
+                if williams_r[i] <= -50:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -74,6 +72,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dEMA34_Trend_VolumeSurge_v1"
-timeframe = "12h"
+name = "6h_WilliamsR_MeanReversion_1dEMA34_Trend_VolumeSurge_v1"
+timeframe = "6h"
 leverage = 1.0
