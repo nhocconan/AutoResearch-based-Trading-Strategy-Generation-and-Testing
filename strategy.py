@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Camarilla pivot levels (R1/S1) with 1-day EMA trend filter and volume spike confirmation.
-Long when price breaks above R1 with rising 1d EMA34 and volume spike.
-Short when price breaks below S1 with falling 1d EMA34 and volume spike.
-Exit when price returns to the pivot point (P) or reverses EMA direction.
-Camarilla levels provide precise intraday support/resistance; 1d EMA filters for higher-timeframe trend;
-volume spike confirms institutional participation. Designed for low trade frequency by requiring multiple confirmations.
-Works in both bull and bear markets by following the 1d trend.
+Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Long when price breaks above 20-period high and 1-day EMA34 is rising with volume spike.
+Short when price breaks below 20-period low and 1-day EMA34 is falling with volume spike.
+Exit when price crosses the opposite Donchian band or EMA trend reverses.
+Designed for low trade frequency by requiring breakout + trend + volume confluence.
+Works in bull markets via upside breakouts and bear markets via downside breakouts.
 """
 
 import numpy as np
@@ -23,26 +22,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using previous day's high, low, close
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Donchian channels: 20-period high/low
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    r1 = pivot + (range_hl * 1.1 / 12)
-    s1 = pivot - (range_hl * 1.1 / 12)
-    
-    # Load 1d data for trend filter - ONCE before loop
+    # Load 1-day data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 34-period EMA on 1d close for trend
+    # 34-period EMA on 1-day close for trend
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -55,8 +44,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(pivot[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,27 +55,27 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Price breaks above R1 with rising 1d EMA34 and volume spike
-            if (close[i] > r1[i] and 
+            # Long: Break above upper band with rising 1d EMA34 and volume spike
+            if (close[i] > donch_high[i-1] and 
                 ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with falling 1d EMA34 and volume spike
-            elif (close[i] < s1[i] and 
+            # Short: Break below lower band with falling 1d EMA34 and volume spike
+            elif (close[i] < donch_low[i-1] and 
                   ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to pivot point or EMA reverses
+            # Exit: Price crosses opposite band or EMA trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price <= pivot or 1d EMA34 turns down
-                if close[i] <= pivot[i] or ema34_1d_aligned[i] < ema34_1d_aligned[i-1]:
+                # Exit long: Price crosses below lower band or EMA turns down
+                if close[i] < donch_low[i-1] or ema34_1d_aligned[i] < ema34_1d_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price >= pivot or 1d EMA34 turns up
-                if close[i] >= pivot[i] or ema34_1d_aligned[i] > ema34_1d_aligned[i-1]:
+                # Exit short: Price crosses above upper band or EMA turns up
+                if close[i] > donch_high[i-1] or ema34_1d_aligned[i] > ema34_1d_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -97,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+name = "4H_Donchian_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
