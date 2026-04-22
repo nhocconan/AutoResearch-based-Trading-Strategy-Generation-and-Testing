@@ -3,127 +3,106 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour mean reversion with 4-hour trend filter and 1-day volatility regime
-# Long when: price < 4h VWAP - 0.5*ATR, RSI(14) < 30, and 1d ATR ratio > 1.2 (high vol regime)
-# Short when: price > 4h VWAP + 0.5*ATR, RSI(14) > 70, and 1d ATR ratio > 1.2
-# Exit when: price crosses 4h VWAP or RSI returns to neutral (40-60)
-# Works in both bull and bear markets by fading extremes during high volatility periods
-# Uses 4h for directional context and volatility regime, 1h for precise entry/exit
-# Target: 20-35 trades/year to stay under fee drag limits
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Long when Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA50 AND volume spike.
+# Short when Bear Power > 0 AND Bull Power < 0 AND price < 1d EMA50 AND volume spike.
+# Exit when power signals reverse or volume drops below average.
+# Works in bull (strong bull power) and bear (strong bear power) markets.
+# Target: 15-30 trades/year to minimize fee drag on 6h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for VWAP and ATR calculation
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate 4h VWAP (typical price * volume cumulative)
-    typical_price_4h = (high_4h + low_4h + close_4h) / 3
-    vwap_4h = (typical_price_4h * volume_4h).cumsum() / volume_4h.cumsum()
-    
-    # Calculate 4h ATR(14)
-    tr1_4h = high_4h[1:] - low_4h[1:]
-    tr2_4h = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3_4h = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.concatenate([[np.inf], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    
-    # Load 1d data for ATR ratio (volatility regime filter)
+    # Load 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14)
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.inf], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate ATR ratio: current 1d ATR / 50-period average
-    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_1d / atr_ma_50
+    # Calculate Elder Ray components (EMA13 of close)
+    close = prices['close'].values
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Align 4h indicators to 1h timeframe
-    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # Align 1d ATR ratio to 1h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Volume spike filter (20-period average)
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1h RSI(14)
-    close_1h = prices['close'].values
-    delta = np.diff(close_1h, prepend=close_1h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1h = 100 - (100 / (1 + rs))
+    # Align 1d EMA50 to 6h
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(vwap_4h_aligned[i]) or 
-            np.isnan(atr_4h_aligned[i]) or 
-            np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(rsi_1h[i])):
+        if (np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(ema50_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close_1h[i]
-        vwap = vwap_4h_aligned[i]
-        atr = atr_4h_aligned[i]
-        atr_ratio_val = atr_ratio_aligned[i]
-        rsi = rsi_1h[i]
+        price = prices['close'].iloc[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        bp = bull_power[i]
+        br = bear_power[i]
+        ema50 = ema50_aligned[i]
         
-        # High volatility regime filter: ATR ratio > 1.2
-        high_vol = atr_ratio_val > 1.2
+        # Volume filter: current volume > 1.5 * 20-day average
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long conditions: price below VWAP - 0.5*ATR, RSI oversold, high vol
-            if price < (vwap - 0.5 * atr) and rsi < 30 and high_vol:
-                signals[i] = 0.20
+            # Long conditions: Bull Power positive, Bear Power negative, price > EMA50, volume spike
+            if bp > 0 and br < 0 and price > ema50 and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: price above VWAP + 0.5*ATR, RSI overbought, high vol
-            elif price > (vwap + 0.5 * atr) and rsi > 70 and high_vol:
-                signals[i] = -0.20
+            # Short conditions: Bear Power positive, Bull Power negative, price < EMA50, volume spike
+            elif br > 0 and bp < 0 and price < ema50 and vol_spike:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses VWAP or RSI returns to neutral
+            # Exit conditions: power signals reverse or volume drops
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price crosses above VWAP or RSI >= 40
-                if price > vwap or rsi >= 40:
+                # Exit when Bull Power turns negative or Bear Power turns positive
+                if bp <= 0 or br >= 0:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price crosses below VWAP or RSI <= 60
-                if price < vwap or rsi <= 60:
+                # Exit when Bear Power turns negative or Bull Power turns positive
+                if br <= 0 or bp >= 0:
                     exit_signal = True
+            
+            # Also exit if volume dries up significantly
+            if vol < 0.6 * vol_ma:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_VWAP_ATR_RSI_MeanReversion"
-timeframe = "1h"
+name = "6h_ElderRay_EMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
