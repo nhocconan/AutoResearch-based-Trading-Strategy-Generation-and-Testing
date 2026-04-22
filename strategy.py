@@ -13,90 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot points (ONCE before loop)
+    # Load 1d data for trend and volatility filters (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's pivot points
+    # 1d EMA 34 for trend direction
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 1d ATR for volatility filter (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    prev_high = high_1d
-    prev_low = low_1d
-    prev_close = close_1d
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    
-    # Align pivot levels to 1d timeframe (already aligned)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Volume confirmation: 20-day average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 6h 20-period Donchian channels
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 6h volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(20, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_avg_20[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+            np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R2 + volume spike + volatility filter
-            if (close[i] > r2_aligned[i] and 
+            # Long: Price breaks above 20-period high + above 1d EMA34 + volume spike + volatility filter
+            if (close[i] > high_roll[i] and 
+                close[i] > ema_34_1d_aligned[i] and
                 volume[i] > 1.5 * vol_avg_20[i] and
-                atr[i] > 0.5 * atr[i-1] if i > 0 else True):
-                signals[i] = 0.30
+                atr_1d_aligned[i] > 0.5 * np.nanmedian(atr_1d_aligned[max(0, i-20):i])):  # Volatility above median
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S2 + volume spike + volatility filter
-            elif (close[i] < s2_aligned[i] and 
+            # Short: Price breaks below 20-period low + below 1d EMA34 + volume spike + volatility filter
+            elif (close[i] < low_roll[i] and 
+                  close[i] < ema_34_1d_aligned[i] and
                   volume[i] > 1.5 * vol_avg_20[i] and
-                  atr[i] > 0.5 * atr[i-1] if i > 0 else True):
-                signals[i] = -0.30
+                  atr_1d_aligned[i] > 0.5 * np.nanmedian(atr_1d_aligned[max(0, i-20):i])):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite pivot level (full exit)
+            # Exit: Price crosses back to 20-period opposite band
             if position == 1:
-                # Exit long: Price closes below S1
-                if close[i] < s1_aligned[i]:
+                # Exit long: Price closes below 20-period low
+                if close[i] < low_roll[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above R1
-                if close[i] > r1_aligned[i]:
+                # Exit short: Price closes above 20-period high
+                if close[i] > high_roll[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
-name = "1D_Pivot_R2_S2_Breakout_Volume_Volatility"
-timeframe = "1d"
+name = "6H_Donchian20_1dEMA34_Volume_Volatility"
+timeframe = "6h"
 leverage = 1.0
