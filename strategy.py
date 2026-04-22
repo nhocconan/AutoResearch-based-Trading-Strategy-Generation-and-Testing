@@ -1,11 +1,21 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+
+"""
+Hypothesis: 12h timeframe with Camarilla pivot levels (R1/S1) from daily data,
+combined with EMA trend filter and volume confirmation. Uses 12h for lower
+frequency to reduce trade count and fee drag. Targets 50-150 total trades over
+4 years. Works in both bull and bear markets by using EMA filter for trend
+direction and volume for confirmation.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 34:
+    if n < 35:
         return np.zeros(n)
     
     # Load 1d data once for Camarilla levels and EMA34
@@ -14,7 +24,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (based on current day's HLC)
+    # Calculate Camarilla levels (based on previous day's HLC)
     range_1d = high_1d - low_1d
     r1_1d = close_1d + range_1d * 1.1 / 12
     s1_1d = close_1d - range_1d * 1.1 / 12
@@ -23,20 +33,20 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike filter (20-period average)
+    # Volume spike filter (20-period average on 12h data)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(35, n):
         # Skip if any data is not ready
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
@@ -92,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
