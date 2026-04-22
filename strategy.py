@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-
-"""
-Hypothesis: 4-hour Donchian Breakout with 12-hour EMA Trend and Volume Filter.
-Trades breakouts above/below 4-hour Donchian channels only when aligned with 12-hour EMA trend direction.
-Requires volume confirmation to reduce false breakouts. Designed for low trade frequency (20-40 trades/year)
-to minimize fee drag and capture strong trending moves in both bull and bear markets.
-"""
+# 1h Strategy: 4h Trend + 1h Momentum with Volume Confirmation
+# Hypothesis: In 1h timeframe, use 4h EMA trend as primary direction filter and 1h RSI mean-reversion
+# for entry timing. Only trade during active session (08-20 UTC) to reduce noise.
+# Target: 15-30 trades/year by requiring trend alignment + RSI extreme + volume spike.
+# Works in bull/bear by following 4h trend direction while fading 1h extremes.
 
 import numpy as np
 import pandas as pd
@@ -21,70 +18,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12-hour data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # 12-hour EMA for trend filter (50-period)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA21 for trend filter
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # 4-hour Donchian channels (20-period)
-    # We need to calculate this on 4h data, so we use the prices array directly
-    # Since prices is 4h, we can compute rolling max/min
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1h RSI(14) for mean-reversion signals
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # 1h volume spike: current > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(high_max_20[i]) or 
-            np.isnan(low_min_20[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
-        if position == 0 and vol_filter:
-            # Long breakout: price breaks above upper Donchian channel with uptrend bias
-            if close[i] > high_max_20[i] and close[i] > ema_50_12h_aligned[i]:
-                signals[i] = 0.25
+        if position == 0 and vol_spike:
+            # Long: 4h uptrend + 1h RSI oversold (<30)
+            if ema_21_4h_aligned[i] > ema_21_4h_aligned[i-1] and rsi[i] < 30:
+                signals[i] = 0.20
                 position = 1
-            # Short breakout: price breaks below lower Donchian channel with downtrend bias
-            elif close[i] < low_min_20[i] and close[i] < ema_50_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: 4h downtrend + 1h RSI overbought (>70)
+            elif ema_21_4h_aligned[i] < ema_21_4h_aligned[i-1] and rsi[i] > 70:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: price returns to opposite Donchian level or trend reverses
+            # Exit: RSI returns to neutral zone (40-60) or trend change
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below lower Donchian channel or closes below 12h EMA
-                if close[i] < low_min_20[i] or close[i] < ema_50_12h_aligned[i]:
+                # Exit long: RSI >= 40 or 4h trend turns down
+                if rsi[i] >= 40 or ema_21_4h_aligned[i] < ema_21_4h_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above upper Donchian channel or closes above 12h EMA
-                if close[i] > high_max_20[i] or close[i] > ema_50_12h_aligned[i]:
+                # Exit short: RSI <= 60 or 4h trend turns up
+                if rsi[i] <= 60 or ema_21_4h_aligned[i] > ema_21_4h_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_Donchian_Breakout_12hEMA50_Volume"
-timeframe = "4h"
+name = "1h_4hEMA21_Trend_RSI14_MeanRev_Volume"
+timeframe = "1h"
 leverage = 1.0
