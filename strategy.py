@@ -8,7 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for pivot levels and ATR (HTF)
+    # Load weekly data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Load daily data for pivot levels (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -36,11 +41,6 @@ def generate_signals(prices):
     tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
     # Volume spike detection (20-period average)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,26 +55,26 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all HTF data to 6h timeframe
+    # Align all HTF data to 1d timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any data is not ready
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
             np.isnan(r2_aligned[i]) or 
             np.isnan(s2_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i]) or 
             np.isnan(atr[i])):
             if position != 0:
@@ -90,17 +90,17 @@ def generate_signals(prices):
         r2 = r2_aligned[i]
         s2 = s2_aligned[i]
         atr_1d = atr_1d_aligned[i]
-        ema50_12h = ema50_12h_aligned[i]
+        ema200_1w = ema200_1w_aligned[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume + above 12h EMA50 + volatility filter
-            if price > r2 and vol > 1.5 * vol_ma and price > ema50_12h and atr_1d > 0:
+            # Long: price breaks above R2 with volume + above weekly EMA200 + volatility filter
+            if price > r2 and vol > 1.5 * vol_ma and price > ema200_1w and atr_1d > 0:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S2 with volume + below 12h EMA50 + volatility filter
-            elif price < s2 and vol > 1.5 * vol_ma and price < ema50_12h and atr_1d > 0:
+            # Short: price breaks below S2 with volume + below weekly EMA200 + volatility filter
+            elif price < s2 and vol > 1.5 * vol_ma and price < ema200_1w and atr_1d > 0:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -123,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyPivot_R1_S1_Breakout_12hEMA50_Volume_ATRStop"
-timeframe = "6h"
+name = "1d_DailyPivot_R1_S1_Breakout_1wEMA200_Volume_ATRStop"
+timeframe = "1d"
 leverage = 1.0
