@@ -13,30 +13,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for Donchian(20) - ONCE before loop
+    # Load weekly data for ATR filter - ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    if len(df_weekly) < 14:
         return np.zeros(n)
     
-    # Calculate Donchian(20) channels from weekly data
+    # Calculate weekly ATR(14)
     high_weekly = df_weekly['high'].values
     low_weekly = df_weekly['low'].values
-    upper_20 = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
+    close_weekly = df_weekly['close'].values
+    tr1 = high_weekly - low_weekly
+    tr2 = np.abs(high_weekly - np.roll(close_weekly, 1))
+    tr3 = np.abs(low_weekly - np.roll(close_weekly, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_weekly = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Donchian channels to 12h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_weekly, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_weekly, lower_20)
-    
-    # Load daily data for volume average (20-period) - ONCE before loop
+    # Load daily data for Donchian(20) - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate daily volume average
-    daily_volume = df_daily['volume'].values
-    vol_avg_20 = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_daily, vol_avg_20)
+    # Calculate Donchian(20) channels from daily data
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian channels and ATR to 1d timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
+    atr_weekly_aligned = align_htf_to_ltf(prices, df_weekly, atr_weekly)
+    
+    # Calculate 1d volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -47,7 +57,7 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i])):
+            np.isnan(atr_weekly_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,14 +74,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above weekly Donchian(20) with volume
+            # Long: Price breaks above upper Donchian(20) with volume and low weekly volatility
             if (close[i] > upper_20_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20_aligned[i]):
+                volume[i] > 1.5 * vol_avg_20[i] and
+                atr_weekly_aligned[i] < np.median(atr_weekly_aligned[max(0, i-50):i+1])):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly Donchian(20) with volume
+            # Short: Price breaks below lower Donchian(20) with volume and low weekly volatility
             elif (close[i] < lower_20_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20_aligned[i]):
+                  volume[i] > 1.5 * vol_avg_20[i] and
+                  atr_weekly_aligned[i] < np.median(atr_weekly_aligned[max(0, i-50):i+1])):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -91,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WeeklyDonchian20_Volume_Session"
-timeframe = "12h"
+name = "1D_Donchian20_Volume_ATRFilter_Session"
+timeframe = "1d"
 leverage = 1.0
