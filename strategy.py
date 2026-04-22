@@ -8,63 +8,63 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: 12h price action strategy using 1d high/low channels with volume confirmation
-    # Works in both bull and bear markets: buys near 1d support, sells near 1d resistance
-    # Uses 1-day high/low channels as dynamic support/resistance levels
-    # Volume surge confirms institutional interest at key levels
+    # Hypothesis: 4h Donchian breakout with 12h EMA50 trend and volume confirmation
+    # Works in both bull and bear markets: breakouts from price channels capture directional moves
+    # Donchian channels identify breakout/breakdown levels
+    # Volume surge confirms breakout strength, EMA50 filters trend direction
     
-    # Load daily data once
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 12h data once
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # 1-day channel: 20-period high/low (dynamic support/resistance)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # 12h EMA50 trend filter
+    ema_12h_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
     
-    # Align 1-day channel to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # 4h Donchian channels (20 period)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # Calculate Donchian upper and lower channels
+    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter (20-period MA surge)
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 1.8 * vol_ma20
-    
-    # Price position within 1-day channel (0 = at low, 1 = at high)
-    price_pos = (prices['close'].values - low_20_aligned) / (high_20_aligned - low_20_aligned + 1e-10)
+    vol_surge = prices['volume'].values > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_12h_50_aligned[i]) or np.isnan(donch_upper[i]) or 
+            np.isnan(donch_lower[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Near 1d support (low channel) with volume surge
-            if price_pos[i] < 0.2 and vol_surge[i]:
+            # Long: Donchian breakout above upper channel with volume surge AND 12h EMA50 uptrend
+            if close[i] > donch_upper[i] and vol_surge[i] and close[i] > ema_12h_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Near 1d resistance (high channel) with volume surge
-            elif price_pos[i] > 0.8 and vol_surge[i]:
+            # Short: Donchian breakdown below lower channel with volume surge AND 12h EMA50 downtrend
+            elif close[i] < donch_lower[i] and vol_surge[i] and close[i] < ema_12h_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price moves to middle of channel or opposite extreme
+            # Exit: Price returns to opposite Donchian channel
             if position == 1:
-                if price_pos[i] > 0.5:  # Moved to middle
+                if close[i] < donch_lower[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if price_pos[i] < 0.5:  # Moved to middle
+                if close[i] > donch_upper[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -72,6 +72,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dChannel_Volume_Surge_v1"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_12hEMA50_Trend_VolumeSurge_v1"
+timeframe = "4h"
 leverage = 1.0
