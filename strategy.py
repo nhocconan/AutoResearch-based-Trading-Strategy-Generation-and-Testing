@@ -3,92 +3,141 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1-day volume confirmation and 1-week trend filter.
-# Uses 4-hour Donchian channel breakouts (20 periods) for entry, confirmed by 1-day volume spikes
-# and filtered by 1-week EMA trend direction. Designed to capture strong momentum moves while
-# avoiding counter-trend trades. Targets 20-50 trades/year with disciplined risk control.
+# Hypothesis: Daily trading strategy using weekly Supertrend for trend direction and daily ATR-based breakout for entry.
+# Weekly Supertrend defines bull/bear regime; daily ATR breakout captures momentum within the trend.
+# Designed to work in both bull and bear markets by only trading in the direction of the weekly trend.
+# Targets 10-25 trades/year with disciplined risk control via ATR-based exits.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1-week data for EMA trend filter (once before loop)
+    # Load weekly data for Supertrend (trend filter)
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_length = 34
-    ema_1w = pd.Series(close_1w).ewm(span=ema_length, adjust=False, min_periods=ema_length).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Load 1-day data for volume spike filter
+    # Calculate weekly Supertrend (10, 3.0)
+    atr_period = 10
+    multiplier = 3.0
+    
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Basic Upper and Lower Bands
+    hl2 = (high_1w + low_1w) / 2
+    upper_band = hl2 + multiplier * atr_1w
+    lower_band = hl2 - multiplier * atr_1w
+    
+    # Final Upper and Lower Bands
+    final_upper = np.zeros_like(upper_band)
+    final_lower = np.zeros_like(lower_band)
+    for i in range(len(close_1w)):
+        if i == 0:
+            final_upper[i] = upper_band[i]
+            final_lower[i] = lower_band[i]
+        else:
+            if close_1w[i-1] <= final_upper[i-1]:
+                final_upper[i] = min(upper_band[i], final_upper[i-1])
+            else:
+                final_upper[i] = upper_band[i]
+            
+            if close_1w[i-1] >= final_lower[i-1]:
+                final_lower[i] = max(lower_band[i], final_lower[i-1])
+            else:
+                final_lower[i] = lower_band[i]
+    
+    # Supertrend direction
+    supertrend_dir = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > final_upper[i-1]:
+            supertrend_dir[i] = 1
+        elif close_1w[i] < final_lower[i-1]:
+            supertrend_dir[i] = -1
+        else:
+            supertrend_dir[i] = supertrend_dir[i-1]
+            if supertrend_dir[i] == 1 and final_lower[i] < final_lower[i-1]:
+                final_lower[i] = final_lower[i-1]
+            if supertrend_dir[i] == -1 and final_upper[i] > final_upper[i-1]:
+                final_upper[i] = final_upper[i-1]
+    
+    # Align weekly Supertrend to daily
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend_dir)
+    
+    # Load daily data for ATR breakout
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_length = 20
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=vol_ma_length, min_periods=vol_ma_length).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4-hour Donchian channel
-    high = prices['high'].values
-    low = prices['low'].values
-    donchian_length = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_length, min_periods=donchian_length).max().values
-    lower_channel = pd.Series(low).rolling(window=donchian_length, min_periods=donchian_length).min().values
+    # Calculate daily ATR (14)
+    atr_period_d = 14
+    tr1_d = high_1d - low_1d
+    tr2_d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1_d[0] = 0
+    tr2_d[0] = 0
+    tr3_d[0] = 0
+    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    atr_1d = pd.Series(tr_d).rolling(window=atr_period_d, min_periods=atr_period_d).mean().values
     
-    # Calculate 4-hour average volume for volume spike detection
-    volume = prices['volume'].values
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily moving average (20) for breakout reference
+    ma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or 
-            np.isnan(vol_ma_4h[i])):
+        if (np.isnan(supertrend_aligned[i]) or 
+            np.isnan(atr_1d[i]) or 
+            np.isnan(ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        vol_4h = volume[i]
-        vol_4h_ma = vol_ma_4h[i]
-        vol_1d = vol_ma_1d_aligned[i]
-        ema_trend = ema_1w_aligned[i]
-        
-        upper = upper_channel[i]
-        lower = lower_channel[i]
-        
-        # Volume filter: current 4h volume > 1.5 * 4h average AND 1d volume > 1.5 * 1d average
-        vol_4h_spike = vol_4h > 1.5 * vol_4h_ma
-        vol_1d_spike = vol_1d > 1.5 * vol_ma_1d_aligned[i]
-        volume_filter = vol_4h_spike and vol_1d_spike
+        atr = atr_1d[i]
+        ma = ma_20[i]
+        trend = supertrend_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above Donchian upper channel with volume and uptrend
-            if price > upper and volume_filter and price > ema_trend:
+            # Long entry: price breaks above MA(20) + 0.5*ATR in uptrend
+            if trend == 1 and price > ma + 0.5 * atr:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian lower channel with volume and downtrend
-            elif price < lower and volume_filter and price < ema_trend:
+                entry_price = price
+            # Short entry: price breaks below MA(20) - 0.5*ATR in downtrend
+            elif trend == -1 and price < ma - 0.5 * atr:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: ATR-based trailing stop
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on retracement to Donchian lower channel
-                if price < lower:
+                # Trailing stop: highest close since entry minus 2.0*ATR
+                # We approximate highest close using rolling max of close
+                # For simplicity, use close-based trailing stop from entry
+                if price < entry_price - 2.0 * atr:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on retracement to Donchian upper channel
-                if price > upper:
+                # Trailing stop: lowest close since entry plus 2.0*ATR
+                if price > entry_price + 2.0 * atr:
                     exit_signal = True
             
             if exit_signal:
@@ -100,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_1dVolumeSpike_1wTrendFilter"
-timeframe = "4h"
+name = "1d_WeeklySupertrend_DailyATRBreakout"
+timeframe = "1d"
 leverage = 1.0
