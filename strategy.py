@@ -1,67 +1,71 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 1-day RSI with 1-week trend filter and volume confirmation. 
-RSI(14) identifies overbought/oversold conditions, while the 1-week EMA(34) 
-determines the primary trend direction. Volume spikes confirm momentum at 
-extreme RSI readings. This strategy aims to capture mean reversion in ranging 
-markets and trend continuation in trending markets by filtering RSI signals 
-with the higher timeframe trend. Target: 7-25 trades/year per symbol (30-100 total).
+Hypothesis: 6-hour Williams Alligator with 12-hour trend filter and volume confirmation.
+The Alligator (Jaw/Teeth/Lips) identifies trend direction and strength.
+The 12-hour trend filter ensures trades align with the higher timeframe trend.
+Volume spikes confirm participation at Alligator alignment points.
+This strategy aims to catch strong trending moves in both bull and bear markets by
+trading when all three Alligator lines are aligned in the same direction.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_alligator(high, low, jaw=13, teeth=8, lips=5):
+    """Calculate Alligator lines: Jaw (13), Teeth (8), Lips (5) SMAs of median price"""
+    median_price = (high + low) / 2
+    
+    # Jaw: 13-period SMA shifted 8 bars ahead
+    jaw_line = (pd.Series(median_price).rolling(window=jaw, min_periods=jaw).mean()).shift(8)
+    
+    # Teeth: 8-period SMA shifted 5 bars ahead
+    teeth_line = (pd.Series(median_price).rolling(window=teeth, min_periods=teeth).mean()).shift(5)
+    
+    # Lips: 5-period SMA shifted 3 bars ahead
+    lips_line = (pd.Series(median_price).rolling(window=lips, min_periods=lips).mean()).shift(3)
+    
+    return jaw_line.values, teeth_line, lips_line
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for RSI calculation - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 6h Alligator data - ONCE before loop
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
         return np.zeros(n)
     
-    # Calculate RSI(14) on 1d data
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Alligator on 6h data
+    jaw_6h, teeth_6h, lips_6h = calculate_alligator(
+        df_6h['high'].values, df_6h['low'].values
+    )
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 periods
-    avg_loss[13] = np.mean(loss[1:14])
+    # Align Alligator lines to 6h timeframe
+    jaw_6h_aligned = align_htf_to_ltf(prices, df_6h, jaw_6h)
+    teeth_6h_aligned = align_htf_to_ltf(prices, df_6h, teeth_6h)
+    lips_6h_aligned = align_htf_to_ltf(prices, df_6h, lips_6h)
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1d = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
-    
-    # Align RSI to lower timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Load 1w data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 12h data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34) for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h EMA for trend filter (21-period)
+    close_12h = df_12h['close'].values
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
     
-    # Calculate volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h volume average (24-period)
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -69,10 +73,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(jaw_6h_aligned[i]) or np.isnan(teeth_6h_aligned[i]) or 
+            np.isnan(lips_6h_aligned[i]) or np.isnan(ema_21_12h_aligned[i]) or
+            np.isnan(vol_avg_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,35 +93,36 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # RSI levels
-        rsi = rsi_1d_aligned[i]
-        ema_trend = ema_34_1w_aligned[i]
-        close_price = close[i]
+        # Check Alligator alignment
+        # Bullish alignment: Lips > Teeth > Jaw (all pointing up)
+        bullish_aligned = (lips_6h_aligned[i] > teeth_6h_aligned[i] > jaw_6h_aligned[i])
+        # Bearish alignment: Lips < Teeth < Jaw (all pointing down)
+        bearish_aligned = (lips_6h_aligned[i] < teeth_6h_aligned[i] < jaw_6h_aligned[i])
         
         if position == 0:
-            # Long: RSI oversold (<30) in uptrend (price > weekly EMA) with volume confirmation
-            if (rsi < 30 and 
-                close_price > ema_trend and 
-                volume[i] > 1.5 * vol_avg_20[i]):
+            # Long: Bullish alignment + above 12h EMA + volume spike
+            if (bullish_aligned and 
+                close[i] > ema_21_12h_aligned[i] and 
+                volume[i] > 2.0 * vol_avg_24[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) in downtrend (price < weekly EMA) with volume confirmation
-            elif (rsi > 70 and 
-                  close_price < ema_trend and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
+            # Short: Bearish alignment + below 12h EMA + volume spike
+            elif (bearish_aligned and 
+                  close[i] < ema_21_12h_aligned[i] and 
+                  volume[i] > 2.0 * vol_avg_24[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral zone (40-60) or contrary signal
+            # Exit: Alligator lines cross or price crosses 12h EMA
             exit_signal = False
             
             if position == 1:
-                # Exit long: RSI reaches 50 or bearish reversal signal
-                if rsi >= 50 or (rsi > 70 and close_price < ema_trend):
+                # Exit long: Bearish alignment or price below 12h EMA
+                if bearish_aligned or close[i] < ema_21_12h_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: RSI reaches 50 or bullish reversal signal
-                if rsi <= 50 or (rsi < 30 and close_price > ema_trend):
+                # Exit short: Bullish alignment or price above 12h EMA
+                if bullish_aligned or close[i] > ema_21_12h_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -127,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_RSI_1wEMA_Trend_Volume"
-timeframe = "1d"
+name = "6h_Alligator_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
