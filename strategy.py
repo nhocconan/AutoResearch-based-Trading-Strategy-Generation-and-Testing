@@ -3,86 +3,75 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index (14) + RSI (14) mean reversion with 12h EMA50 trend filter.
-# In low volatility (choppy) markets, price tends to revert to mean. High Choppiness Index (>61.8) 
-# indicates ranging conditions. Combine with RSI extremes (<30 for long, >70 for short) and 
-# 12h EMA50 trend filter to avoid counter-trend trades. Low trade frequency (~15-25/year) 
-# minimizes fee decay. Works in both bull and bear markets by adapting to ranging conditions.
+# Hypothesis: 4h RSI(14) with 1d EMA50 trend filter and volume spike confirmation.
+# RSI < 30 indicates oversold conditions, RSI > 70 indicates overbought conditions.
+# Combined with 1d EMA50 trend filter to ensure we trade in the direction of higher timeframe trend,
+# and volume spikes (>1.5x 20-period average) to confirm institutional participation.
+# Designed for low trade frequency (~15-25/year) to minimize fee decay.
+# Works in both bull and bear markets by following higher timeframe trend and buying dips/selling rallies.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA50 trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 1d data for RSI calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 50-period EMA on 12h close for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Calculate 14-period Choppiness Index
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # ATR(14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr / (hh - ll)) / np.log10(14)
-    
-    # Calculate 14-period RSI
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / avg_loss
+    # Calculate 14-period RSI on 1d close
+    delta = pd.Series(close_1d).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Calculate 50-period EMA on 1d close for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d indicators to 1h timeframe (waits for 1d bar to close)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(chop[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        chop_val = chop[i]
-        rsi_val = rsi[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        rsi_val = rsi_aligned[i]
         ema_val = ema_50_aligned[i]
         
-        # Chop filter: > 61.8 indicates ranging market (mean reversion)
-        chop_filter = chop_val > 61.8
+        # Volume filter: current volume > 1.5 * 20-period average (moderate filter for low frequency)
+        vol_spike = vol > 1.5 * vol_ma
+        
+        # RSI conditions
+        rsi_oversold = rsi_val < 30
+        rsi_overbought = rsi_val > 70
         
         if position == 0:
-            # Long conditions: choppy market + RSI oversold + price above EMA (weak uptrend bias)
-            if chop_filter and rsi_val < 30 and price > ema_val:
-                signals[i] = 0.25
+            # Long conditions: RSI oversold + price above EMA + volume spike
+            if rsi_oversold and price > ema_val and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: choppy market + RSI overbought + price below EMA (weak downtrend bias)
-            elif chop_filter and rsi_val > 70 and price < ema_val:
-                signals[i] = -0.25
+            # Short conditions: RSI overbought + price below EMA + volume spike
+            elif rsi_overbought and price < ema_val and vol_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
@@ -90,13 +79,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when RSI returns to neutral or chop decreases
-                if rsi_val > 50 or chop_val < 50:
+                # Exit when RSI becomes overbought or price breaks below EMA
+                if rsi_overbought or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when RSI returns to neutral or chop decreases
-                if rsi_val < 50 or chop_val < 50:
+                # Exit when RSI becomes oversold or price breaks above EMA
+                if rsi_oversold or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -104,10 +93,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_ChopRSI_MeanReversion_12hEMA50"
-timeframe = "4h"
+name = "1d_RSI14_1dEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
