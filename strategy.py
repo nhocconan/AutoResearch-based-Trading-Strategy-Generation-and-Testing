@@ -1,22 +1,36 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 12-hour Williams %R Reversal with 1-day EMA trend filter and volume confirmation.
-Trades reversals at extreme Williams %R levels (<-80 for long, >-20 for short) in the direction of the daily EMA trend.
-Uses volume spike to confirm institutional interest. Designed for low trade frequency (12-37/year) to minimize fee drag
-and work in both bull and bear markets by aligning with higher timeframe trend and mean-reversion at extreme levels.
+Hypothesis: 4-hour Williams Fractal Breakout with 12-hour EMA trend filter and volume confirmation.
+Trades breakouts of Williams fractal highs/lows in the direction of the 12-hour EMA trend.
+Volume spike confirms institutional participation. Designed for low trade frequency
+(15-30 trades/year) to minimize fee drift and work in both bull and bear markets by aligning with
+higher timeframe trend and using fractal-based structure.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_williams_r(high, low, close, period=14):
-    """Calculate Williams %R indicator."""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return wr.fillna(0).values
+def calculate_williams_fractals(high, low):
+    """Calculate Williams fractal highs and lows.
+    Returns (fractal_high, fractal_low) arrays with NaN where no fractal.
+    """
+    n = len(high)
+    fractal_high = np.full(n, np.nan)
+    fractal_low = np.full(n, np.nan)
+    
+    for i in range(2, n-2):
+        # Fractal high: high[i] is highest of 5-bar window (i-2, i-1, i, i+1, i+2)
+        if (high[i] > high[i-1] and high[i] > high[i-2] and 
+            high[i] > high[i+1] and high[i] > high[i+2]):
+            fractal_high[i] = high[i]
+        # Fractal low: low[i] is lowest of 5-bar window
+        if (low[i] < low[i-1] and low[i] < low[i-2] and 
+            low[i] < low[i+1] and low[i] < low[i+2]):
+            fractal_low[i] = low[i]
+    
+    return fractal_high, fractal_low
 
 def generate_signals(prices):
     n = len(prices)
@@ -28,22 +42,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter and Williams %R calculation - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12-hour data for trend filter and fractal calculation - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Daily EMA for trend filter (34-period)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12-hour EMA for trend filter (21-period)
+    close_12h = df_12h['close'].values
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
     
-    # Calculate daily Williams %R (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    wr_14 = calculate_williams_r(high_1d, low_1d, close_1d_arr, 14)
-    wr_14_aligned = align_htf_to_ltf(prices, df_1d, wr_14)
+    # Calculate 12-hour Williams fractals
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    fractal_high_12h, fractal_low_12h = calculate_williams_fractals(high_12h, low_12h)
+    fractal_high_12h_aligned = align_htf_to_ltf(prices, df_12h, fractal_high_12h, additional_delay_bars=2)
+    fractal_low_12h_aligned = align_htf_to_ltf(prices, df_12h, fractal_low_12h, additional_delay_bars=2)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,8 +67,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(wr_14_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(fractal_high_12h_aligned[i]) or 
+            np.isnan(fractal_low_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,25 +78,25 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0 and vol_spike:
-            # Long: Williams %R oversold (< -80) with uptrend bias
-            if wr_14_aligned[i] < -80 and close[i] > ema_34_1d_aligned[i]:
+            # Long: price breaks above recent 12h fractal high with uptrend bias
+            if close[i] > fractal_high_12h_aligned[i] and close[i] > ema_21_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) with downtrend bias
-            elif wr_14_aligned[i] > -20 and close[i] < ema_34_1d_aligned[i]:
+            # Short: price breaks below recent 12h fractal low with downtrend bias
+            elif close[i] < fractal_low_12h_aligned[i] and close[i] < ema_21_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Williams %R returns to neutral range (-50) or trend reverses
+            # Exit: price returns to opposite fractal level or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R rises above -50 or price closes below daily EMA
-                if wr_14_aligned[i] > -50 or close[i] < ema_34_1d_aligned[i]:
+                # Exit long: price closes below 12h fractal low or below 12h EMA
+                if close[i] < fractal_low_12h_aligned[i] or close[i] < ema_21_12h_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R falls below -50 or price closes above daily EMA
-                if wr_14_aligned[i] < -50 or close[i] > ema_34_1d_aligned[i]:
+                # Exit short: price closes above 12h fractal high or above 12h EMA
+                if close[i] > fractal_high_12h_aligned[i] or close[i] > ema_21_12h_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -93,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_Reversal_1dEMA34_Volume"
-timeframe = "12h"
+name = "4h_Williams_Fractal_Breakout_12hEMA21_Volume"
+timeframe = "4h"
 leverage = 1.0
