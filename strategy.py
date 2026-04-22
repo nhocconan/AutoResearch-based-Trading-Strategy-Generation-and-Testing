@@ -33,13 +33,13 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all levels to daily timeframe
+    # Align all levels to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume confirmation: 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 4-period average (12h bars)
+    vol_avg_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,7 +47,7 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,19 +55,20 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R4 with volume spike AND above 1d EMA34 (uptrend)
-            if (close[i] > r4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+            if (close[i] > r4_aligned[i] and volume[i] > 1.5 * vol_avg_4[i] and 
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S4 with volume spike AND below 1d EMA34 (downtrend)
-            elif (close[i] < s4_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
+            elif (close[i] < s4_aligned[i] and volume[i] > 1.5 * vol_avg_4[i] and 
                   close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite S1/R1 level (tighter stop)
+            # Exit: Price crosses back to opposite R1/S1 level (tighter stop)
             if position == 1:
-                # Calculate S1 for exit condition from previous day's data
+                # Exit long: Price closes below S1 (calculated from previous day)
+                # Recalculate S1 for exit condition
                 if i > 0:
                     s1 = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
                     s1_series = pd.Series(np.full_like(close_1d, s1))
@@ -80,7 +81,7 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Calculate R1 for exit condition from previous day's data
+                # Exit short: Price closes above R1 (calculated from previous day)
                 if i > 0:
                     r1 = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
                     r1_series = pd.Series(np.full_like(close_1d, r1))
@@ -95,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
-timeframe = "1d"
+name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
