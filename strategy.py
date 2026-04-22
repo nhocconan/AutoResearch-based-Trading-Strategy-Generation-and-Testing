@@ -13,82 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for pivot and ATR
+    # Load weekly data for trend filter and monthly data for volatility regime
+    df_1w = get_htf_data(prices, '1w')
+    df_1m = get_htf_data(prices, '1M')
+    
+    close_1w = df_1w['close'].values
+    close_1m = df_1m['close'].values
+    
+    # Weekly EMA200 for trend filter (bull/bear regime)
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Monthly ATR for volatility regime (high/low volatility filter)
+    high_1m = df_1m['high'].values
+    low_1m = df_1m['low'].values
+    tr1m = np.maximum(high_1m - low_1m, 
+                      np.absolute(np.subtract(high_1m, np.roll(close_1m, 1))),
+                      np.absolute(np.subtract(low_1m, np.roll(close_1m, 1))))
+    atr1m = pd.Series(tr1m).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr1m_pct = atr1m / close_1m  # ATR as percentage of price
+    
+    # Daily Donchian channel (20-period) for breakout signals
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate daily range
-    daily_range = high_1d - low_1d
+    # Calculate Donchian channels (using rolling window)
+    upper20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla R1 and S1 from previous day (avoid look-ahead)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_range = np.roll(daily_range, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_range[0] = np.nan
-    
-    r1 = prev_close + (prev_range * 1.1 / 12)
-    s1 = prev_close - (prev_range * 1.1 / 12)
-    
-    # Calculate 1-day ATR(14) for volatility filter and stop
-    tr1 = np.maximum(high_1d - low_1d,
-                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
-                                np.abs(low_1d - np.roll(close_1d, 1))))
-    tr1[0] = np.nan
-    atr14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume spike filter (20-period on 12h)
+    # Volume confirmation (20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20
+    vol_surge = volume > 1.5 * vol_ma20  # 1.5x volume surge for confirmation
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Align indicators to 12-hour timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    # Align all indicators to daily timeframe
+    upper20_aligned = align_htf_to_ltf(prices, df_1d, upper20)
+    lower20_aligned = align_htf_to_ltf(prices, df_1d, lower20)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1d, ema200_1w)
+    atr1m_pct_aligned = align_htf_to_ltf(prices, df_1d, atr1m_pct)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(100, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(atr14_1d_aligned[i]) or np.isnan(vol_ma20[i]) or
-            not in_session[i]):
+    for i in range(200, n):  # Start after warmup for indicators
+        # Skip if data not ready
+        if (np.isnan(upper20_aligned[i]) or np.isnan(lower20_aligned[i]) or
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(atr1m_pct_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Regime filters:
+        # 1. Trend filter: only take longs in bull market (price > weekly EMA200)
+        #    only take shorts in bear market (price < weekly EMA200)
+        bull_market = close[i] > ema200_1w_aligned[i]
+        bear_market = close[i] < ema200_1w_aligned[i]
+        
+        # 2. Volatility filter: avoid extremely low volatility (choppy) and extremely high volatility (panic)
+        #    Optimal range: 0.5% to 3.0% daily ATR
+        vol_ok = (atr1m_pct_aligned[i] >= 0.005) & (atr1m_pct_aligned[i] <= 0.030)
+        
         if position == 0:
-            # Long: Price breaks above R1 + volume spike
-            if close[i] > r1_aligned[i] and vol_spike[i]:
+            # Long: Price breaks above Donchian upper + bull market + vol OK + volume surge
+            if (close[i] > upper20_aligned[i] and 
+                bull_market and 
+                vol_ok and 
+                vol_surge[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike
-            elif close[i] < s1_aligned[i] and vol_spike[i]:
+            # Short: Price breaks below Donchian lower + bear market + vol OK + volume surge
+            elif (close[i] < lower20_aligned[i] and 
+                  bear_market and 
+                  vol_ok and 
+                  vol_surge[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to opposite level or ATR-based stop
+            # Exit conditions:
+            # 1. Price returns to opposite Donchian level
+            # 2. Trend changes (price crosses weekly EMA200)
+            # 3. Volatility becomes too low (< 0.3%) indicating chop
             if position == 1:
-                # Exit long if price crosses below S1 or ATR stop hit
-                if close[i] < s1_aligned[i] or close[i] < (high[max(0, i-1)] - 1.5 * atr14_1d_aligned[i]):
+                if (close[i] < lower20_aligned[i] or 
+                    close[i] < ema200_1w_aligned[i] or
+                    atr1m_pct_aligned[i] < 0.003):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short if price crosses above R1 or ATR stop hit
-                if close[i] > r1_aligned[i] or close[i] > (low[max(0, i-1)] + 1.5 * atr14_1d_aligned[i]):
+                if (close[i] > upper20_aligned[i] or 
+                    close[i] > ema200_1w_aligned[i] or
+                    atr1m_pct_aligned[i] < 0.003):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -96,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_Volume_ATRStop"
-timeframe = "12h"
+name = "1d_Donchian20_WeeklyEMA200Trend_MonthlyATR_Volume"
+timeframe = "1d"
 leverage = 1.0
