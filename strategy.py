@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversals at R1/S1 with 12h trend and volume confirmation.
-# Uses 12h EMA50 for trend filter and 4h volume spike for momentum.
-# Session filter (08-20 UTC) reduces noise. Target: 20-40 trades/year (80-160 total over 4 years).
-# Works in bull/bear by using 12h trend filter + volume spike for momentum confirmation.
+# Hypothesis: 12h Williams Alligator + 1d trend filter + volume confirmation.
+# Uses Alligator jaws/teeth/lips for trend direction and entry signals.
+# 1d EMA50 filter ensures alignment with higher timeframe trend.
+# Volume spike confirms momentum. Works in bull/bear by following trend.
+# Target: 12-37 trades/year (50-150 total over 4 years) on 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,87 +19,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for price and pivots - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
-        return np.zeros(n)
-    
-    # Load 12h data for trend filter - ONCE before loop
+    # Load 12h data for Alligator calculation - ONCE before loop
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    if len(df_12h) < 13:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
+    # Calculate Williams Alligator on 12h
+    # Jaw (blue): 13-period SMMA, smoothed by 8 periods
+    # Teeth (red): 8-period SMMA, smoothed by 5 periods
+    # Lips (green): 5-period SMMA, smoothed by 3 periods
     close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 4h Camarilla pivots (based on previous 4h bar)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_prev = df_4h['close'].values
+    # SMMA (Smoothed Moving Average) calculation
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan)
+        sma = np.convolve(arr, np.ones(period)/period, mode='valid')
+        result[period-1:] = sma
+        # Smooth the SMA
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    rango = high_4h - low_4h
-    r1 = close_4h_prev + (rango * 1.1 / 12)
-    s1 = close_4h_prev - (rango * 1.1 / 12)
+    jaw = smma(close_12h, 13)
+    teeth = smma(close_12h, 8)
+    lips = smma(close_12h, 5)
     
-    # Align pivots to 4h timeframe (previous 4h bar's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    # Smooth further as per Alligator definition
+    jaw = smma(jaw, 8)
+    teeth = smma(teeth, 5)
+    lips = smma(lips, 3)
     
-    # Calculate 4h volume average (20-period)
+    # Align Alligator lines to 12h timeframe (already aligned via get_htf_data)
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    
+    # Load 1d data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Alligator alignment check: lips > teeth > jaw = uptrend
+        # lips < teeth < jaw = downtrend
+        lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
         
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        is_uptrend = (lips_val > teeth_val > jaw_val)
+        is_downtrend = (lips_val < teeth_val < jaw_val)
         
         if position == 0:
-            # Long: Price crosses below S1 (support) in uptrend with volume
-            if (close[i] < s1_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
+            # Long: Alligator aligned up + price above lips + volume confirmation
+            if (is_uptrend and 
+                close[i] > lips_val and 
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price crosses above R1 (resistance) in downtrend with volume
-            elif (close[i] > r1_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
+            # Short: Alligator aligned down + price below lips + volume confirmation
+            elif (is_downtrend and 
+                  close[i] < lips_val and 
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to 4h close pivot
-            close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h_prev)
+            # Exit: Price crosses back through teeth line or trend changes
             if position == 1:
-                if close[i] >= close_4h_aligned[i]:
+                if close[i] < teeth_val or not is_uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] <= close_4h_aligned[i]:
+                if close[i] > teeth_val or not is_downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -106,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1S1_12hTrend_Volume_Session"
-timeframe = "4h"
+name = "12H_WilliamsAlligator_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
