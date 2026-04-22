@@ -3,35 +3,38 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R momentum with 12h trend filter and volume spike.
-# Williams %R identifies overbought/oversold conditions. In trending markets (12h EMA50),
-# we take counter-trend entries at extremes with volume confirmation. Works in both
-# bull and bear markets by adapting to trend direction. Targets 20-50 trades/year.
+# Hypothesis: Daily 200-day EMA trend filter + weekly Donchian(10) breakout + volume confirmation.
+# Uses weekly Donchian channels for breakout signals in the direction of the daily 200-EMA trend.
+# In uptrend (price > daily EMA200): long on breakout above weekly Donchian high with volume spike.
+# In downtrend (price < daily EMA200): short on breakout below weekly Donchian low with volume spike.
+# Designed to capture major trends while avoiding counter-trend whipsaws.
+# Targets 10-25 trades/year with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 12h data for trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load daily data for EMA200 (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 50-period EMA on 12h data
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 200-day EMA
+    ema200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate Williams %R on 4h data (14-period)
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Load weekly data for Donchian channels (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Calculate 10-period weekly Donchian channels
+    donch_high_1w = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
+    donch_low_1w = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
     
-    # Williams %R = -100 * (HH - Close) / (HH - LL)
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Avoid division by zero
+    # Align indicators to daily timeframe
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high_1w)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low_1w)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -40,10 +43,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
+        if (np.isnan(ema200_aligned[i]) or 
+            np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -53,38 +57,36 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        wr = williams_r[i]
-        ema_50 = ema_50_12h_aligned[i]
+        ema200_val = ema200_aligned[i]
+        upper = donch_high_aligned[i]
+        lower = donch_low_aligned[i]
         
         # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = vol > 1.5 * vol_ma
+        vol_spike = vol > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Determine trend direction from 12h EMA50
-            uptrend = price > ema_50
-            downtrend = price < ema_50
-            
-            # In uptrend: look for oversold conditions to go long
-            # In downtrend: look for overbought conditions to go short
-            if uptrend and wr < -80 and vol_spike:  # Oversold in uptrend
-                signals[i] = 0.25
-                position = 1
-            elif downtrend and wr > -20 and vol_spike:  # Overbought in downtrend
-                signals[i] = -0.25
-                position = -1
+            # Determine trend based on daily EMA200
+            if price > ema200_val:  # Uptrend
+                if price > upper and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+            elif price < ema200_val:  # Downtrend
+                if price < lower and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: opposite Donchian break or loss of trend
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Williams %R returns to overbought or midpoint
-                if wr > -20 or wr > -50:
+                # Exit on break below weekly Donchian low or price below EMA200
+                if price < lower or price < ema200_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when Williams %R returns to oversold or midpoint
-                if wr < -80 or wr < -50:
+                # Exit on break above weekly Donchian high or price above EMA200
+                if price > upper or price > ema200_val:
                     exit_signal = True
             
             if exit_signal:
@@ -96,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_TrendFilter_Volume"
-timeframe = "4h"
+name = "1d_EMA200_WeeklyDonchian10_Trend"
+timeframe = "1d"
 leverage = 1.0
