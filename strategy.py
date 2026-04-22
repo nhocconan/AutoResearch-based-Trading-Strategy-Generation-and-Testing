@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,6 @@ def generate_signals(prices):
     
     # Load 1d data for pivot points (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    
     if len(df_1d) < 2:
         return np.zeros(n)
     
@@ -33,7 +32,7 @@ def generate_signals(prices):
     r2 = pivot + (high_1d - low_1d)
     s2 = pivot - (high_1d - low_1d)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -66,16 +65,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R2 + volume spike + volatility filter
+            # Long: Price breaks above R2 + volume spike
             if (close[i] > r2_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i] and
-                atr[i] > 0.5 * atr[i-1] if i > 0 else True):
+                volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below S2 + volume spike + volatility filter
+            # Short: Price breaks below S2 + volume spike
             elif (close[i] < s2_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i] and
-                  atr[i] > 0.5 * atr[i-1] if i > 0 else True):
+                  volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.30
                 position = -1
         else:
@@ -97,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Pivot_R2_S2_Breakout_Volume_Volatility"
-timeframe = "12h"
+name = "4H_Pivot_R2_S2_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
