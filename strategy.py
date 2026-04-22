@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d EMA34 trend filter and volume spike confirmation
-# Williams %R identifies overbought/oversold conditions for mean reversion entries.
-# 1d EMA34 filter ensures alignment with daily trend for higher probability trades.
-# Volume spike (>2x 20-period average) confirms institutional participation.
-# Designed for 6h timeframe targeting 12-30 trades/year with strong performance in both bull and bear markets.
+# Hypothesis: 12-hour Williams %R with 1-day EMA34 trend filter and volume spike confirmation
+# Williams %R identifies overbought/oversold conditions for mean-reversion entries
+# 1d EMA34 ensures alignment with daily trend for higher probability trades
+# Volume spike (>2x 20-period average) confirms institutional participation
+# Designed for 12h timeframe targeting 12-37 trades/year with strong performance in both bull and bear markets
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,22 +19,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA trend filter (ONCE before loop)
+    # Load 1d data for EMA trend (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Williams %R (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Calculate Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,7 +44,7 @@ def generate_signals(prices):
     
     for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,7 +65,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Williams %R returns to neutral zone (-50) or trend reversal
+            # Exit: Williams %R returns to neutral zone or trend reversal
             if position == 1:
                 # Exit long: Williams %R returns above -50 or trend turns down
                 if (williams_r[i] > -50 or 
@@ -85,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1dEMA34_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
