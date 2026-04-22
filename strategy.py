@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume spike
-# Long when price is above Alligator's teeth (green line) in uptrend (close > 1d EMA34) with volume spike
-# Short when price is below Alligator's teeth in downtrend (close < 1d EMA34) with volume spike
-# Exit when price crosses the Alligator's jaw (red line) or trend reverses
-# Williams Alligator: Jaw (blue) = SMA(13,8), Teeth (red) = SMA(8,5), Lips (green) = SMA(5,3)
-# Uses median price (H+L)/2 as input. Designed for low trade frequency (~20-40/year) to minimize fee drain.
-# Works in bull/bear by combining trend-following with Alligator's alignment and volume confirmation.
+# Hypothesis: 4h Chaikin Money Flow (CMF) with 1d EMA trend filter and volume spike
+# Long when CMF > 0 (buying pressure) + close > 1d EMA34 (uptrend) + volume spike
+# Short when CMF < 0 (selling pressure) + close < 1d EAMA34 (downtrend) + volume spike
+# Exit when CMF crosses zero or trend reverses
+# CMF accumulates money flow volume, providing early signals of accumulation/distribution
+# Designed for low trade frequency (~20-40/year) to minimize fee drain.
+# Works in bull/bear by combining trend-following with CMF momentum and volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,25 +24,26 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Alligator on 4h data using median price
+    # Calculate Chaikin Money Flow (CMF) on 4h data
     high = prices['high'].values
     low = prices['low'].values
-    median_price = (high + low) / 2.0
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Jaw (blue line): 13-period SMA, smoothed by 8 periods
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.rolling(window=8, min_periods=8).mean().values
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Avoid division by zero
+    hl_range = high - low
+    mfm = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
     
-    # Teeth (red line): 8-period SMA, smoothed by 5 periods
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.rolling(window=5, min_periods=5).mean().values
+    # Money Flow Volume = MFM * Volume
+    mfv = mfm * volume
     
-    # Lips (green line): 5-period SMA, smoothed by 3 periods
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
-    lips = lips.rolling(window=3, min_periods=3).mean().values
+    # 20-period CMF = sum of MFV over 20 periods / sum of Volume over 20 periods
+    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
+    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0.0)
     
     # Calculate 20-period average volume for volume spike detection
-    volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -50,9 +51,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or 
+        if (np.isnan(cmf[i]) or 
             np.isnan(ema_34_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -63,36 +62,34 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        cmf_val = cmf[i]
         ema_val = ema_34_aligned[i]
         
         # Volume filter: current volume > 2.0 * 20-period average
         vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long conditions: price above lips (green) + uptrend + volume spike
-            if price > lips_val and price > ema_val and vol_spike:
+            # Long conditions: CMF > 0 (buying pressure) + uptrend + volume spike
+            if cmf_val > 0.0 and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price below lips (green) + downtrend + volume spike
-            elif price < lips_val and price < ema_val and vol_spike:
+            # Short conditions: CMF < 0 (selling pressure) + downtrend + volume spike
+            elif cmf_val < 0.0 and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses jaw (blue line) or trend reverses
+            # Exit conditions: CMF crosses zero or trend reverses
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price crosses below jaw or trend turns down
-                if price < jaw_val or price < ema_val:
+                # Exit when CMF turns negative or trend turns down
+                if cmf_val < 0.0 or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price crosses above jaw or trend turns up
-                if price > jaw_val or price > ema_val:
+                # Exit when CMF turns positive or trend turns up
+                if cmf_val > 0.0 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -104,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dEMA34_Volume"
+name = "4h_CMF_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
