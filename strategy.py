@@ -55,7 +55,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all HTF data to 6h timeframe
+    # Align all HTF data to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
@@ -123,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyPivot_R1_S1_Breakout_12hEMA50_Volume_ATRStop"
-timeframe = "6h"
+name = "12h_DailyPivot_R1_S1_Breakout_12hEMA50_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
