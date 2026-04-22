@@ -3,92 +3,96 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band squeeze breakout with volume confirmation and 1d EMA34 trend filter.
-# Bollinger Band width measures volatility contraction (squeeze). Breakout after squeeze with volume
-# spike and trend alignment captures explosive moves. Designed for low trade frequency (~20-40/year)
-# to minimize fee decay. Works in both bull and bear markets by following higher timeframe trend
-# and requiring volume confirmation.
+# Hypothesis: 1d weekly (Monday) open gap fill with volume confirmation and trend filter.
+# Weekly gaps (price opens outside previous week's range) often revert to fill the gap.
+# We go long when price opens below prior week's low and short when above prior week's high,
+# only if volume confirms (>1.5x 20-day average) and price is above/below 50-week EMA for trend alignment.
+# Designed for very low frequency (~5-15 trades/year) to minimize fee decay.
+# Works in both bull and bear markets by using weekly structure and volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA34 trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load weekly data for gap calculation (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) == 0:
+        return np.zeros(n)
     
-    # Calculate 34-period EMA on 1d close for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_open = df_weekly['open'].values
+    weekly_close = df_weekly['close'].values
     
-    # Align 1d EMA34 to 4h timeframe (waits for 1d bar to close)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 50-week EMA for trend filter
+    ema_50_weekly = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Bollinger Bands on 4h data (20-period, 2 std dev)
-    close = prices['close'].values
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
+    # Align weekly indicators to daily timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low)
+    weekly_open_aligned = align_htf_to_ltf(prices, df_weekly, weekly_open)
+    ema_50_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
     
-    # Bollinger Band squeeze: width below 20-period average
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
-    
-    # Calculate 20-period average volume for volume spike detection
+    # Calculate 20-day average volume for volume confirmation
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(sma_20[i]) or 
-            np.isnan(std_20[i]) or 
-            np.isnan(bb_width_ma[i]) or 
+        if (np.isnan(weekly_high_aligned[i]) or 
+            np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(weekly_open_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        # Current day's open price (first available price of the day)
+        # Since we're using daily timeframe, we use the open price
+        open_price = prices['open'].iloc[i]
+        close_price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        sma_val = sma_20[i]
-        upper_val = upper_bb[i]
-        lower_val = lower_bb[i]
-        ema_val = ema_34_aligned[i]
-        squeeze_val = squeeze[i]
+        weekly_high_val = weekly_high_aligned[i]
+        weekly_low_val = weekly_low_aligned[i]
+        weekly_open_val = weekly_open_aligned[i]
+        ema_val = ema_50_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average (strict filter for low frequency)
-        vol_spike = vol > 2.0 * vol_ma
+        # Volume filter: current volume > 1.5 * 20-day average
+        vol_confirmed = vol > 1.5 * vol_ma
+        
+        # Gap conditions: open outside prior week's range
+        gap_down = open_price < weekly_low_val  # opened below weekly low
+        gap_up = open_price > weekly_high_val   # opened above weekly high
         
         if position == 0:
-            # Long conditions: Bollinger Band breakout above upper band + squeeze + uptrend + volume spike
-            if price > upper_val and squeeze_val and price > ema_val and vol_spike:
+            # Long: gap down + volume confirmation + price above weekly EMA (bullish bias)
+            if gap_down and vol_confirmed and open_price > ema_val:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bollinger Band breakout below lower band + squeeze + downtrend + volume spike
-            elif price < lower_val and squeeze_val and price < ema_val and vol_spike:
+            # Short: gap up + volume confirmation + price below weekly EMA (bearish bias)
+            elif gap_up and vol_confirmed and open_price < ema_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: price returns to opposite side of week's range or trend breaks
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price breaks below lower Bollinger Band or trend breaks
-                if price < lower_val or price < ema_val:
+                # Exit when price returns to or above weekly high (gap filled) or trend breaks
+                if close_price >= weekly_high_val or close_price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price breaks above upper Bollinger Band or trend breaks
-                if price > upper_val or price > ema_val:
+                # Exit when price returns to or below weekly low (gap filled) or trend breaks
+                if close_price <= weekly_low_val or close_price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -100,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_BollingerSqueeze_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_WeeklyGapFill_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
