@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Williams Alligator with 1-day ADX trend filter and volume spike.
-Long when Jaw < Teeth < Lips (bullish alignment) with 1-day ADX > 25 and volume spike.
-Short when Jaw > Teeth > Lips (bearish alignment) with 1-day ADX > 25 and volume spike.
-Exit when Alligator lines cross (Jaw-Teeth or Teeth-Lips crossover) or ADX < 20.
-Williams Alligator identifies trend phases; 1-day ADX filters strong trends; volume spike confirms momentum.
-Designed for low trade frequency by requiring multiple confirmations. Works in both bull and bear markets
-by following strong trends only when ADX confirms trend strength.
+Hypothesis: 1-day Donchian(20) breakout with 1-week EMA20 trend filter and volume confirmation.
+Long when price breaks above 1-day upper Donchian channel with 1-week EMA20 rising and volume spike.
+Short when price breaks below 1-day lower Donchian channel with 1-week EMA20 falling and volume spike.
+Exit when price crosses the 1-day 20-period EMA.
+Designed for low trade frequency by requiring multiple confirmations and using daily trend filter.
+Works in both bull and bear markets by following the weekly trend.
 """
 
 import numpy as np
@@ -23,88 +22,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator (SMMA-based)
-    jaw_period, jaw_shift = 13, 8
-    teeth_period, teeth_shift = 8, 5
-    lips_period, lips_shift = 5, 3
-    
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan, dtype=float)
-        sma = np.nansum(arr[:period]) / period
-        result[period-1] = sma
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw = smma(close, jaw_period)
-    jaw = np.roll(jaw, jaw_shift)
-    jaw[:jaw_shift] = np.nan
-    
-    teeth = smma(close, teeth_period)
-    teeth = np.roll(teeth, teeth_shift)
-    teeth[:teeth_shift] = np.nan
-    
-    lips = smma(close, lips_period)
-    lips = np.roll(lips, lips_shift)
-    lips[:lips_shift] = np.nan
-    
-    # Load 1-day data for ADX - ONCE before loop
+    # Load 1-day data for Donchian channels - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate 1-day Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        if len(high) < period + 1:
-            return np.full_like(high, np.nan)
-        up = high[1:] - high[:-1]
-        down = low[:-1] - low[1:]
-        plus_dm = np.where((up > down) & (up > 0), up, 0.0)
-        minus_dm = np.where((down > up) & (down > 0), down, 0.0)
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = np.full_like(tr, np.nan)
-        atr[period-1] = np.nanmean(tr[:period])
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        plus_di = 100 * np.full_like(tr, np.nan)
-        minus_di = 100 * np.full_like(tr, np.nan)
-        for i in range(period, len(tr)):
-            if atr[i] != 0:
-                plus_di[i] = 100 * plus_dm[i] / atr[i]
-                minus_di[i] = 100 * minus_dm[i] / atr[i]
-        dx = np.full_like(tr, np.nan)
-        for i in range(period, len(tr)):
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        adx = np.full_like(tr, np.nan)
-        adx[2*period-1] = np.nanmean(dx[period-1:2*period-1])
-        for i in range(2*period, len(tr)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        # Prepend NaN for alignment
-        return np.concatenate([np.full(period+1, np.nan), adx])
+    # Upper and lower bands
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    # Align to 1d timeframe (each day's levels apply to the entire day)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    
+    # Load 1-week data for EMA20 trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Calculate 1-week EMA20
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align to 1d timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Exit condition: 1-day 20-period EMA
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after enough data for Alligator and ADX
+    for i in range(30, n):  # Start after enough data for EMA20
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(adx_14_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(ema20_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -113,34 +75,28 @@ def generate_signals(prices):
         # Volume confirmation
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Alligator alignment
-        bullish_aligned = jaw[i] < teeth[i] < lips[i]
-        bearish_aligned = jaw[i] > teeth[i] > lips[i]
-        
-        # ADX trend strength
-        strong_trend = adx_14_aligned[i] > 25
-        weak_trend = adx_14_aligned[i] < 20
-        
         if position == 0:
-            # Long: Bullish alignment + strong trend + volume spike
-            if bullish_aligned and strong_trend and vol_spike:
+            # Long: Price breaks above upper Donchian with 1-week EMA20 rising and volume spike
+            if (close[i] > upper_20_aligned[i] and 
+                ema20_1w_aligned[i] > ema20_1w_aligned[i-1] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment + strong trend + volume spike
-            elif bearish_aligned and strong_trend and vol_spike:
+            # Short: Price breaks below lower Donchian with 1-week EMA20 falling and volume spike
+            elif (close[i] < lower_20_aligned[i] and 
+                  ema20_1w_aligned[i] < ema20_1w_aligned[i-1] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit: Price crosses the 1-day 20-period EMA
             exit_signal = False
             
             if position == 1:
-                # Exit long: Bearish crossover OR weak trend
-                if jaw[i] > teeth[i] or teeth[i] > lips[i] or weak_trend:
+                # Exit long: Price crosses below EMA20
+                if close[i] < ema20_1d_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Bullish crossover OR weak trend
-                if jaw[i] < teeth[i] or teeth[i] < lips[i] or weak_trend:
+                # Exit short: Price crosses above EMA20
+                if close[i] > ema20_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -151,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_WilliamsAlligator_ADX_Trend_Volume"
-timeframe = "4h"
+name = "1D_Donchian_20_1wEMA20_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
