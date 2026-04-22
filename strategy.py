@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Triple EMA with 12-hour VWAP and Volume Spike Filter.
-Long when fast EMA > medium EMA > slow EMA and price > 12h VWAP with volume spike.
-Short when fast EMA < medium EMA < slow EMA and price < 12h VWAP with volume spike.
-Exit when EMA alignment breaks or VWAP condition reverses.
-Triple EMA provides robust trend filtering with low whipsaw; 12h VWAP adds institutional context;
-volume spike confirms participation. Designed for low trade frequency (<40/year) by requiring
-strong confluence. Works in bull markets via trend following and bear markets via short signals.
+Hypothesis: 1-hour ADX trend strength with 4-hour Donchian breakout and volume confirmation.
+Long when ADX > 25 (trending) and price breaks above 4h Donchian upper band with volume spike.
+Short when ADX > 25 and price breaks below 4h Donchian lower band with volume spike.
+Exit when ADX < 20 (range) or price crosses 4h Donchian midline.
+Designed for low trade frequency by requiring strong trend + breakout + volume confirmation.
+Works in both bull and bear markets by following established trends.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,81 +22,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Triple EMA: fast (9), medium (21), slow (55)
-    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # ADX calculation (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First value
+        
+        # Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        up_move[0] = 0
+        down_move[0] = 0
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Smoothed values
+        def smooth_wmma(arr, period):
+            result = np.full_like(arr, np.nan, dtype=float)
+            if len(arr) < period:
+                return result
+            # First value is simple average
+            result[period-1] = np.sum(arr[:period]) / period
+            for i in range(period, len(arr)):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+            return result
+        
+        tr_14 = smooth_wmma(tr, period)
+        plus_dm_14 = smooth_wmma(plus_dm, period)
+        minus_dm_14 = smooth_wmma(minus_dm, period)
+        
+        # Directional Indicators
+        plus_di_14 = np.where(tr_14 != 0, (plus_dm_14 / tr_14) * 100, 0)
+        minus_di_14 = np.where(tr_14 != 0, (minus_dm_14 / tr_14) * 100, 0)
+        
+        # DX and ADX
+        dx = np.where((plus_di_14 + minus_di_14) != 0,
+                      np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14) * 100, 0)
+        adx = smooth_wmma(dx, period)
+        return adx
     
-    # Load 12h data for VWAP - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    adx = calculate_adx(high, low, close, 14)
+    
+    # Load 4h data for Donchian channels - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate VWAP on 12h data: typical price * volume cumulative / volume cumulative
-    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3.0
-    volume_12h = df_12h['volume'].values
-    vwap_12h = np.full_like(typical_price_12h, np.nan)
+    # 20-period Donchian channels on 4h
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    cum_vol = 0.0
-    cum_pv = 0.0
-    for i in range(len(typical_price_12h)):
-        cum_vol += volume_12h[i]
-        cum_pv += typical_price_12h[i] * volume_12h[i]
-        if cum_vol > 0:
-            vwap_12h[i] = cum_pv / cum_vol
+    def donchian_channels(high, low, period=20):
+        upper = np.full_like(high, np.nan, dtype=float)
+        lower = np.full_like(low, np.nan, dtype=float)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    donch_up_4h, donch_low_4h = donchian_channels(high_4h, low_4h, 20)
+    donch_mid_4h = (donch_up_4h + donch_low_4h) / 2
     
-    # Volume confirmation: current volume > 2.5x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Align Donchian channels to 1h
+    donch_up_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_up_4h)
+    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
+    donch_mid_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_mid_4h)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(55, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema9[i]) or np.isnan(ema21[i]) or np.isnan(ema55[i]) or 
-            np.isnan(vwap_12h_aligned[i]) or np.isnan(vol_ma_30[i])):
+        if (np.isnan(adx[i]) or np.isnan(donch_up_4h_aligned[i]) or 
+            np.isnan(donch_low_4h_aligned[i]) or np.isnan(donch_mid_4h_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 2.5 * vol_ma_30[i]
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: EMA alignment bullish and price > VWAP with volume spike
-            if (ema9[i] > ema21[i] > ema55[i] and 
-                close[i] > vwap_12h_aligned[i] and vol_spike):
-                signals[i] = 0.25
+            # Long: ADX > 25 (trending) and price breaks above 4h Donchian upper with volume spike
+            if adx[i] > 25 and close[i] > donch_up_4h_aligned[i] and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short: EMA alignment bearish and price < VWAP with volume spike
-            elif (ema9[i] < ema21[i] < ema55[i] and 
-                  close[i] < vwap_12h_aligned[i] and vol_spike):
-                signals[i] = -0.25
+            # Short: ADX > 25 and price breaks below 4h Donchian lower with volume spike
+            elif adx[i] > 25 and close[i] < donch_low_4h_aligned[i] and vol_spike:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: EMA alignment breaks or VWAP condition reverses
+            # Exit: ADX < 20 (range) or price crosses 4h Donchian midline
             exit_signal = False
             
             if position == 1:
-                # Exit long: EMA alignment breaks or price <= VWAP
-                if not (ema9[i] > ema21[i] > ema55[i]) or close[i] <= vwap_12h_aligned[i]:
+                # Exit long: ADX < 20 or price crosses below midline
+                if adx[i] < 20 or close[i] < donch_mid_4h_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: EMA alignment breaks or price >= VWAP
-                if not (ema9[i] < ema21[i] < ema55[i]) or close[i] >= vwap_12h_aligned[i]:
+                # Exit short: ADX < 20 or price crosses above midline
+                if adx[i] < 20 or close[i] > donch_mid_4h_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4H_TripleEMA_12hVWAP_VolumeSpike"
-timeframe = "4h"
+name = "1H_ADX_4H_Donchian_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
