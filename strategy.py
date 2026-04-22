@@ -13,95 +13,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Choppiness Index - ONCE before loop
+    # Load daily data for Donchian(20) and ATR(14) - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate Choppiness Index (14-period) on daily data
+    # Calculate Donchian(20) channels from daily data
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
+    upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate ATR(14) from daily data
+    tr1 = high_daily - low_daily
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1)) if 'close_daily' in locals() else np.abs(high_daily - np.roll(df_daily['close'].values, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1)) if 'close_daily' in locals() else np.abs(low_daily - np.roll(df_daily['close'].values, 1))
     close_daily = df_daily['close'].values
-    
-    # True Range
-    tr1 = high_daily[1:] - low_daily[1:]
-    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
-    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
+    tr1 = high_daily - low_daily
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with original array
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # ATR (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align Donchian channels and ATR to 6h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
+    atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
     
-    # Sum of true ranges over 14 periods
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_daily).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_daily).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chop = np.where((highest_high - lowest_low) != 0,
-                    100 * np.log10(sum_tr / atr) / np.log10(14),
-                    50)  # Default to neutral if no range
-    
-    # Align Choppiness Index to 4h timeframe with 2-bar delay for confirmation
-    chop_aligned = align_htf_to_ltf(prices, df_daily, chop, additional_delay_bars=2)
-    
-    # Calculate 4-period RSI on 4h close prices
-    delta = np.diff(close, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=4, min_periods=4).mean().values
-    avg_loss = pd.Series(loss).rolling(window=4, min_periods=4).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate 4h volume average (20-period)
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-calculate session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after warmup period
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(chop_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Range-bound market filter: Choppiness Index > 61.8
-        if chop_aligned[i] <= 61.8:
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold (< 30) with volume confirmation
-            if (rsi[i] < 30 and 
-                volume[i] > 1.5 * vol_avg_20[i]):
+            # Long: Price breaks above upper Donchian(20) with volume and ATR filter
+            if (close[i] > upper_20_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20[i] and
+                atr_14_aligned[i] > 0):  # Ensure ATR is valid
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (> 70) with volume confirmation
-            elif (rsi[i] > 70 and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
+            # Short: Price breaks below lower Donchian(20) with volume and ATR filter
+            elif (close[i] < lower_20_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i] and
+                  atr_14_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral zone (40-60)
+            # Exit: Price returns to the opposite Donchian channel
             if position == 1:
-                if rsi[i] >= 40:
+                if close[i] < lower_20_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if rsi[i] <= 60:
+                if close[i] > upper_20_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -109,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_RSI_MeanReversion_ChopFilter_Volume"
-timeframe = "4h"
+name = "6H_Donchian20_Volume_ATR_Filter"
+timeframe = "6h"
 leverage = 1.0
