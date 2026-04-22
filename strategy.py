@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,38 +13,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA20 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align EMA20 to 6h timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Load daily data for Donchian calculation - ONCE before loop
+    # Load daily data for ATR and volume - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period)
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
+    # Calculate daily ATR(20)
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    close_1d = pd.Series(df_1d['close'].values)
+    tr1 = high_1d - low_1d
+    tr2 = abs(high_1d - close_1d.shift(1))
+    tr3 = abs(low_1d - close_1d.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=20, min_periods=20).mean().values
     
-    # Upper band: highest high of last 20 days
-    upper_d = pd.Series(high_d).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 days
-    lower_d = pd.Series(low_d).rolling(window=20, min_periods=20).min().values
+    # Calculate daily volume average (20-period)
+    vol_avg_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Align Donchian bands to 6h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_d)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_d)
+    # Align ATR and volume average to 1d timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
-    # Calculate 6h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily high and low for Donchian channel (20-period)
+    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 1d timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -52,10 +49,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian lookback
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,29 +69,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above weekly Donchian upper with bullish weekly trend and volume spike
-            if (close[i] > upper_aligned[i] and 
-                close[i] > ema20_1w_aligned[i] and  # Bullish trend: price above weekly EMA20
-                volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+            # Long: Price breaks above 20-day high with volume spike and ATR filter
+            if (close[i] > high_20_aligned[i] and 
+                volume[i] > 2.0 * vol_avg_aligned[i] and
+                atr_aligned[i] > 0):  # Ensure volatility is present
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly Donchian lower with bearish weekly trend and volume spike
-            elif (close[i] < lower_aligned[i] and 
-                  close[i] < ema20_1w_aligned[i] and  # Bearish trend: price below weekly EMA20
-                  volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+            # Short: Price breaks below 20-day low with volume spike and ATR filter
+            elif (close[i] < low_20_aligned[i] and 
+                  volume[i] > 2.0 * vol_avg_aligned[i] and
+                  atr_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to the opposite Donchian band
+            # Exit conditions: ATR-based trailing stop
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to weekly Donchian lower band
-                if close[i] <= lower_aligned[i]:
+                # Exit long: price drops below entry price minus 2*ATR
+                if close[i] <= (high_20_aligned[i] - 2.0 * atr_aligned[i]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to weekly Donchian upper band
-                if close[i] >= upper_aligned[i]:
+                # Exit short: price rises above entry price plus 2*ATR
+                if close[i] >= (low_20_aligned[i] + 2.0 * atr_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -105,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_20_1wEMA20_Trend_Volume"
-timeframe = "6h"
+name = "1d_Donchian_20_ATR_Volume_Breakout"
+timeframe = "1d"
 leverage = 1.0
