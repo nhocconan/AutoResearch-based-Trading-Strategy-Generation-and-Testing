@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Volume-Weighted Average Price (VWAP) mean reversion with daily volatility regime filter.
-Long when price deviates >1.5 standard deviations below VWAP during low volatility (VIX-like regime),
-short when price deviates >1.5 standard deviations above VWAP during low volatility.
-Exit when price returns to VWAP or volatility expands. Designed for 4h timeframe to capture
-mean reversion in ranging markets while avoiding trending periods. Works in both bull and bear
-markets by fading extremes during low volatility regimes.
+Hypothesis: Daily Close above 10-period SMA with weekly trend filter and volume confirmation.
+Go long when daily close crosses above SMA10 and weekly EMA34 is rising; short when daily close crosses below SMA10 and weekly EMA34 is falling.
+Requires volume confirmation (volume > 1.5x 20-period average) to avoid false breakouts.
+Designed for low trade frequency (7-25 trades/year) by requiring multiple confirmations: trend alignment, price crossover, and volume spike.
+Works in both bull and bear markets by following the weekly trend.
 """
 
 import numpy as np
@@ -15,89 +14,66 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Typical price for VWAP calculation
-    typical_price = (high + low + close) / 3.0
+    # 10-period SMA on daily
+    close_s = pd.Series(close)
+    sma10 = close_s.rolling(window=10, min_periods=10).mean().values
     
-    # VWAP (20-period)
-    pv = typical_price * volume
-    cum_pv = np.nancumsum(pv)
-    cum_vol = np.nancumsum(volume)
-    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
-    
-    # Standard deviation of price deviation from VWAP (20-period)
-    price_dev = typical_price - vwap
-    price_dev_series = pd.Series(price_dev)
-    dev_std = price_dev_series.rolling(window=20, min_periods=20).std().values
-    
-    # Daily volatility regime: ATR(14) percentile (50-period lookback)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_pct = pd.Series(atr).rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
-    
-    # Load daily data for trend filter - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    # Load weekly data for trend filter - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Daily EMA50 for trend direction (avoid trading against strong trend)
-    daily_close = df_daily['close'].values
-    ema50_daily = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    # Weekly EMA34 for trend direction
+    weekly_close = df_weekly['close'].values
+    ema34_weekly = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(10, n):
         # Skip if data not ready
-        if (np.isnan(vwap[i]) or np.isnan(dev_std[i]) or 
-            np.isnan(atr_pct[i]) or np.isnan(ema50_daily_aligned[i])):
+        if (np.isnan(sma10[i]) or np.isnan(ema34_weekly_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Low volatility regime: ATR percentile < 40% (avoid high volatility trending periods)
-        low_vol = atr_pct[i] < 0.4
-        
-        # VWAP deviation in standard deviations
-        if dev_std[i] > 0:
-            dev_sigma = price_dev[i] / dev_std[i]
-        else:
-            dev_sigma = 0
+        # Volume confirmation
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: low vol + price < -1.5 sigma below VWAP + not in strong downtrend
-            if low_vol and dev_sigma < -1.5 and ema50_daily_aligned[i] > ema50_daily_aligned[i-1]:
+            # Long: close crosses above SMA10 + weekly uptrend + volume spike
+            if close[i] > sma10[i] and close[i-1] <= sma10[i-1] and ema34_weekly_aligned[i] > ema34_weekly_aligned[i-1] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: low vol + price > +1.5 sigma above VWAP + not in strong uptrend
-            elif low_vol and dev_sigma > 1.5 and ema50_daily_aligned[i] < ema50_daily_aligned[i-1]:
+            # Short: close crosses below SMA10 + weekly downtrend + volume spike
+            elif close[i] < sma10[i] and close[i-1] >= sma10[i-1] and ema34_weekly_aligned[i] < ema34_weekly_aligned[i-1] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to VWAP (±0.5 sigma) or volatility expands
+            # Exit: price crosses back through SMA10
             exit_signal = False
             
             if position == 1:
-                # Exit long: price >= VWAP - 0.5 sigma or high volatility
-                if dev_sigma >= -0.5 or atr_pct[i] > 0.6:
+                # Exit long: price crosses below SMA10
+                if close[i] < sma10[i] and close[i-1] >= sma10[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price <= VWAP + 0.5 sigma or high volatility
-                if dev_sigma <= 0.5 or atr_pct[i] > 0.6:
+                # Exit short: price crosses above SMA10
+                if close[i] > sma10[i] and close[i-1] <= sma10[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -108,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_MeanReversion_VolRegime_DailyTrend"
-timeframe = "4h"
+name = "Daily_SMA10_Cross_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
