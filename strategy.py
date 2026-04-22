@@ -13,14 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for weekly pivot and ATR(14) - ONCE before loop
+    # Load daily data for weekly pivot - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from daily data (weekly high/low/close)
-    # We need to calculate weekly pivot from daily data - simple approach:
-    # Use the highest high, lowest low, and last close of the past 5 trading days as weekly proxy
+    # Calculate weekly pivot points from daily data (using 5-day lookback)
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
@@ -28,15 +26,12 @@ def generate_signals(prices):
     # Weekly high/low/close approximation using 5-day lookback
     weekly_high = pd.Series(high_daily).rolling(window=5, min_periods=5).max().values
     weekly_low = pd.Series(low_daily).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(close_daily).rolling(window=5, min_periods=5).last().values  # last close of 5-day period
+    weekly_close = pd.Series(close_daily).rolling(window=5, min_periods=5).last().values
     
     # Calculate weekly pivot point: (H + L + C) / 3
     weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
     # Calculate weekly support and resistance levels
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
     weekly_range = weekly_high - weekly_low
     weekly_r1 = 2 * weekly_pivot - weekly_low
     weekly_s1 = 2 * weekly_pivot - weekly_high
@@ -99,13 +94,13 @@ def generate_signals(prices):
             if (close[i] > weekly_r1_aligned[i] and 
                 volume[i] > 1.5 * vol_avg_20[i] and
                 atr_14_aligned[i] > 0):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Price crosses below weekly S1 with volume confirmation
             elif (close[i] < weekly_s1_aligned[i] and 
                   volume[i] > 1.5 * vol_avg_20[i] and
                   atr_14_aligned[i] > 0):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit: Price returns to weekly pivot level
@@ -114,13 +109,13 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
                 if close[i] > weekly_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
