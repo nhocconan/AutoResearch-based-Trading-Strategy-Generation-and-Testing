@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation
-# Uses Williams Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) to identify trends
-# Long when Lips > Teeth > Jaw (bullish alignment) with price above Teeth, bullish 1d trend, and volume spike
-# Short when Lips < Teeth < Jaw (bearish alignment) with price below Teeth, bearish 1d trend, and volume spike
-# Designed for 6h timeframe to target 15-35 trades/year per symbol.
-# Works in bull/bear via multi-timeframe trend alignment and volatility-based signals.
+# Hypothesis: 4h KAMA + RSI + Choppiness filter (4h)
+# Uses Kaufman's Adaptive Moving Average (KAMA) for trend direction,
+# RSI(14) for momentum filtering, and Choppiness Index for regime detection.
+# Long when KAMA rising + RSI > 50 + Chop < 61.8 (trending regime)
+# Short when KAMA falling + RSI < 50 + Chop < 61.8
+# Designed for 4h timeframe to target 20-50 trades/year per symbol.
+# Works in bull/bear via KAMA trend + Chop regime filter.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,74 +21,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # KAMA parameters
+    fast = 2
+    slow = 30
+    kama_period = 10
     
-    # Williams Alligator on 6h data: Jaw(13), Teeth(8), Lips(5)
-    # All are SMAs with specific periods
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # Direction
+    change = np.abs(close - np.roll(close, kama_period))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+    volatility = pd.Series(volatility).rolling(window=kama_period, min_periods=1).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
     
-    # 1d EMA(34) for higher timeframe trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume spike filter (20-period on 6h data)
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Choppiness Index (14)
+    atr = np.zeros_like(close)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(np.sum(atr, axis=1) / (max_high - min_low)) / np.log10(14)
+    chop = pd.Series(chop).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume spike filter
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20  # Higher threshold for fewer, higher quality trades
+    vol_spike = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    for i in range(60, n):
-        # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+    for i in range(50, n):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # KAMA direction: rising if current > previous
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
+        
         if position == 0:
-            # Bullish Alligator alignment: Lips > Teeth > Jaw
-            bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-            # Bearish Alligator alignment: Lips < Teeth < Jaw
-            bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-            
-            # Long: bullish alignment + price above Teeth + bullish 1d trend + volume spike
-            if (bullish_alignment and 
-                close[i] > teeth[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # Long: KAMA rising + RSI > 50 + Chop < 61.8 + volume spike
+            if (kama_rising and 
+                rsi[i] > 50 and 
+                chop[i] < 61.8 and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment + price below Teeth + bearish 1d trend + volume spike
-            elif (bearish_alignment and 
-                  close[i] < teeth[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # Short: KAMA falling + RSI < 50 + Chop < 61.8 + volume spike
+            elif (kama_falling and 
+                  rsi[i] < 50 and 
+                  chop[i] < 61.8 and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Alligator alignment breaks or trend reversal
+            # Exit on opposite KAMA direction or Chop > 61.8 (range)
             if position == 1:
-                # Exit on bearish alignment or price below Teeth or trend reversal
-                bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-                if (not bullish_alignment or 
-                    close[i] < teeth[i] or 
-                    close[i] < ema_34_1d_aligned[i]):
+                if (not kama_rising or chop[i] > 61.8):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on bullish alignment or price above Teeth or trend reversal
-                bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-                if (not bearish_alignment or 
-                    close[i] > teeth[i] or 
-                    close[i] > ema_34_1d_aligned[i]):
+                if (not kama_falling or chop[i] > 61.8):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -95,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike"
-timeframe = "6h"
+name = "4h_KAMA_RSI_Chop_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
