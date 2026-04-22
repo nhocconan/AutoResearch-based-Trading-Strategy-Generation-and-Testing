@@ -3,95 +3,72 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h ADX + 14-period RSI pullback strategy with 4h EMA200 trend filter.
-# Uses ADX(14) > 25 to identify trending markets, then enters on RSI pullbacks:
-# - Long: ADX > 25 + RSI < 30 (oversold) + price > 4h EMA200 (uptrend)
-# - Short: ADX > 25 + RSI > 70 (overbought) + price < 4h EMA200 (downtrend)
-# Exits when RSI returns to neutral (40-60 range) or trend breaks.
-# Designed for low trade frequency (15-30/year) by requiring strong trend + extreme RSI.
-# Works in bull/bear by following 4h trend direction and only trading pullbacks within trend.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1-week EMA13 trend filter and volume confirmation.
+# Elder Ray measures bullish/bearish power by comparing high/low to EMA, capturing momentum exhaustion.
+# Weekly EMA13 provides strong trend filter in both bull and bear markets.
+# Volume spike (>2x 20-period average) confirms breakout strength.
+# Designed for low trade frequency (~15-35/year) to minimize fee decay while capturing strong trends.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for EMA200 trend filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Load 1w data for EMA13 trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 200-period EMA on 4h close
-    ema_200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
+    # Calculate 13-period EMA on 1w close for trend filter
+    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 14-period ADX on 1h data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Align 1w EMA to 6h timeframe (waits for 1w bar to close)
+    ema_13_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate 13-period EMA on 6h close for Elder Ray
+    close_6h = prices['close'].values
+    ema_13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate Elder Ray components
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    bull_power = high_6h - ema_13_6h  # Bull Power = High - EMA13
+    bear_power = low_6h - ema_13_6h   # Bear Power = Low - EMA13
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Calculate 14-period RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(adx[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(ema_200_aligned[i])):
+        if (np.isnan(ema_13_aligned[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx[i]
-        rsi_val = rsi[i]
-        ema_val = ema_200_aligned[i]
-        price = close[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        ema_13_val = ema_13_aligned[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        
+        # Volume filter: current volume > 2.0 * 20-period average (strict filter for low frequency)
+        vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long conditions: strong uptrend + RSI oversold
-            if adx_val > 25 and price > ema_val and rsi_val < 30:
-                signals[i] = 0.20
+            # Long conditions: Bull Power > 0 (bullish momentum) + above weekly EMA + volume spike
+            if bull > 0 and ema_13_val > 0 and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: strong downtrend + RSI overbought
-            elif adx_val > 25 and price < ema_val and rsi_val > 70:
-                signals[i] = -0.20
+            # Short conditions: Bear Power < 0 (bearish momentum) + below weekly EMA + volume spike
+            elif bear < 0 and ema_13_val < 0 and vol_spike:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
@@ -99,13 +76,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when RSI returns to neutral or trend breaks
-                if rsi_val > 40 or price < ema_val:
+                # Exit when Bull Power turns negative or weekly trend breaks
+                if bull <= 0 or ema_13_val <= 0:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when RSI returns to neutral or trend breaks
-                if rsi_val < 60 or price > ema_val:
+                # Exit when Bear Power turns positive or weekly trend breaks
+                if bear >= 0 or ema_13_val >= 0:
                     exit_signal = True
             
             if exit_signal:
@@ -113,10 +90,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_ADX_RSI_Pullback_4hEMA200"
-timeframe = "1h"
+name = "6h_ElderRay_1wEMA13_Volume"
+timeframe = "6h"
 leverage = 1.0
