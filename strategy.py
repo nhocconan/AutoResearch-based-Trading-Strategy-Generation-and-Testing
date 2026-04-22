@@ -1,3 +1,10 @@
+# 6H_Camarilla_R1_S1_Breakout_1dEMA34_1wTrend_Volume
+# Hypothesis: Combines Camarilla pivot breakouts with multi-timeframe trend filtering and volume confirmation.
+# Uses daily EMA34 for intermediate trend and weekly pivot levels for higher timeframe bias.
+# Volume spikes confirm breakout strength. Designed to work in both bull and bear markets by requiring
+# alignment across timeframes, reducing false signals during choppy periods.
+# Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -44,7 +51,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all to 4h timeframe
+    # Align all to 6h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
@@ -96,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_1wTrend_Volume"
-timeframe = "4h"
+name = "6H_Camarilla_R1_S1_Breakout_1dEMA34_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
