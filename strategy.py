@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Camarilla pivot levels with 1-day trend filter and volume spike confirmation.
-Long when price breaks above R1 in uptrend with volume spike. Short when price breaks below S1 in downtrend with volume spike.
-Exit when price returns to pivot point (P). Uses actual Camarilla calculation from prior day's high-low-close.
-Camarilla levels provide institutional support/resistance; volume filter ensures follow-through; trend filter avoids counter-trend trades.
-Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by following institutional levels.
+Hypothesis: 1-day Keltner Channel breakout with 1-week EMA trend filter and volume confirmation.
+Long when price > Upper KC (20,2) and weekly EMA(50) rising + volume > 20-day avg volume.
+Short when price < Lower KC (20,2) and weekly EMA(50) falling + volume > 20-day avg volume.
+Exit when price crosses middle line or volume drops below average.
+Keltner adapts to volatility; weekly EMA filters trend direction; volume ensures institutional interest.
+Works in bull/bear by following institutional volume with volatility-adjusted breakouts.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,85 +22,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Camarilla levels and trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 1-week data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), R2 = C + ((H-L)*1.1/6), R1 = C + ((H-L)*1.1/12)
-    # S1 = C - ((H-L)*1.1/12), S2 = C - ((H-L)*1.1/6), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
-    # P = (H + L + C) / 3
+    # Weekly EMA(50) for trend
+    weekly_close = df_1w['close'].values
+    ema_50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_slope = np.diff(ema_50_1w, prepend=ema_50_1w[0])
+    ema_50_1w_slope = np.append(ema_50_1w_slope, ema_50_1w_slope[-1])  # same length
+    ema_50_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w_slope)
     
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Load 1-day data for ATR (KC width) and volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate levels for each day
-    camarilla_p = np.full(len(df_1d), np.nan)
-    camarilla_r1 = np.full(len(df_1d), np.nan)
-    camarilla_s1 = np.full(len(df_1d), np.nan)
+    # ATR(20) for KC width
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
     
-    for i in range(len(df_1d)):
-        if i == 0:  # Need previous day
-            continue
-        high_prev = h_1d[i-1]
-        low_prev = l_1d[i-1]
-        close_prev = c_1d[i-1]
-        
-        camarilla_p[i] = (high_prev + low_prev + close_prev) / 3.0
-        camarilla_r1[i] = close_prev + ((high_prev - low_prev) * 1.1 / 12)
-        camarilla_s1[i] = close_prev - ((high_prev - low_prev) * 1.1 / 12)
+    # 20-day average volume for filter
+    volume_1d = df_1d['volume'].values
+    avg_vol_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 1-day EMA trend filter
-    ema_34_1d = pd.Series(c_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: current volume > 2x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_avg_20)
+    # Keltner Channel (20,2) on daily
+    kc_middle = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = kc_middle + 2 * atr_20
+    kc_lower = kc_middle - 2 * atr_20
+    kc_middle_aligned = align_htf_to_ltf(prices, df_1d, kc_middle)
+    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_p_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_34_aligned[i])):
+        if np.isnan(kc_middle_aligned[i]) or np.isnan(ema_50_1w_slope_aligned[i]) or np.isnan(avg_vol_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1, uptrend (price > EMA34), volume spike
-            if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
-                volume_spike[i]):
+            # Long: Price breaks above upper KC, weekly EMA rising, volume above average
+            if (high[i] > kc_upper_aligned[i] and 
+                ema_50_1w_slope_aligned[i] > 0 and 
+                volume[i] > avg_vol_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1, downtrend (price < EMA34), volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
-                  volume_spike[i]):
+            # Short: Price breaks below lower KC, weekly EMA falling, volume above average
+            elif (low[i] < kc_lower_aligned[i] and 
+                  ema_50_1w_slope_aligned[i] < 0 and 
+                  volume[i] > avg_vol_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit when price returns to pivot point (P)
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls back to or below pivot
-                if close[i] <= camarilla_p_aligned[i]:
+                # Exit long: Price crosses below middle KC
+                if close[i] < kc_middle_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises back to or above pivot
-                if close[i] >= camarilla_p_aligned[i]:
+                # Exit short: Price crosses above middle KC
+                if close[i] > kc_middle_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1D_KC_Breakout_1wEMA_Volume"
+timeframe = "1d"
 leverage = 1.0
