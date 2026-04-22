@@ -3,38 +3,38 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with weekly pivot point reversal strategy.
-# Uses weekly pivot points (calculated from prior week's OHLC) for support/resistance levels.
-# Enters long when price bounces above weekly pivot support with volume confirmation,
-# enters short when price rejects below weekly pivot resistance with volume confirmation.
-# Exits when price reaches opposite pivot level or shows reversal signs.
-# Designed to work in both bull and bear markets by fading extremes at key weekly levels.
-# Targets 12-37 trades/year with disciplined risk control.
+# Hypothesis: 12h timeframe with 1-day Williams %R + 1-day EMA trend + volume spike.
+# Uses Williams %R(14) for overbought/oversold signals, EMA(50) for trend direction,
+# and volume spike for confirmation. Designed to capture reversals in trending markets
+# while avoiding chop. Targets 15-40 trades/year with disciplined risk control.
+# Williams %R < -80 = oversold (long), > -20 = overbought (short) in trend direction.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for pivot point calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P - H, R1 = 2P - L
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    s1 = 2 * pivot - high_1w  # Support 1
-    r1 = 2 * pivot - low_1w   # Resistance 1
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    
-    # Load daily data for additional context and volume
+    # Load 1-day data for Williams %R and EMA (once before loop)
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 14-day Williams %R
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Calculate 50-day EMA for trend
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align indicators to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -43,11 +43,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -57,21 +56,19 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        wr = williams_r_aligned[i]
+        ema = ema_50_aligned[i]
         
-        # Volume filter: current volume > 1.3 * 20-period average
-        vol_spike = vol > 1.3 * vol_ma
-        
-        pivot_val = pivot_aligned[i]
-        s1_val = s1_aligned[i]
-        r1_val = r1_aligned[i]
+        # Volume filter: current volume > 2.0 * 20-period average
+        vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long entry: price bounces above S1 support with volume confirmation
-            if price > s1_val and price <= pivot_val and vol_spike:
+            # Long entry: Williams %R oversold (< -80) AND price above EMA (uptrend) AND volume spike
+            if wr < -80 and price > ema and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price rejects below R1 resistance with volume confirmation
-            elif price < r1_val and price >= pivot_val and vol_spike:
+            # Short entry: Williams %R overbought (> -20) AND price below EMA (downtrend) AND volume spike
+            elif wr > -20 and price < ema and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -80,12 +77,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price reaches pivot level or shows rejection
-                if price >= pivot_val:
+                # Exit on Williams %R crossing above -50 (momentum fading) OR price below EMA (trend change)
+                if wr > -50 or price < ema:
                     exit_signal = True
+            
             elif position == -1:  # short position
-                # Exit when price reaches pivot level or shows bounce
-                if price <= pivot_val:
+                # Exit on Williams %R crossing below -50 (momentum fading) OR price above EMA (trend change)
+                if wr < -50 or price > ema:
                     exit_signal = True
             
             if exit_signal:
@@ -97,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_S1R1_Bounce"
-timeframe = "6h"
+name = "12h_WilliamsR_EMA_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
