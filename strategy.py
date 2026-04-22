@@ -33,7 +33,7 @@ def generate_signals(prices):
     r2 = pivot + (high_1d - low_1d)
     s2 = pivot - (high_1d - low_1d)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 1h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -52,14 +52,17 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        # Skip if data not ready
+        # Skip if data not ready or outside session
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_avg_20[i]) or
-            np.isnan(atr[i])):
+            np.isnan(atr[i]) or not (8 <= hours[i] <= 20)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,13 +73,13 @@ def generate_signals(prices):
             if (close[i] > r2_aligned[i] and 
                 volume[i] > 1.5 * vol_avg_20[i] and
                 atr[i] > 0.5 * atr[i-1] if i > 0 else True):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: Price breaks below S2 + volume spike + volatility filter
             elif (close[i] < s2_aligned[i] and 
                   volume[i] > 1.5 * vol_avg_20[i] and
                   atr[i] > 0.5 * atr[i-1] if i > 0 else True):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit: Price crosses back to opposite pivot level (full exit)
@@ -86,17 +89,17 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
                 # Exit short: Price closes above R1
                 if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4H_Pivot_R2_S2_Breakout_Volume_Volatility"
-timeframe = "4h"
+name = "1H_Pivot_R2_S2_Breakout_Volume_Volatility_Session"
+timeframe = "1h"
 leverage = 1.0
