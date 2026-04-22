@@ -54,26 +54,26 @@ def generate_signals(prices):
         if position == 0:
             # Long: Price breaks above S1 with volume surge
             if close[i] > s1_1d_aligned[i] and vol_surge[i]:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: Price breaks below R1 with volume surge
             elif close[i] < r1_1d_aligned[i] and vol_surge[i]:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to pivot level or volatility drops
+            # Exit: Price returns to pivot level or volatility drops significantly
             if position == 1:
-                if close[i] < pivot_1d_aligned[i] or atr[i] < 0.5 * atr[i-1]:
+                if close[i] < pivot_1d_aligned[i] or atr[i] < 0.3 * atr[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > pivot_1d_aligned[i] or atr[i] < 0.5 * atr[i-1]:
+                if close[i] > pivot_1d_aligned[i] or atr[i] < 0.3 * atr[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
