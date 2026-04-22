@@ -5,51 +5,41 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Weekly ATR for volatility regime filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily close for 1d EMA trend
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # True Range for weekly ATR
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    atr_ma_1w = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
+    # 1d EMA34 for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 12h ATR for entry trigger and stop
+    # 4h close for entry trigger
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
+    # 4h ATR for volatility and stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h SMA for trend direction
-    sma = pd.Series(close).rolling(window=30, min_periods=30).mean().values
-    
-    # Align weekly ATR and its MA to 12h timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    atr_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
+    # 4h EMA34 for dynamic support/resistance
+    ema34_4h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any data is not ready
-        if (np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(atr_ma_1w_aligned[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(sma[i])):
+            np.isnan(ema34_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,39 +47,40 @@ def generate_signals(prices):
         
         price = close[i]
         atr_val = atr[i]
-        sma_val = sma[i]
-        atr_1w = atr_1w_aligned[i]
-        atr_ma_1w = atr_ma_1w_aligned[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        ema34_4h_val = ema34_4h[i]
         
-        # Volatility regime: only trade when weekly ATR is elevated (trending market)
-        vol_regime = atr_1w > atr_ma_1w
+        # Trend filter: only trade in direction of 1d EMA34
+        long_trend = price > ema34_1d_val
+        short_trend = price < ema34_1d_val
         
-        if position == 0 and vol_regime:
-            # Long: price breaks above SMA + 1.5*ATR with rising volatility
-            if price > sma_val + 1.5 * atr_val and atr_val > atr[i-1]:
+        if position == 0:
+            # Long: price pulls back to 4h EMA34 in uptrend
+            if long_trend and price <= ema34_4h_val + 0.5 * atr_val and price >= ema34_4h_val - 0.5 * atr_val:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below SMA - 1.5*ATR with rising volatility
-            elif price < sma_val - 1.5 * atr_val and atr_val > atr[i-1]:
+            # Short: price pulls back to 4h EMA34 in downtrend
+            elif short_trend and price <= ema34_4h_val + 0.5 * atr_val and price >= ema34_4h_val - 0.5 * atr_val:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position != 0:
-            # Exit: mean reversion to SMA or volatility collapse
-            mean_rev = (position == 1 and price < sma_val) or (position == -1 and price > sma_val)
-            vol_collapse = atr_val < 0.5 * atr[i-1]  # Sharp drop in volatility
+            # Exit: price moves 1.5*ATR away from EMA or contrary 1d trend
+            adverse_move = (position == 1 and price < ema34_4h_val - 1.5 * atr_val) or \
+                           (position == -1 and price > ema34_4h_val + 1.5 * atr_val)
+            trend_fail = (position == 1 and price < ema34_1d_val) or \
+                         (position == -1 and price > ema34_1d_val)
             
-            if mean_rev or vol_collapse:
+            if adverse_move or trend_fail:
                 signals[i] = 0.0
                 position = 0
             else:
-                # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12h_WeeklyATRTrend_FilteredBreakout_v1"
-timeframe = "12h"
+name = "4h_EMA34_Pullback_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
