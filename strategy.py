@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
+# 6h_Weekly_Pivot_Swing_Rejection
+# Hypothesis: On 6h timeframe, price often rejects at weekly pivot levels (R1/S1, R2/S2) during
+# weekly trend exhaustion. Enter on rejection with confirmation from 1d EMA trend filter and
+# volume spike. Works in bull/bear by only taking trades in direction of higher timeframe trend.
+# Target: 15-25 trades/year per symbol (~60-100 total over 4 years).
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1h range breakout using 4h Keltner bands with volume confirmation and 1d trend filter
-# Uses 4h ATR-based channels to capture volatility expansion and 1d EMA50 for trend alignment
-# Target: 15-30 trades/year per symbol (60-120 total over 4 years) with strict entry conditions
-# Breakouts occur when price breaks 4h Keltner bands with volume spike, filtered by 1d trend
-# Works in bull/bear via trend filter; session filter reduces noise
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,86 +18,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4-hour data for Keltner channels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Load weekly data for pivot calculation
+    df_1w = get_htf_ata(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h ATR(20) for Keltner channels
-    tr_4h = np.maximum(np.maximum(high_4h[1:] - low_4h[1:], 
-                                  np.abs(high_4h[1:] - close_4h[:-1])),
-                       np.abs(low_4h[1:] - close_4h[:-1]))
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_4h = pd.Series(tr_4h).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly range
+    weekly_range = high_1w - low_1w
     
-    # Calculate 4h EMA20 for Keltner center
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly pivot points from previous week
+    prev_close = np.roll(close_1w, 1)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_range = np.roll(weekly_range, 1)
     
-    # Calculate Keltner upper and lower bands (2.0 * ATR)
-    keltner_upper = ema_20_4h + 2.0 * atr_4h
-    keltner_lower = ema_20_4h - 2.0 * atr_4h
+    # Set first week values to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_range[0] = np.nan
     
-    # Load 1-day data for trend filter
+    # Calculate weekly R1, S1, R2, S2 (standard pivot formulas)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = (2 * pivot) - prev_low
+    s1 = (2 * pivot) - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    
+    # Load daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
     # Calculate 50-period EMA on daily close for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1d_series = pd.Series(close_1d)
+    ema_50 = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume spike filter (20-period on 1h)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20
+    # Volume spike filter (24-period on 6h ≈ 6 days)
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > 1.5 * vol_ma24
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Align indicators to 1-hour timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_4h, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_4h, keltner_lower)
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align weekly pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Align daily EMA to 6h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma20[i]) or not in_session[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma24[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above upper Keltner band + volume spike + uptrend (price > 1d EMA50)
-            if (close[i] > keltner_upper_aligned[i] and vol_spike[i] and close[i] > ema_50_1d_aligned[i]):
-                signals[i] = 0.20
+            # Long setup: Reject at S1/S2 with volume spike and uptrend
+            long_reject_s1 = (low[i] <= s1_aligned[i] and close[i] > s1_aligned[i])
+            long_reject_s2 = (low[i] <= s2_aligned[i] and close[i] > s2_aligned[i])
+            uptrend = close[i] > ema_50_aligned[i]
+            
+            if (long_reject_s1 or long_reject_s2) and vol_spike[i] and uptrend:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Keltner band + volume spike + downtrend (price < 1d EMA50)
-            elif (close[i] < keltner_lower_aligned[i] and vol_spike[i] and close[i] < ema_50_1d_aligned[i]):
-                signals[i] = -0.20
-                position = -1
+            # Short setup: Reject at R1/R2 with volume spike and downtrend
+            elif (high[i] >= r1_aligned[i] and close[i] < r1_aligned[i]) or \
+                 (high[i] >= r2_aligned[i] and close[i] < r2_aligned[i]):
+                if vol_spike[i] and close[i] < ema_50_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         else:
-            # Exit: Price returns to 4h EMA20 (middle of Keltner channel)
+            # Exit: Price moves back through the pivot level
             if position == 1:
-                if close[i] < ema_20_4h_aligned[i]:
+                if close[i] < pivot[i]:  # Use current week's pivot for exit
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema_20_4h_aligned[i]:
+                if close[i] > pivot[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_Keltner_Breakout_Volume_Trend_Session"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Swing_Rejection"
+timeframe = "6h"
 leverage = 1.0
