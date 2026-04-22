@@ -8,79 +8,69 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: Weekly EMA200 trend + Daily Pivot Point (PP) breakout with volume confirmation
-    # Uses weekly trend filter to avoid counter-trend trades, daily pivot levels for institutional relevance
-    # Volume surge filters low-probability breakouts. Works in bull/bear via trend filter.
+    # Hypothesis: Daily Williams %R overbought/oversold with weekly EMA50 trend filter and volume confirmation
+    # Williams %R identifies reversals at extremes, weekly trend filters counter-trend trades
+    # Volume surge confirms momentum, suitable for both bull and bear markets
     
-    # Load weekly and daily data once
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data once
     df_1d = get_htf_data(prices, '1d')
-    
-    # Weekly EMA200 trend filter
-    close_1w = df_1w['close'].values
-    ema_1w_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_1w_200_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_200)
-    
-    # Daily Pivot Point calculation (standard formula)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pp_1d - low_1d
-    s1_1d = 2 * pp_1d - high_1d
     
-    # Align daily levels to 4h
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Load weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 4h ATR for volatility filter
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Weekly EMA50 trend filter
+    ema_1w_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
+    
+    # Daily Williams %R (14-period)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Volume filter (20-period MA surge)
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_surge = prices['volume'].values > 2.0 * vol_ma20
+    
+    # Price and other arrays
+    close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_1w_200_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_1w_50_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above S1 with volume surge AND weekly EMA200 uptrend
-            if close[i] > s1_1d_aligned[i] and vol_surge[i] and close[i] > ema_1w_200_aligned[i]:
+            # Long: Williams %R oversold (< -80) with volume surge AND weekly EMA50 uptrend
+            if williams_r_aligned[i] < -80 and vol_surge[i] and close[i] > ema_1w_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below R1 with volume surge AND weekly EMA200 downtrend
-            elif close[i] < r1_1d_aligned[i] and vol_surge[i] and close[i] < ema_1w_200_aligned[i]:
+            # Short: Williams %R overbought (> -20) with volume surge AND weekly EMA50 downtrend
+            elif williams_r_aligned[i] > -20 and vol_surge[i] and close[i] < ema_1w_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to pivot point level
+            # Exit: Williams %R returns to neutral zone (-50) or trend reversal
             if position == 1:
-                if close[i] < pp_1d_aligned[i]:
+                if williams_r_aligned[i] > -50 or close[i] < ema_1w_50_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > pp_1d_aligned[i]:
+                if williams_r_aligned[i] < -50 or close[i] > ema_1w_50_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -88,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyEMA200_DailyPivot_PP_R1_S1_Breakout_VolumeSurge_v1"
-timeframe = "4h"
+name = "1d_WilliamsR_WeeklyEMA50_Trend_VolumeSurge_v1"
+timeframe = "1d"
 leverage = 1.0
