@@ -1,13 +1,13 @@
-# 6h_WeeklyPivot_DailyTrend_Signal
-# Hypothesis: For 6h timeframe, trade in direction of 1d EMA34 trend only when price breaks weekly pivot S1/R1.
-# Use weekly pivot from 1w timeframe for structure and 1d EMA34 for trend filter.
-# Enter long when price breaks above weekly R1 and 1d EMA34 rising; short when breaks below weekly S1 and 1d EMA34 falling.
-# Exit when price crosses 1d EMA34 (trend change) or reverses to weekly pivot point.
-# Designed for 6h timeframe targeting 15-30 trades/year with trend-following edge in both bull and bear markets.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Camarilla pivot (R1/S1) breakout with 1d trend filter and volume spike
+# Camarilla pivot levels derived from prior 1d high/low/close provide robust support/resistance.
+# Breakout above R1 or below S1 with 1d EMA34 trend filter and volume spike (>1.5x 20-day average)
+# avoids false breakouts. Works in bull markets (buy R1 breakouts) and bear markets (sell S1 breakdowns)
+# via trend filter and volume confirmation. Targets 20-40 trades/year on 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,75 +17,75 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load weekly data for pivot points (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Load daily data for EMA34 trend filter (ONCE before loop)
+    # Load 1d data for Camarilla pivots, trend filter, and volume (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
+    # Camarilla pivot levels for current day (based on prior day)
+    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    hl_range = high_1d - low_1d
+    r1 = close_1d + 1.1 * hl_range / 12
+    s1 = close_1d - 1.1 * hl_range / 12
     
-    # Align weekly pivot levels to 6h timeframe (wait for weekly bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align Camarilla levels to 4h (each 4h bar gets the prior day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 1d volume 20-period average for spike detection
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R1 and daily EMA34 is rising (trend up)
+            # Long: break above R1 + 1d uptrend + volume spike
             if (close[i] > r1_aligned[i] and 
-                ema34_1d_aligned[i] > ema34_1d_aligned[i-1]):
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 and daily EMA34 is falling (trend down)
+            # Short: break below S1 + 1d downtrend + volume spike
             elif (close[i] < s1_aligned[i] and 
-                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1]):
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: trend reversal (EMA34 flatten/reverse) or price returns to weekly pivot
+            # Exit: return to prior day's close or trend reversal
             if position == 1:
-                # Exit on trend reversal or return to pivot
-                if (ema34_1d_aligned[i] <= ema34_1d_aligned[i-1] or 
-                    close[i] <= pivot_aligned[i]):
+                # Exit on return to prior close or trend reversal
+                if (close[i] <= close_1d[i] or 
+                    close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on trend reversal or return to pivot
-                if (ema34_1d_aligned[i] >= ema34_1d_aligned[i-1] or 
-                    close[i] >= pivot_aligned[i]):
+                # Exit on return to prior close or trend reversal
+                if (close[i] >= close_1d[i] or 
+                    close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_DailyTrend_Signal"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
