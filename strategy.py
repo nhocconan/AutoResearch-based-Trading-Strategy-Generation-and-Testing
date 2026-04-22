@@ -8,42 +8,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Weekly data for trend filter (primary trend)
+    # Weekly data for trend filter and volatility
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    # Weekly EMA8 for trend filter
-    ema_8_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
-    # Align to 6h
-    ema_8_1w_6h = align_htf_to_ltf(prices, df_1w, ema_8_1w)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Daily data for support/resistance levels
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Weekly ATR(14) for volatility filter
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w[0] = tr1[0]  # First value
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    
+    # Daily Donchian(20) breakout levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Pivot point calculation (standard)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Daily EMA21 for dynamic support/resistance
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Daily Donchian upper/lower bands (20-period)
+    donch_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align daily levels to 6h
-    pivot_1d_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    ema_21_1d_6h = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Align weekly indicators to daily timeframe
+    ema_34_1d = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    atr_1w_1d = align_htf_to_ltf(prices, df_1w, atr_1w)
+    donch_upper_1d = align_htf_to_ltf(prices, df_1d, donch_upper)
+    donch_lower_1d = align_htf_to_ltf(prices, df_1d, donch_lower)
     
-    # 6h ATR(14) for volatility filter and stop
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume filter (20-period MA)
+    # Daily volume filter (20-period MA)
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_surge = prices['volume'].values > 1.5 * vol_ma20  # Moderate volume surge
     
@@ -52,38 +49,37 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_8_1w_6h[i]) or np.isnan(pivot_1d_6h[i]) or np.isnan(ema_21_1d_6h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_34_1d[i]) or np.isnan(atr_1w_1d[i]) or 
+            np.isnan(donch_upper_1d[i]) or np.isnan(donch_lower_1d[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above weekly EMA8 (uptrend) and bounces from daily EMA21 support with volume
-            if (close[i] > ema_8_1w_6h[i] and 
-                close[i] > ema_21_1d_6h[i] and 
-                low[i] <= ema_21_1d_6h[i] * 1.005 and  # Touched or slightly below support
-                vol_surge[i]):
+            # Long: Price breaks above Donchian upper with volume surge and above weekly EMA34
+            if (prices['close'].values[i] > donch_upper_1d[i] and vol_surge[i] and 
+                prices['close'].values[i] > ema_34_1d[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly EMA8 (downtrend) and rejects from daily EMA21 resistance with volume
-            elif (close[i] < ema_8_1w_6h[i] and 
-                  close[i] < ema_21_1d_6h[i] and 
-                  high[i] >= ema_21_1d_6h[i] * 0.995 and  # Touched or slightly above resistance
-                  vol_surge[i]):
+            # Short: Price breaks below Donchian lower with volume surge and below weekly EMA34
+            elif (prices['close'].values[i] < donch_lower_1d[i] and vol_surge[i] and 
+                  prices['close'].values[i] < ema_34_1d[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses weekly EMA8 (trend change) or volatility drops significantly
+            # Exit: Price crosses opposite Donchian level or volatility drops significantly
             if position == 1:
-                if close[i] < ema_8_1w_6h[i] or atr[i] < 0.4 * atr[i-1]:  # Trend change or vol drop
+                if (prices['close'].values[i] < donch_lower_1d[i] or 
+                    atr_1w_1d[i] < 0.5 * atr_1w_1d[i-1]):  # Volatility drop filter
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema_8_1w_6h[i] or atr[i] < 0.4 * atr[i-1]:  # Trend change or vol drop
+                if (prices['close'].values[i] > donch_upper_1d[i] or 
+                    atr_1w_1d[i] < 0.5 * atr_1w_1d[i-1]):  # Volatility drop filter
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -91,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyEMA8_Trend_DailyEMA21_Bounce_VolumeSurge_v1"
-timeframe = "6h"
+name = "1d_DonchianBreakout_WeeklyEMA34_VolumeSurge_v2"
+timeframe = "1d"
 leverage = 1.0
