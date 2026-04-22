@@ -1,51 +1,22 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour RSI divergence with 1-day trend filter and volume confirmation.
-RSI divergence captures momentum exhaustion at trend extremes.
-The 1-day trend filter ensures trades align with the daily trend to avoid counter-trend trades.
-Volume spikes confirm institutional participation at reversal points.
-This strategy aims to capture reversals in both bull and bear markets by
-trading RSI divergences with trend and volume confirmation.
-Target: 19-50 trades/year per symbol (75-200 total over 4 years).
+Hypothesis: Daily Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation.
+The Donchian channel identifies breakout points with clear support/resistance.
+The weekly EMA50 ensures trades align with the higher timeframe trend to avoid counter-trend trades.
+Volume spikes confirm institutional participation at breakout points.
+This strategy aims to capture strong momentum moves in both bull and bear markets by
+trading breakouts of the daily Donchian channel with weekly trend and volume confirmation.
+Target: 7-25 trades/year per symbol (30-100 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(prices, period=14):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(prices, prepend=prices[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False).mean()
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def detect_divergence(price, rsi, lookback=14):
-    """Detect bullish and bearish RSI divergence"""
-    n = len(price)
-    bullish_div = np.zeros(n, dtype=bool)
-    bearish_div = np.zeros(n, dtype=bool)
-    
-    for i in range(lookback, n):
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        if price[i] < price[i-lookback:i].min() and rsi[i] > rsi[i-lookback:i].min():
-            bullish_div[i] = True
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        if price[i] > price[i-lookback:i].max() and rsi[i] < rsi[i-lookback:i].max():
-            bearish_div[i] = True
-            
-    return bullish_div, bearish_div
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -53,33 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h price data for RSI calculation - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate RSI on 4h data
-    rsi_4h = calculate_rsi(df_4h['close'].values, 14)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    
-    # Detect RSI divergence on 4h
-    bullish_div_4h, bearish_div_4h = detect_divergence(
-        df_4h['close'].values, rsi_4h, 14
-    )
-    bullish_div_4h_aligned = align_htf_to_ltf(prices, df_4h, bullish_div_4h.astype(float))
-    bearish_div_4h_aligned = align_htf_to_ltf(prices, df_4h, bearish_div_4h.astype(float))
-    
-    # Load 1d data for trend filter - ONCE before loop
+    # Load daily data for Donchian calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA for trend filter (50-period)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily Donchian(20) - upper and lower bands
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h volume average (20-period)
+    # Align Donchian bands to 1d timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    
+    # Load weekly data for EMA50 trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate daily volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -88,11 +58,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_avg_20[i]) or np.isnan(bullish_div_4h_aligned[i]) or
-            np.isnan(bearish_div_4h_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -109,29 +78,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: bullish RSI divergence, above 1d EMA, volume spike
-            if (bullish_div_4h_aligned[i] and                    # Bullish RSI divergence
-                close[i] > ema_50_1d_aligned[i] and              # Above 1d EMA (bullish trend)
-                volume[i] > 1.8 * vol_avg_20[i]):                # Volume spike
+            # Long: price breaks above Donchian upper, above weekly EMA50, volume spike
+            if (close[i] > donchian_upper_aligned[i] and                    # Price above upper band
+                close[i] > ema_50_1w_aligned[i] and                        # Above weekly EMA50 (bullish trend)
+                volume[i] > 2.0 * vol_avg_20[i]):                          # Volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish RSI divergence, below 1d EMA, volume spike
-            elif (bearish_div_4h_aligned[i] and                  # Bearish RSI divergence
-                  close[i] < ema_50_1d_aligned[i] and            # Below 1d EMA (bearish trend)
-                  volume[i] > 1.8 * vol_avg_20[i]):              # Volume spike
+            # Short: price breaks below Donchian lower, below weekly EMA50, volume spike
+            elif (close[i] < donchian_lower_aligned[i] and                 # Price below lower band
+                  close[i] < ema_50_1w_aligned[i] and                      # Below weekly EMA50 (bearish trend)
+                  volume[i] > 2.0 * vol_avg_20[i]):                        # Volume spike
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral zone or crosses 1d EMA
+            # Exit: price returns to opposite side of Donchian band or crosses weekly EMA50
             exit_signal = False
             
             if position == 1:
-                # Exit long: RSI > 70 or price crosses below 1d EMA
-                if rsi_4h_aligned[i] > 70 or close[i] < ema_50_1d_aligned[i]:
+                # Exit long: price crosses below lower band or below weekly EMA50
+                if close[i] < donchian_lower_aligned[i] or close[i] < ema_50_1w_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: RSI < 30 or price crosses above 1d EMA
-                if rsi_4h_aligned[i] < 30 or close[i] > ema_50_1d_aligned[i]:
+                # Exit short: price crosses above upper band or above weekly EMA50
+                if close[i] > donchian_upper_aligned[i] or close[i] > ema_50_1w_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -142,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_Divergence_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Donchian_20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
