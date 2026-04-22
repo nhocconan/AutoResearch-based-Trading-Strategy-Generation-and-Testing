@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with daily EMA trend filter and volume confirmation.
-# Uses daily timeframe to determine trend via EMA34, and takes breakouts in direction of daily trend.
-# Volume spike confirms institutional interest. Designed for 4h to capture multi-day swings with low frequency.
+# Hypothesis: 6h Williams %R with 1-day RSI and volume confirmation for mean reversion.
+# Williams %R(14) > -20 indicates overbought, < -80 indicates oversold.
+# RSI(14) on 1-day confirms momentum divergence: RSI < 30 for long, > 70 for short.
+# Volume spike filters for conviction. Designed to work in both bull and bear markets
+# by fading extremes during pullbacks in trends or mean reversion in ranges.
 # Target: 20-30 trades/year per symbol (80-120 total) to minimize fee drag.
-# Works in bull markets via trend-following breakouts, in bear via short breakdowns.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,74 +20,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter (EMA34) and Camarilla pivot calculation
+    # Williams %R on 6h (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    
+    # RSI on 1-day (14-period)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla pivot levels using prior day's data
-    # Typical price = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Volume spike filter (24-period on 6h)
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > 1.5 * vol_ma24
     
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Trend: price above EMA34 = bullish, below = bearish
-    trend_bullish = close_1d > ema34
-    trend_bearish = close_1d < ema34
-    
-    # Volume spike filter (20-period on 4h)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20
-    
-    # Align indicators to 4-hour timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish.astype(float))
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish.astype(float))
+    # Align indicators to 6-hour timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), williams_r)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(vol_ma24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + daily bullish trend + volume spike
-            if (close[i] > r1_aligned[i] and 
-                trend_bullish_aligned[i] > 0.5 and 
+            # Long: Williams %R oversold (< -80) + RSI < 30 + volume spike
+            if (williams_r_aligned[i] < -80 and 
+                rsi_1d_aligned[i] < 30 and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + daily bearish trend + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  trend_bearish_aligned[i] > 0.5 and 
+            # Short: Williams %R overbought (> -20) + RSI > 70 + volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  rsi_1d_aligned[i] > 70 and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price breaks opposite Camarilla level or trend changes
+            # Exit: Williams %R returns to neutral range (-50) or RSI reverts
             if position == 1:
-                if (close[i] < s1_aligned[i] or trend_bullish_aligned[i] <= 0.5):
+                if (williams_r_aligned[i] > -50 or rsi_1d_aligned[i] > 50):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if (close[i] > r1_aligned[i] or trend_bearish_aligned[i] <= 0.5):
+                if (williams_r_aligned[i] < -50 or rsi_1d_aligned[i] < 50):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -94,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_DailyEMA34_Trend_Volume_Spike"
-timeframe = "4h"
+name = "6h_WilliamsR_RSI1D_Volume_Spike"
+timeframe = "6h"
 leverage = 1.0
