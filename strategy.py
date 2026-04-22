@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Bollinger Band squeeze with daily trend filter and volume confirmation.
-Long when price breaks above upper BB during low volatility (BBW < 20th percentile) and price > daily EMA50.
-Short when price breaks below lower BB during low volatility (BBW < 20th percentile) and price < daily EMA50.
-Exit when price returns to middle BB (mean reversion) or volatility expands (BBW > 80th percentile).
-BB squeeze captures low volatility breakouts; daily EMA filter ensures trend alignment; volume avoids false breakouts.
-Works in both bull and bear markets by trading volatility contractions/expansions with trend alignment.
+Hypothesis: 4-hour Camarilla pivot reversal with 12-hour trend filter.
+Long at S1 support when price bounces up from S1 and 12h EMA50 is rising.
+Short at R1 resistance when price rejects down from R1 and 12h EMA50 is falling.
+Exit when price crosses the pivot point (PP) or reaches opposite S3/R3 level.
+Camarilla levels provide high-probability reversal zones in ranging markets.
+Trend filter ensures we only trade with the higher timeframe momentum.
+Works in both bull and bear markets by adapting to 12h trend direction.
 """
 
 import numpy as np
@@ -17,67 +18,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) - calculated on 12h data
-    bb_period = 20
-    bb_std = 2.0
-    
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma + bb_std * std
-    lower_bb = sma - bb_std * std
-    middle_bb = sma
-    bb_width = (upper_bb - lower_bb) / middle_bb  # Normalized bandwidth
-    
-    # Percentile of BB width for squeeze detection (lookback 50 periods)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_pct = bb_width_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Daily EMA50 for trend filter
+    # Load 1-day data for Camarilla pivot calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla levels from previous day's range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily volume average for confirmation
-    vol_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Camarilla formulas: PP = (H+L+C)/3, Range = H-L
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Key levels: S1, S2, S3, R1, R2, R3
+    s1 = close_1d - (range_1d * 1.0 / 6.0)
+    s2 = close_1d - (range_1d * 2.0 / 6.0)
+    s3 = close_1d - (range_1d * 3.0 / 6.0)
+    r1 = close_1d + (range_1d * 1.0 / 6.0)
+    r2 = close_1d + (range_1d * 2.0 / 6.0)
+    r3 = close_1d + (range_1d * 3.0 / 6.0)
+    pp_val = pp  # pivot point
+    
+    # Align Camarilla levels to 4h timeframe (1-day levels shift only at daily boundary)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_val)
+    
+    # Load 12h data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    # 12h EMA50 for trend direction
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Volume confirmation - 4h volume vs 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
-            np.isnan(bb_width_pct[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(avg_vol_1d_aligned[i])):
+        # Skip if any data not ready
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: BB squeeze (low volatility) + breakout above upper BB + price > daily EMA50 + volume confirmation
-            if (bb_width_pct[i] < 20 and  # Bollinger Band squeeze (low volatility)
-                close[i] > upper_bb[i] and  # Break above upper BB
-                close[i] > ema_50_1d_aligned[i] and  # Above daily EMA50 (uptrend)
-                volume[i] > avg_vol_1d_aligned[i]):  # Volume above average
+            # Long setup: Price at S1 support with bullish 12h trend and volume
+            if (close[i] <= s1_aligned[i] * 1.001 and  # Allow small tolerance
+                close[i] > s1_aligned[i] and           # Must be above S1
+                ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1] and  # 12h EMA rising
+                volume[i] > vol_ma_20[i]):             # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: BB squeeze + breakdown below lower BB + price < daily EMA50 + volume confirmation
-            elif (bb_width_pct[i] < 20 and  # Bollinger Band squeeze (low volatility)
-                  close[i] < lower_bb[i] and  # Break below lower BB
-                  close[i] < ema_50_1d_aligned[i] and  # Below daily EMA50 (downtrend)
-                  volume[i] > avg_vol_1d_aligned[i]):  # Volume above average
+            # Short setup: Price at R1 resistance with bearish 12h trend and volume
+            elif (close[i] >= r1_aligned[i] * 0.999 and  # Allow small tolerance
+                  close[i] < r1_aligned[i] and           # Must be below R1
+                  ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1] and  # 12h EMA falling
+                  volume[i] > vol_ma_20[i]):             # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         else:
@@ -85,12 +101,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price returns to middle BB OR volatility expands (BBW > 80th percentile)
-                if (close[i] < middle_bb[i] or bb_width_pct[i] > 80):
+                # Exit long: Price crosses PP (take profit) or hits S3 (stop)
+                if close[i] >= pp_aligned[i] or close[i] <= s3_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price returns to middle BB OR volatility expands
-                if (close[i] > middle_bb[i] or bb_width_pct[i] > 80):
+                # Exit short: Price crosses PP (take profit) or hits R3 (stop)
+                if close[i] <= pp_aligned[i] or close[i] >= r3_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -101,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_BB_Squeeze_DailyEMA50_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_S1R1_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
