@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly trend filter (1w EMA50) and volume confirmation.
-# Uses weekly EMA for trend direction (bull/bear agnostic), Donchian channels for breakout signals,
-# and volume spike for confirmation. Designed for 6h timeframe to target 15-35 trades/year per symbol.
-# Works in bull/bear via weekly trend filter + volatility-based breakout levels.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+# Uses weekly EMA for trend direction, daily Donchian channels for breakout signals, and volume spike for confirmation.
+# Long when price breaks above 20-day high in uptrend (close > weekly EMA50) with volume spike.
+# Short when price breaks below 20-day low in downtrend (close < weekly EMA50) with volume spike.
+# Exit on opposite Donchian touch or trend reversal.
+# Designed for 1d timeframe to target 10-30 trades/year per symbol.
+# Works in bull/bear via trend filter + volatility-based entry levels.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,12 +28,12 @@ def generate_signals(prices):
     # 1w EMA(50) for trend direction
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 6h timeframe (waits for 1w bar to close)
+    # Align to 1d timeframe (waits for 1w bar to close)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Donchian channels (20-period) on 6h data
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on daily data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -39,24 +42,26 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 20-period high + uptrend (close > weekly EMA50) + volume spike
-            if (close[i] > high_max[i] and 
+            # Long: price breaks above 20-day high + uptrend (close > weekly EMA50) + volume spike
+            if (close[i] > high_20[i] and 
                 close[i] > ema_50_1w_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low + downtrend (close < weekly EMA50) + volume spike
-            elif (close[i] < low_min[i] and 
+            # Short: price breaks below 20-day low + downtrend (close < weekly EMA50) + volume spike
+            elif (close[i] < low_20[i] and 
                   close[i] < ema_50_1w_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
@@ -64,15 +69,15 @@ def generate_signals(prices):
         else:
             # Exit conditions
             if position == 1:
-                # Exit on 20-period low touch or trend reversal
-                if (close[i] < low_min[i] or close[i] < ema_50_1w_aligned[i]):
+                # Exit on 20-day low touch or trend reversal
+                if (close[i] < low_20[i] or close[i] < ema_50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on 20-period high touch or trend reversal
-                if (close[i] > high_max[i] or close[i] > ema_50_1w_aligned[i]):
+                # Exit on 20-day high touch or trend reversal
+                if (close[i] > high_20[i] or close[i] > ema_50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -80,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1wEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
