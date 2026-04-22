@@ -3,47 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 12h EMA trend filter and volume confirmation.
-# Bollinger Band squeeze (BB width < 20th percentile) indicates low volatility, often preceding breakouts.
-# Direction determined by 12h EMA: long when price > EMA, short when price < EMA.
-# Volume confirmation requires current volume > 2x 20-period average to avoid false breakouts.
-# Designed to capture volatility breakouts in both bull and bear markets by aligning with trend.
-# Targets 15-25 trades/year with strict entry conditions to minimize fee drag.
+# Hypothesis: 4h Commodity Channel Index (CCI) with 1-day EMA trend filter and volume confirmation.
+# CCI identifies overbought (>100) and oversold (<-100) conditions with mean reversion tendencies.
+# 1-day EMA provides trend direction: only take longs when price > 1d EMA, shorts when price < 1d EMA.
+# Volume confirmation requires current volume > 1.3x 20-period average to filter weak signals.
+# Designed to work in both bull and bear markets by aligning with trend via 1d EMA filter.
+# Targets 20-40 trades/year with strict entry conditions to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 1d data for EMA trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 50-period EMA on 12h data
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 34-period EMA on 1d data
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate Bollinger Bands (20, 2) on 6h data
-    close = prices['close'].values
+    # Calculate CCI on 4h data (20-period)
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Middle band: 20-period SMA
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    # Standard deviation
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    # Upper and lower bands
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    # Bollinger Band width
-    bb_width = (upper_bb - lower_bb) / sma_20
-    # 20th percentile of BB width for squeeze detection (using expanding window to avoid look-ahead)
-    bb_width_percentile = pd.Series(bb_width).expanding(min_periods=20).quantile(0.20).values
-    # Squeeze condition: BB width < 20th percentile
-    squeeze = bb_width < bb_width_percentile
+    typical_price = (high + low + close) / 3.0
+    ma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    deviation = np.abs(typical_price - ma_tp)
+    mean_deviation = pd.Series(deviation).rolling(window=20, min_periods=20).mean().values
+    
+    # Avoid division by zero
+    cci = np.where(mean_deviation != 0, (typical_price - ma_tp) / (0.015 * mean_deviation), 0.0)
     
     # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -51,11 +45,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or 
-            np.isnan(sma_20[i]) or 
-            np.isnan(std_20[i]) or 
-            np.isnan(bb_width[i]) or 
-            np.isnan(bb_width_percentile[i]) or 
+        if (np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(cci[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,34 +56,34 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        squeeze_active = squeeze[i]
-        ema_val = ema_12h_aligned[i]
+        cci_val = cci[i]
+        ema_val = ema_1d_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
-        vol_spike = vol > 2.0 * vol_ma
+        # Volume filter: current volume > 1.3 * 20-period average
+        vol_spike = vol > 1.3 * vol_ma
         
         if position == 0:
-            # Entry conditions: Bollinger Band squeeze + trend alignment + volume spike
-            if squeeze_active:
-                if price > ema_val and vol_spike:  # Long: price above 12h EMA + volume spike
-                    signals[i] = 0.25
-                    position = 1
-                elif price < ema_val and vol_spike:  # Short: price below 12h EMA + volume spike
-                    signals[i] = -0.25
-                    position = -1
+            # Long conditions: oversold + uptrend + volume spike
+            if cci_val < -100 and price > ema_val and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # Short conditions: overbought + downtrend + volume spike
+            elif cci_val > 100 and price < ema_val and vol_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Exit conditions: squeeze ends or trend reverses
+            # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when squeeze ends or price breaks below 12h EMA
-                if not squeeze_active or price < ema_val:
+                # Exit when CCI returns to overbought or trend breaks
+                if cci_val > 100 or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when squeeze ends or price breaks above 12h EMA
-                if not squeeze_active or price > ema_val:
+                # Exit when CCI returns to oversold or trend breaks
+                if cci_val < -100 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -104,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BBSqueeze_12hEMA_Trend_Volume"
-timeframe = "6h"
+name = "4h_CCI_1dEMA_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
