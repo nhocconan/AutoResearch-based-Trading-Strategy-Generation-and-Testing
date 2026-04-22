@@ -13,52 +13,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for weekly pivot - ONCE before loop
+    # Load daily data for pivot calculation - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from daily data (using 5-day lookback)
+    # Calculate daily pivot points
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
     
-    # Weekly high/low/close approximation using 5-day lookback
-    weekly_high = pd.Series(high_daily).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_daily).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(close_daily).rolling(window=5, min_periods=5).last().values
+    # Daily pivot point
+    pivot = (high_daily + low_daily + close_daily) / 3.0
+    # Support and resistance levels
+    r1 = 2 * pivot - low_daily
+    s1 = 2 * pivot - high_daily
+    r2 = pivot + (high_daily - low_daily)
+    s2 = pivot - (high_daily - low_daily)
+    r3 = high_daily + 2 * (pivot - low_daily)
+    s3 = low_daily - 2 * (high_daily - pivot)
     
-    # Calculate weekly pivot point: (H + L + C) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    
-    # Calculate weekly support and resistance levels
-    weekly_range = weekly_high - weekly_low
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + weekly_range
-    weekly_s2 = weekly_pivot - weekly_range
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
-    
-    # Calculate ATR(14) from daily data for volatility filter
+    # Calculate ATR(14) from daily data
     tr1 = high_daily - low_daily
     tr2 = np.abs(high_daily - np.roll(close_daily, 1))
     tr3 = np.abs(low_daily - np.roll(close_daily, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly pivot levels and ATR to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_daily, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_daily, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_daily, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_daily, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_daily, weekly_s2)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_daily, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_daily, weekly_s3)
+    # Align pivot levels and ATR to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_daily, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_daily, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_daily, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
     atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
     
-    # Calculate 6h volume average (20-period)
+    # Calculate 4h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -69,11 +62,9 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or
-            np.isnan(weekly_s2_aligned[i]) or np.isnan(weekly_r3_aligned[i]) or
-            np.isnan(weekly_s3_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(atr_14_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,35 +81,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price crosses above weekly R1 with volume confirmation
-            if (close[i] > weekly_r1_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i] and
+            # Long: Price breaks above R1 with volume confirmation
+            if (close[i] > r1_aligned[i] and 
+                volume[i] > 1.8 * vol_avg_20[i] and
                 atr_14_aligned[i] > 0):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: Price crosses below weekly S1 with volume confirmation
-            elif (close[i] < weekly_s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i] and
+            # Short: Price breaks below S1 with volume confirmation
+            elif (close[i] < s1_aligned[i] and 
+                  volume[i] > 1.8 * vol_avg_20[i] and
                   atr_14_aligned[i] > 0):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to weekly pivot level
+            # Exit: Price returns to pivot level
             if position == 1:
-                if close[i] < weekly_pivot_aligned[i]:
+                if close[i] < pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > weekly_pivot_aligned[i]:
+                if close[i] > pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
-name = "6H_WeeklyPivot_R1S1_Volume_ATR_Filter"
-timeframe = "6h"
+name = "4H_DailyPivot_R1S1_Volume_Session"
+timeframe = "4h"
 leverage = 1.0
