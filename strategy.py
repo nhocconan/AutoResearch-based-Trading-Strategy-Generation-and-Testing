@@ -5,128 +5,113 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 4h data once
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Load daily data once
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h Supertrend (ATR=10, multiplier=3)
-    # ATR calculation
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Calculate Pivot levels using previous day's HLC (no look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Basic upper and lower bands
-    hl2 = (high_4h + low_4h) / 2
-    upper_band = hl2 + 3 * atr
-    lower_band = hl2 - 3 * atr
+    pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    r1_1d = 2 * pp_1d - prev_low_1d
+    s1_1d = 2 * pp_1d - prev_high_1d
+    r2_1d = pp_1d + (prev_high_1d - prev_low_1d)
+    s2_1d = pp_1d - (prev_high_1d - prev_low_1d)
     
-    # Initialize Supertrend
-    supertrend = np.full_like(close_4h, np.nan)
-    direction = np.full_like(close_4h, 1)  # 1 for uptrend, -1 for downtrend
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    for i in range(10, len(close_4h)):
-        if np.isnan(atr[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
-            continue
-            
-        if close_4h[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close_4h[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            
-        if direction[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1]) if not np.isnan(supertrend[i-1]) else lower_band[i]
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1]) if not np.isnan(supertrend[i-1]) else upper_band[i]
+    # Align to 12h timeframe (primary timeframe)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align Supertrend to 1h
-    supertrend_1h = align_htf_to_ltf(prices, df_4h, supertrend)
-    direction_1h = align_htf_to_ltf(prices, df_4h, direction)
+    # Volume spike filter (20-period average on 12h data)
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1h = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # 1h RSI for entry timing
-    close_series = prices['close']
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Session filter (08-20 UTC)
-    hours = prices.index.hour
+    # Daily volatility filter (10-day average of absolute returns)
+    daily_return = pd.Series(close_1d).pct_change().abs()
+    vol_filter = pd.Series(daily_return).rolling(window=10, min_periods=10).mean().values
+    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # Skip if data not ready
-        if (np.isnan(supertrend_1h[i]) or 
-            np.isnan(direction_1h[i]) or 
-            np.isnan(ema50_1h[i]) or 
-            np.isnan(rsi[i])):
+    for i in range(50, n):
+        # Skip if any data is not ready
+        if (np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(vol_filter_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        st = supertrend_1h[i]
-        dir_4h = direction_1h[i]
-        ema50 = ema50_1h[i]
-        rsi_val = rsi[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        vol_filter_val = vol_filter_aligned[i]
+        pp = pp_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        r2 = r2_aligned[i]
+        s2 = s2_aligned[i]
+        ema34 = ema34_aligned[i]
+        
+        # Volatility filter: only trade in normal volatility (avoid chop)
+        vol_condition = vol_filter_val < 0.03  # Less than 3% daily volatility
+        
+        # Volume spike: current volume > 1.5 * 20-period average
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: 4h uptrend + price above Supertrend + above EMA50 + RSI < 70
-            if dir_4h == 1 and price > st and price > ema50 and rsi_val < 70:
-                signals[i] = 0.20
+            # Long: price breaks above R2 + volume spike + above EMA34 + normal vol
+            if price > r2 and vol_spike and price > ema34 and vol_condition:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + price below Supertrend + below EMA50 + RSI > 30
-            elif dir_4h == -1 and price < st and price < ema50 and rsi_val > 30:
-                signals[i] = -0.20
+            # Short: price breaks below S2 + volume spike + below EMA34 + normal vol
+            elif price < s2 and vol_spike and price < ema34 and vol_condition:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: trend change or RSI extreme
+            # Exit: price crosses back through central pivot or volatility increases
             exit_signal = False
             
             if position == 1:  # long
-                if dir_4h == -1 or price < st or rsi_val > 80:
+                if price < pp or vol_filter_val > 0.05:  # High volatility exit
                     exit_signal = True
             elif position == -1:  # short
-                if dir_4h == 1 or price > st or rsi_val < 20:
+                if price > pp or vol_filter_val > 0.05:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_Supertrend_EMA50_RSI_Session"
-timeframe = "1h"
+name = "12h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
