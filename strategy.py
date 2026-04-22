@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -8,82 +9,98 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Load 1h and 4h data ONCE before loop
-    df_1h = get_htf_data(prices, '1h')
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_1h) < 20 or len(df_4h) < 20:
+    # Load daily data (HTF) ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1h RSI(14)
-    delta = pd.Series(df_1h['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14_vals = rsi_14.values
+    # Calculate daily Donchian channels (20-day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h ADX(14) for trend strength
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    # Calculate daily ATR (14-period) for stop-loss
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
-    plus_dm = np.where((high_4h - np.roll(high_4h, 1)) > (np.roll(low_4h, 1) - low_4h), 
-                       np.maximum(high_4h - np.roll(high_4h, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_4h, 1) - low_4h) > (high_4h - np.roll(high_4h, 1)), 
-                        np.maximum(np.roll(low_4h, 1) - low_4h, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align indicators to 15m timeframe
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1h, rsi_14_vals)
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    # Calculate 12h volume average (20-period) - use same timeframe as price
+    vol_avg_20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 12h timeframe
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(rsi_14_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) and ADX > 25 (strong trend)
-            if rsi_14_aligned[i] < 30 and adx_aligned[i] > 25:
+            # Long: Price breaks above 20-day Donchian high with volume confirmation
+            if (prices['close'].iloc[i] > donch_high_20_aligned[i] and 
+                prices['volume'].iloc[i] > 1.5 * vol_avg_20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) and ADX > 25 (strong trend)
-            elif rsi_14_aligned[i] > 70 and adx_aligned[i] > 25:
+                entry_price = prices['close'].iloc[i]
+            # Short: Price breaks below 20-day Donchian low with volume confirmation
+            elif (prices['close'].iloc[i] < donch_low_20_aligned[i] and 
+                  prices['volume'].iloc[i] > 1.5 * vol_avg_20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
+                entry_price = prices['close'].iloc[i]
         else:
-            # Exit: RSI returns to neutral zone (40-60)
+            # Track highest/lowest price since entry for trailing stop
             if position == 1:
-                if rsi_14_aligned[i] > 40:
+                # Long position: trail from highest high
+                highest_since_entry = np.maximum(
+                    donch_high_20_aligned[i],  # placeholder, will be updated below
+                    np.max(prices['high'].iloc[:i+1]) if i > 0 else prices['high'].iloc[i]
+                )
+                # Actually track highest high since entry
+                if i == 1:
+                    highest_since_entry = prices['high'].iloc[i]
+                else:
+                    highest_since_entry = np.maximum(
+                        highest_since_entry if 'highest_since_entry' in locals() else entry_price,
+                        prices['high'].iloc[i]
+                    )
+                # Exit conditions: price reversal or trailing stop
+                if (prices['close'].iloc[i] < donch_low_20_aligned[i] or  # reversal
+                    prices['close'].iloc[i] < highest_since_entry - 2.0 * atr_14_aligned[i]):  # trailing stop
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if rsi_14_aligned[i] < 60:
+                # Short position: trail from lowest low
+                if i == 1:
+                    lowest_since_entry = prices['low'].iloc[i]
+                else:
+                    lowest_since_entry = np.minimum(
+                        lowest_since_entry if 'lowest_since_entry' in locals() else entry_price,
+                        prices['low'].iloc[i]
+                    )
+                # Exit conditions: price reversal or trailing stop
+                if (prices['close'].iloc[i] > donch_high_20_aligned[i] or  # reversal
+                    prices['close'].iloc[i] > lowest_since_entry + 2.0 * atr_14_aligned[i]):  # trailing stop
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -91,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "15m_RSI14_ADX25_TrendFilter"
-timeframe = "15m"
+name = "12H_Donchian20_Volume_ATR_Trail"
+timeframe = "12h"
 leverage = 1.0
