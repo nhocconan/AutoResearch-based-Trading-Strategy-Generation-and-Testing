@@ -1,3 +1,11 @@
+# 1D_WMMA_TREND_REVERSAL
+# WMMA-weighted mean deviation mean reversion on daily timeframe with weekly trend filter
+# Long when price deviates significantly below WMMA in weekly uptrend
+# Short when price deviates significantly above WMMA in weekly downtrend
+# Uses deviation bands (2.5 * ATR) for entry and mean reversion to WMMA for exit
+# Designed for low trade frequency (<25/year) to minimize fee drag
+# Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -11,71 +19,87 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data for pivot points (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for trend filter (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Previous day's pivot points (standard)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate WMMA on weekly close (Weighted Moving Average)
+    close_1w = df_1w['close'].values
+    length = 9
+    weights = np.arange(1, length + 1)
+    wma_1w = np.full_like(close_1w, np.nan)
     
-    prev_high = high_1d
-    prev_low = low_1d
-    prev_close = close_1d
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    for i in range(length - 1, len(close_1w)):
+        wma_1w[i] = np.dot(close_1w[i - length + 1:i + 1], weights) / weights.sum()
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Weekly trend: slope of WMMA
+    wma_slope = np.diff(wma_1w, prepend=np.nan)
+    wma_trend_up = wma_slope > 0
+    wma_trend_down = wma_slope < 0
     
-    # Volume confirmation: 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly trend to daily
+    wma_trend_up_aligned = align_htf_to_ltf(prices, df_1w, wma_trend_up.astype(float))
+    wma_trend_down_aligned = align_htf_to_ltf(prices, df_1w, wma_trend_down.astype(float))
     
-    # 4h EMA34 for trend filter
-    close_s = pd.Series(close)
-    ema_34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate WMMA on daily for entry/exit
+    wma_daily = np.full_like(close, np.nan)
+    for i in range(length - 1, len(close)):
+        wma_daily[i] = np.dot(close[i - length + 1:i + 1], weights) / weights.sum()
+    
+    # ATR for deviation bands
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full_like(tr, np.nan)
+    
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr[i] = np.nanmean(tr[1:i+1])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Deviation from WMMA
+    deviation = close - wma_daily
+    upper_band = wma_daily + 2.5 * atr
+    lower_band = wma_daily - 2.5 * atr
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_20[i]) or np.isnan(ema_34[i])):
+        if (np.isnan(wma_trend_up_aligned[i]) or np.isnan(wma_trend_down_aligned[i]) or
+            np.isnan(wma_daily[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 + volume spike + price above EMA34
-            if close[i] > r1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and close[i] > ema_34[i]:
+            # Long: Price below lower band in weekly uptrend
+            if close[i] < lower_band[i] and wma_trend_up_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike + price below EMA34
-            elif close[i] < s1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and close[i] < ema_34[i]:
+            # Short: Price above upper band in weekly downtrend
+            elif close[i] > upper_band[i] and wma_trend_down_aligned[i] > 0.5:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back below/above pivot (full exit)
+            # Exit: Price returns to WMMA (mean reversion)
             if position == 1:
-                # Exit long: Price closes below pivot
-                if close[i] < pivot_aligned[i]:
+                # Exit long: Price crosses above WMMA
+                if close[i] > wma_daily[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above pivot
-                if close[i] > pivot_aligned[i]:
+                # Exit short: Price crosses below WMMA
+                if close[i] < wma_daily[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -83,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Pivot_R1_S1_Breakout_Trend_Volume_Spike"
-timeframe = "4h"
+name = "1D_WMMA_Trend_Reversal"
+timeframe = "1d"
 leverage = 1.0
