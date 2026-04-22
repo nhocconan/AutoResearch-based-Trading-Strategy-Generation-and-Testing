@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud breakout with weekly trend filter and volume confirmation.
-Long when price breaks above Kumo (cloud) with weekly trend bullish (price > weekly Kijun-Sen) and volume spike.
-Short when price breaks below Kumo with weekly trend bearish (price < weekly Kijun-Sen) and volume spike.
-Exit when price re-enters the cloud.
-Ichimoku provides dynamic support/resistance and trend direction, effective in both trending and ranging markets.
-Weekly filter ensures alignment with higher timeframe trend to avoid counter-trend whipsaws.
-Designed for low trade frequency (12-30/year) to minimize fee drag.
+Hypothesis: 12h KAMA (Kaufman Adaptive Moving Average) with RSI and chop filter.
+Long when KAMA is rising, RSI between 40-60, and chop > 61.8 (range market).
+Short when KAMA is falling, RSI between 40-60, and chop > 61.8 (range market).
+Exit when RSI crosses 50 or chop < 38.2 (trending market).
+Designed for low trade frequency (12-37/year) with mean-reversion in range markets.
 """
 import numpy as np
 import pandas as pd
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,46 +20,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter - ONCE before loop
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 26:
+    # Load 1d data for chop calculation - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Ichimoku components for trend filter
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
+    # Calculate 1d chop (choppiness index)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    tenkan_sen_w = (pd.Series(high_w).rolling(window=9, min_periods=9).max() + 
-                    pd.Series(low_w).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    kijun_sen_w = (pd.Series(high_w).rolling(window=26, min_periods=26).max() + 
-                   pd.Series(low_w).rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a_w = ((tenkan_sen_w + kijun_sen_w) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    senkou_span_b_w = ((pd.Series(high_w).rolling(window=52, min_periods=52).max() + 
-                        pd.Series(low_w).rolling(window=52, min_periods=52).min()) / 2)
+    atr_period = 14
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Align weekly components to 6h timeframe
-    kijun_sen_w_aligned = align_htf_to_ltf(prices, df_w, kijun_sen_w.values)
-    senkou_span_a_w_aligned = align_htf_to_ltf(prices, df_w, senkou_span_a_w.values)
-    senkou_span_b_w_aligned = align_htf_to_ltf(prices, df_w, senkou_span_b_w.values)
+    atr = np.zeros_like(tr)
+    for i in range(len(tr)):
+        if i < atr_period:
+            atr[i] = np.nan
+        elif i == atr_period:
+            atr[i] = np.nanmean(tr[1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    # Calculate 6h Ichimoku components for entry signals
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    tenkan_sen = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
-                  pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    kijun_sen = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
-                 pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    senkou_span_b = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
-                      pd.Series(low).rolling(window=52, min_periods=52).min()) / 2)
+    # Calculate highest high and lowest low over ATR period
+    highest_high = np.zeros_like(high_1d)
+    lowest_low = np.zeros_like(low_1d)
+    for i in range(len(high_1d)):
+        if i < atr_period:
+            highest_high[i] = np.nan
+            lowest_low[i] = np.nan
+        else:
+            highest_high[i] = np.nanmax(high_1d[i-atr_period+1:i+1])
+            lowest_low[i] = np.nanmin(low_1d[i-atr_period+1:i+1])
     
-    # Calculate 6h volume average (20-period)
+    # Chop calculation
+    sum_atr = np.zeros_like(atr)
+    for i in range(len(sum_atr)):
+        if i < atr_period:
+            sum_atr[i] = np.nan
+        else:
+            sum_atr[i] = np.nansum(atr[i-atr_period+1:i+1])
+    
+    range_hl = highest_high - lowest_low
+    chop = np.zeros_like(range_hl)
+    for i in range(len(chop)):
+        if range_hl[i] == 0 or np.isnan(sum_atr[i]) or np.isnan(range_hl[i]):
+            chop[i] = np.nan
+        else:
+            chop[i] = 100 * np.log10(sum_atr[i] / range_hl[i]) / np.log10(atr_period)
+    
+    # Align chop to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate 12h KAMA
+    close_s = pd.Series(close)
+    # Efficiency ratio
+    change = np.abs(close - np.roll(close, 10))
+    change[0] = np.nan
+    volatility = np.abs(np.diff(close, prepend=np.nan))
+    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
+    er = change / volatility_sum
+    er = np.nan_to_num(er, nan=0)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    # KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Align KAMA to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # Calculate 12h RSI
+    delta = np.diff(close, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rs = np.where(avg_loss == 0, 100, rs)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -70,12 +118,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after Senkou B lookback
+    for i in range(30, n):  # Start after lookback
         # Skip if data not ready
-        if (np.isnan(kijun_sen_w_aligned[i]) or np.isnan(senkou_span_a_w_aligned[i]) or 
-            np.isnan(senkou_span_b_w_aligned[i]) or np.isnan(tenkan_sen[i]) or 
-            np.isnan(kijun_sen[i]) or np.isnan(senkou_span_a[i]) or 
-            np.isnan(senkou_span_b[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,34 +137,36 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        upper_cloud = np.maximum(senkou_span_a[i], senkou_span_b[i])
-        lower_cloud = np.minimum(senkou_span_a[i], senkou_span_b[i])
+        # KAMA direction
+        kama_rising = kama_aligned[i] > kama_aligned[i-1]
+        kama_falling = kama_aligned[i] < kama_aligned[i-1]
         
         if position == 0:
-            # Long: Price breaks above cloud with bullish weekly trend and volume spike
-            if (close[i] > upper_cloud and 
-                close[i] > kijun_sen_w_aligned[i] and  # Weekly trend bullish: price above weekly Kijun-sen
-                volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+            # Long: KAMA rising, RSI 40-60, chop > 61.8 (range market)
+            if (kama_rising and 
+                40 <= rsi_aligned[i] <= 60 and 
+                chop_aligned[i] > 61.8 and
+                volume[i] > 1.5 * vol_avg_20[i]):  # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below cloud with bearish weekly trend and volume spike
-            elif (close[i] < lower_cloud and 
-                  close[i] < kijun_sen_w_aligned[i] and  # Weekly trend bearish: price below weekly Kijun-sen
-                  volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
+            # Short: KAMA falling, RSI 40-60, chop > 61.8 (range market)
+            elif (kama_falling and 
+                  40 <= rsi_aligned[i] <= 60 and 
+                  chop_aligned[i] > 61.8 and
+                  volume[i] > 1.5 * vol_avg_20[i]):  # Volume confirmation
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price re-enters the cloud
+            # Exit conditions: RSI crosses 50 or chop < 38.2 (trending market)
             exit_signal = False
             
             if position == 1:
-                # Exit long: price falls back into cloud
-                if close[i] <= upper_cloud:
+                # Exit long: RSI crosses below 50 or chop < 38.2
+                if (rsi_aligned[i] < 50 and rsi_aligned[i-1] >= 50) or chop_aligned[i] < 38.2:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price rises back into cloud
-                if close[i] >= lower_cloud:
+                # Exit short: RSI crosses above 50 or chop < 38.2
+                if (rsi_aligned[i] > 50 and rsi_aligned[i-1] <= 50) or chop_aligned[i] < 38.2:
                     exit_signal = True
             
             if exit_signal:
@@ -129,7 +177,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Ichimoku_Cloud_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12H_KAMA_RSI_Chop_Range"
+timeframe = "12h"
 leverage = 1.0
 #%%
