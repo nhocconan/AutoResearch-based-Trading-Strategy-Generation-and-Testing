@@ -3,49 +3,55 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1-week EMA13 trend filter and volume spike confirmation.
+# Elder Ray calculates Bull Power = High - EMA13 and Bear Power = Low - EMA13.
+# Long when Bull Power > 0 and rising, Bear Power < 0 and falling, with price > 1w EMA13 and volume spike (>2x 20-period average).
+# Short when Bear Power < 0 and falling, Bull Power > 0 and rising, with price < 1w EMA13 and volume spike.
+# This captures institutional buying/selling pressure while filtering with higher timeframe trend and volume confirmation.
+# Designed for low trade frequency (~15-30/year) to minimize fee decay in ranging markets like 2025.
+
 def generate_signals(prices):
-    # Hypothesis: Weekly high/low breakouts on daily chart with volume confirmation and RSI filter.
-    # The weekly high and low act as significant support/resistance levels.
-    # A breakout above weekly high with increasing volume suggests bullish momentum,
-    # while a breakout below weekly low suggests bearish momentum.
-    # RSI filter avoids entering at extreme overbought/oversold levels.
-    # This strategy aims to capture medium-term trends while keeping trade frequency low
-    # to minimize fee drag, suitable for both bull and bear markets.
-    
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data once before loop
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values  # not used but kept for clarity
+    # Load 1w data for EMA13 trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align weekly high/low to daily timeframe (values available after weekly bar closes)
-    high_weekly_aligned = align_htf_to_ltf(prices, df_weekly, high_weekly)
-    low_weekly_aligned = align_htf_to_ltf(prices, df_weekly, low_weekly)
+    # Calculate 13-period EMA on 1w close for trend filter
+    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Daily RSI(14)
+    # Align 1w EMA to 6h timeframe
+    ema_13_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
+    
+    # Calculate Elder Ray components on 6l data
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)  # avoid division by zero
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Daily average volume (20-period)
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
+    
+    # 13-period EMA for Elder Ray (same as trend filter but on 6l)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Calculate 20-period average volume for volume spike detection
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup for volume MA and RSI
-        # Skip if weekly data not ready
-        if np.isnan(high_weekly_aligned[i]) or np.isnan(low_weekly_aligned[i]):
+    for i in range(50, n):
+        # Skip if data not ready
+        if (np.isnan(ema_13_aligned[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,31 +60,39 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        rsi_val = rsi[i]
+        ema_val = ema_13_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         
-        # Volume filter: current volume > 1.5 * 20-day average
-        vol_filter = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 2.0 * 20-period average (strict filter for low frequency)
+        vol_spike = vol > 2.0 * vol_ma
+        
+        # Slope of power (1-bar change)
+        bull_slope = bull_val - bull_power[i-1] if i > 0 else 0
+        bear_slope = bear_val - bear_power[i-1] if i > 0 else 0
         
         if position == 0:
-            # Long: breakout above weekly high, not overbought, volume confirmation
-            if price > high_weekly_aligned[i] and rsi_val < 60 and vol_filter:
+            # Long conditions: Bull Power > 0 and rising, Bear Power < 0 and falling, uptrend, volume spike
+            if bull_val > 0 and bull_slope > 0 and bear_val < 0 and bear_slope < 0 and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below weekly low, not oversold, volume confirmation
-            elif price < low_weekly_aligned[i] and rsi_val > 40 and vol_filter:
+            # Short conditions: Bear Power < 0 and falling, Bull Power > 0 and rising, downtrend, volume spike
+            elif bear_val < 0 and bear_slope < 0 and bull_val > 0 and bull_slope > 0 and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
             # Exit conditions
             exit_signal = False
-            if position == 1:  # long
-                # Exit when price breaks below weekly low
-                if price < low_weekly_aligned[i]:
+            
+            if position == 1:  # long position
+                # Exit when Bull Power turns negative or Bear Power turns positive or trend breaks
+                if bull_val <= 0 or bear_val >= 0 or price < ema_val:
                     exit_signal = True
-            elif position == -1:  # short
-                # Exit when price breaks above weekly high
-                if price > high_weekly_aligned[i]:
+            
+            elif position == -1:  # short position
+                # Exit when Bear Power turns positive or Bull Power turns negative or trend breaks
+                if bear_val >= 0 or bull_val <= 0 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -90,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyHighLow_Breakout_VolumeRSI"
-timeframe = "1d"
+name = "6h_ElderRay_1wEMA13_Volume"
+timeframe = "6h"
 leverage = 1.0
