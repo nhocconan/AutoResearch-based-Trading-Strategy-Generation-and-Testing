@@ -3,42 +3,72 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d VWAP filter and volume spike
-# Long when Williams %R < -80 (oversold) + price > 1d VWAP + volume spike
-# Short when Williams %R > -20 (overbought) + price < 1d VWAP + volume spike
-# Exit when Williams %R returns to -50 (neutral) or trend reverses
-# Designed for low trade frequency (~15-30/year) with edge in ranging markets
-# Williams %R identifies exhaustion; VWAP filters trend direction; volume confirms strength
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper band + 1d ADX > 25 (trending) + volume spike
+# Short when price breaks below 4h Donchian lower band + 1d ADX > 25 (trending) + volume spike
+# Exit when price returns to Donchian middle band or ADX < 20 (range)
+# Designed for low trade frequency (~20-40/year) with strong trend-following edge in trending markets
+# Donchian provides clear breakout levels, ADX filters for trending conditions, volume confirms momentum
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for VWAP calculation
+    # Load 1d data for ADX calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 14-period Williams %R on 12h data (using close, high, low)
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
+    # Calculate 14-period ADX for trend strength
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # +DM and -DM
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # Calculate 1d VWAP (typical price * volume cumulative / volume cumulative)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    vwap_num = np.cumsum(typical_price_1d * volume_1d)
-    vwap_den = np.cumsum(volume_1d)
-    vwap_1d = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price_1d)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        smoothed = np.full_like(values, np.nan)
+        if len(values) >= period:
+            smoothed[period-1] = np.nansum(values[:period])
+            for i in range(period, len(values)):
+                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
+        return smoothed
+    
+    tr_14 = wilders_smoothing(tr, 14)
+    plus_dm_14 = wilders_smoothing(plus_dm, 14)
+    minus_dm_14 = wilders_smoothing(minus_dm, 14)
+    
+    # DI+ and DI-
+    plus_di_14 = np.where(tr_14 != 0, (plus_dm_14 / tr_14) * 100, 0)
+    minus_di_14 = np.where(tr_14 != 0, (minus_dm_14 / tr_14) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di_14 + minus_di_14) != 0, 
+                  np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -47,10 +77,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(vwap_1d_aligned[i]) or 
+        if (np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or 
+            np.isnan(adx_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,34 +92,40 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        wr = williams_r[i]
-        vwap = vwap_1d_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        middle = donchian_middle[i]
+        adx_val = adx_aligned[i]
         
         # Volume filter: current volume > 1.8 * 20-day average
         vol_spike = vol > 1.8 * vol_ma
         
+        # Trend filters: ADX > 25 for trending, ADX < 20 for ranging
+        is_trending = adx_val > 25
+        is_ranging = adx_val < 20
+        
         if position == 0:
-            # Long conditions: Williams %R oversold + price above VWAP + volume spike
-            if wr < -80 and price > vwap and vol_spike:
+            # Long conditions: break above upper band + trending + volume spike
+            if price > upper and is_trending and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R overbought + price below VWAP + volume spike
-            elif wr > -20 and price < vwap and vol_spike:
+            # Short conditions: break below lower band + trending + volume spike
+            elif price < lower and is_trending and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: Williams %R returns to neutral (-50) or price crosses VWAP
+            # Exit conditions: return to middle band or trend ends
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Williams %R returns to neutral or price drops below VWAP
-                if wr >= -50 or price < vwap:
+                # Exit when price returns to middle or trend becomes ranging
+                if price <= middle or is_ranging:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when Williams %R returns to neutral or price rises above VWAP
-                if wr <= -50 or price > vwap:
+                # Exit when price returns to middle or trend becomes ranging
+                if price >= middle or is_ranging:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_VWAP_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX25_Volume"
+timeframe = "4h"
 leverage = 1.0
