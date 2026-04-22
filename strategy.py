@@ -3,40 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot R1/S1 breakout with 12h EMA trend filter and volume confirmation.
-# Uses actual Camarilla calculation from prior day's OHLC. Only takes long when price breaks above R1
-# and price > 12h EMA (uptrend), short when breaks below S1 and price < 12h EMA (downtrend).
-# Volume confirmation requires current volume > 1.5x 20-period average to avoid false signals.
-# Designed to work in both bull and bear markets by aligning with trend via 12h EMA filter.
-# Targets 20-40 trades/year with strict entry conditions to minimize fee drag.
+# Hypothesis: 6h 14-day RSI with weekly pivot rejection + volume confirmation.
+# RSI identifies overbought/oversold conditions (below 30 for long, above 70 for short).
+# Weekly pivot levels act as dynamic support/resistance: only take longs when price > weekly pivot,
+# shorts when price < weekly pivot to avoid counter-trend entries at major levels.
+# Volume confirmation requires current volume > 1.3x 20-period average to filter weak breakouts.
+# Designed for 6h timeframe to target 15-35 trades/year with strict confluence of signals.
+# Works in bull markets via RSI oversold bounces above pivot, and in bear markets via
+# RSI overbought rejections below pivot, avoiding false signals in sideways chop.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load weekly data for pivot calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 50-period EMA on 12h data
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate weekly pivot point (standard formula: (H+L+C)/3)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # Calculate Camarilla levels from previous day's OHLC (1d timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 14-period RSI on 6h data
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + camarilla_range * 1.1 / 12
-    s1 = close_1d - camarilla_range * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Use Wilder's smoothing (alpha = 1/period)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -45,11 +46,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
+        if (np.isnan(pivot_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,35 +59,34 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_val = ema_12h_aligned[i]
+        rsi_val = rsi[i]
+        pivot_val = pivot_1w_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 1.3 * 20-period average
+        vol_spike = vol > 1.3 * vol_ma
         
         if position == 0:
-            # Long conditions: price breaks above R1 + uptrend + volume spike
-            if price > r1_val and price > ema_val and vol_spike:
+            # Long conditions: oversold RSI + above weekly pivot + volume spike
+            if rsi_val < 30 and price > pivot_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S1 + downtrend + volume spike
-            elif price < s1_val and price < ema_val and vol_spike:
+            # Short conditions: overbought RSI + below weekly pivot + volume spike
+            elif rsi_val > 70 and price < pivot_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: RSI returns to neutral zone or price crosses pivot
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price returns below S1 or trend breaks
-                if price < s1_val or price < ema_val:
+                # Exit when RSI returns to overbought or price breaks below pivot
+                if rsi_val > 70 or price < pivot_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price returns above R1 or trend breaks
-                if price > r1_val or price > ema_val:
+                # Exit when RSI returns to oversold or price breaks above pivot
+                if rsi_val < 30 or price > pivot_val:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_12hEMA_Trend_Volume"
-timeframe = "4h"
+name = "6h_RSI_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
