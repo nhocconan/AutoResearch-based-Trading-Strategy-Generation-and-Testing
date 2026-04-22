@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Bollinger Band breakout with 12-hour trend filter and volume confirmation.
-Long when price breaks above upper BB(20,2) and 12h EMA(50) is rising and volume > 20-period average.
-Short when price breaks below lower BB(20,2) and 12h EMA(50) is falling and volume > 20-period average.
-Exit when price returns to middle band (SMA20).
-Bollinger Bands capture volatility expansion; 12h EMA ensures trend alignment; volume filter confirms institutional interest.
-Works in bull markets (riding trends) and bear markets (catching reversals from extremes).
+Hypothesis: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Long when price breaks above 12h Donchian high (20) and 1-day EMA34 trend is up and volume > 1-day average.
+Short when price breaks below 12h Donchian low (20) and 1-day EMA34 trend is down and volume > 1-day average.
+Exit when price crosses 12h Donchian midline or trend reverses.
+Donchian provides clear breakout levels; EMA34 filter ensures trading with trend; volume confirms institutional interest.
+Works in both bull and bear markets by filtering for strong trends and avoiding chop.
 """
 
 import numpy as np
@@ -17,50 +17,61 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std)
-    lower_band = sma - (bb_std * std)
-    middle_band = sma
-    
-    # Load 12-hour data for EMA trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1-day data for trend and volume filters - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 1-day EMA34 for trend
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_prev = np.roll(ema_34_1d, 1)
+    ema_34_1d_prev[0] = ema_34_1d[0]
+    ema_trend_up = ema_34_1d > ema_34_1d_prev
+    ema_trend_down = ema_34_1d < ema_34_1d_prev
+    ema_trend_up_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_up)
+    ema_trend_down_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_down)
     
-    # Volume filter: 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1-day average volume for confirmation
+    volume_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    
+    # 12-hour Donchian channels (20 periods)
+    donch_len = 20
+    highest_high = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
+    lowest_low = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
+    donch_mid = (highest_high + lowest_low) / 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(sma[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_trend_up_aligned[i]) or np.isnan(ema_trend_down_aligned[i]) or
+            np.isnan(avg_vol_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above upper BB, 12h EMA rising, volume above average
-            if close[i] > upper_band[i] and ema_12h_aligned[i] > ema_12h_aligned[i-1] and volume[i] > vol_ma[i]:
+            # Long: Break above Donchian high, uptrend, volume confirmation
+            if (close[i] > highest_high[i] and 
+                ema_trend_up_aligned[i] and 
+                volume[i] > avg_vol_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower BB, 12h EMA falling, volume above average
-            elif close[i] < lower_band[i] and ema_12h_aligned[i] < ema_12h_aligned[i-1] and volume[i] > vol_ma[i]:
+            # Short: Break below Donchian low, downtrend, volume confirmation
+            elif (close[i] < lowest_low[i] and 
+                  ema_trend_down_aligned[i] and 
+                  volume[i] > avg_vol_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -68,12 +79,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price returns to middle band
-                if close[i] >= middle_band[i]:
+                # Exit long: Price falls below Donchian midline OR trend turns down
+                if (close[i] < donch_mid[i] or not ema_trend_up_aligned[i]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price returns to middle band
-                if close[i] <= middle_band[i]:
+                # Exit short: Price rises above Donchian midline OR trend turns up
+                if (close[i] > donch_mid[i] or not ema_trend_down_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -84,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_BB_Breakout_12hEMA_Trend_Volume"
-timeframe = "4h"
+name = "12H_Donchian_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
