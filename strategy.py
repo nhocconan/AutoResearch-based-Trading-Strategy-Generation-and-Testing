@@ -1,3 +1,12 @@
+# 6h_ElderRay_BullBearPower_1dTrend_Filter_v1
+# Hypothesis: Elder Ray (Bull/Bear Power) combined with 1-day trend filter
+# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# Long when Bull Power > 0 and Bear Power < 0 (bullish bar) with 1d EMA50 uptrend
+# Short when Bear Power > 0 and Bull Power < 0 (bearish bar) with 1d EMA50 downtrend
+# Uses 13-period EMA as in classic Elder Ray, suitable for 6h timeframe
+# Trend filter avoids counter-trend trades, improving win rate in both bull/bear markets
+# Discrete position sizing (0.25) to limit drawdown and reduce trade frequency
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,90 +14,88 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 1-day EMA for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Calculate EMA(50) on daily timeframe
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly EMA200 for long-term trend
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Weekly Donchian channels for structure
-    donch_high_20_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low_20_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Align weekly indicators to daily timeframe
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    donch_high_20_1w_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20_1w)
-    donch_low_20_1w_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20_1w)
-    
-    # Daily ATR for volatility filter and stop
+    # 60-minute data for Elder Ray calculation
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema_13  # High - EMA(13)
+    bear_power = ema_13 - low   # EMA(13) - Low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any data is not ready
-        if (np.isnan(ema200_1w_aligned[i]) or 
-            np.isnan(donch_high_20_1w_aligned[i]) or 
-            np.isnan(donch_low_20_1w_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        atr_val = atr[i]
-        ema200_val = ema200_1w_aligned[i]
-        donch_high = donch_high_20_1w_aligned[i]
-        donch_low = donch_low_20_1w_aligned[i]
+        ema_50_1d = ema_50_1d_aligned[i]
+        ema_13_val = ema_13[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
         
-        # Trend filter: only trade in direction of weekly EMA200
-        bullish_trend = price > ema200_val
-        bearish_trend = price < ema200_val
+        # Trend filter: 1-day EMA50 slope
+        # Uptrend: current EMA50 > previous EMA50
+        # Downtrend: current EMA50 < previous EMA50
+        if i > 50:
+            ema_50_prev = ema_50_1d_aligned[i-1]
+            uptrend = ema_50_1d > ema_50_prev
+            downtrend = ema_50_1d < ema_50_prev
+        else:
+            uptrend = True  # Default to allow initial trades
+            downtrend = False
         
+        # Entry conditions
         if position == 0:
-            # Long: break above weekly Donchian high in bullish trend
-            if bullish_trend and price > donch_high:
+            # Long: Bullish bar (Bull Power > 0 and Bear Power < 0) in uptrend
+            if bull > 0 and bear < 0 and uptrend:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: break below weekly Donchian low in bearish trend
-            elif bearish_trend and price < donch_low:
+            # Short: Bearish bar (Bear Power > 0 and Bull Power < 0) in downtrend
+            elif bear > 0 and bull < 0 and downtrend:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
+        # Exit conditions
         elif position != 0:
-            # Exit: opposite Donchian break or ATR-based stop
+            # Exit long when bearish bar appears OR trend turns down
             if position == 1:
-                # Exit long on break below weekly Donchian low or 2*ATR stop
-                if price < donch_low or price < entry_price - 2.0 * atr_val:
+                if bear > 0 or not uptrend:  # Bearish power or trend change
                     signals[i] = 0.0
                     position = 0
-            else:  # position == -1
-                # Exit short on break above weekly Donchian high or 2*ATR stop
-                if price > donch_high or price > entry_price + 2.0 * atr_val:
+                else:
+                    signals[i] = 0.25  # Hold long
+            # Exit short when bullish bar appears OR trend turns up
+            elif position == -1:
+                if bull > 0 or not downtrend:  # Bullish power or trend change
                     signals[i] = 0.0
                     position = 0
+                else:
+                    signals[i] = -0.25  # Hold short
     
     return signals
 
-name = "1d_WeeklyDonchianBreakout_EMA200Trend_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
