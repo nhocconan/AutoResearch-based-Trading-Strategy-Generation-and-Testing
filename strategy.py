@@ -5,52 +5,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d data once for pivot levels and EMA34
+    # Load 1-day data once
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Previous day's HLC for pivot calculation
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # Calculate daily RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Daily pivot levels (standard formula)
-    pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1_1d = 2 * pp_1d - prev_low_1d
-    s1_1d = 2 * pp_1d - prev_high_1d
-    r2_1d = pp_1d + (high_1d - low_1d)
-    s2_1d = pp_1d - (high_1d - low_1d)
+    # Calculate 1-day ATR(14)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily EMA(50) for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume spike detection (20-period average)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all 1d data to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align all 1D data to 4H timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,36 +62,39 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
-        ema34 = ema34_aligned[i]
+        rsi = rsi_aligned[i]
+        atr = atr_aligned[i]
+        ema50 = ema50_aligned[i]
         
         if position == 0:
-            # Long: price breaks above daily R2 with volume + above EMA34
-            if price > r2 and vol > 1.5 * vol_ma and price > ema34:
+            # Long: RSI oversold (<30) + price above EMA50 + volume spike
+            if rsi < 30 and price > ema50 and vol > 2.0 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily S2 with volume + below EMA34
-            elif price < s2 and vol > 1.5 * vol_ma and price < ema34:
+            # Short: RSI overbought (>70) + price below EMA50 + volume spike
+            elif rsi > 70 and price < ema50 and vol > 2.0 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price returns to daily S1 (for long) or R1 (for short)
-            if position == 1 and price < s1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and price > r1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Exit: RSI returns to neutral zone (40-60) or ATR-based stop
+            if position == 1:
+                # Long exit: RSI > 40 or price drops below EMA50 - 1*ATR
+                if rsi > 40 or price < ema50 - atr:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # position == -1
+                # Short exit: RSI < 60 or price rises above EMA50 + 1*ATR
+                if rsi < 60 or price > ema50 + atr:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "12h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Spike"
-timeframe = "12h"
+name = "4h_RSI_MeanReversion_EMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
