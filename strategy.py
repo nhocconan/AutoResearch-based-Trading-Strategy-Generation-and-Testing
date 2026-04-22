@@ -3,74 +3,94 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Elder Ray Index (bull/bear power) + weekly pivot bias + volume confirmation.
-# Uses weekly pivot points to establish bullish/bearish bias from higher timeframe.
-# Elder Ray measures bull power (high - EMA) and bear power (low - EMA) to detect strength.
-# In bullish weekly bias: buy when bull power turns positive with volume.
-# In bearish weekly bias: sell when bear power turns negative with volume.
-# Designed to work in both bull and bear markets by aligning with weekly structure.
-# Targets 15-35 trades/year with disciplined risk control.
+# Hypothesis: 12h price action at 1-day Camarilla pivot levels with volume confirmation and daily Choppiness Index regime filter.
+# Uses daily Camarilla pivot points (S1, R1) for entry and daily Choppiness Index to filter regime.
+# In trending regimes (Choppiness < 38.2): trade breakouts above R1 or below S1.
+# In ranging regimes (Choppiness > 61.8): trade mean reversion at S1/R1 levels.
+# Volume confirmation requires current volume > 1.5x 12h 20-period average.
+# Designed for low-frequency, high-conviction trades to minimize fee drag and work in both bull/bear markets.
+# Targets 15-30 trades/year with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for pivot points (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points (standard floor trader pivots)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    
-    # Determine weekly bias: above pivot = bullish, below pivot = bearish
-    weekly_bias = np.where(close_1w > pivot_1w, 1, -1)  # 1=bullish, -1=bearish
-    
-    # Load daily data for EMA (used in Elder Ray)
+    # Load daily data for Camarilla pivots and Choppiness Index (once before loop)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA for Elder Ray
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate True Range for Choppiness Index
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align weekly bias and daily EMA to 6h timeframe
-    bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
-    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
+    # Calculate ADX components for Choppiness Index
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # Calculate Elder Ray components on 6h data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # Need to align EMA to 6h for Elder Ray calculation
-    # We'll use the daily EMA aligned to 6h as proxy for 6h EMA (acceptable approximation)
-    bull_power = high - ema_13_aligned  # Bull Power = High - EMA
-    bear_power = low - ema_13_aligned   # Bear Power = Low - EMA
+    # Calculate DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
     
-    # Calculate 6-period EMA of Elder Ray for smoothing (signal line)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=6, adjust=False, min_periods=6).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=6, adjust=False, min_periods=6).mean().values
+    # Calculate DX and Choppiness Index
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # Avoid division by zero
     
-    # Calculate volume average for spike detection
+    # Calculate Camarilla pivot points (S1, R1) from previous day
+    # Classic Camarilla formulas: 
+    # R1 = close + (high - low) * 1.1 / 12
+    # S1 = close - (high - low) * 1.1 / 12
+    # We use previous day's OHLC to avoid look-ahead
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # First day: use current close as previous (no look-ahead)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    camarilla_width = (prev_high - prev_low) * 1.1 / 12
+    r1 = prev_close + camarilla_width
+    s1 = prev_close - camarilla_width
+    
+    # Align daily indicators to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate 20-period average volume on 12h data for volume spike detection
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(bias_aligned[i]) or 
-            np.isnan(ema_13_aligned[i]) or 
-            np.isnan(bull_power_smooth[i]) or 
-            np.isnan(bear_power_smooth[i]) or 
+        if (np.isnan(chop_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -80,38 +100,49 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        bias = bias_aligned[i]
-        bull = bull_power_smooth[i]
-        bear = bear_power_smooth[i]
+        chop_val = chop_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
         # Volume filter: current volume > 1.5 * 20-period average
         vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Enter based on weekly bias and Elder Ray signals
-            if bias == 1:  # Weekly bullish bias
-                # Look for bull power turning positive (bullish momentum)
-                if bull > 0 and bull_power_smooth[i-1] <= 0 and vol_spike:
+            # Determine market regime using Choppiness Index
+            is_trending = chop_val < 38.2  # Trending market
+            is_ranging = chop_val > 61.8   # Ranging market
+            
+            if is_trending:
+                # Trending regime: breakout strategy at Camarilla levels
+                if price > r1_val and vol_spike:
                     signals[i] = 0.25
                     position = 1
-            elif bias == -1:  # Weekly bearish bias
-                # Look for bear power turning negative (bearish momentum)
-                if bear < 0 and bear_power_smooth[i-1] >= 0 and vol_spike:
+                elif price < s1_val and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
+            elif is_ranging:
+                # Ranging regime: mean reversion at Camarilla levels
+                if price <= s1_val and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif price >= r1_val and vol_spike:
                     signals[i] = -0.25
                     position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: mean reversion to midpoint or opposite level touch
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when bull power turns negative or weekly bias flips
-                if bull < 0 or bias == -1:
+                # Exit when price returns to midpoint or reaches opposite resistance
+                midpoint = (r1_val + s1_val) / 2
+                if price <= midpoint or price >= r1_val * 1.02:  # slight buffer above R1
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when bear power turns positive or weekly bias flips
-                if bear > 0 or bias == 1:
+                # Exit when price returns to midpoint or reaches opposite support
+                midpoint = (r1_val + s1_val) / 2
+                if price >= midpoint or price <= s1_val * 0.98:  # slight buffer below S1
                     exit_signal = True
             
             if exit_signal:
@@ -123,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_WeeklyPivot_Bias"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Chop_Volume"
+timeframe = "12h"
 leverage = 1.0
