@@ -1,104 +1,132 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-6h_WeeklyPivot_S1R1_Bounce
-Hypothesis: Price tends to bounce off weekly pivot support/resistance levels (S1/R1) during ranging markets.
-Uses weekly pivot levels as dynamic support/resistance with 60-minute momentum confirmation.
-Works in both bull and bear markets by fading extremes at key weekly levels.
-Target: 20-40 trades/year with strict entry conditions to minimize fee drag.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: Daily CRSI (2,1,2) with weekly Bollinger Band squeeze filter and volume confirmation.
+# CRSI < 10 for long, > 90 for short with price > 50-day SMA for longs and < 50-day SMA for shorts.
+# Weekly Bollinger Band width < 50th percentile indicates low volatility squeeze, favoring mean reversion.
+# Volume > 1.5x 20-day average confirms institutional interest.
+# Designed for 1d timeframe to capture multi-day mean reversion moves in both bull and bear markets.
+# Targets 10-20 trades/year with strict entry conditions to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for pivot calculation (once before loop)
+    # Load weekly data for Bollinger Band squeeze filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2*P - H, R1 = 2*P - L
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    s1 = 2 * pivot - high_1w  # Support 1
-    r1 = 2 * pivot - low_1w   # Resistance 1
+    # Calculate 20-period Bollinger Bands on weekly data
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    # Calculate 50-period percentile of BB width for squeeze filter
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).rank(pct=True).values
     
-    # 60-minute momentum: ROC(60) - measures momentum over 5 periods (5*60min = 5h)
+    # Calculate daily RSI(2) for CRSI
     close = prices['close'].values
-    roc_60 = np.zeros_like(close)
-    for i in range(5, len(close)):
-        if close[i-5] != 0:
-            roc_60[i] = ((close[i] - close[i-5]) / close[i-5]) * 100
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # RSI(2)
+    avg_gain_2 = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss_2 = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs_2 = np.where(avg_loss_2 != 0, avg_gain_2 / avg_loss_2, 0)
+    rsi_2 = 100 - (100 / (1 + rs_2))
+    
+    # RSI(1) on RSI(2) values
+    delta_rsi2 = np.diff(rsi_2, prepend=rsi_2[0])
+    gain_rsi2 = np.where(delta_rsi2 > 0, delta_rsi2, 0)
+    loss_rsi2 = np.where(delta_rsi2 < 0, -delta_rsi2, 0)
+    avg_gain_1 = pd.Series(gain_rsi2).ewm(alpha=1/1, adjust=False, min_periods=1).mean().values
+    avg_loss_1 = pd.Series(loss_rsi2).ewm(alpha=1/1, adjust=False, min_periods=1).mean().values
+    rs_1 = np.where(avg_loss_1 != 0, avg_gain_1 / avg_loss_1, 0)
+    rsi_1 = 100 - (100 / (1 + rs_1))
+    
+    # RSI(2) on RSI(1) values to complete CRSI
+    delta_rsi1 = np.diff(rsi_1, prepend=rsi_1[0])
+    gain_rsi1 = np.where(delta_rsi1 > 0, delta_rsi1, 0)
+    loss_rsi1 = np.where(delta_rsi1 < 0, -delta_rsi1, 0)
+    avg_gain_2b = pd.Series(gain_rsi1).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss_2b = pd.Series(loss_rsi1).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs_2b = np.where(avg_loss_2b != 0, avg_gain_2b / avg_loss_2b, 0)
+    rsi_2b = 100 - (100 / (1 + rs_2b))
+    
+    # Percentile rank of RSI(2) over 100 days for CRSI
+    rsi_2_series = pd.Series(rsi_2b)
+    percentrank = rsi_2_series.rolling(window=100, min_periods=100).apply(
+        lambda x: (x < x[-1]).sum() / len(x) * 100 if len(x) > 0 else 50, raw=True
+    ).values
+    
+    # CRSI = (RSI(2) + RSI(1) + Percentile Rank) / 3
+    crsi = (rsi_2 + rsi_1 + percentrank) / 3
+    
+    # Calculate 50-day SMA for trend filter
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    
+    # Calculate 20-day average volume for volume confirmation
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(roc_60[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(sma_50[i]) or 
+            np.isnan(crsi[i]) or 
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(bb_width_percentile[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        roc_val = roc_60[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        s1_val = s1_aligned[i]
-        r1_val = r1_aligned[i]
-        pivot_val = pivot_aligned[i]
+        crsi_val = crsi[i]
+        sma_val = sma_50[i]
+        bb_percentile = bb_width_percentile[i]
         
-        # Volume filter
-        vol_filter = vol > 1.3 * vol_ma
+        # Bollinger Band squeeze: width < 50th percentile indicates low volatility
+        bb_squeeze = bb_percentile < 0.5
+        
+        # Volume filter: current volume > 1.5 * 20-day average
+        vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price near S1 support with bullish momentum
-            near_s1 = abs(price - s1_val) / s1_val < 0.005  # Within 0.5% of S1
-            bullish_momentum = roc_val > 15  # Strong upward momentum
-            
-            if near_s1 and bullish_momentum and vol_filter:
+            # Long conditions: oversold CRSI + above SMA + BB squeeze + volume spike
+            if crsi_val < 10 and price > sma_val and bb_squeeze and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            
-            # Short: price near R1 resistance with bearish momentum
-            elif abs(price - r1_val) / r1_val < 0.005 and roc_val < -15 and vol_filter:
+            # Short conditions: overbought CRSI + below SMA + BB squeeze + volume spike
+            elif crsi_val > 90 and price < sma_val and bb_squeeze and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: CRSI returns to neutral zone (40-60)
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price reaches pivot or momentum fades
-                if price >= pivot_val or roc_val < 5:
+                # Exit when CRSI returns to neutral or becomes overbought
+                if crsi_val > 60:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price reaches pivot or momentum fades
-                if price <= pivot_val or roc_val > -5:
+                # Exit when CRSI returns to neutral or becomes oversold
+                if crsi_val < 40:
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_S1R1_Bounce"
-timeframe = "6h"
+name = "1d_CRSI_BB_Squeeze_Volume"
+timeframe = "1d"
 leverage = 1.0
