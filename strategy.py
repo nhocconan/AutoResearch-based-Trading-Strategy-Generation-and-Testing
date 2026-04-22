@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,33 +13,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Donchian(10) and ATR(10) - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    # Load weekly data for 10-week EMA - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Calculate Donchian(10) channels from daily data
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    upper_10 = pd.Series(high_daily).rolling(window=10, min_periods=10).max().values
-    lower_10 = pd.Series(low_daily).rolling(window=10, min_periods=10).min().values
+    # Calculate EMA(10) from weekly close
+    close_weekly = df_weekly['close'].values
+    ema_10_weekly = pd.Series(close_weekly).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_10_weekly)
     
-    # Calculate ATR(10) from daily data
+    # Load daily data for RSI(14) - ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 14:
+        return np.zeros(n)
+    
+    # Calculate RSI(14) from daily close
     close_daily = df_daily['close'].values
-    tr1 = high_daily - low_daily
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # Align Donchian channels and ATR to 12h timeframe
-    upper_10_aligned = align_htf_to_ltf(prices, df_daily, upper_10)
-    lower_10_aligned = align_htf_to_ltf(prices, df_daily, lower_10)
-    atr_10_aligned = align_htf_to_ltf(prices, df_daily, atr_10)
-    
-    # Calculate 12h volume average (10-period)
-    vol_avg_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    delta = np.diff(close_daily, prepend=close_daily[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_daily = 100 - (100 / (1 + rs))
+    rsi_14_daily_aligned = align_htf_to_ltf(prices, df_daily, rsi_14_daily)
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -49,8 +47,7 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(upper_10_aligned[i]) or np.isnan(lower_10_aligned[i]) or 
-            np.isnan(atr_10_aligned[i]) or np.isnan(vol_avg_10[i])):
+        if (np.isnan(ema_10_weekly_aligned[i]) or np.isnan(rsi_14_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,28 +64,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above upper Donchian(10) with volume and ATR filter
-            if (close[i] > upper_10_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_10[i] and
-                atr_10_aligned[i] > 0):
+            # Long: Price above weekly EMA(10) and RSI < 30 (oversold)
+            if (close[i] > ema_10_weekly_aligned[i] and 
+                rsi_14_daily_aligned[i] < 30):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian(10) with volume and ATR filter
-            elif (close[i] < lower_10_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_10[i] and
-                  atr_10_aligned[i] > 0):
+            # Short: Price below weekly EMA(10) and RSI > 70 (overbought)
+            elif (close[i] < ema_10_weekly_aligned[i] and 
+                  rsi_14_daily_aligned[i] > 70):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to the opposite Donchian channel
+            # Exit: RSI returns to neutral zone (40-60)
             if position == 1:
-                if close[i] < lower_10_aligned[i]:
+                if rsi_14_daily_aligned[i] > 40:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > upper_10_aligned[i]:
+                if rsi_14_daily_aligned[i] < 60:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -96,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian10_Volume_ATR_Filter"
-timeframe = "12h"
+name = "1D_WeeklyEMA10_DailyRSI_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
