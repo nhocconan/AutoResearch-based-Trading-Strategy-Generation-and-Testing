@@ -1,3 +1,4 @@
+#%%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -26,17 +27,17 @@ def generate_signals(prices):
     # Daily EMA34 for trend filter
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe (primary)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align to 1h timeframe (primary)
+    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    r2_1h = align_htf_to_ltf(prices, df_1d, r2)
+    r3_1h = align_htf_to_ltf(prices, df_1d, r3)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    s2_1h = align_htf_to_ltf(prices, df_1d, s2)
+    s3_1h = align_htf_to_ltf(prices, df_1d, s3)
+    ema_34_1h = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # 4h ATR(14) for volatility filter and stop
+    # 1h ATR(14) for volatility filter and stop
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -52,14 +53,18 @@ def generate_signals(prices):
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_surge = prices['volume'].values > 2.0 * vol_ma20  # Strong volume surge
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(r3_4h[i]) or
-            np.isnan(s1_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(s3_4h[i]) or
-            np.isnan(ema_34_4h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(pivot_1h[i]) or np.isnan(r1_1h[i]) or np.isnan(r2_1h[i]) or np.isnan(r3_1h[i]) or
+            np.isnan(s1_1h[i]) or np.isnan(s2_1h[i]) or np.isnan(s3_1h[i]) or
+            np.isnan(ema_34_1h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,30 +72,31 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above S3 with volume surge, above daily EMA34
-            if (close[i] > s3_4h[i] and vol_surge[i] and close[i] > ema_34_4h[i]):
-                signals[i] = 0.25
+            if (close[i] > s3_1h[i] and vol_surge[i] and close[i] > ema_34_1h[i]):
+                signals[i] = 0.20
                 position = 1
             # Short: Price breaks below R3 with volume surge, below daily EMA34
-            elif (close[i] < r3_4h[i] and vol_surge[i] and close[i] < ema_34_4h[i]):
-                signals[i] = -0.25
+            elif (close[i] < r3_1h[i] and vol_surge[i] and close[i] < ema_34_1h[i]):
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit: Price crosses opposite level or volatility drops significantly
             if position == 1:
-                if close[i] < pivot_4h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
+                if close[i] < pivot_1h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if close[i] > pivot_4h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
+                if close[i] > pivot_1h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSurge_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSurge_v1"
+timeframe = "1h"
 leverage = 1.0
+#%%
