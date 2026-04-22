@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Elder Ray Index with 1-day trend filter and volume confirmation.
-Long when Bull Power > 0 (close > EMA13) with Bear Power improving and volume > 1.5x average.
-Short when Bear Power < 0 (close < EMA13) with Bull Power deteriorating and volume > 1.5x average.
-Exit when power crosses zero or volume drops. Uses 1-day EMA34 for trend filter to avoid counter-trend trades.
-Designed for low trade frequency (~15-25/year) to avoid fee drag in 6h timeframe.
+Hypothesis: 12-hour Donchian breakout with 1-day volume spike filter and EMA trend filter.
+Long when price breaks above 20-period Donchian high on 12h with volume > 1.8x 20-period average volume and 12h EMA > 50-period EMA.
+Short when price breaks below 20-period Donchian low on 12h with volume > 1.8x 20-period average volume and 12h EMA < 50-period EMA.
+Exit when price returns to 12h 50-period EMA.
+Designed for low trade frequency (~10-20/year) to avoid fee drag, with trend filter to avoid whipsaws.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,68 +21,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Elder Ray components
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # EMA trend filter on 12h - calculate directly
+    ema_fast = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Load 1-day data for trend filter and volume average - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Donchian channels on 12h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # 1-day average volume for filter
-    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Volume filter: 20-period average volume on 12h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power improving (less negative) AND volume confirmation AND uptrend
-            if (bull_power[i] > 0 and 
-                bear_power[i] > bear_power[i-1] and 
-                volume[i] > 1.5 * vol_avg_1d_aligned[i] and
-                close[i] > ema34_1d_aligned[i]):
+            # Long: Price breaks above Donchian high with volume and EMA confirmation
+            if (close[i] > donchian_high[i] and 
+                volume[i] > 1.8 * vol_ma[i] and 
+                ema_fast[i] > ema_slow[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND Bull Power deteriorating (less positive) AND volume confirmation AND downtrend
-            elif (bear_power[i] < 0 and 
-                  bull_power[i] < bull_power[i-1] and 
-                  volume[i] > 1.5 * vol_avg_1d_aligned[i] and
-                  close[i] < ema34_1d_aligned[i]):
+            # Short: Price breaks below Donchian low with volume and EMA confirmation
+            elif (close[i] < donchian_low[i] and 
+                  volume[i] > 1.8 * vol_ma[i] and 
+                  ema_fast[i] < ema_slow[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: return to 50-period EMA
             exit_signal = False
             
             if position == 1:
-                # Exit long: Bull Power <= 0 OR Bear Power deteriorating OR volume drops OR trend change
-                if (bull_power[i] <= 0 or 
-                    bear_power[i] < bear_power[i-1] or
-                    volume[i] < vol_avg_1d_aligned[i] or
-                    close[i] < ema34_1d_aligned[i]):
+                # Exit long: Price returns to or below 50-period EMA
+                if close[i] <= ema_slow[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Bear Power >= 0 OR Bull Power deteriorating OR volume drops OR trend change
-                if (bear_power[i] >= 0 or 
-                    bull_power[i] < bull_power[i-1] or
-                    volume[i] < vol_avg_1d_aligned[i] or
-                    close[i] > ema34_1d_aligned[i]):
+                # Exit short: Price returns to or above 50-period EMA
+                if close[i] >= ema_slow[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -93,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ElderRay_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "12H_Donchian_Breakout_Volume_EMATrend"
+timeframe = "12h"
 leverage = 1.0
