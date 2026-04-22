@@ -3,100 +3,93 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Williams %R with 4h trend and 1d volatility filter
-# Long when Williams %R crosses above -80 in uptrend (close > 4h EMA50) and low volatility (ATR ratio < 1.2)
-# Short when Williams %R crosses below -20 in downtrend (close < 4h EMA50) and low volatility
-# Exit when Williams %R crosses opposite threshold or volatility spikes
-# Designed for low trade frequency (~20-40/year) to minimize fee drain. Works in range markets via mean reversion and in trends via trend filter.
+# Hypothesis: 6h Williams %R with 1-week trend filter and volume confirmation
+# Long when Williams %R crosses above -80 (oversold reversal) in uptrend (close > 1w EMA50) with volume spike
+# Short when Williams %R crosses below -20 (overbought reversal) in downtrend (close < 1w EMA50) with volume spike
+# Exit when Williams %R returns to -50 (mean reversion) or trend reverses
+# Williams %R is effective at catching reversals in ranging markets, which dominates 2025+ BTC/ETH
+# Trend filter ensures we trade with the higher timeframe momentum
+# Volume confirmation filters out false reversals
+# Designed for low trade frequency (~15-30/year) to minimize fee drain.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Load 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 50-period EMA on 4h close for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 50-period EMA on 1w close for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Load 1d data for volatility filter (ATR)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align 1w EMA to 6h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 14-period ATR on 1d
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr = np.concatenate([[np.nan], tr2])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Williams %R on 6h data (14-period)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Calculate 50-period ATR average for volatility regime
-    atr_ma_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
-    atr_ratio_1d = atr_14_1d / atr_ma_50_1d
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
-    # Calculate Williams %R (14-period) on 1h closes
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    close_1h = prices['close'].values
-    
-    highest_high = pd.Series(high_1h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1h) / (highest_high - lowest_low)
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(williams_r[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
+        price = close[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        ema_val = ema_50_1w_aligned[i]
         wr = williams_r[i]
-        ema_val = ema_50_4h_aligned[i]
-        vol_ratio = atr_ratio_aligned[i]
         
-        # Williams %R signals
-        wr_cross_up = wr > -80 and williams_r[i-1] <= -80
-        wr_cross_down = wr < -20 and williams_r[i-1] >= -20
+        # Previous Williams %R for crossover detection
+        wr_prev = williams_r[i-1]
         
-        # Volatility filter: low volatility regime (ATR ratio < 1.2)
-        low_vol = vol_ratio < 1.2
+        # Volume filter: current volume > 1.8 * 20-period average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: Williams %R crosses above -80 + uptrend + low volatility
-            if wr_cross_up and price > ema_val and low_vol:
-                signals[i] = 0.20
+            # Long conditions: Williams %R crosses above -80 + uptrend + volume spike
+            if wr > -80 and wr_prev <= -80 and price > ema_val and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: Williams %R crosses below -20 + downtrend + low volatility
-            elif wr_cross_down and price < ema_val and low_vol:
-                signals[i] = -0.20
+            # Short conditions: Williams %R crosses below -20 + downtrend + volume spike
+            elif wr < -20 and wr_prev >= -20 and price < ema_val and vol_spike:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: Williams %R crosses opposite threshold or volatility spikes
+            # Exit conditions: Williams %R returns to -50 or trend reverses
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Williams %R crosses below -20 or volatility spikes
-                if wr_cross_down or vol_ratio >= 1.5:
+                # Exit when Williams %R returns to -50 or trend turns down
+                if wr >= -50 or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when Williams %R crosses above -80 or volatility spikes
-                if wr_cross_up or vol_ratio >= 1.5:
+                # Exit when Williams %R returns to -50 or trend turns up
+                if wr <= -50 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -104,10 +97,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_WilliamsR_4hEMA50_1dATR_Volatility"
-timeframe = "1h"
+name = "6h_WilliamsR_1wEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
