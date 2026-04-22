@@ -5,13 +5,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Williams Alligator + Elder Ray Power with 1d trend filter
-    # Works in both bull and bear markets: Alligator identifies trend state,
-    # Elder Ray measures bull/bear power, 1d EMA50 filters higher timeframe trend.
-    # Low trade frequency (~20-40/year) avoids fee drag.
+    # Hypothesis: 12h momentum breakout with daily trend filter
+    # Uses price breaking above/below 12-period high/low on 12h chart
+    # Confirmed by daily EMA trend direction and volume surge
+    # Works in both bull and bear markets by capturing momentum bursts
     
     # Load daily data once
     df_1d = get_htf_data(prices, '1d')
@@ -19,79 +19,55 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Daily EMA50 trend filter
-    ema_1d_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    # Daily EMA34 trend filter
+    ema_1d_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
-    # Williams Alligator (6h): Jaw(13), Teeth(8), Lips(5) - smoothed with SMMA
-    close = prices['close'].values
+    # 12h price channel (12-period high/low)
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            # First value is SMA
-            result[period-1] = np.mean(arr[:period])
-            # Subsequent values: SMMA = (Prev SMMA*(period-1) + Current) / period
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate 12-period highest high and lowest low
+    highest_high = pd.Series(high).rolling(window=12, min_periods=12).max().values
+    lowest_low = pd.Series(low).rolling(window=12, min_periods=12).min().values
     
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
-    
-    # Elder Ray Power (6h)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Volume filter (12-period average surge)
+    vol_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    vol_surge = volume > 1.5 * vol_ma12
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(100, n):
+    for i in range(12, n):
         # Skip if data not ready
-        if (np.isnan(ema_1d_50_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma12[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Alligator sleeping: jaws, teeth, lips intertwined (no strong trend)
-            # Alligator awakening: lines separate in specific order
-            # Bullish: Lips > Teeth > Jaw (green > red > blue)
-            # Bearish: Jaw > Teeth > Lips (blue > red > green)
-            
-            # Long: Bullish alignment + Bull Power > 0 + 1d Uptrend
-            if (lips[i] > teeth[i] > jaw[i] and 
-                bull_power[i] > 0 and 
-                close[i] > ema_1d_50_aligned[i]):
+            # Long: Price breaks above 12-period high with volume surge AND daily EMA34 uptrend
+            if close[i] > highest_high[i] and vol_surge[i] and close[i] > ema_1d_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish alignment + Bear Power < 0 + 1d Downtrend
-            elif (jaw[i] > teeth[i] > lips[i] and 
-                  bear_power[i] < 0 and 
-                  close[i] < ema_1d_50_aligned[i]):
+            # Short: Price breaks below 12-period low with volume surge AND daily EMA34 downtrend
+            elif close[i] < lowest_low[i] and vol_surge[i] and close[i] < ema_1d_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Alligator returns to sleep (lines re-intertwine) OR Elder Power diverges
+            # Exit: Price returns to opposite side of the channel
             if position == 1:
-                # Exit long: Bearish power OR Alligator turns bearish
-                if (bear_power[i] < 0 or 
-                    jaw[i] > teeth[i] > lips[i]):
+                if close[i] < lowest_low[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Bullish power OR Alligator turns bullish
-                if (bull_power[i] > 0 or 
-                    lips[i] > teeth[i] > jaw[i]):
+                if close[i] > highest_high[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -99,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Williams_Alligator_ElderRay_Power_1dEMA50_Trend_v1"
-timeframe = "6h"
+name = "12h_Momentum_Breakout_1dEMA34_Trend_VolumeSurge_v1"
+timeframe = "12h"
 leverage = 1.0
