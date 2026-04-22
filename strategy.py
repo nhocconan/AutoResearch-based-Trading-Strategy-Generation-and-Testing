@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Camarilla pivot (R3/S3) breakout with 1-day volume spike and 1-day EMA34 trend filter.
-Only enter long when price breaks above R3 with volume spike and daily EMA34 up; short when price breaks below S3 with volume spike and daily EMA34 down.
-Exit on break of opposite Camarilla level (S3 for long, R3 for short) or loss of EMA34 trend.
-Uses actual Camarilla formula based on prior day's range. Designed for low trade frequency by requiring confluence of price level break, volume confirmation, and trend alignment.
-Works in both bull and bear markets by following daily EMA34 trend.
+Hypothesis: Weekly Donchian Channel Breakout with Daily Volume Confirmation and ATR Stop
+Trade long when price breaks above weekly Donchian upper band with daily volume confirmation,
+short when breaks below lower band. Uses ATR-based volatility filter to avoid breakouts in
+extreme volatility. Weekly trend provides direction, daily volume confirms momentum.
+Designed for low trade frequency (7-25 trades/year) with ATR stop to manage risk in
+both bull and bear markets. Weekly timeframe reduces noise, daily volume ensures
+institutional participation.
 """
 
 import numpy as np
@@ -13,8 +15,8 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prrices)
-    if n < 50:
+    n = len(prices)
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,78 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla levels, EMA, and volume - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Daily ATR(14) for volatility filter
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr_series = pd.Series(true_range)
+    atr = tr_series.rolling(window=14, min_periods=14).mean().values
+    
+    # Load weekly data for Donchian channels - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior day's OHLC
-    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    #          S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    # We use R3 and S3 as primary breakout levels
-    daily_close = df_daily['close'].values
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
+    # Weekly Donchian Channel (20 periods)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_dc_upper = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    weekly_dc_lower = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla R3 and S3 for each day
-    camarilla_r3 = np.full_like(daily_close, np.nan)
-    camarilla_s3 = np.full_like(daily_close, np.nan)
+    # Align weekly Donchian levels to daily
+    dc_upper_aligned = align_htf_to_ltf(prices, df_weekly, weekly_dc_upper)
+    dc_lower_aligned = align_htf_to_ltf(prices, df_weekly, weekly_dc_lower)
     
-    for i in range(1, len(daily_close)):
-        if i-1 >= 0 and not (np.isnan(daily_high[i-1]) or np.isnan(daily_low[i-1]) or np.isnan(daily_close[i-1])):
-            rng = daily_high[i-1] - daily_low[i-1]
-            camarilla_r3[i] = daily_close[i-1] + rng * 1.1 / 4
-            camarilla_s3[i] = daily_close[i-1] - rng * 1.1 / 4
+    # Daily volume confirmation: volume > 1.3x 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align Camarilla levels to 4h timeframe (use prior day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
-    
-    # Daily EMA34 for trend filter
-    ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
-    
-    # Daily volume spike: current day's volume > 2.0x 20-day average
-    daily_volume = df_daily['volume'].values
-    vol_ma_20_daily = pd.Series(daily_volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike_daily = daily_volume > 2.0 * vol_ma_20_daily
-    vol_spike_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_spike_daily.astype(float))
+    # Weekly trend filter: price above/below weekly 50 EMA
+    weekly_close = df_weekly['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_daily_aligned[i]) or np.isnan(vol_spike_daily_aligned[i])):
+        if (np.isnan(dc_upper_aligned[i]) or np.isnan(dc_lower_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(weekly_ema50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike condition from daily data
-        vol_spike = vol_spike_daily_aligned[i] > 0.5  # True if spike
+        # Volatility filter: avoid extreme volatility (ATR > 3x 50-day average)
+        if i >= 50:
+            atr_ma_50 = pd.Series(atr[:i+1]).rolling(window=50, min_periods=1).mean().iloc[-1]
+            vol_filter = atr[i] < 3 * atr_ma_50
+        else:
+            vol_filter = True
+        
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.3 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above R3 + volume spike + daily EMA34 up
-            if close[i] > camarilla_r3_aligned[i] and vol_spike and ema34_daily_aligned[i] > ema34_daily_aligned[i-1]:
+            # Long: price breaks above weekly Donchian upper + weekly uptrend + vol confirm + vol filter
+            if (close[i] > dc_upper_aligned[i] and 
+                weekly_ema50_aligned[i] > weekly_ema50_aligned[i-1] and
+                vol_confirm and vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + volume spike + daily EMA34 down
-            elif close[i] < camarilla_s3_aligned[i] and vol_spike and ema34_daily_aligned[i] < ema34_daily_aligned[i-1]:
+            # Short: price breaks below weekly Donchian lower + weekly downtrend + vol confirm + vol filter
+            elif (close[i] < dc_lower_aligned[i] and 
+                  weekly_ema50_aligned[i] < weekly_ema50_aligned[i-1] and
+                  vol_confirm and vol_filter):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: break of opposite Camarilla level or loss of EMA34 trend
+            # ATR-based trailing stop and exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below S3 or EMA34 turns down
-                if close[i] < camarilla_s3_aligned[i] or ema34_daily_aligned[i] < ema34_daily_aligned[i-1]:
+                # Exit long: ATR stop or price returns to weekly Donchian middle
+                atr_stop = close[i] <= dc_upper_aligned[i] - 2.0 * atr[i]
+                mid_line = (dc_upper_aligned[i] + dc_lower_aligned[i]) / 2
+                mean_revert = close[i] < mid_line
+                if atr_stop or mean_revert:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above R3 or EMA34 turns up
-                if close[i] > camarilla_r3_aligned[i] or ema34_daily_aligned[i] > ema34_daily_aligned[i-1]:
+                # Exit short: ATR stop or price returns to weekly Donchian middle
+                atr_stop = close[i] >= dc_lower_aligned[i] + 2.0 * atr[i]
+                mid_line = (dc_upper_aligned[i] + dc_lower_aligned[i]) / 2
+                mean_revert = close[i] > mid_line
+                if atr_stop or mean_revert:
                     exit_signal = True
             
             if exit_signal:
@@ -104,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "Weekly_Donchian_Breakout_DailyVol_ATRStop"
+timeframe = "1d"
 leverage = 1.0
