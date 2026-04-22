@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Williams %R with 1-day EMA50 trend filter and volume confirmation.
-Buy when Williams %R crosses above -80 (oversold) with price above daily EMA50 and volume > 1.5x 20-period average.
-Sell when Williams %R crosses below -20 (overbought) or price closes below daily EMA50.
-Williams %R identifies mean-reversion entries; daily EMA50 filters trend direction; volume avoids fakeouts.
-Designed for low trade frequency by requiring multiple confirmations and only trading at extreme %R levels.
-Works in both bull and bear markets by following daily trend while using 4h Williams %R for entries.
+Hypothesis: 4-hour Bollinger Squeeze with 1-day RSI momentum.
+Long when price breaks above upper Bollinger band during low volatility (squeeze) and 1-day RSI > 50.
+Short when price breaks below lower Bollinger band during low volatility and 1-day RSI < 50.
+Exit when price returns to middle Bollinger band (20-period SMA).
+Bollinger Squeeze identifies low volatility breakouts; 1-day RSI filters momentum direction.
+Designed for low trade frequency by requiring volatility contraction before breakout.
+Works in both bull and bear markets by capturing volatility expansion moves in direction of higher timeframe momentum.
 """
 
 import numpy as np
@@ -20,67 +21,67 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1-day data for EMA50 trend filter - ONCE before loop
+    # Load 1-day data for RSI filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 14-period RSI
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Williams %R (14 periods) - momentum oscillator
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Avoid division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Bollinger Bands (20, 2)
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = ma20 + 2 * std20
+    lower = ma20 - 2 * std20
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.5)
+    # Bollinger Band Width for squeeze detection (normalized by middle band)
+    bb_width = (upper - lower) / ma20
+    # Squeeze condition: BB width below its 50-period minimum (volatility contraction)
+    bb_width_min = pd.Series(bb_width).rolling(window=50, min_periods=50).min().values
+    squeeze = bb_width < bb_width_min
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after enough data for indicators
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ma20[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(squeeze[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (from below), price above daily EMA50, volume confirmation
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and  # Cross above -80
-                close[i] > ema50_1d_aligned[i] and
-                volume_confirm[i]):
+            # Long: Price breaks above upper band during squeeze and 1-day RSI > 50
+            if (close[i] > upper[i] and squeeze[i] and rsi_1d_aligned[i] > 50):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 (from above), price below daily EMA50, volume confirmation
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and  # Cross below -20
-                  close[i] < ema50_1d_aligned[i] and
-                  volume_confirm[i]):
+            # Short: Price breaks below lower band during squeeze and 1-day RSI < 50
+            elif (close[i] < lower[i] and squeeze[i] and rsi_1d_aligned[i] < 50):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: price returns to middle Bollinger band (20-period SMA)
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R crosses below -20 OR price closes below daily EMA50
-                if (williams_r[i] < -20 and williams_r[i-1] >= -20 or  # Cross below -20
-                    close[i] < ema50_1d_aligned[i]):
+                # Exit long: price falls below middle band
+                if close[i] < ma20[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R crosses above -80 OR price closes above daily EMA50
-                if (williams_r[i] > -80 and williams_r[i-1] <= -80 or  # Cross above -80
-                    close[i] > ema50_1d_aligned[i]):
+                # Exit short: price rises above middle band
+                if close[i] > ma20[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -91,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_WilliamsR_1dEMA50_Volume"
+name = "4H_Bollinger_Squeeze_1dRSI_Momentum"
 timeframe = "4h"
 leverage = 1.0
