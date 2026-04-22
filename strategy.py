@@ -3,86 +3,56 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with daily ADX trend filter and volume confirmation.
-# Uses daily ADX (14) to confirm trend strength (ADX > 25) and avoid whipsaws.
-# In trending markets: long on breakout above Donchian(20) upper band,
-# short on breakdown below lower band, both with volume spike confirmation.
-# Includes ATR-based trailing stop (3x ATR) to manage risk.
-# Designed to work in both bull and bear markets by filtering for strong trends only.
-# Targets 20-40 trades/year with strict entry conditions to minimize fee drag.
+# Hypothesis: Weekly Relative Strength Index (RSI) mean reversion on daily timeframe.
+# Uses weekly RSI(14) to detect overbought (>70) and oversold (<30) conditions.
+# Enters long when weekly RSI crosses below 30 from above (oversold bounce).
+# Enters short when weekly RSI crosses above 70 from below (overbought reversal).
+# Includes volume confirmation (volume > 1.5x 20-day average) to filter weak signals.
+# Designed to work in both bull and bear markets by fading extremes.
+# Targets 10-25 trades/year with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for ADX and ATR (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data for RSI calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate True Range for ADX and ATR
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate weekly RSI(14)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate ADX components
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Wilder's smoothing (equivalent to alpha=1/14)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Smooth TR, +DM, -DM
-    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Calculate DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)
+    rsi = np.where(avg_gain == 0, 0, rsi)
     
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align weekly RSI to daily timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
     
-    # Calculate ATR for stop loss
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX and ATR to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    
-    # Calculate Donchian channels (20-period) on 4h data
-    high = prices['high'].values
-    low = prices['low'].values
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 20-period average volume for volume spike detection
+    # Calculate 20-day average volume for volume spike detection
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or 
-            np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,54 +61,45 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx_aligned[i]
-        atr_val = atr_aligned[i]
-        upper = donch_high[i]
-        lower = donch_low[i]
+        rsi_val = rsi_aligned[i]
+        rsi_prev = rsi_aligned[i-1] if i > 0 else 50
         
-        # Volume filter: current volume > 1.5 * 20-period average
+        # Volume filter: current volume > 1.5 * 20-day average
         vol_spike = vol > 1.5 * vol_ma
         
-        # Trend filter: ADX > 25 indicates strong trend
-        is_trending = adx_val > 25
-        
         if position == 0:
-            if is_trending and vol_spike:
-                # Long on breakout above upper band
-                if price > upper:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = price
-                    highest_since_entry = price
-                # Short on breakdown below lower band
-                elif price < lower:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = price
-                    lowest_since_entry = price
+            # Long signal: RSI crosses below 30 from above (oversold bounce)
+            if rsi_prev > 30 and rsi_val <= 30 and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # Short signal: RSI crosses above 70 from below (overbought reversal)
+            elif rsi_prev < 70 and rsi_val >= 70 and vol_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position != 0:
-            # Update highest/lowest since entry for trailing stop
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, price)
-                # ATR trailing stop: exit if price drops 3*ATR from high
-                if price < highest_since_entry - 3.0 * atr_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit conditions
+            exit_signal = False
             
-            elif position == -1:
-                lowest_since_entry = min(lowest_since_entry, price)
-                # ATR trailing stop: exit if price rises 3*ATR from low
-                if price > lowest_since_entry + 3.0 * atr_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            if position == 1:  # long position
+                # Exit when RSI returns to neutral (50) or overbought (70)
+                if rsi_val >= 50:
+                    exit_signal = True
+            
+            elif position == -1:  # short position
+                # Exit when RSI returns to neutral (50) or oversold (30)
+                if rsi_val <= 50:
+                    exit_signal = True
+            
+            if exit_signal:
+                signals[i] = 0.0
+                position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_Donchian_ADX_Trend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyRSI_MeanReversion_Volume"
+timeframe = "1d"
 leverage = 1.0
