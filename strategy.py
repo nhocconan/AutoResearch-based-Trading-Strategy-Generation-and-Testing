@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI mean reversion with Bollinger Bands and volume confirmation
-# Uses 1-day ATR for regime filter (low ATR = range, high ATR = trend) to adapt to market conditions
-# Target: 20-35 trades/year per symbol, works in range-bound markets via mean reversion
-# RSI < 30 for long, RSI > 70 for short, with Bollinger Band support/resistance and volume spike
-# Includes volatility-adjusted position sizing and volatility filter to avoid choppy markets
+# Hypothesis: 12h Williams Fractal breakout with volume confirmation and trend filter
+# Uses 1d Williams Fractal for key support/resistance levels and 1d EMA34 for trend direction
+# Williams Fractal provides natural swing points with fewer false signals than pivot levels
+# Target: 15-25 trades/year per symbol, works in bull/bear via trend filter
+# Breakout at bearish/bullish fractal with volume and trend alignment
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,113 +19,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ATR-based regime filter
+    # Load 1-day data for Williams Fractal and EMA
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period ATR on daily timeframe for regime filter
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    tr_1d[0] = np.nan  # First value has no previous close
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate Williams Fractal (5-bar pattern)
+    # Bearish fractal: high[n-2] is highest of 5 bars (n-4 to n)
+    # Bullish fractal: low[n-2] is lowest of 5 bars (n-4 to n)
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
     
-    # Calculate 14-period RSI on 4-hour timeframe
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    for i in range(2, len(high_1d) - 2):
+        # Bearish fractal: middle bar has highest high
+        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        
+        # Bullish fractal: middle bar has lowest low
+        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    # Calculate Bollinger Bands (20, 2) on 4-hour timeframe
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    upper_bb_values = upper_bb.values
-    lower_bb_values = lower_bb.values
+    # Calculate 34-period EMA on daily close for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume spike filter (20-period on 4h)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > 2.0 * vol_ma20.values
+    # Volume spike filter (20-period on 12h)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 2.0 * vol_ma20
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Align 1-day ATR to 4-hour timeframe
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Align indicators to 12-hour timeframe with 2-bar delay for fractal confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(rsi_values[i]) or
-            np.isnan(lower_bb_values[i]) or np.isnan(upper_bb_values[i]) or
-            np.isnan(vol_ma20.values[i]) or not in_session[i]):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        # Regime filter: only trade when ATR is low (range-bound market)
-        # Use 50th percentile of ATR as threshold - adaptive to each symbol
-        if np.isnan(atr_14_1d_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # Calculate adaptive ATR threshold based on historical values
-        # Use rolling 50-period percentile of ATR for dynamic threshold
-        if i >= 150:  # Need sufficient history for percentile calculation
-            atr_hist = atr_14_1d_aligned[max(0, i-50):i+1]
-            valid_atr = atr_hist[~np.isnan(atr_hist)]
-            if len(valid_atr) >= 10:
-                atr_median = np.median(valid_atr)
-                # Only trade in low volatility regime (below median ATR)
-                if atr_14_1d_aligned[i] > atr_median:
-                    if position != 0:
-                        signals[i] = 0.0
-                        position = 0
-                    continue
         
         if position == 0:
-            # Long: RSI oversold (<30) + price at or below lower BB + volume spike
-            if (rsi_values[i] < 30 and 
-                close[i] <= lower_bb_values[i] and 
-                vol_spike[i]):
+            # Long: Price breaks above bullish fractal + volume spike + uptrend (price > EMA34)
+            if (close[i] > bullish_fractal_aligned[i] and vol_spike[i] and close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) + price at or above upper BB + volume spike
-            elif (rsi_values[i] > 70 and 
-                  close[i] >= upper_bb_values[i] and 
-                  vol_spike[i]):
+            # Short: Price breaks below bearish fractal + volume spike + downtrend (price < EMA34)
+            elif (close[i] < bearish_fractal_aligned[i] and vol_spike[i] and close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit: Price returns to opposite fractal level
             if position == 1:
-                # Exit long: RSI returns to neutral (50) or price reaches middle of BB
-                sma_20_val = sma_20.values[i]
-                if (rsi_values[i] >= 50 or 
-                    close[i] >= sma_20_val):
+                if close[i] < bearish_fractal_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: RSI returns to neutral (50) or price reaches middle of BB
-                sma_20_val = sma_20.values[i]
-                if (rsi_values[i] <= 50 or 
-                    close[i] <= sma_20_val):
+                if close[i] > bullish_fractal_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -133,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_BB_MeanReversion_Volume_ATRFilter"
-timeframe = "4h"
+name = "12h_Williams_Fractal_Breakout_Trend_Volume_Session"
+timeframe = "12h"
 leverage = 1.0
