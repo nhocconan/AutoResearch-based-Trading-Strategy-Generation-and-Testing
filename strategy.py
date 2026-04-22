@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""
+Hypothesis: 4-hour Williams %R with daily trend filter and volume confirmation.
+Long when Williams %R crosses above -80 (oversold) + daily close > daily EMA50 + volume > 1.5x average.
+Short when Williams %R crosses below -20 (overbought) + daily close < daily EMA50 + volume > 1.5x average.
+Exit when Williams %R crosses -50 (mean reversion midpoint) or daily trend changes.
+Designed for moderate trade frequency (~20-40/year) to balance signal quality and fee drag.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -8,107 +16,94 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    # Load daily data for ATR volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate weekly EMA10 for trend filter
-    ema10_1w = pd.Series(df_1w['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
-    
-    # Calculate daily ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align daily ATR to daily timeframe (same resolution)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Calculate daily Donchian channels (20-period)
-    high_1d_arr = df_1d['high'].values
-    low_1d_arr = df_1d['low'].values
-    donch_high = pd.Series(high_1d_arr).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d_arr).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to daily timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    
-    # Price and volume arrays
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Load daily data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate daily EMA50 for trend filter
+    daily_close = df_1d['close'].values
+    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.fillna(0).values
+    
+    # Calculate average volume for confirmation
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(14, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or 
-            np.isnan(ema10_1w_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(daily_ema50_aligned[i]) or 
+            np.isnan(avg_volume[i]) or volume[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
-        atr_daily = atr_14_aligned[i]
-        ema10_1w_val = ema10_1w_aligned[i]
-        price = close[i]
+        daily_close_val = None
+        daily_ema50_val = None
+        if i < len(daily_ema50_aligned):
+            daily_close_val = df_1d['close'].values[-1] if len(df_1d) > 0 else np.nan
+            daily_ema50_val = daily_ema50_aligned[i]
+        else:
+            daily_close_val = np.nan
+            daily_ema50_val = np.nan
+            
+        if np.isnan(daily_close_val) or np.isnan(daily_ema50_val):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        daily_trend_up = daily_close_val > daily_ema50_val
+        daily_trend_down = daily_close_val < daily_ema50_val
         
-        # Volatility filter: daily ATR > 0.3 * 20-period average (avoid low volatility chop)
-        atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean().values[i]
-        vol_filter = atr_daily > 0.3 * atr_ma_20
-        
-        # Trend filter: price above/below weekly EMA10
-        uptrend = price > ema10_1w_val
-        downtrend = price < ema10_1w_val
+        volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 0:
-            # Long: price breaks above daily Donchian high + weekly uptrend + volatility filter
-            if price > donch_high_val and uptrend and vol_filter:
+            # Long: Williams %R crosses above -80 + daily uptrend + volume confirmation
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                daily_trend_up and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily Donchian low + weekly downtrend + volatility filter
-            elif price < donch_low_val and downtrend and vol_filter:
+            # Short: Williams %R crosses below -20 + daily downtrend + volume confirmation
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                  daily_trend_down and volume_confirm):
                 signals[i] = -0.25
                 position = -1
-        
-        elif position != 0:
-            # Exit: price crosses back through opposite Donchian level or volatility drops
+        else:
+            # Exit conditions
             exit_signal = False
             
-            if position == 1:  # long position
-                # Exit on breakdown below Donchian low or volatility collapse
-                if price < donch_low_val or not vol_filter:
+            if position == 1:
+                # Exit long: Williams %R crosses above -50 or daily trend changes to down
+                if williams_r[i] >= -50 or not daily_trend_up:
                     exit_signal = True
-            
-            elif position == -1:  # short position
-                # Exit on breakout above Donchian high or volatility collapse
-                if price > donch_high_val or not vol_filter:
+            else:  # position == -1
+                # Exit short: Williams %R crosses below -50 or daily trend changes to up
+                if williams_r[i] <= -50 or not daily_trend_down:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                # Hold position
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1d_Donchian20_WeeklyEMA10_ATRVolFilter"
-timeframe = "1d"
+name = "4H_WilliamsR_DailyTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
