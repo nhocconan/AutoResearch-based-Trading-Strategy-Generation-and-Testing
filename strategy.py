@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Bollinger Band squeeze breakout with 1-day trend filter.
-Long when Bollinger Band width < 20th percentile (squeeze), price breaks above upper band, and 1-day EMA50 rising.
-Short when Bollinger Band width < 20th percentile (squeeze), price breaks below lower band, and 1-day EMA50 falling.
-Exit when price re-enters Bollinger Bands or Bollinger Band width exceeds 80th percentile (squeeze ends).
-Uses volatility contraction/expansion for low-frequency, high-conviction trades.
-Works in both bull and bear markets by following daily trend while using 4h Bollinger squeeze for entries.
+Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
+Long when price breaks above 20-day high and weekly EMA10 is rising.
+Short when price breaks below 20-day low and weekly EMA10 is falling.
+Exit when price crosses opposite 20-day boundary or weekly EMA trend reverses.
+Daily timeframe ensures low trade frequency; weekly EMA filters trend to avoid counter-trend trades.
+Works in both bull and bear markets by following weekly trend while using daily Donchian for entries.
+Volume confirmation reduces false breakouts.
 """
 
 import numpy as np
 import pandas as pd
-from mtrader import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,55 +21,55 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1-day data for EMA50 trend filter - ONCE before loop
+    # Load daily data for Donchian channels - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Weekly data for EMA10 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_1w = df_1w['close'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
+    # Daily Donchian channels (20-period)
+    high_20d = pd.Series(close_1d).rolling(window=20, min_periods=20).max().values
+    low_20d = pd.Series(close_1d).rolling(window=20, min_periods=20).min().values
     
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    # Weekly EMA10 for trend filter
+    ema10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
     
-    upper = sma + (bb_std * std)
-    lower = sma - (bb_std * std)
-    bandwidth = (upper - lower) / sma  # Normalized bandwidth
-    
-    # Percentile bands for squeeze detection (using 50-period lookback)
-    bandwidth_series = pd.Series(bandwidth)
-    bw_lower = bandwidth_series.rolling(window=50, min_periods=20).quantile(0.20).values
-    bw_upper = bandwidth_series.rolling(window=50, min_periods=20).quantile(0.80).values
+    # Daily volume average (20-period) for confirmation
+    vol_avg_20d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(bb_period, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(bw_lower[i]) or np.isnan(bw_upper[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(high_20d[i]) or np.isnan(low_20d[i]) or np.isnan(ema10_1w_aligned[i]) or
+            np.isnan(vol_avg_20d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bollinger squeeze (bandwidth < 20th percentile) AND price breaks above upper band AND 1-day EMA50 rising
-            if (bandwidth[i] < bw_lower[i] and 
-                close[i] > upper[i] and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):
+            # Long: Price breaks above 20-day high, weekly EMA10 rising, volume above average
+            if (close[i] > high_20d[i] and 
+                ema10_1w_aligned[i] > ema10_1w_aligned[i-1] and
+                volume[i] > vol_avg_20d[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bollinger squeeze (bandwidth < 20th percentile) AND price breaks below lower band AND 1-day EMA50 falling
-            elif (bandwidth[i] < bw_lower[i] and 
-                  close[i] < lower[i] and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):
+            # Short: Price breaks below 20-day low, weekly EMA10 falling, volume above average
+            elif (close[i] < low_20d[i] and 
+                  ema10_1w_aligned[i] < ema10_1w_aligned[i-1] and
+                  volume[i] > vol_avg_20d[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -76,12 +77,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price re-enters Bollinger Bands OR squeeze ends (bandwidth > 80th percentile)
-                if (close[i] < upper[i] and close[i] > lower[i]) or bandwidth[i] > bw_upper[i]:
+                # Exit long: Price falls below 20-day low OR weekly EMA10 turns down
+                if (close[i] < low_20d[i] or 
+                    ema10_1w_aligned[i] < ema10_1w_aligned[i-1]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price re-enters Bollinger Bands OR squeeze ends (bandwidth > 80th percentile)
-                if (close[i] < upper[i] and close[i] > lower[i]) or bandwidth[i] > bw_upper[i]:
+                # Exit short: Price rises above 20-day high OR weekly EMA10 turns up
+                if (close[i] > high_20d[i] or 
+                    ema10_1w_aligned[i] > ema10_1w_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -92,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Bollinger_Squeeze_Breakout_1dEMA50_Trend"
-timeframe = "4h"
+name = "Daily_Donchian20_WeeklyEMA10_Volume"
+timeframe = "1d"
 leverage = 1.0
