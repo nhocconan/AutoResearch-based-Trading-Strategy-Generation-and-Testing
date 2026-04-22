@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivot levels and EMA trend (ONCE before loop)
+    # Load 1d data for Donchian channels and EMA trend (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -22,19 +22,17 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla pivot levels
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    prev_high = high_1d
-    prev_low = low_1d
-    prev_close = close_1d
-    pivot_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * pivot_range / 12
-    s1 = prev_close - 1.1 * pivot_range / 12
+    # Daily Donchian(20) channels
+    # Upper = max(high over past 20 days)
+    # Lower = min(low over past 20 days)
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donch_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Donchian levels to 12h timeframe
+    donch_upper_aligned = align_htf_to_ltf(prices, df_1d, donch_upper)
+    donch_lower_aligned = align_htf_to_ltf(prices, df_1d, donch_lower)
     
     # 1d EMA(34) for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -48,7 +46,7 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(donch_upper_aligned[i]) or np.isnan(donch_lower_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,12 +54,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close breaks above R1 + above 1d EMA34 + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
+            # Long: Close breaks above Donchian upper + above 1d EMA34 + volume spike
+            if close[i] > donch_upper_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S1 + below 1d EMA34 + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
+            # Short: Close breaks below Donchian lower + below 1d EMA34 + volume spike
+            elif close[i] < donch_lower_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -83,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1_S1_Breakout_1D_EMA34_Trend_Volume_Confirmation"
-timeframe = "4h"
+name = "12H_Donchian20_Breakout_1D_EMA34_Trend_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
