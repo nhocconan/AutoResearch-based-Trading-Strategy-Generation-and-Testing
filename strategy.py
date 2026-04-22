@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
-"""
-Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Long when price breaks above Donchian upper band (20) and 1-day EMA34 is rising with volume spike.
-Short when price breaks below Donchian lower band (20) and 1-day EMA34 is falling with volume spike.
-Exit when price crosses Donchian middle band or EMA34 reverses.
-This strategy targets trending moves with institutional participation, works in bull/bear by following 1d trend.
-Designed for low trade frequency (target: 20-50/year) by requiring breakout + trend + volume confluence.
-"""
+# 1D_WeeklyTrend_Follow_With_Trend_Confirmation
+# Hypothesis: Daily price follows weekly trend direction. Enter long when daily close crosses above weekly EMA20 and weekly EMA20 is rising, short when crosses below and falling.
+# Uses weekly trend as filter to avoid counter-trend trades. Works in bull markets by catching uptrends and in bear markets by avoiding longs and taking shorts.
+# Low trade frequency due to weekly trend filter requiring sustained direction.
 
 import numpy as np
 import pandas as pd
@@ -18,75 +13,47 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.max(arr[i - window + 1:i + 1])
-        return res
-    
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.min(arr[i - window + 1:i + 1])
-        return res
-    
-    upper = rolling_max(high, 20)
-    lower = rolling_min(low, 20)
-    middle = (upper + lower) / 2.0
-    
-    # Load 1d data for trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    # 34-period EMA on 1d close for trend
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Weekly EMA20 for trend direction
+    weekly_close = df_weekly['close'].values
+    ema20_weekly = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i])):
+    for i in range(30, n):
+        # Skip if weekly EMA not ready
+        if np.isnan(ema20_weekly_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
-        
         if position == 0:
-            # Long: break above upper band with rising 1d EMA34 and volume spike
-            if close[i] > upper[i] and ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike:
+            # Long: daily close crosses above weekly EMA20 and weekly EMA20 rising
+            if close[i] > ema20_weekly_aligned[i] and close[i-1] <= ema20_weekly_aligned[i-1] and ema20_weekly_aligned[i] > ema20_weekly_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with falling 1d EMA34 and volume spike
-            elif close[i] < lower[i] and ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike:
+            # Short: daily close crosses below weekly EMA20 and weekly EMA20 falling
+            elif close[i] < ema20_weekly_aligned[i] and close[i-1] >= ema20_weekly_aligned[i-1] and ema20_weekly_aligned[i] < ema20_weekly_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price crosses middle band or EMA34 reverses
+            # Exit: daily close crosses back through weekly EMA20
             exit_signal = False
-            
             if position == 1:
-                # Exit long: price below middle or EMA34 turns down
-                if close[i] < middle[i] or ema34_1d_aligned[i] < ema34_1d_aligned[i-1]:
+                # Exit long: close crosses below weekly EMA20
+                if close[i] < ema20_weekly_aligned[i] and close[i-1] >= ema20_weekly_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price above middle or EMA34 turns up
-                if close[i] > middle[i] or ema34_1d_aligned[i] > ema34_1d_aligned[i-1]:
+                # Exit short: close crosses above weekly EMA20
+                if close[i] > ema20_weekly_aligned[i] and close[i-1] <= ema20_weekly_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -97,6 +64,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_DonchianBreakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "1D_WeeklyTrend_Follow_With_Trend_Confirmation"
+timeframe = "1d"
 leverage = 1.0
