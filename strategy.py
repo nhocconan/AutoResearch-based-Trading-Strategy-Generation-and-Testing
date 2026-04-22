@@ -1,11 +1,11 @@
-#%%
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Bollinger Band breakout with 1d trend filter and volume confirmation.
-In bull markets, price breaks above upper BB with upward 1d trend.
-In bear markets, price breaks below lower BB with downward 1d trend.
-Volume surge confirms institutional participation.
-Designed for low trade frequency (12-30/year) to minimize fee drag.
+Hypothesis: 4h Camarilla Pivot Breakout with 1d Volume Spike and 1w Trend Filter.
+In trending markets, price breaks above/below Camarilla R1/S1 with strong volume.
+In ranging markets, price reverses at Camarilla H4/L4 with volume confirmation.
+Weekly trend filter ensures we trade in the direction of higher timeframe momentum.
+Volume spike confirms institutional participation.
+Designed for low trade frequency (20-50/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -21,24 +21,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter - ONCE before loop
+    # Load daily data for Camarilla pivots and volume - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    if len(df_daily) < 10:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands (20, 2.0) on 6h
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2.0 * bb_std
-    bb_lower = bb_middle - 2.0 * bb_std
+    # Load weekly data for trend filter - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
+        return np.zeros(n)
     
-    # Calculate 1d EMA34 trend
-    ema34_daily = pd.Series(df_daily['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    # Calculate Camarilla pivot levels from previous day
+    # Based on previous day's high, low, close
+    phigh = df_daily['high'].shift(1).values
+    plow = df_daily['low'].shift(1).values
+    pclose = df_daily['close'].shift(1).values
     
-    # Calculate 6h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla levels
+    # R4 = close + ((high-low) * 1.5)
+    # R3 = close + ((high-low) * 1.25)
+    # R2 = close + ((high-low) * 1.166)
+    # R1 = close + ((high-low) * 1.083)
+    # PP = (high + low + close) / 3
+    # S1 = close - ((high-low) * 1.083)
+    # S2 = close - ((high-low) * 1.166)
+    # S3 = close - ((high-low) * 1.25)
+    # S4 = close - ((high-low) * 1.5)
+    diff = phigh - plow
+    r1 = pclose + diff * 1.083
+    s1 = pclose - diff * 1.083
+    h4 = pclose + diff * 1.166  # Same as R2
+    l4 = pclose - diff * 1.166  # Same as S2
+    
+    # Calculate weekly EMA20 for trend filter
+    ema20_weekly = pd.Series(df_weekly['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate daily volume average (20-period)
+    vol_avg_20 = pd.Series(df_daily['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all HTF data to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_daily, r1)
+    s1_4h = align_htf_to_ltf(prices, df_daily, s1)
+    h4_4h = align_htf_to_ltf(prices, df_daily, h4)
+    l4_4h = align_htf_to_ltf(prices, df_daily, l4)
+    vol_avg_20_4h = align_htf_to_ltf(prices, df_daily, vol_avg_20)
+    ema20_weekly_4h = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -46,10 +73,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after BB warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(h4_4h[i]) or np.isnan(l4_4h[i]) or 
+            np.isnan(vol_avg_20_4h[i]) or np.isnan(ema20_weekly_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,28 +94,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above upper BB with bullish 1d trend and volume
-            if (close[i] > bb_upper[i] and 
-                close[i] > ema34_aligned[i] and  # Price above 1d EMA = bullish trend
-                volume[i] > 2.0 * vol_avg_20[i]):
+            # Long: Price breaks above R1 with volume spike and weekly uptrend
+            if (close[i] > r1_4h[i] and 
+                volume[i] > 2.0 * vol_avg_20_4h[i] and 
+                close[i] > ema20_weekly_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower BB with bearish 1d trend and volume
-            elif (close[i] < bb_lower[i] and 
-                  close[i] < ema34_aligned[i] and  # Price below 1d EMA = bearish trend
-                  volume[i] > 2.0 * vol_avg_20[i]):
+            # Short: Price breaks below S1 with volume spike and weekly downtrend
+            elif (close[i] < s1_4h[i] and 
+                  volume[i] > 2.0 * vol_avg_20_4h[i] and 
+                  close[i] < ema20_weekly_4h[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to BB middle
+            # Exit: Price returns to opposite pivot level
             if position == 1:
-                if close[i] < bb_middle[i]:
+                if close[i] < s1_4h[i]:  # Reverse to S1
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > bb_middle[i]:
+                if close[i] > r1_4h[i]:  # Reverse to R1
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -95,7 +123,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_BollingerBreakout_1dEMA34Trend_Volume"
-timeframe = "6h"
+name = "4H_Camarilla_Pivot_Breakout_1dVolume_1wTrend"
+timeframe = "4h"
 leverage = 1.0
 #%%
