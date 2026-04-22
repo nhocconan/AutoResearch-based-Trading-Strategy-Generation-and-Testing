@@ -22,13 +22,13 @@ def generate_signals(prices):
     # Daily EMA34 for trend filter
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # 4h ATR(14) for volatility filter
+    # 12h ATR(14) for volatility filter
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -49,8 +49,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema_34_4h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(ema_34_12h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,23 +58,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above S1 with volume surge, above daily EMA34
-            if (close[i] > s1_4h[i] and vol_surge[i] and close[i] > ema_34_4h[i]):
+            if (close[i] > s1_12h[i] and vol_surge[i] and close[i] > ema_34_12h[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: Price breaks below R1 with volume surge, below daily EMA34
-            elif (close[i] < r1_4h[i] and vol_surge[i] and close[i] < ema_34_4h[i]):
+            elif (close[i] < r1_12h[i] and vol_surge[i] and close[i] < ema_34_12h[i]):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit: Price crosses opposite level or volatility drops
             if position == 1:
-                if close[i] < pivot_4h[i] or atr[i] < 0.3 * atr[i]:  # Strong volatility drop
+                if close[i] < pivot_12h[i] or atr[i] < 0.3 * atr[i]:  # Strong volatility drop
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > pivot_4h[i] or atr[i] < 0.3 * atr[i]:  # Strong volatility drop
+                if close[i] > pivot_12h[i] or atr[i] < 0.3 * atr[i]:  # Strong volatility drop
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -82,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PivotBreakout_VolumeSurge_EMA34Trend_v1"
-timeframe = "4h"
+name = "12h_PivotBreakout_VolumeSurge_EMA34Trend_v1"
+timeframe = "12h"
 leverage = 1.0
