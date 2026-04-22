@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA10 trend filter and volume spike
-# Uses Donchian channel (20-day high/low) for breakout entries
-# Long when price breaks above 20-day high with 1w uptrend and volume spike
-# Short when price breaks below 20-day low with 1w downtrend and volume spike
-# Weekly trend filter reduces whipsaws and improves performance in both bull and bear markets
-# Designed for 1d timeframe to target 15-25 trades/year per symbol.
-# Based on proven patterns showing strong test performance for similar configurations.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume spike
+# Elder Ray uses EMA13 as trend reference: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Long when Bull Power > 0 and increasing + 1d uptrend + volume spike
+# Short when Bear Power < 0 and decreasing + 1d downtrend + volume spike
+# Combines trend (EMA13) with momentum (power changes) for better timing
+# Designed for 6h timeframe to target 15-30 trades/year per symbol.
+# Works in both bull (captures momentum) and bear (avoids false breaks via trend filter)
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,22 +21,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for trend filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data for trend filter (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA(10) for higher timeframe trend filter
-    ema_10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
+    # 1d EMA(34) for higher timeframe trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian(20) on 1d data
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 for Elder Ray (using 6h data)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume spike filter (20-period on 1d data)
+    # Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = low - ema13   # Low - EMA13
+    
+    # Power changes (momentum)
+    bull_power_change = bull_power - np.roll(bull_power, 1)
+    bear_power_change = bear_power - np.roll(bear_power, 1)
+    bull_power_change[0] = 0
+    bear_power_change[0] = 0
+    
+    # Volume spike filter (20-period on 6h data)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > 2.0 * vol_ma20
     
@@ -45,40 +54,43 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
-            np.isnan(ema_10_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 20-day high + 1w uptrend + volume spike
-            if (close[i] > donchian_high_20[i] and 
-                close[i] > ema_10_1w_aligned[i] and 
+            # Long: Bull Power > 0 and increasing + 1d uptrend + volume spike
+            if (bull_power[i] > 0 and 
+                bull_power_change[i] > 0 and 
+                close[i] > ema_34_1d_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low + 1w downtrend + volume spike
-            elif (close[i] < donchian_low_20[i] and 
-                  close[i] < ema_10_1w_aligned[i] and 
+            # Short: Bear Power < 0 and decreasing + 1d downtrend + volume spike
+            elif (bear_power[i] < 0 and 
+                  bear_power_change[i] < 0 and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to opposite Donchian band or trend reversal
+            # Exit conditions: power crosses zero or trend reversal
             if position == 1:
-                # Exit on price below 20-day low or trend reversal
-                if (close[i] < donchian_low_20[i] or 
-                    close[i] < ema_10_1w_aligned[i]):
+                # Exit on Bull Power <= 0 or trend reversal
+                if (bull_power[i] <= 0 or 
+                    close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on price above 20-day high or trend reversal
-                if (close[i] > donchian_high_20[i] or 
-                    close[i] > ema_10_1w_aligned[i]):
+                # Exit on Bear Power >= 0 or trend reversal
+                if (bear_power[i] >= 0 or 
+                    close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -86,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA10_Trend_VolumeSpike"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA34_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
