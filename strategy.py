@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d ADX trend filter + volume confirmation.
-# Williams Alligator (JAWS=13, TEETH=8, LIPS=5 SMMA) identifies trend direction.
-# ADX > 25 confirms trending market (avoid ranging).
-# Volume > 1.5x 20-period MA confirms momentum.
-# Long when GATOR > TEETH > LIPS (bullish alignment) + ADX > 25 + volume spike.
-# Short when LIPS > TEETH > JAWS (bearish alignment) + ADX > 25 + volume spike.
-# Designed for 12h timeframe to capture multi-day trends with low frequency.
-# Target: 12-37 trades/year per symbol (48-148 total) to minimize fee drag.
+# Hypothesis: 4h Choppiness Index regime filter + 12h Donchian breakout + volume confirmation.
+# Uses 12h Donchian channel (20-period) for directional bias and 4h Choppiness Index (14-period) to filter trending markets.
+# Long when price breaks above 12h Donchian high AND chop < 38.2 (trending).
+# Short when price breaks below 12h Donchian low AND chop < 38.2 (trending).
+# Volume confirmation reduces false breakouts.
+# Designed for 4h timeframe with ~30-50 trades/year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,106 +20,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Williams Alligator (SMMA)
+    # Load 12h data for Donchian channel (trend signal)
     df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Smoothed Moving Average (SMMA) calculation
-    def smma(source, length):
-        sma = np.full_like(source, np.nan, dtype=float)
-        sma[length-1] = np.mean(source[:length])
-        for i in range(length, len(source)):
-            if not np.isnan(sma[i-1]):
-                sma[i] = (sma[i-1] * (length-1) + source[i]) / length
-        return sma
+    # 12h Donchian channel: 20-period high/low (prior 12h)
+    high_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Shift to use only completed 12h bars (avoid look-ahead)
+    high_20_12h = np.roll(high_20_12h, 1)
+    low_20_12h = np.roll(low_20_12h, 1)
     
-    jaws = smma(close_12h, 13)  # Blue line
-    teeth = smma(close_12h, 8)   # Red line
-    lips = smma(close_12h, 5)    # Green line
-    
-    # Load 1d data for ADX
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 4h data for Choppiness Index (regime filter)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # True Range (TR)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_1d[0] - low_1d[0]  # First TR
+    # Set first TR to high-low (no prior close)
+    tr[0] = high_4h[0] - low_4h[0]
     
-    # Directional Movement
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Smoothed TR, +DM, -DM (14-period)
-    def smooth_rma(source, length):
-        rma = np.full_like(source, np.nan, dtype=float)
-        rma[length-1] = np.nansum(source[:length]) / length
-        for i in range(length, len(source)):
-            if not np.isnan(rma[i-1]):
-                rma[i] = (rma[i-1] * (length-1) + source[i]) / length
-        return rma
+    # Sum of TR over 14 periods
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    atr = smooth_rma(tr, 14)
-    plus_di = 100 * smooth_rma(plus_dm, 14) / atr
-    minus_di = 100 * smooth_rma(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth_rma(dx, 14)
+    # Choppiness Index: 100 * log10(sumTR / (ATR * 14)) / log10(14)
+    # Avoid division by zero or invalid values
+    atr14 = atr * 14
+    chop = np.full_like(close_4h, np.nan, dtype=float)
+    mask = (sum_tr > 0) & (atr14 > 0)
+    chop[mask] = 100 * np.log10(sum_tr[mask] / atr14[mask]) / np.log10(14)
     
     # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > 1.5 * vol_ma20
     
-    # Align indicators to 12h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_12h, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align indicators to 4h timeframe
+    high_20_12h_aligned = align_htf_to_ltf(prices, df_12h, high_20_12h)
+    low_20_12h_aligned = align_htf_to_ltf(prices, df_12h, low_20_12h)
+    chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(high_20_12h_aligned[i]) or np.isnan(low_20_12h_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Bullish alignment: JAWS < TEETH < LIPS
-            bullish = jaws_aligned[i] < teeth_aligned[i] < lips_aligned[i]
-            # Bearish alignment: LIPS < TEETH < JAWS
-            bearish = lips_aligned[i] < teeth_aligned[i] < jaws_aligned[i]
-            
-            if bullish and adx_aligned[i] > 25 and vol_spike[i]:
+            # Long: price breaks above 12h Donchian high + chop < 38.2 (trending) + volume spike
+            if (close[i] > high_20_12h_aligned[i] and 
+                chop_aligned[i] < 38.2 and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            elif bearish and adx_aligned[i] > 25 and vol_spike[i]:
+            # Short: price breaks below 12h Donchian low + chop < 38.2 (trending) + volume spike
+            elif (close[i] < low_20_12h_aligned[i] and 
+                  chop_aligned[i] < 38.2 and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: alignment breaks or ADX < 20 (trend weakening)
+            # Exit: price breaks opposite 12h Donchian level or chop > 61.8 (ranging)
             if position == 1:
-                bullish = jaws_aligned[i] < teeth_aligned[i] < lips_aligned[i]
-                if not bullish or adx_aligned[i] < 20:
+                if (close[i] < low_20_12h_aligned[i] or chop_aligned[i] > 61.8):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                bearish = lips_aligned[i] < teeth_aligned[i] < jaws_aligned[i]
-                if not bearish or adx_aligned[i] < 20:
+                if (close[i] > high_20_12h_aligned[i] or chop_aligned[i] > 61.8):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -129,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ADX_Trend_Volume_Spike"
-timeframe = "12h"
+name = "4h_Choppiness_Regime_12hDonchian_Breakout_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
