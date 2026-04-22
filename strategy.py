@@ -3,10 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 12h ADX trend filter and volume confirmation
-# Uses Williams Fractals (1d) for precise swing points, breaks above/below recent fractals with 12h ADX > 25 for trend strength
-# Volume spike confirms breakout momentum. Designed to catch strong trends in both bull and bear markets
-# Target: 15-35 trades/year per symbol (60-140 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1-day ADX trend filter
+# Uses 20-period Donchian channels for breakout detection, volume spike confirms breakout strength
+# 1-day ADX > 25 filters for trending markets to avoid choppy conditions
+# Trades only in direction of 1-day trend to reduce counter-trend losses
+# Target: 20-35 trades/year per symbol (80-140 total over 4 years) to avoid fee drag
+# Works in bull/bear markets by only trading with the trend on higher timeframe
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,88 +20,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Williams Fractals
+    # Load 1-day data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams Fractals (5-point: bar high/low > 2 bars on each side)
-    def calculate_williams_fractals(high_arr, low_arr):
-        n1 = len(high_arr)
-        bullish = np.zeros(n1, dtype=bool)
-        bearish = np.zeros(n1, dtype=bool)
+    # Calculate ADX (14-period) on 1-day data
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
         
-        for i in range(2, n1 - 2):
-            # Bullish fractal: low[i] is lowest among i-2, i-1, i, i+1, i+2
-            if (low[i] < low[i-2] and low[i] < low[i-1] and 
-                low[i] < low[i+1] and low[i] < low[i+2]):
-                bullish[i] = True
-            # Bearish fractal: high[i] is highest among i-2, i-1, i, i+1, i+2
-            if (high[i] > high[i-2] and high[i] > high[i-1] and 
-                high[i] > high[i+1] and high[i] > high[i+2]):
-                bearish[i] = True
-        return bullish, bearish
-    
-    bullish_fractal, bearish_fractal = calculate_williams_fractals(high_1d, low_1d)
-    
-    # Convert to price levels (use the fractal point value)
-    bullish_fractal_val = np.where(bullish_fractal, low_1d, np.nan)
-    bearish_fractal_val = np.where(bearish_fractal, high_1d, np.nan)
-    
-    # Load 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate ADX (14-period)
-    def calculate_adx(high_arr, low_arr, close_arr, period=14):
-        n1 = len(high_arr)
-        if n1 < period + 1:
-            return np.full(n1, np.nan)
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            
+            # If both are positive, the smaller one becomes zero
+            if plus_dm[i] > 0 and minus_dm[i] > 0:
+                if plus_dm[i] > minus_dm[i]:
+                    minus_dm[i] = 0
+                else:
+                    plus_dm[i] = 0
+            
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
         
-        # True Range
-        tr1 = np.abs(high_arr - low_arr)
-        tr2 = np.abs(high_arr - np.roll(close_arr, 1))
-        tr3 = np.abs(low_arr - np.roll(close_arr, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = np.nan  # First value has no previous close
+        # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
         
-        # Directional Movement
-        up_move = high_arr - np.roll(high_arr, 1)
-        down_move = np.roll(low_arr, 1) - low_arr
+        # Initial values
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_sum = np.sum(plus_dm[1:period+1])
+        minus_dm_sum = np.sum(minus_dm[1:period+1])
         
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sum = (plus_dm_sum * (period-1) + plus_dm[i]) / period
+            minus_dm_sum = (minus_dm_sum * (period-1) + minus_dm[i]) / period
+            
+            if atr[i] != 0:
+                plus_di[i] = 100 * plus_dm_sum / atr[i]
+                minus_di[i] = 100 * minus_dm_sum / atr[i]
         
-        # Smoothed values (using Wilder's smoothing = EMA with alpha=1/period)
-        def wilders_smooth(arr, period):
-            n1 = len(arr)
-            result = np.full(n1, np.nan)
-            if n1 < period:
-                return result
-            # First value: simple average
-            result[period-1] = np.nansum(arr[:period]) / period
-            # Subsequent values: Wilder smoothing
-            for i in range(period, n1):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-            return result
+        # Calculate DX and ADX
+        dx = np.zeros_like(high)
+        adx = np.zeros_like(high)
         
-        tr_sum = wilders_smooth(tr, period)
-        plus_dm_sum = wilders_smooth(plus_dm, period)
-        minus_dm_sum = wilders_smooth(minus_dm, period)
+        for i in range(2*period, len(high)):
+            if plus_di[i] + minus_di[i] != 0:
+                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
         
-        # Avoid division by zero
-        plus_di = np.where(tr_sum != 0, 100 * plus_dm_sum / tr_sum, 0)
-        minus_di = np.where(tr_sum != 0, 100 * minus_dm_sum / tr_sum, 0)
-        
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        adx = wilders_smooth(dx, period)
+        # Wilder's smoothing for ADX
+        adx[2*period] = np.mean(dx[period+1:2*period+1])
+        for i in range(2*period+1, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+            
         return adx
     
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Volume spike filter (20-period on 6h)
+    # Calculate 20-period Donchian channels on 4-hour data
+    def donchian_channels(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-(period-1):i+1])
+            lower[i] = np.min(low[i-(period-1):i+1])
+            
+        return upper, lower
+    
+    donch_upper, donch_lower = donchian_channels(high, low, 20)
+    
+    # Volume spike filter (20-period on 4h)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > 2.0 * vol_ma20
     
@@ -107,46 +104,40 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Align indicators to 6-hour timeframe
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal_val, additional_delay_bars=2)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal_val, additional_delay_bars=2)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Align indicators to 4-hour timeframe
+    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(bullish_fractal_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+            np.isnan(adx_14_1d_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above recent bearish fractal + ADX > 25 + volume spike
-            if (close[i] > bearish_fractal_aligned[i] and 
-                adx_12h_aligned[i] > 25 and vol_spike[i]):
+            # Long: Price breaks above Donchian upper + volume spike + ADX > 25 (trending)
+            if (close[i] > donch_upper[i] and vol_spike[i] and adx_14_1d_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below recent bullish fractal + ADX > 25 + volume spike
-            elif (close[i] < bullish_fractal_aligned[i] and 
-                  adx_12h_aligned[i] > 25 and vol_spike[i]):
+            # Short: Price breaks below Donchian lower + volume spike + ADX > 25 (trending)
+            elif (close[i] < donch_lower[i] and vol_spike[i] and adx_14_1d_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to opposite fractal level or ADX weakens
+            # Exit: Price returns to opposite Donchian level
             if position == 1:
-                if (close[i] < bullish_fractal_aligned[i] or 
-                    adx_12h_aligned[i] < 20):
+                if close[i] < donch_lower[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if (close[i] > bearish_fractal_aligned[i] or 
-                    adx_12h_aligned[i] < 20):
+                if close[i] > donch_upper[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -154,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Williams_Fractal_Breakout_12hADX_Volume_Session"
-timeframe = "6h"
+name = "4h_Donchian20_Volume_Spike_ADX25_Trend"
+timeframe = "4h"
 leverage = 1.0
