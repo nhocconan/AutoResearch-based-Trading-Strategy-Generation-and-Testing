@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour ADX-based trend following with 1-week volatility filter.
-Long when ADX > 25 (trending) and +DI > -DI (bullish momentum) and weekly ATR < median (low volatility).
-Short when ADX > 25 and -DI > +DI (bearish momentum) and weekly ATR < median.
-Exit when ADX < 20 (trend weakens) or DI crossover reverses.
-Uses weekly ATR regime filter to avoid whipsaws in high volatility periods.
-Designed for low trade frequency by requiring strong trend + low volatility conditions.
-Works in both bull and bear markets by following the trend direction with volatility filter.
+Hypothesis: 4-hour Bollinger Squeeze breakout with 1-day volume confirmation and ADX trend filter.
+Long when Bollinger Bands width at 50-day low, price breaks above upper band, 1-day volume > 1.5x 20-day average, and ADX > 25.
+Short when Bollinger Bands width at 50-day low, price breaks below lower band, 1-day volume > 1.5x 20-day average, and ADX > 25.
+Exit when price crosses the middle band (20-day SMA).
+Bollinger Squeeze identifies low volatility breakouts; volume confirmation ensures institutional participation; ADX filter avoids choppy markets.
+Designed for low trade frequency by requiring multiple confirmations (volatility contraction + volume expansion + trend strength).
+Works in both bull and bear markets by capturing volatility breakouts regardless of direction.
 """
 
 import numpy as np
@@ -15,118 +15,122 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load weekly data for ATR volatility filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly ATR(14) for volatility regime
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1w = np.concatenate([[np.nan], tr_1w])
-    atr_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Weekly ATR median for regime threshold
-    atr_median_1w = np.nanmedian(atr_1w[~np.isnan(atr_1w)])
-    atr_1w_low_vol = atr_1w < atr_median_1w  # Low volatility regime
-    
-    # Align weekly low vol regime to 12h
-    atr_1w_low_vol_aligned = align_htf_to_ltf(prices, df_1w, atr_1w_low_vol.astype(float))
-    
-    # Daily data for ADX calculation (using 1d as proxy for higher timeframe trend strength)
+    # Load 1-day data for volume and ADX - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # ADX(14) calculation on daily data
-    # True Range
-    tr1_d = np.abs(high_1d[1:] - low_1d[1:])
-    tr2_d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
-    tr_d = np.concatenate([[np.nan], tr_d])
+    # 1-day volume: 20-day average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # 1-day ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            high_diff = high[i] - high[i-1]
+            low_diff = low[i-1] - low[i]
+            
+            plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+            minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+            
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_sum = np.sum(plus_dm[1:period+1])
+        minus_dm_sum = np.sum(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sum = plus_dm_sum - (plus_dm_sum / period) + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - (minus_dm_sum / period) + minus_dm[i]
+            
+            plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
+        
+        dx = np.zeros_like(high)
+        adx = np.zeros_like(high)
+        dx[2*period:] = 100 * np.abs(plus_di[2*period:] - minus_di[2*period:]) / (plus_di[2*period:] + minus_di[2*period:])
+        
+        adx[2*period] = np.mean(dx[2*period:3*period+1])
+        for i in range(3*period+1, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Smoothed values
-    atr_1d = pd.Series(tr_d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_14 = calculate_adx(high_1d, low_1d, close_1d)
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # DI values
-    di_plus = 100 * dm_plus_smooth / np.where(atr_1d == 0, 1, atr_1d)
-    di_minus = 100 * dm_minus_smooth / np.where(atr_1d == 0, 1, atr_1d)
+    # Bollinger Bands (20, 2) on 4h
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
+    bb_width = (upper_band - lower_band) / sma_20
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align daily indicators to 12h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    di_plus_aligned = align_htf_to_ltf(prices, df_1d, di_plus)
-    di_minus_aligned = align_htf_to_ltf(prices, df_1d, di_minus)
+    # Bollinger Squeeze: BB width at 50-day low
+    bb_width_50d_low = pd.Series(bb_width).rolling(window=50, min_periods=50).min().values
+    squeeze_condition = bb_width <= bb_width_50d_low * 1.1  # Within 10% of 50-day low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after enough data for ADX
+    for i in range(50, n):  # Start after enough data for BB width 50-day low
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(di_plus_aligned[i]) or np.isnan(di_minus_aligned[i]) or
-            np.isnan(atr_1w_low_vol_aligned[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(adx_14_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: ADX > 25 (strong trend), +DI > -DI (bullish), low volatility regime
-            if (adx_aligned[i] > 25 and 
-                di_plus_aligned[i] > di_minus_aligned[i] and 
-                atr_1w_low_vol_aligned[i] > 0.5):  # True (1.0) indicates low vol
+            # Long: Bollinger squeeze, price breaks above upper band, volume confirmation, ADX > 25
+            if (squeeze_condition[i] and 
+                close[i] > upper_band[i] and 
+                volume[i] > 1.5 * vol_ma_20_aligned[i] and 
+                adx_14_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: ADX > 25 (strong trend), -DI > +DI (bearish), low volatility regime
-            elif (adx_aligned[i] > 25 and 
-                  di_minus_aligned[i] > di_plus_aligned[i] and 
-                  atr_1w_low_vol_aligned[i] > 0.5):
+            # Short: Bollinger squeeze, price breaks below lower band, volume confirmation, ADX > 25
+            elif (squeeze_condition[i] and 
+                  close[i] < lower_band[i] and 
+                  volume[i] > 1.5 * vol_ma_20_aligned[i] and 
+                  adx_14_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit when price crosses middle band (20-day SMA)
             exit_signal = False
             
             if position == 1:
-                # Exit long: ADX < 20 (weak trend) OR -DI crosses above +DI
-                if (adx_aligned[i] < 20 or 
-                    di_minus_aligned[i] > di_plus_aligned[i]):
+                # Exit long: Price falls below middle band
+                if close[i] < sma_20[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: ADX < 20 (weak trend) OR +DI crosses above -DI
-                if (adx_aligned[i] < 20 or 
-                    di_plus_aligned[i] > di_minus_aligned[i]):
+                # Exit short: Price rises above middle band
+                if close[i] > sma_20[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -137,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_ADX_Trend_1wVolatilityFilter"
-timeframe = "12h"
+name = "4H_Bollinger_Squeeze_1dVolume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
