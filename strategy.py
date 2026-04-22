@@ -3,92 +3,102 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band breakout with volume spike and 1d RSI filter.
-# Long when price breaks above upper band + volume spike + 1d RSI > 50 (bullish regime)
-# Short when price breaks below lower band + volume spike + 1d RSI < 50 (bearish regime)
-# Exit when price crosses back through middle band or volume drops below 80% of average.
-# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 20-40 trades/year to avoid excessive fee drag.
+# Hypothesis: 1d Williams Alligator with 1h time frame for entry timing and weekly trend filter.
+# Long when: price > Alligator's Jaw (TEMA13) + price > Alligator's Teeth (TEMA8) + weekly close > weekly EMA26
+# Short when: price < Alligator's Jaw (TEMA13) + price < Alligator's Teeth (TEMA8) + weekly close < weekly EMA26
+# Exit when price crosses back through Alligator's Lips (TEMA5)
+# Williams Alligator uses smoothed moving averages (SMMA) which act as dynamic support/resistance.
+# Works in trending markets (both bull and bear) by aligning with the weekly trend.
+# Target: 15-25 trades/year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for RSI filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load 1h data for Williams Alligator calculation
+    df_1h = get_htf_data(prices, '1h')
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
     
-    # 14-period RSI on 1d
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
+    # Calculate Williams Alligator components (SMMA = Smoothed Moving Average)
+    # Jaw (TEMA13): SMMA of median price, period 13
+    # Teeth (TEMA8): SMMA of median price, period 8
+    # Lips (TEMA5): SMMA of median price, period 5
+    median_price_1h = (high_1h + low_1h) / 2
     
-    # Bollinger Bands on 4h (20-period, 2 std dev)
-    close = prices['close'].values
-    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper = ma_20 + 2 * std_20
-    lower = ma_20 - 2 * std_20
-    middle = ma_20
-    upper = upper.values
-    lower = lower.values
-    middle = middle.values
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan)
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: (prev*(period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Volume spike filter (20-period average)
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    jaw_1h = smma(median_price_1h, 13)
+    teeth_1h = smma(median_price_1h, 8)
+    lips_1h = smma(median_price_1h, 5)
+    
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA26 for trend filter
+    ema26_1w = pd.Series(close_1w).ewm(span=26, adjust=False, min_periods=26).mean().values
+    
+    # Align all indicators to 1d timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1h, jaw_1h)
+    teeth_aligned = align_htf_to_ltf(prices, df_1h, teeth_1h)
+    lips_aligned = align_htf_to_ltf(prices, df_1h, lips_1h)
+    ema26_aligned = align_htf_to_ltf(prices, df_1w, ema26_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or 
-            np.isnan(middle[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or 
+            np.isnan(ema26_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        # Get 1d RSI aligned (same value for all 4h bars in the day)
-        rsi_val = rsi_1d[i // 96] if i // 96 < len(rsi_1d) else rsi_1d[-1]
-        
-        # Volume filter: current volume > 1.8 * 20-day average
-        vol_spike = vol > 1.8 * vol_ma
+        jaw = jaw_aligned[i]
+        teeth = teeth_aligned[i]
+        lips = lips_aligned[i]
+        ema26 = ema26_aligned[i]
         
         if position == 0:
-            # Long conditions: price breaks above upper band + volume spike + 1d RSI > 50
-            if price > upper[i] and vol_spike and rsi_val > 50:
+            # Long conditions: price > Jaw AND price > Teeth AND weekly close > weekly EMA26
+            if price > jaw and price > teeth and close_1w[-1] > ema26:  # close_1w[-1] is latest weekly close
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below lower band + volume spike + 1d RSI < 50
-            elif price < lower[i] and vol_spike and rsi_val < 50:
+            # Short conditions: price < Jaw AND price < Teeth AND weekly close < weekly EMA26
+            elif price < jaw and price < teeth and close_1w[-1] < ema26:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses back through middle band or volume dries up
+            # Exit conditions: price crosses back through Lips
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price crosses below middle band or volume dries up
-                if price < middle[i] or vol < 0.8 * vol_ma:
+                # Exit when price crosses below Lips
+                if price < lips:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price crosses above middle band or volume dries up
-                if price > middle[i] or vol < 0.8 * vol_ma:
+                # Exit when price crosses above Lips
+                if price > lips:
                     exit_signal = True
             
             if exit_signal:
@@ -100,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Bollinger_Breakout_Volume_1dRSI"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1hTEMA_1wEMA26_Trend"
+timeframe = "1d"
 leverage = 1.0
