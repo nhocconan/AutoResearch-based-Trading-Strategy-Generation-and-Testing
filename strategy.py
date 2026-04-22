@@ -70,13 +70,13 @@ def generate_signals(prices):
             if (close[i] > r2_aligned[i] and 
                 volume[i] > 1.5 * vol_avg_20[i] and
                 atr[i] > 0.5 * atr[i-1] if i > 0 else True):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S2 + volume spike + volatility filter
             elif (close[i] < s2_aligned[i] and 
                   volume[i] > 1.5 * vol_avg_20[i] and
                   atr[i] > 0.5 * atr[i-1] if i > 0 else True):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit: Price crosses back to opposite pivot level (full exit)
@@ -86,17 +86,17 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
                 # Exit short: Price closes above R1
                 if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
-name = "4H_Pivot_R2_S2_Breakout_Volume_Volatility_v2"
+name = "4H_Pivot_R2_S2_Breakout_Volume_Volatility"
 timeframe = "4h"
 leverage = 1.0
