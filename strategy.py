@@ -3,110 +3,96 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator trend filter with 1d ATR-based entry levels and volume confirmation.
-# Alligator uses SMAs (13,8,5) with 8,5,3 period offsets to identify trends.
-# Long when price > Alligator Teeth (SMA8) + price > 1d ATR-based upper band + volume spike.
-# Short when price < Alligator Teeth (SMA8) + price < 1d ATR-based lower band + volume spike.
-# Exit when price crosses Alligator Jaw (SMA13) or ATR-based middle band.
-# Designed for 4h to capture trends with minimal whipsaw in both bull/bear markets.
+# Hypothesis: 4h Choppiness Index regime filter + 1d Williams %R mean reversion.
+# Uses daily Williams %R for mean reversion signals (oversold/overbought).
+# Enters only when 4h Choppiness > 61.8 (ranging market) to avoid trending whipsaws.
+# Long when Williams %R < -80 (oversold) in ranging market.
+# Short when Williams %R > -20 (overbought) in ranging market.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+# Designed for low trade frequency (<30/year) to minimize fee drag in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data for ATR and Alligator components (ONCE before loop)
+    # Load 1d data for Williams %R (overbought/oversold)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, tr2)
-    tr = np.concatenate([[np.nan], tr])  # align length
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Williams %R (14-period): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
     
-    # Calculate Alligator components from 1d close
-    # Jaw: SMA(13) offset by 8 bars
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    jaw = np.concatenate([np.full(8, np.nan), jaw[:-8]])  # shift right by 8
-    # Teeth: SMA(8) offset by 5 bars
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    teeth = np.concatenate([np.full(5, np.nan), teeth[:-5]])  # shift right by 5
-    # Lips: SMA(5) offset by 3 bars
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
-    lips = np.concatenate([np.full(3, np.nan), lips[:-3]])  # shift right by 3
+    # Load 4h data for Choppiness Index (regime filter)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 1d ATR-based bands (middle = close, upper/lower = close ± ATR*1.5)
-    atr_mult = 1.5
-    upper_band = close_1d + atr_14_1d * atr_mult
-    lower_band = close_1d - atr_14_1d * atr_mult
-    middle_band = close_1d
+    # True Range and ATR(14) for Choppiness
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align to 4h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    middle_aligned = align_htf_to_ltf(prices, df_1d, middle_band)
+    # Choppiness Index: 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
     
-    # Volume spike filter (20-period)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20  # Higher threshold for fewer trades
+    # Align Williams %R to 4h timeframe (waits for 1d bar to close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(teeth_aligned[i]) or np.isnan(jaw_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(middle_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Long: price > Teeth + price > Upper band + volume spike
-            if (close[i] > teeth_aligned[i] and 
-                close[i] > upper_aligned[i] and 
-                vol_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: price < Teeth + price < Lower band + volume spike
-            elif (close[i] < teeth_aligned[i] and 
-                  close[i] < lower_aligned[i] and 
-                  vol_spike[i]):
-                signals[i] = -0.25
-                position = -1
-        else:
-            # Exit conditions
-            if position == 1:
-                # Exit on price < Jaw or price < Middle band
-                if (close[i] < jaw_aligned[i] or close[i] < middle_aligned[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
+        # Only trade in ranging markets (Choppiness > 61.8)
+        if chop[i] > 61.8:
+            if position == 0:
+                # Long: Williams %R oversold (< -80)
+                if williams_r_aligned[i] < -80:
                     signals[i] = 0.25
-            else:  # position == -1
-                # Exit on price > Jaw or price > Middle band
-                if (close[i] > jaw_aligned[i] or close[i] > middle_aligned[i]):
+                    position = 1
+                # Short: Williams %R overbought (> -20)
+                elif williams_r_aligned[i] > -20:
+                    signals[i] = -0.25
+                    position = -1
+            else:
+                # Exit: Williams %R crosses midpoint (-50)
+                if position == 1 and williams_r_aligned[i] > -50:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and williams_r_aligned[i] < -50:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = 0.25 if position == 1 else -0.25
+        else:
+            # In trending markets, stay flat
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
     
     return signals
 
-name = "4h_WilliamsAlligator_TeethFilter_1dATR_Bands_VolumeSpike"
+name = "4h_Chop_WilliamsR_MeanReversion"
 timeframe = "4h"
 leverage = 1.0
