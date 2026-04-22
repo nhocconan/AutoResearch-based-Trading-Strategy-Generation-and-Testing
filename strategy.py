@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 12-hour Williams Alligator with 1-day trend filter and volume confirmation.
-The Williams Alligator uses smoothed moving averages (Jaw, Teeth, Lips) to identify
-trending vs ranging markets. When all three lines are aligned (all above/below price
-and in correct order), it indicates a strong trend. The 1-day trend filter ensures
-trades align with the daily trend to avoid counter-trend trades. Volume spikes
-confirm institutional participation at trend continuation points.
-This strategy aims to capture strong trending moves in both bull and bear markets
-by trading in the direction of the Alligator alignment with trend and volume confirmation.
+Hypothesis: 6-hour Bollinger Bands squeeze breakout with 1-day trend filter and volume confirmation.
+In low volatility (Bollinger Band width < 30th percentile), price often breaks out strongly in the direction of the higher timeframe trend.
+Volume spikes confirm institutional participation. This strategy avoids whipsaw by only trading breakouts during low volatility regimes
+and requiring alignment with the daily trend. Works in both bull and bear markets by trading with the higher timeframe trend.
 Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
@@ -16,77 +12,54 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(values, period):
-    """Smoothed Moving Average (SMMA) - also called Wilder's Smoothing"""
-    if len(values) < period:
-        return np.full_like(values, np.nan, dtype=float)
-    result = np.full_like(values, np.nan, dtype=float)
-    # First value is simple average
-    result[period-1] = np.mean(values[:period])
-    # Subsequent values: SMMA = (Prev SMMA * (Period-1) + Current Value) / Period
-    for i in range(period, len(values)):
-        result[i] = (result[i-1] * (period-1) + values[i]) / period
-    return result
-
-def calculate_alligator(high, low, close):
-    """Calculate Williams Alligator: Jaw (13), Teeth (8), Lips (5)"""
-    # Median price = (High + Low) / 2
-    median_price = (high + low) / 2
-    
-    # Jaw: 13-period SMMA, shifted 8 bars ahead
-    jaw = smma(median_price, 13)
-    jaw = np.roll(jaw, 8)  # shift 8 bars ahead
-    jaw[:8] = np.nan  # first 8 values invalid after shift
-    
-    # Teeth: 8-period SMMA, shifted 5 bars ahead
-    teeth = smma(median_price, 8)
-    teeth = np.roll(teeth, 5)  # shift 5 bars ahead
-    teeth[:5] = np.nan  # first 5 values invalid after shift
-    
-    # Lips: 5-period SMMA, shifted 3 bars ahead
-    lips = smma(median_price, 5)
-    lips = np.roll(lips, 3)  # shift 3 bars ahead
-    lips[:3] = np.nan  # first 3 values invalid after shift
-    
-    return jaw, teeth, lips
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h Alligator data - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 6h data for Bollinger Bands - ONCE before loop
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 50:
         return np.zeros(n)
     
-    # Calculate Alligator on 12h data
-    jaw_12h, teeth_12h, lips_12h = calculate_alligator(
-        df_12h['high'].values, df_12h['low'].values, df_12h['close'].values
-    )
+    # Calculate 6h Bollinger Bands (20, 2)
+    close_6h = df_6h['close'].values
+    ma_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma_20 + 2 * std_20
+    lower_bb = ma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / ma_20  # normalized width
     
-    # Align Alligator components to 12h timeframe
-    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
-    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
+    # Align Bollinger Bands components
+    ma_20_aligned = align_htf_to_ltf(prices, df_6h, ma_20)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_6h, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_6h, lower_bb)
+    bb_width_aligned = align_htf_to_ltf(prices, df_6h, bb_width)
     
-    # Load 1d data for trend filter - ONCE before loop
+    # Load 1d data for trend filter and BB width percentile - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Calculate 1d EMA for trend filter (34-period)
+    # 1d EMA for trend filter (50-period)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h volume average (24-period)
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # 1d Bollinger Band width for regime filter (20, 2)
+    ma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_width_1d = ( (ma_20_1d + 2 * std_20_1d) - (ma_20_1d - 2 * std_20_1d) ) / ma_20_1d
+    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
+    
+    # Pre-calculate 30th percentile of 1d BB width for regime filter (using expanding window)
+    bb_width_30th = pd.Series(bb_width_1d).expanding(min_periods=50).quantile(0.30).values
+    bb_width_30th_aligned = align_htf_to_ltf(prices, df_1d, bb_width_30th)
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -96,9 +69,10 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or 
-            np.isnan(lips_12h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_avg_24[i])):
+        if (np.isnan(ma_20_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or np.isnan(bb_width_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(bb_width_1d_aligned[i]) or
+            np.isnan(bb_width_30th_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,42 +88,29 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Check Alligator alignment
-        # Bullish alignment: Lips > Teeth > Jaw (all above price indicates uptrend)
-        # Bearish alignment: Lips < Teeth < Jaw (all below price indicates downtrend)
-        bullish_alignment = (lips_12h_aligned[i] > teeth_12h_aligned[i] > jaw_12h_aligned[i])
-        bearish_alignment = (lips_12h_aligned[i] < teeth_12h_aligned[i] < jaw_12h_aligned[i])
+        # Regime filter: low volatility (BB width < 30th percentile)
+        is_low_vol = bb_width_1d_aligned[i] < bb_width_30th_aligned[i]
         
-        if position == 0:
-            # Long: bullish alignment, price above all lines, above 1d EMA, volume spike
-            if (bullish_alignment and
-                close[i] > lips_12h_aligned[i] and
-                close[i] > teeth_12h_aligned[i] and
-                close[i] > jaw_12h_aligned[i] and
-                close[i] > ema_34_1d_aligned[i] and
-                volume[i] > 2.0 * vol_avg_24[i]):
+        if position == 0 and is_low_vol:
+            # Long: price breaks above upper BB, above 1d EMA (uptrend)
+            if close[i] > upper_bb_aligned[i] and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment, price below all lines, below 1d EMA, volume spike
-            elif (bearish_alignment and
-                  close[i] < lips_12h_aligned[i] and
-                  close[i] < teeth_12h_aligned[i] and
-                  close[i] < jaw_12h_aligned[i] and
-                  close[i] < ema_34_1d_aligned[i] and
-                  volume[i] > 2.0 * vol_avg_24[i]):
+            # Short: price breaks below lower BB, below 1d EMA (downtrend)
+            elif close[i] < lower_bb_aligned[i] and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: alignment breaks or price crosses opposite side
+            # Exit: price returns to middle band or volatility expands significantly
             exit_signal = False
             
             if position == 1:
-                # Exit long: bearish alignment or price below teeth
-                if bearish_alignment or close[i] < teeth_12h_aligned[i]:
+                # Exit long: price touches middle band or BB width exceeds 50th percentile (vol expansion)
+                if close[i] < ma_20_aligned[i] or bb_width_1d_aligned[i] > bb_width_30th_aligned[i] * 1.5:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: bullish alignment or price above teeth
-                if bullish_alignment or close[i] > teeth_12h_aligned[i]:
+                # Exit short: price touches middle band or BB width exceeds 50th percentile
+                if close[i] > ma_20_aligned[i] or bb_width_1d_aligned[i] > bb_width_30th_aligned[i] * 1.5:
                     exit_signal = True
             
             if exit_signal:
@@ -160,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_Bollinger_Squeeze_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
