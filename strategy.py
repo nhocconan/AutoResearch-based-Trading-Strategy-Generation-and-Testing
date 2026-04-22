@@ -1,13 +1,10 @@
-#!/usr/bin/env python3
-
-"""
-Hypothesis: 4-hour Donchian channel breakout with daily trend filter and volume confirmation.
-Long when price breaks above 4h Donchian upper band (20-period) and daily EMA(34) is rising.
-Short when price breaks below 4h Donchian lower band and daily EMA(34) is falling.
-Requires volume spike (>1.5x 20-period average) for entry confirmation.
-Exits when price returns to Donchian middle band or volatility expands (ATR ratio > 2.0).
-Designed for low trade frequency (19-50/year) with strong trend-following edge in both bull and bear markets.
-"""
+# 4H_Donchian_Breakout_Volume_Trend_12hEMA50
+# Hypothesis: Donchian(20) breakout on 4h with 12h EMA50 trend filter and volume spike confirmation.
+# Uses tight entry conditions for low trade frequency (target: 20-50 trades/year) to avoid fee drag.
+# Long when price breaks above Donchian upper channel + 12h EMA50 rising + volume spike.
+# Short when price breaks below Donchian lower channel + 12h EMA50 falling + volume spike.
+# Exits when price returns to Donchian middle or opposite breakout occurs.
+# Designed to work in both bull and bear markets by following 12h trend.
 
 import numpy as np
 import pandas as pd
@@ -23,69 +20,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
-    high_roll = pd.Series(high)
-    low_roll = pd.Series(low)
-    donchian_high = high_roll.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_roll.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Donchian Channel (20-period) on 4h
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
     
-    # Daily EMA34 for trend filter - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 40:
+    for i in range(lookback-1, n):
+        upper[i] = np.max(high[i-lookback+1:i+1])
+        lower[i] = np.min(low[i-lookback+1:i+1])
+        middle[i] = (upper[i] + lower[i]) / 2
+    
+    # Load 12h data for EMA50 trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    daily_close = df_daily['close'].values
-    ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    # 12h EMA50 for trend direction
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility exit (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema34_daily_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper + daily uptrend + volume spike
-            if close[i] > donchian_high[i] and ema34_daily_aligned[i] > ema34_daily_aligned[i-1] and vol_spike:
+            # Long: price breaks above upper channel + 12h EMA50 rising + volume spike
+            if close[i] > upper[i] and ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + daily downtrend + volume spike
-            elif close[i] < donchian_low[i] and ema34_daily_aligned[i] < ema34_daily_aligned[i-1] and vol_spike:
+            # Short: price breaks below lower channel + 12h EMA50 falling + volume spike
+            elif close[i] < lower[i] and ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to middle band OR volatility expansion (ATR ratio > 2.0)
+            # Exit: price returns to middle channel or opposite breakout
             exit_signal = False
             
             if position == 1:
-                # Exit long: price below middle OR ATR expansion
-                if close[i] < donchian_mid[i] or atr[i] > 2.0 * atr[i-1]:
+                # Exit long: price closes below middle or breaks below lower channel
+                if close[i] < middle[i] or close[i] < lower[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price above middle OR ATR expansion
-                if close[i] > donchian_mid[i] or atr[i] > 2.0 * atr[i-1]:
+                # Exit short: price closes above middle or breaks above upper channel
+                if close[i] > middle[i] or close[i] > upper[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -96,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian_Breakout_DailyTrend_Volume"
+name = "4H_Donchian_Breakout_Volume_Trend_12hEMA50"
 timeframe = "4h"
 leverage = 1.0
