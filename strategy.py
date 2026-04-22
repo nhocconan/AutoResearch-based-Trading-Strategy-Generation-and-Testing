@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Commodity Channel Index (CCI) with 1-day EMA trend filter and volume confirmation.
-# CCI identifies overbought (>100) and oversold (<-100) conditions with mean reversion tendencies.
-# 1-day EMA provides trend direction: only take longs when price > 1d EMA, shorts when price < 1d EMA.
-# Volume confirmation requires current volume > 1.3x 20-period average to filter weak signals.
-# Designed to work in both bull and bear markets by aligning with trend via 1d EMA filter.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation + ATR stop.
+# Donchian breakout captures breakouts in trending markets; EMA34 filters for trend direction (only long when price > EMA34, short when price < EMA34).
+# Volume confirmation requires current volume > 1.8x 20-period average to avoid false breakouts.
+# ATR-based stop exits when price moves against position by 2.5 * ATR(14).
+# Designed to work in both bull and bear markets by aligning with 1d trend via EMA34 filter.
 # Targets 20-40 trades/year with strict entry conditions to minimize fee drag.
 
 def generate_signals(prices):
@@ -23,18 +23,20 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate CCI on 4h data (20-period)
+    # Calculate ATR(14) for stop loss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    typical_price = (high + low + close) / 3.0
-    ma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    deviation = np.abs(typical_price - ma_tp)
-    mean_deviation = pd.Series(deviation).rolling(window=20, min_periods=20).mean().values
-    
-    # Avoid division by zero
-    cci = np.where(mean_deviation != 0, (typical_price - ma_tp) / (0.015 * mean_deviation), 0.0)
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -42,11 +44,14 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0  # track entry price for stop loss
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(cci[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,37 +61,37 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        cci_val = cci[i]
+        atr_val = atr[i]
         ema_val = ema_1d_aligned[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         
-        # Volume filter: current volume > 1.3 * 20-period average
-        vol_spike = vol > 1.3 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-period average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: oversold + uptrend + volume spike
-            if cci_val < -100 and price > ema_val and vol_spike:
+            # Long conditions: breakout above upper channel + uptrend + volume spike
+            if price > upper_channel and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: overbought + downtrend + volume spike
-            elif cci_val > 100 and price < ema_val and vol_spike:
+                entry_price = price
+            # Short conditions: breakdown below lower channel + downtrend + volume spike
+            elif price < lower_channel and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
         elif position != 0:
-            # Exit conditions
-            exit_signal = False
-            
+            # Stop loss: price moves against position by 2.5 * ATR
+            stop_loss_hit = False
             if position == 1:  # long position
-                # Exit when CCI returns to overbought or trend breaks
-                if cci_val > 100 or price < ema_val:
-                    exit_signal = True
-            
+                if price < entry_price - 2.5 * atr_val:
+                    stop_loss_hit = True
             elif position == -1:  # short position
-                # Exit when CCI returns to oversold or trend breaks
-                if cci_val < -100 or price > ema_val:
-                    exit_signal = True
+                if price > entry_price + 2.5 * atr_val:
+                    stop_loss_hit = True
             
-            if exit_signal:
+            if stop_loss_hit:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_CCI_1dEMA_Trend_Volume"
+name = "4h_Donchian20_1dEMA34_Trend_Volume_ATRStop"
 timeframe = "4h"
 leverage = 1.0
