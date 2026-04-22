@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,83 +13,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points (ONCE before loop)
+    # Load 1d data for ATR and volatility calculation (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Previous day's pivot points (standard)
+    # Daily ATR for volatility regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    prev_high = high_1d
-    prev_low = low_1d
-    prev_close = close_1d
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    
-    # Align pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Volume confirmation: 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # ATR-based volatility filter: only trade when daily ATR > 20-period average (high volatility regime)
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    vol_regime = atr_1d > atr_ma_20
+    
+    # Align volatility regime to 4h timeframe
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime.astype(float))
+    
+    # 4h RSI for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(14, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_avg_20[i]) or
-            np.isnan(atr[i])):
+        if np.isnan(rsi[i]) or np.isnan(vol_regime_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R2 + volume spike + volatility filter
-            if (close[i] > r2_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i] and
-                atr[i] > 0.5 * atr[i-1] if i > 0 else True):
+            # Long: RSI oversold (<30) + high volatility regime
+            if rsi[i] < 30 and vol_regime_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S2 + volume spike + volatility filter
-            elif (close[i] < s2_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i] and
-                  atr[i] > 0.5 * atr[i-1] if i > 0 else True):
+            # Short: RSI overbought (>70) + high volatility regime
+            elif rsi[i] > 70 and vol_regime_aligned[i] > 0.5:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back to opposite pivot level (full exit)
+            # Exit: RSI returns to neutral zone (40-60)
             if position == 1:
-                # Exit long: Price closes below S1
-                if close[i] < s1_aligned[i]:
+                if rsi[i] >= 40:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above R1
-                if close[i] > r1_aligned[i]:
+                if rsi[i] <= 60:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -97,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Pivot_R2_S2_Breakout_Volume_Volatility"
-timeframe = "12h"
+name = "4H_RSI_MeanReversion_VolatilityRegime"
+timeframe = "4h"
 leverage = 1.0
