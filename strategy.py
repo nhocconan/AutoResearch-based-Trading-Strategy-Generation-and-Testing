@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h/1d Volume-Weighted Average Price (VWAP) with 1-day volume filter.
-Long when price > VWAP and 1-day volume > 50-period average volume.
-Short when price < VWAP and 1-day volume > 50-period average volume.
-Exit when price crosses VWAP or 1-day volume drops below average.
-VWAP provides intraday mean reversion; volume filter ensures institutional participation.
-Works in both bull and bear markets by following institutional volume while using VWAP for entry timing.
+Hypothesis: 12-hour Camarilla pivot (S3/R3) breakout with 1-day volume spike filter.
+Long when price breaks above R3 with volume > 1.5x 20-period average volume.
+Short when price breaks below S3 with volume > 1.5x 20-period average volume.
+Exit when price returns to the Camarilla H-L (close) level.
+Camarilla levels derived from prior 1-day range provide institutional support/resistance.
+Volume filter ensures breakout validity. Works in trending and ranging markets by
+filtering false breakouts. Designed for low trade frequency (~15-25/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,55 +23,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for volume filter - ONCE before loop
+    # Load 1-day data for Camarilla pivot and volume filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(volume_1d).rolling(window=50, min_periods=50).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Calculate Camarilla levels from prior 1-day range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # VWAP calculation for 6h period
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = typical_price * volume
-    vwap_denominator = volume
+    # Camarilla: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
+    camarilla_h_l = (high_1d + low_1d + close_1d) / 3.0  # H-L close level for exit
     
-    # Cumulative VWAP (resets daily)
-    vwap = np.full(n, np.nan)
-    cum_num = 0.0
-    cum_den = 0.0
+    # Align Camarilla levels to 12h timeframe (wait for prior day's close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_h_l_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h_l)
     
-    for i in range(n):
-        # Reset at start of each day (00:00 UTC)
-        if i > 0 and prices['open_time'].iloc[i].date() != prices['open_time'].iloc[i-1].date():
-            cum_num = 0.0
-            cum_den = 0.0
-        
-        cum_num += vwap_numerator[i]
-        cum_den += vwap_denominator[i]
-        
-        if cum_den > 0:
-            vwap[i] = cum_num / cum_den
+    # Volume filter: 20-period average volume on 12h timeframe
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if np.isnan(vwap[i]) or np.isnan(avg_vol_1d_aligned[i]):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_h_l_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above VWAP and 1-day volume above average
-            if close[i] > vwap[i] and volume_1d[i] > avg_vol_1d_aligned[i]:
+            # Long: Price breaks above R3 with volume confirmation
+            if close[i] > camarilla_r3_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below VWAP and 1-day volume above average
-            elif close[i] < vwap[i] and volume_1d[i] > avg_vol_1d_aligned[i]:
+            # Short: Price breaks below S3 with volume confirmation
+            elif close[i] < camarilla_s3_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -78,12 +72,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls below VWAP
-                if close[i] < vwap[i]:
+                # Exit long: Price returns to H-L level
+                if close[i] <= camarilla_h_l_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises above VWAP
-                if close[i] > vwap[i]:
+                # Exit short: Price returns to H-L level
+                if close[i] >= camarilla_h_l_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -94,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_VWAP_1dVolume_Filter"
-timeframe = "6h"
+name = "12H_Camarilla_S3R3_Breakout_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
