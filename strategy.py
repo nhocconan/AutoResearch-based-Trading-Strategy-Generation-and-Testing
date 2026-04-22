@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Volume Weighted MACD with 1d ADX trend filter and volume confirmation
-# Uses volume-weighted MACD for better momentum signal in low-volume periods
-# ADX(14) from 1d filters for trending markets only (ADX > 25)
-# Volume spike (2x 20-period average) confirms institutional participation
-# Designed for 6h timeframe to target 15-30 trades/year per symbol.
-# Volume weighting reduces false signals during low-volume consolidations
-# Works in bull markets (captures momentum) and bear (avoids false signals via ADX filter)
+# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume spike
+# Williams Alligator: Jaw (SMA13), Teeth (SMA8), Lips (SMA5)
+# Lips crossing above Teeth and Jaw = bullish; crossing below = bearish
+# Trend filter: 1d EMA34 to align with higher timeframe direction
+# Volume spike: >2x 20-period average to confirm momentum
+# Designed for 12h timeframe to target 12-37 trades/year per symbol.
+# Works in both bull (captures trend) and bear (avoids false breaks via trend filter)
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,126 +26,70 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d ADX(14) for higher timeframe trend strength filter
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = 0  # First value has no previous close
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
-        def WilderSmooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            if len(data) >= period:
-                result[period-1] = np.nansum(data[:period]) / period
-                for i in range(period, len(data)):
-                    if not np.isnan(data[i]):
-                        result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-            return result
-        
-        atr = WilderSmooth(tr, period)
-        dm_plus_smooth = WilderSmooth(dm_plus, period)
-        dm_minus_smooth = WilderSmooth(dm_minus, period)
-        
-        # Avoid division by zero
-        dm_plus_di = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-        dm_minus_di = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-        
-        dx = np.where((dm_plus_di + dm_minus_di) != 0, 
-                      100 * np.abs(dm_plus_di - dm_minus_di) / (dm_plus_di + dm_minus_di), 0)
-        adx = WilderSmooth(dx, period)
-        return adx
+    # 1d EMA(34) for higher timeframe trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Williams Alligator components (using 12h data)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # SMA13
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values   # SMA8
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values    # SMA5
     
-    # Volume-weighted MACD components
-    # Volume-weighted close price
-    vwc = (close * volume) / np.where(volume != 0, volume, 1)
-    vwc[volume == 0] = close[volume == 0]  # Fallback to regular close if no volume
+    # Alligator signals: Lips crossing Teeth/Jaw
+    lips_above_teeth = lips > teeth
+    lips_above_jaw = lips > jaw
+    teeth_above_jaw = teeth > jaw
     
-    # EMA of volume-weighted close
-    def ema_wilder(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # Simple average for first value
-            result[period-1] = np.mean(data[:period])
-            # Wilder smoothing for subsequent values
-            alpha = 2.0 / (period + 1)
-            for i in range(period, len(data)):
-                if not np.isnan(data[i]):
-                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
+    # Bullish: Lips above Teeth and Jaw, and Teeth above Jaw
+    bullish_setup = lips_above_teeth & lips_above_jaw & teeth_above_jaw
+    # Bearish: Lips below Teeth and Jaw, and Teeth below Jaw
+    bearish_setup = (lips < teeth) & (lips < jaw) & (teeth < jaw)
     
-    vwc_ema12 = ema_wilder(vwc, 12)
-    vwc_ema26 = ema_wilder(vwc, 26)
-    macd_line = vwc_ema12 - vwc_ema26
-    macd_signal = ema_wilder(macd_line, 9)
-    macd_histogram = macd_line - macd_signal
-    
-    # Volume spike filter (20-period on 6h data)
+    # Volume spike filter (20-period on 12h data)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > 2.0 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(adx_14_1d_aligned[i]) or np.isnan(macd_line[i]) or 
-            np.isnan(macd_signal[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: MACD bullish crossover + strong trend (ADX > 25) + volume spike
-            if (macd_line[i] > macd_signal[i] and 
-                macd_line[i-1] <= macd_signal[i-1] and 
-                adx_14_1d_aligned[i] > 25 and 
+            # Long: Bullish setup + 1d uptrend + volume spike
+            if (bullish_setup[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: MACD bearish crossover + strong trend (ADX > 25) + volume spike
-            elif (macd_line[i] < macd_signal[i] and 
-                  macd_line[i-1] >= macd_signal[i-1] and 
-                  adx_14_1d_aligned[i] > 25 and 
+            # Short: Bearish setup + 1d downtrend + volume spike
+            elif (bearish_setup[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: MACD crossover in opposite direction or trend weakening
+            # Exit conditions: Alligator lines cross or trend reversal
             if position == 1:
-                # Exit on MACD bearish crossover or ADX < 20 (trend weakening)
-                if (macd_line[i] < macd_signal[i] and 
-                    macd_line[i-1] >= macd_signal[i-1]) or \
-                   adx_14_1d_aligned[i] < 20:
+                # Exit on bearish setup or trend reversal
+                if (bearish_setup[i] or 
+                    close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on MACD bullish crossover or ADX < 20 (trend weakening)
-                if (macd_line[i] > macd_signal[i] and 
-                    macd_line[i-1] <= macd_signal[i-1]) or \
-                   adx_14_1d_aligned[i] < 20:
+                # Exit on bullish setup or trend reversal
+                if (bullish_setup[i] or 
+                    close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -153,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VolumeWeightedMACD_1dADX25_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
