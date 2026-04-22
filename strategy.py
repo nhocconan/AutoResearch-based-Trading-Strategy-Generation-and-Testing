@@ -3,41 +3,59 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot Breakout with daily trend filter and volume confirmation
-# Long when price breaks above R1 + price > daily EMA34 + volume spike
-# Short when price breaks below S1 + price < daily EMA34 + volume spike
-# Exit when price returns to pivot point or trend reverses
-# Designed for moderate trade frequency (~25-40/year) with strong edge in both bull and bear markets
+# Hypothesis: 1d KAMA trend with weekly Hull Moving Average filter and volume confirmation
+# Long when KAMA crosses above HMA + volume > 1.5x average
+# Short when KAMA crosses below HMA + volume > 1.5x average
+# Exit when KAMA crosses back across HMA
+# Designed for low trade frequency (<10/year) to minimize fee drag while capturing major trends
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Camarilla pivots and trend filter
+    # Load weekly data for Hull Moving Average trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
+    
+    # Calculate weekly Hull Moving Average (HMA)
+    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    n_hull = 16
+    half_n = n_hull // 2
+    sqrt_n = int(np.sqrt(n_hull))
+    
+    def wma(arr, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(arr, weights/weights.sum(), mode='same')
+    
+    wma_full = wma(close_weekly, n_hull)
+    wma_half = wma(close_weekly, half_n)
+    raw_hma = 2 * wma_half - wma_full
+    hma = wma(raw_hma, sqrt_n)
+    hma_aligned = align_htf_to_ltf(prices, df_weekly, hma)
+    
+    # Load daily data for KAMA trend
     df_daily = get_htf_data(prices, '1d')
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
     
-    # Calculate Camarilla pivot levels for previous day
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot = (high_daily + low_daily + close_daily) / 3
-    r1 = close_daily + (high_daily - low_daily) * 1.1 / 12
-    s1 = close_daily - (high_daily - low_daily) * 1.1 / 12
+    # Calculate Kaufman Adaptive Moving Average (KAMA)
+    # ER = |Change| / Volatility
+    # SC = [ER * (fastest - slowest) + slowest]^2
+    change = np.abs(np.diff(close_daily, k=10))
+    volatility = np.sum(np.abs(np.diff(close_daily, k=1)), axis=0)
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    fastest = 2 / (2 + 1)
+    slowest = 2 / (30 + 1)
+    sc = (er * (fastest - slowest) + slowest) ** 2
     
-    # Align Camarilla levels to 4h timeframe (previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_daily, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
+    kama = np.zeros_like(close_daily)
+    kama[0] = close_daily[0]
+    for i in range(1, len(close_daily)):
+        kama[i] = kama[i-1] + sc[i-1] * (close_daily[i] - kama[i-1])
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_daily, ema_34_daily)
+    kama_aligned = align_htf_to_ltf(prices, df_daily, kama)
     
-    # Calculate 20-period average volume for volume spike detection
+    # Calculate 20-period average volume for volume confirmation
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -46,10 +64,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(hma_aligned[i]) or 
+            np.isnan(kama_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,39 +75,26 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema_val = ema_34_aligned[i]
+        kama_val = kama_aligned[i]
+        hma_val = hma_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
-        vol_spike = vol > 2.0 * vol_ma
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_filter = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long conditions: price breaks above R1 + uptrend + volume spike
-            if price > r1_val and price > ema_val and vol_spike:
+            # Long conditions: KAMA crosses above HMA + volume filter
+            if kama_val > hma_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S1 + downtrend + volume spike
-            elif price < s1_val and price < ema_val and vol_spike:
+            # Short conditions: KAMA crosses below HMA + volume filter
+            elif kama_val < hma_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price returns to pivot point or trend reverses
-            exit_signal = False
-            
-            if position == 1:  # long position
-                # Exit when price returns to pivot or trend turns down
-                if price <= pivot_val or price < ema_val:
-                    exit_signal = True
-            
-            elif position == -1:  # short position
-                # Exit when price returns to pivot or trend turns up
-                if price >= pivot_val or price > ema_val:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit when KAMA crosses back across HMA
+            if (position == 1 and kama_val < hma_val) or \
+               (position == -1 and kama_val > hma_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "4h"
+name = "1d_KAMA_HMA_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
