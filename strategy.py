@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 1h 4-hour Donchian breakout with daily volume and ADX trend filter.
-Only trade long when price breaks above 4-hour Donchian upper channel with daily ADX > 25 and volume > 1.5x 20-period average.
-Short when price breaks below 4-hour Donchian lower channel with daily ADX > 25 and volume > 1.5x 20-period average.
-Uses 4-hour timeframe for signal direction and 1-hour for precise entry timing to reduce false breakouts.
-Session filter (08-20 UTC) avoids low-liquidity periods. Designed for low trade frequency (15-37/year).
-Works in trending markets by capturing breakouts and avoids ranging markets via ADX filter.
+Hypothesis: 6h Chaikin Money Flow (CMF) with 1-week trend filter and volume confirmation.
+Long when CMF > 0.1 (accumulation) and weekly trend is up; short when CMF < -0.1 (distribution)
+and weekly trend is down. Uses 20-period CMF to avoid whipsaw. Designed for low trade frequency
+(12-37 trades/year) by requiring CMF extremes and trend alignment. Works in both bull and bear
+markets by following the weekly trend, avoiding counter-trend trades during regime changes.
 """
 
 import numpy as np
@@ -18,124 +17,69 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4-hour Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Chaikin Money Flow (20-period)
+    mfm = ((close - low) - (high - close)) / (high - low)
+    mfm = np.where(high == low, 0, mfm)  # avoid division by zero
+    mfv = mfm * volume
+    cmf = pd.Series(mfv).rolling(window=20, min_periods=20).sum() / pd.Series(volume).rolling(window=20, min_periods=20).sum()
+    cmf = cmf.values
+    
+    # Load weekly data for trend filter - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Daily ADX for trend strength
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed averages
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * dm_plus_smooth / atr
-    minus_di = 100 * dm_minus_smooth / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Weekly EMA34 for trend direction
+    weekly_close = df_weekly['close'].values
+    ema34_weekly = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(cmf[i]) or np.isnan(ema34_weekly_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        # Session filter
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume confirmation
-        vol_ok = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above 4h Donchian high + ADX > 25 + volume confirmation
-            if close[i] > donchian_high_aligned[i] and adx_aligned[i] > 25 and vol_ok:
-                signals[i] = 0.20
+            # Long: CMF > 0.1 (accumulation) + weekly uptrend
+            if cmf[i] > 0.1 and ema34_weekly_aligned[i] > ema34_weekly_aligned[i-1]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low + ADX > 25 + volume confirmation
-            elif close[i] < donchian_low_aligned[i] and adx_aligned[i] > 25 and vol_ok:
-                signals[i] = -0.20
+            # Short: CMF < -0.1 (distribution) + weekly downtrend
+            elif cmf[i] < -0.1 and ema34_weekly_aligned[i] < ema34_weekly_aligned[i-1]:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to Donchian midpoint or ADX weakens
-            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+            # Exit: CMF returns to neutral zone (-0.1 to 0.1) or trend reversal
             exit_signal = False
             
             if position == 1:
-                # Exit long: price below midpoint or ADX < 20
-                if close[i] < midpoint or adx_aligned[i] < 20:
+                # Exit long: CMF < 0.1 or weekly downtrend
+                if cmf[i] < 0.1 or ema34_weekly_aligned[i] < ema34_weekly_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price above midpoint or ADX < 20
-                if close[i] > midpoint or adx_aligned[i] < 20:
+                # Exit short: CMF > -0.1 or weekly uptrend
+                if cmf[i] > -0.1 or ema34_weekly_aligned[i] > ema34_weekly_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_4h_Donchian_Breakout_DailyADX_Volume_Session"
-timeframe = "1h"
+name = "6h_CMF_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
