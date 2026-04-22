@@ -3,73 +3,56 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining 1-week Donchian channel breakouts with volume confirmation and 1-day ADX trend filter.
-# Uses weekly Donchian channels (20-period high/low) for structural breakouts, 1-day ADX (>25) to confirm trend strength,
-# and volume spikes (>2x 20-period average) to validate momentum. Designed to capture strong trending moves in both bull
-# and bear markets while avoiding choppy conditions. Targets 20-50 trades/year with disciplined risk control.
+# Hypothesis: 1-day timeframe with 1-week RSI mean reversion and volume confirmation.
+# Uses weekly RSI (14) to identify extreme overbought/oversold conditions.
+# Enters long when weekly RSI < 30 and price > daily VWAP with volume confirmation.
+# Enters short when weekly RSI > 70 and price < daily VWAP with volume confirmation.
+# Exits when weekly RSI returns to neutral zone (40-60).
+# Designed to capture mean reversion moves in both bull and bear markets while avoiding
+# choppy conditions. Targets 10-25 trades/year with disciplined risk control.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1-week data for Donchian channels (once before loop)
+    # Load 1-week data for RSI calculation (once before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_length = 20
+    # Calculate weekly RSI
+    close_1w = df_1w['close'].values
+    rsi_length = 14
     
-    # Upper band: highest high over donchian_length periods
-    highest_high = pd.Series(high_1w).rolling(window=donchian_length, min_periods=donchian_length).max().values
-    # Lower band: lowest low over donchian_length periods
-    lowest_low = pd.Series(low_1w).rolling(window=donchian_length, min_periods=donchian_length).min().values
+    # Calculate price changes
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align Donchian channels to 4h timeframe
-    highest_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high)
-    lowest_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low)
+    # Calculate average gain and loss
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_length, min_periods=rsi_length, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_length, min_periods=rsi_length, adjust=False).mean().values
     
-    # Load 1-day data for ADX trend filter
+    # Calculate RSI
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align RSI to daily timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    
+    # Load 1-day data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 14-day ADX
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate typical price and VWAP
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    vwap = pd.Series(typical_price * volume_1d).rolling(window=20, min_periods=20).sum().values / \
+           pd.Series(volume_1d).rolling(window=20, min_periods=20).sum().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align VWAP to daily timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -80,9 +63,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(highest_high_aligned[i]) or 
-            np.isnan(lowest_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(vwap_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -92,50 +74,38 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx_aligned[i]
+        rsi_val = rsi_aligned[i]
+        vwap_val = vwap_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trend_filter = adx_val > 25
-        
-        # Volume filter: current volume > 2.0 * 20-period average
-        vol_spike = vol > 2.0 * vol_ma
-        
-        upper_band = highest_high_aligned[i]
-        lower_band = lowest_low_aligned[i]
+        # Volume filter: current volume > 1.3 * 20-period average
+        vol_filter = vol > 1.3 * vol_ma
         
         if position == 0:
-            # Long entry: price breaks above weekly Donchian upper with volume and trend
-            if price > upper_band and vol_spike and trend_filter:
-                signals[i] = 0.30
+            # Long entry: weekly RSI oversold (<30) and price above VWAP with volume
+            if rsi_val < 30 and price > vwap_val and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below weekly Donchian lower with volume and trend
-            elif price < lower_band and vol_spike and trend_filter:
-                signals[i] = -0.30
+            # Short entry: weekly RSI overbought (>70) and price below VWAP with volume
+            elif rsi_val > 70 and price < vwap_val and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: weekly RSI returns to neutral zone (40-60)
             exit_signal = False
             
-            if position == 1:  # long position
-                # Exit on retracement to weekly Donchian lower (trailing stop)
-                if price < lower_band:
-                    exit_signal = True
-            
-            elif position == -1:  # short position
-                # Exit on retracement to weekly Donchian upper (trailing stop)
-                if price > upper_band:
-                    exit_signal = True
+            if 40 <= rsi_val <= 60:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_WeeklyDonchian20_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_WeeklyRSI_MeanReversion_VWAP"
+timeframe = "1d"
 leverage = 1.0
