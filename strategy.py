@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
-timeframe = "6h"
+name = "12h_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
