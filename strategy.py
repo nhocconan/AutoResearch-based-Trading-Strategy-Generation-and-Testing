@@ -3,101 +3,111 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) pullback to 4h EMA(50) with 1d trend filter and volume confirmation
-# RSI < 30 in uptrend or > 70 in downtrend identifies overextended moves ready for mean reversion.
-# 4h EMA50 provides dynamic support/resistance in trending markets.
-# 1d EMA100 filter ensures trades align with higher timeframe trend.
-# Volume > 1.5x 20-period average confirms momentum behind the move.
-# Designed for 1h timeframe targeting 15-30 trades/year with controlled risk in bull/bear markets.
+# Hypothesis: 6h Ichimoku Cloud + Tenkan/Kijun cross with 1w EMA trend filter
+# Ichimoku provides dynamic support/resistance via Kumo cloud and momentum via TK cross.
+# 1w EMA filter ensures alignment with weekly trend for higher probability trades.
+# Designed for 6h timeframe targeting 15-30 trades/year with strong performance in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14) - well-established momentum oscillator
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Load 4h data for EMA(50) dynamic support/resistance (ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Load 1d data for EMA(100) trend filter (ONCE before loop)
+    # Load 1w data for Ichimoku and 1d for EMA (ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1d = df_1d['close'].values
-    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Volume confirmation: 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Ichimoku components on weekly data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe (use previous week's values)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_100_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine cloud top and bottom
+        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
         if position == 0:
-            # Long: RSI < 30 (oversold) + price above 4h EMA50 + 1d uptrend + volume confirmation
-            if (rsi[i] < 30 and 
-                close[i] > ema_50_4h_aligned[i] and 
-                close[i] > ema_100_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = 0.20
+            # Long: TK cross bullish + price above cloud + weekly uptrend
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and  # TK cross bullish
+                close[i] > cloud_top and  # price above cloud
+                close[i] > ema_50_1d_aligned[i]):  # weekly uptrend
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + price below 4h EMA50 + 1d downtrend + volume confirmation
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  close[i] < ema_100_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = -0.20
+            # Short: TK cross bearish + price below cloud + weekly downtrend
+            elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and  # TK cross bearish
+                  close[i] < cloud_bottom and  # price below cloud
+                  close[i] < ema_50_1d_aligned[i]):  # weekly downtrend
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral zone (40-60) or price crosses 4h EMA50
+            # Exit: TK cross reverses or price enters cloud
             if position == 1:
-                # Exit long: RSI > 40 or price breaks below 4h EMA50
-                if (rsi[i] > 40 or 
-                    close[i] < ema_50_4h_aligned[i]):
+                # Exit long: TK cross bearish or price drops below cloud bottom
+                if (tenkan_sen_aligned[i] < kijun_sen_aligned[i] or 
+                    close[i] < cloud_bottom):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                # Exit short: RSI < 60 or price breaks above 4h EMA50
-                if (rsi[i] < 60 or 
-                    close[i] > ema_50_4h_aligned[i]):
+                # Exit short: TK cross bullish or price rises above cloud top
+                if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] or 
+                    close[i] > cloud_top):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI14_Pullback_4hEMA50_1dEMA100_Volume"
-timeframe = "1h"
+name = "6h_Ichimoku_TKCross_1dEMA50_Trend"
+timeframe = "6h"
 leverage = 1.0
