@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Fractal breakout with volume confirmation and 1d EMA trend filter
-# Uses daily Williams Fractals for high-probability reversal points
-# Trend filter prevents counter-trade trades; volume confirms breakout strength
-# Target: 20-35 trades/year per symbol, works in bull/bear via trend alignment
+# Hypothesis: 4h Camarilla pivot (R1/S1) breakout with volume confirmation and 1d EMA trend filter
+# Uses tighter R1/S1 levels for more frequent but still controlled entries (target: 25-40 trades/year)
+# Trend filter prevents counter-trend trades in strong trends, volume confirms breakout strength
+# Works in bull/bear via trend filter - only trades in direction of higher timeframe trend
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,25 +18,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Williams Fractals and EMA
+    # Load 1-day data for Camarilla pivot and EMA
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams Fractals (5-bar window: 2 left, 2 right)
-    # Bearish fractal: high[i] is highest of [i-2, i-1, i, i+1, i+2]
-    # Bullish fractal: low[i] is lowest of [i-2, i-1, i, i+1, i+2]
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
+    # Calculate daily range
+    daily_range = high_1d - low_1d
     
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and
-            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and
-            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
+    # Calculate Camarilla levels for previous day
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_range = np.roll(daily_range, 1)
+    
+    # Set first day values to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_range[0] = np.nan
+    
+    # Calculate Camarilla R1 and S1 from previous day (tighter than R2/S2)
+    r1 = prev_close + (prev_range * 1.1 / 12)
+    s1 = prev_close - (prev_range * 1.1 / 12)
     
     # Calculate 34-period EMA on daily close for trend filter
     close_1d_series = pd.Series(close_1d)
@@ -50,9 +55,9 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Williams Fractals need 2 extra bars for confirmation (right side of fractal)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Align indicators to 4-hour timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     signals = np.zeros(n)
@@ -60,7 +65,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -68,24 +73,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above bullish fractal + volume spike + uptrend (price > EMA34)
-            if (close[i] > bullish_fractal_aligned[i] and vol_spike[i] and close[i] > ema_34_aligned[i]):
+            # Long: Price breaks above R1 + volume spike + uptrend (price > EMA34)
+            if (close[i] > r1_aligned[i] and vol_spike[i] and close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below bearish fractal + volume spike + downtrend (price < EMA34)
-            elif (close[i] < bearish_fractal_aligned[i] and vol_spike[i] and close[i] < ema_34_aligned[i]):
+            # Short: Price breaks below S1 + volume spike + downtrend (price < EMA34)
+            elif (close[i] < s1_aligned[i] and vol_spike[i] and close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to opposite fractal level
+            # Exit: Price returns to opposite S1/R1 level
             if position == 1:
-                if close[i] < bearish_fractal_aligned[i]:
+                if close[i] < s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > bullish_fractal_aligned[i]:
+                if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -93,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Williams_Fractal_Breakout_Trend_Volume_Session"
+name = "4h_Camarilla_R1_S1_Breakout_Trend_Volume_Session"
 timeframe = "4h"
 leverage = 1.0
