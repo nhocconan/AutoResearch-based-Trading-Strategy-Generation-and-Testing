@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points (ONCE before loop)
+    # Load 1d data for pivot points and trend (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
