@@ -13,28 +13,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points (ONCE before loop)
+    # Load 1d data for weekly pivot points (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's pivot points (standard)
+    # Previous day's high, low, close
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Calculate weekly pivot points using previous day's data
     prev_high = high_1d
     prev_low = low_1d
     prev_close = close_1d
     pivot = (prev_high + prev_low + prev_close) / 3
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    r3 = prev_high + 2 * (prev_close - prev_low)
+    s3 = prev_low - 2 * (prev_high - prev_close)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 6h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,34 +51,34 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 + volume spike
-            if close[i] > r1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
+            # Long: Price breaks above R3 with volume spike (strong breakout)
+            if close[i] > r3_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike
-            elif close[i] < s1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
+            # Short: Price breaks below S3 with volume spike (strong breakout)
+            elif close[i] < s3_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back below/above pivot (full exit)
+            # Exit: Price crosses back below/above R1/S1 (take profit at first level)
             if position == 1:
-                # Exit long: Price closes below pivot
-                if close[i] < pivot_aligned[i]:
+                # Exit long: Price closes below R1
+                if close[i] < r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above pivot
-                if close[i] > pivot_aligned[i]:
+                # Exit short: Price closes above S1
+                if close[i] > s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -79,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Pivot_R1_S1_Breakout_Volume_Spike"
-timeframe = "4h"
+name = "6H_Pivot_R3_S3_Breakout_R1_S1_Exit"
+timeframe = "6h"
 leverage = 1.0
