@@ -1,11 +1,3 @@
-# 6h_AverageTrueRangeTrend_FilteredBreakout_v1
-# Hypothesis: 6h timeframe reduces noise while capturing medium-term trends.
-# Use 6h ATR-based trend filter (price above/below ATR-modified SMA) combined with
-# volatility breakouts (price > SMA + k*ATR for long, < SMA - k*ATR for short).
-# Entry requires volatility expansion (current ATR > average ATR) to avoid false breakouts.
-# Works in bull (captures trend) and bear (avoids false signals via volatility filter).
-# Targets 15-35 trades/year (~60-140 total over 4 years) to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -30,7 +22,7 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # 6h ATR for entry trigger and stop
+    # 12h ATR for entry trigger and stop
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -41,10 +33,10 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h SMA for trend direction
+    # 12h SMA for trend direction
     sma = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
-    # Align daily ATR and its MA to 6s timeframe
+    # Align daily ATR and its MA to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
@@ -98,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_AverageTrueRangeTrend_FilteredBreakout_v1"
-timeframe = "6h"
+name = "12h_AverageTrueRangeTrend_FilteredBreakout_v1"
+timeframe = "12h"
 leverage = 1.0
