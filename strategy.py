@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: Daily Bollinger Band squeeze with weekly trend filter and volume confirmation.
-Only trade long when price breaks above upper Bollinger Band during low volatility (squeeze)
-and weekly trend is up; short when price breaks below lower Bollinger Band during squeeze
-and weekly trend is down. Uses Bollinger Band width percentile to detect squeeze conditions,
-avoiding false breakouts in high volatility periods. Designed for low trade frequency
-(7-25 trades/year) by requiring multiple confirmations: volatility squeeze, price breakout,
-and trend alignment. Works in both bull and bear markets by following the weekly trend.
+Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation.
+Long when price breaks above Donchian(20) upper band with ADX>25 and volume spike;
+short when price breaks below Donchian(20) lower band with ADX>25 and volume spike.
+Uses ADX to filter ranging markets and only trade in trending conditions. Designed
+for moderate trade frequency (20-50 trades/year) by requiring breakout, trend, and volume.
+Works in both bull and bear markets by following the trend direction from higher timeframe.
 """
 
 import numpy as np
@@ -24,30 +23,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on daily
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Donchian Channel (20-period) on 4h
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Bollinger Band width percentile (50-period lookback) for squeeze detection
-    bb_width_pct = pd.Series(bb_width).rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
-    
-    # Load weekly data for trend filter - ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
+    # 1d ADX for trend strength - load ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend direction
-    weekly_close = df_weekly['close'].values
-    ema34_weekly = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    # Calculate ADX(14) on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    def smoothed_series(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period]) 
+        # Subsequent values smoothed
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr = smoothed_series(tr, 14)
+    dm_plus_smooth = smoothed_series(dm_plus, 14)
+    dm_minus_smooth = smoothed_series(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smoothed_series(dx, 14)
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,40 +88,43 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bb_width_pct[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(ema34_weekly_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Squeeze condition: Bollinger Band width in lower 30th percentile
-        squeeze = bb_width_pct[i] < 0.3
+        # Breakout conditions
+        breakout_up = close[i] > donch_high[i-1]  # Using previous close to avoid lookahead
+        breakout_down = close[i] < donch_low[i-1]
+        
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
         # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 0:
-            # Long: squeeze + price breaks above upper band + weekly uptrend + volume spike
-            if squeeze and close[i] > bb_upper[i] and ema34_weekly_aligned[i] > ema34_weekly_aligned[i-1] and vol_spike:
+            # Long: breakout up + strong trend + volume spike
+            if breakout_up and strong_trend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: squeeze + price breaks below lower band + weekly downtrend + volume spike
-            elif squeeze and close[i] < bb_lower[i] and ema34_weekly_aligned[i] < ema34_weekly_aligned[i-1] and vol_spike:
+            # Short: breakout down + strong trend + volume spike
+            elif breakout_down and strong_trend and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: volatility expansion (end of squeeze) or price returns to middle band
+            # Exit: breakout in opposite direction or trend weakening
             exit_signal = False
             
             if position == 1:
-                # Exit long: volatility expansion or price closes below middle band
-                if bb_width_pct[i] > 0.7 or close[i] < bb_middle[i]:
+                # Exit long: breakout down or ADX drops below 20
+                if breakout_down or adx_aligned[i] < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: volatility expansion or price closes above middle band
-                if bb_width_pct[i] > 0.7 or close[i] > bb_middle[i]:
+                # Exit short: breakout up or ADX drops below 20
+                if breakout_up or adx_aligned[i] < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Daily_Bollinger_Squeeze_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_Donchian_AdxTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
