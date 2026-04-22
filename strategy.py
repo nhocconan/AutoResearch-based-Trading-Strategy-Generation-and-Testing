@@ -3,14 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d CCI + RSI mean reversion with weekly trend filter
-# Uses weekly EMA50 to determine primary trend direction.
-# CCI(20) < -100 indicates oversold in uptrend for long entries.
-# CCI(20) > 100 indicates overbought in downtrend for short entries.
-# RSI(14) confirms momentum divergence (RSI < 30 for long, > 70 for short).
-# Volume spike filter ensures institutional participation.
-# Designed for 1d timeframe to capture multi-day swings with low frequency.
-# Target: 10-20 trades/year per symbol (40-80 total) to minimize fee drag.
+# Hypothesis: 12h Bollinger Band squeeze + volume spike + daily ADX trend filter
+# Bollinger Band squeeze (low volatility) precedes breakouts. Volume spike confirms breakout strength.
+# Daily ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranges.
+# Designed for 12h timeframe to capture multi-day swings with low frequency (target: 15-25 trades/year).
+# Works in both bull and bear markets by filtering for strong trends only.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,74 +19,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load daily data for BBands and ADX
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 50-period EMA on weekly close for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Bollinger Bands (20, 2) on daily close
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper = sma20 + 2 * std20
+    lower = sma20 - 2 * std20
+    bb_width = (upper - lower) / sma20  # Normalized width
     
-    # Calculate CCI(20) on daily data
-    typical_price = (high + low + close) / 3
-    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (typical_price - sma_tp) / (0.015 * mad)
+    # Bollinger Squeeze: width below 20-period mean width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
     
-    # Calculate RSI(14) on daily close
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # ADX (14) on daily data
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smooth TR, +DM, -DM
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    # DI and DX
+    plus_di = 100 * plus_dm14 / tr14
+    minus_di = 100 * minus_dm14 / tr14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    # ADX: smoothed DX
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_trend = adx > 25
     
-    # Volume spike filter (20-period)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20
+    # Volume spike (24-period on 12h)
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > 2.0 * vol_ma24
     
-    # Align indicators to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align indicators to 12-hour timeframe
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    adx_trend_aligned = align_htf_to_ltf(prices, df_1d, adx_trend)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(cci[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(squeeze_aligned[i]) or np.isnan(adx_trend_aligned[i]) or
+            np.isnan(vol_ma24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Uptrend (price > weekly EMA50) + CCI oversold (< -100) + RSI < 30 + volume spike
-            if (close[i] > ema_50_1w_aligned[i] and 
-                cci[i] < -100 and 
-                rsi[i] < 30 and 
-                vol_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Downtrend (price < weekly EMA50) + CCI overbought (> 100) + RSI > 70 + volume spike
-            elif (close[i] < ema_50_1w_aligned[i] and 
-                  cci[i] > 100 and 
-                  rsi[i] > 70 and 
-                  vol_spike[i]):
-                signals[i] = -0.25
-                position = -1
+            # Enter long/right after squeeze ends with volume spike and trend
+            if not squeeze_aligned[i-1] and squeeze_aligned[i] and vol_spike[i] and adx_trend_aligned[i]:
+                # Direction: close above/below 20-day SMA
+                sma20_aligned = align_htf_to_ltf(prices, df_1d, sma20)
+                if close[i] > sma20_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                else:
+                    signals[i] = -0.25
+                    position = -1
         else:
-            # Exit: CCI returns to neutral zone or trend changes
+            # Exit: squeeze returns or volume drops
             if position == 1:
-                if (cci[i] > -50 or close[i] < ema_50_1w_aligned[i]):
+                if squeeze_aligned[i] or not vol_spike[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if (cci[i] < 50 or close[i] > ema_50_1w_aligned[i]):
+                if squeeze_aligned[i] or not vol_spike[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -97,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_CCI_RSI_MeanReversion_WeeklyTrend"
-timeframe = "1d"
+name = "12h_Bollinger_Squeeze_Volume_Spike_ADXTrend"
+timeframe = "12h"
 leverage = 1.0
