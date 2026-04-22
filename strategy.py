@@ -22,18 +22,8 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # 4h ATR for entry trigger and stop
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     # 4h SMA for trend direction
+    close = prices['close'].values
     sma = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     # Align daily ATR and its MA to 4h timeframe
@@ -42,21 +32,15 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(50, n):
         # Skip if any data is not ready
         if (np.isnan(atr_1d_aligned[i]) or 
             np.isnan(atr_ma_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
             np.isnan(sma[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
             continue
         
         price = close[i]
-        atr_val = atr[i]
         sma_val = sma[i]
         atr_1d = atr_1d_aligned[i]
         atr_ma_1d = atr_ma_1d_aligned[i]
@@ -65,23 +49,20 @@ def generate_signals(prices):
         vol_regime = atr_1d > atr_ma_1d
         
         if position == 0 and vol_regime:
-            # Long: price breaks above SMA + 1.5*ATR with rising volatility
-            if price > sma_val + 1.5 * atr_val and atr_val > atr[i-1]:
+            # Long: price breaks above SMA + 1*ATR
+            if price > sma_val + 1.0 * atr_1d:
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price breaks below SMA - 1.5*ATR with rising volatility
-            elif price < sma_val - 1.5 * atr_val and atr_val > atr[i-1]:
+            # Short: price breaks below SMA - 1*ATR
+            elif price < sma_val - 1.0 * atr_1d:
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         
         elif position != 0:
-            # Exit: mean reversion to SMA or volatility collapse
+            # Exit: mean reversion to SMA
             mean_rev = (position == 1 and price < sma_val) or (position == -1 and price > sma_val)
-            vol_collapse = atr_val < 0.5 * atr[i-1]  # Sharp drop in volatility
             
-            if mean_rev or vol_collapse:
+            if mean_rev:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +71,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_AverageTrueRangeTrend_FilteredBreakout_v1"
+name = "4d_VolatilityRegime_SMA_Breakout_v1"
 timeframe = "4h"
 leverage = 1.0
