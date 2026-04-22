@@ -3,104 +3,93 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter with 1d Williams %R mean reversion.
-# Choppiness Index > 61.8 indicates ranging market (mean reversion regime), < 38.2 indicates trending.
-# In ranging markets, Williams %R > -20 (overbought) triggers short, < -80 (oversold) triggers long.
-# Uses 1d Williams %R for higher timeframe signal quality, reducing false signals in 4h.
-# Designed for low trade frequency (~20-40/year) to minimize fee decay.
-# Works in both bull and bear markets by adapting to market regime.
-
 def generate_signals(prices):
+    # Hypothesis: Weekly high/low breakouts on daily chart with volume confirmation and RSI filter.
+    # The weekly high and low act as significant support/resistance levels.
+    # A breakout above weekly high with increasing volume suggests bullish momentum,
+    # while a breakout below weekly low suggests bearish momentum.
+    # RSI filter avoids entering at extreme overbought/oversold levels.
+    # This strategy aims to capture medium-term trends while keeping trade frequency low
+    # to minimize fee drag, suitable for both bull and bear markets.
+    
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Williams %R calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data once before loop
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values  # not used but kept for clarity
     
-    # Calculate 14-period Williams %R on 1d data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high - close_1d) / (highest_high - lowest_low)) * -100
+    # Align weekly high/low to daily timeframe (values available after weekly bar closes)
+    high_weekly_aligned = align_htf_to_ltf(prices, df_weekly, high_weekly)
+    low_weekly_aligned = align_htf_to_ltf(prices, df_weekly, low_weekly)
     
-    # Calculate 14-period Choppiness Index on 1d data
-    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[np.nan], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[np.nan], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr / (max_high - min_low)) / np.log10(14)
+    # Daily RSI(14)
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)  # avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align 1d indicators to 4h timeframe (waits for 1d bar to close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Daily average volume (20-period)
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+    for i in range(20, n):  # start after warmup for volume MA and RSI
+        # Skip if weekly data not ready
+        if np.isnan(high_weekly_aligned[i]) or np.isnan(low_weekly_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = prices['close'].iloc[i]
-        chop_val = chop_aligned[i]
-        wr_val = williams_r_aligned[i]
+        price = close[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        rsi_val = rsi[i]
         
-        # Regime filter: Chop > 61.8 = ranging (mean reversion), Chop < 38.2 = trending
-        # We only trade in ranging markets for mean reversion
-        if chop_val > 61.8:
-            # Mean reversion signals in ranging market
-            if position == 0:
-                # Long when oversold (Williams %R < -80)
-                if wr_val < -80:
-                    signals[i] = 0.25
-                    position = 1
-                # Short when overbought (Williams %R > -20)
-                elif wr_val > -20:
-                    signals[i] = -0.25
-                    position = -1
+        # Volume filter: current volume > 1.5 * 20-day average
+        vol_filter = vol > 1.5 * vol_ma
+        
+        if position == 0:
+            # Long: breakout above weekly high, not overbought, volume confirmation
+            if price > high_weekly_aligned[i] and rsi_val < 60 and vol_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short: breakout below weekly low, not oversold, volume confirmation
+            elif price < low_weekly_aligned[i] and rsi_val > 40 and vol_filter:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position != 0:
+            # Exit conditions
+            exit_signal = False
+            if position == 1:  # long
+                # Exit when price breaks below weekly low
+                if price < low_weekly_aligned[i]:
+                    exit_signal = True
+            elif position == -1:  # short
+                # Exit when price breaks above weekly high
+                if price > high_weekly_aligned[i]:
+                    exit_signal = True
             
-            elif position != 0:
-                # Exit when Williams %R returns to neutral zone (-50 to -50)
-                exit_signal = False
-                
-                if position == 1:  # long position
-                    # Exit when Williams %R rises above -50 (mean reversion complete)
-                    if wr_val > -50:
-                        exit_signal = True
-                
-                elif position == -1:  # short position
-                    # Exit when Williams %R falls below -50 (mean reversion complete)
-                    if wr_val < -50:
-                        exit_signal = True
-                
-                if exit_signal:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    # Hold position
-                    signals[i] = 0.25 if position == 1 else -0.25
-        else:
-            # In trending market, stay flat to avoid whipsaw
-            if position != 0:
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
+            else:
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_Chop_WilliamsR_MeanReversion"
-timeframe = "4h"
+name = "1d_WeeklyHighLow_Breakout_VolumeRSI"
+timeframe = "1d"
 leverage = 1.0
