@@ -5,85 +5,107 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: 12-hour Donchian channel breakout with 1-day trend filter and volume confirmation
-    # Donchian(20) on 12h: breakout above upper channel = long, below lower = short
-    # 1-day EMA34 filters trend: only long in uptrend, short in downtrend
-    # Volume spike confirms breakout strength
-    # Targets 15-25 trades/year to minimize fee drag on 12h timeframe
+    # Hypothesis: 1-day KAMA trend filter with 1-week momentum and volume confirmation
+    # KAMA adapts to market noise - follows trend in trending markets, stays flat in choppy
+    # Weekly momentum filter ensures we only trade with the higher timeframe trend
+    # Volume spike confirms institutional participation
+    # Target: 10-25 trades/year to minimize fee drag on daily timeframe
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Donchian calculations
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
-    
-    # Load 1d data for trend filter
+    # Load 1d data for KAMA calculation (primary timeframe data)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-period) on 12h
-    upper_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Load 1w data for momentum filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1d close
+    # Efficiency Ratio: |change| / volatility
+    change = np.abs(np.diff(close_1d, k=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close_1d, k=1)), axis=0)  # 10-period volatility
+    # Handle first 10 values
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.full_like(close_1d, np.nan)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Volume spike filter (20-period on 12h)
-    vol_ma20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_12h > 1.5 * vol_ma20  # Require 1.5x volume for confirmation
+    # Calculate 1-week RSI for momentum filter
+    delta = np.diff(close_1w)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    # First average gain/loss
+    avg_gain = np.full_like(close_1w, np.nan)
+    avg_loss = np.full_like(close_1w, np.nan)
+    avg_gain[14] = np.nanmean(gain[1:15])
+    avg_loss[14] = np.nanmean(loss[1:15])
+    for i in range(15, len(close_1w)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # Align indicators to 12h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_12h, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_12h, lower_20)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike)
+    # Volume spike filter on 1d
+    vol_ma20 = np.full_like(volume_1d, np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma20[i] = np.mean(volume_1d[i-20:i])
+    vol_spike = volume_1d > 2.0 * vol_ma20
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align indicators to 1d timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w, additional_delay_bars=0)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(100, n):  # Start after warmup
-        # Skip if data not ready or outside session
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_spike_aligned[i]) or
-            not in_session[i]):
+    for i in range(200, n):  # Start after warmup
+        # Skip if data not ready
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or
+            np.isnan(vol_ma20_aligned[i]) or np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Breakout above upper Donchian + uptrend (price > 1d EMA34) + volume spike
-            if close[i] > upper_20_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_spike_aligned[i]:
+            # Long: Price above KAMA (uptrend) + weekly RSI > 50 (bullish momentum) + volume spike
+            if close[i] > kama_aligned[i] and rsi_1w_aligned[i] > 50 and vol_spike_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakout below lower Donchian + downtrend (price < 1d EMA34) + volume spike
-            elif close[i] < lower_20_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_spike_aligned[i]:
+            # Short: Price below KAMA (downtrend) + weekly RSI < 50 (bearish momentum) + volume spike
+            elif close[i] < kama_aligned[i] and rsi_1w_aligned[i] < 50 and vol_spike_aligned[i] > 0.5:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price reverts to middle of Donchian channel or trend reverses
-            mid_channel = (upper_20_aligned[i] + lower_20_aligned[i]) / 2
+            # Exit: Trend reversal or momentum divergence
             if position == 1:
-                if close[i] < mid_channel or close[i] < ema34_1d_aligned[i]:
+                if close[i] < kama_aligned[i] or rsi_1w_aligned[i] < 40:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > mid_channel or close[i] > ema34_1d_aligned[i]:
+                if close[i] > kama_aligned[i] or rsi_1w_aligned[i] > 60:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -91,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_20_Breakout_1dEMA34_Volume_Session_v1"
-timeframe = "12h"
+name = "1d_KAMA_1wRSI_Momentum_Volume_Spike_v1"
+timeframe = "1d"
 leverage = 1.0
