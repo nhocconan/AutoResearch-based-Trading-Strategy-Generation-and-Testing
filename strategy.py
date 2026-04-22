@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and volume confirmation.
-# In bull markets: buy when RSI < 30 in 4h uptrend; in bear markets: sell when RSI > 70 in 4h downtrend.
-# Uses volume spike to confirm momentum exhaustion. Designed for 1h to capture mean reversion swings.
-# Target: 15-37 trades/year per symbol (60-150 total) to minimize fee drag.
+# Hypothesis: 12h Donchian(20) breakout with daily pivot level confirmation and volume spike.
+# Uses daily pivot levels (R1/S1) to define key support/resistance zones.
+# Breakouts above daily R1 or below daily S1 are taken only with volume confirmation.
+# Designed for 12h timeframe to capture multi-day swings with low frequency (<30 trades/year).
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,63 +19,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Load 1-day data for pivot levels and Donchian channel
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 4h trend filter: EMA(50) slope
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, min_periods=50).mean().values
-    ema_50_slope = ema_50 - np.roll(ema_50, 1)
-    ema_50_slope[0] = 0
-    ema_50_slope = align_htf_to_ltf(prices, df_4h, ema_50_slope)
+    # Calculate daily pivot points (using prior day's data)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot_1d = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3
+    r1_1d = 2 * pivot_1d - np.roll(low_1d, 1)
+    s1_1d = 2 * pivot_1d - np.roll(high_1d, 1)
     
-    # Volume spike: 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_ma20
+    # Donchian channel: 20-period high/low (prior period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Shift to use only completed periods (avoid look-ahead)
+    high_20 = np.roll(high_20, 1)
+    low_20 = np.roll(low_20, 1)
+    
+    # Volume spike filter (12-period on 12h: 6 days)
+    vol_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    vol_spike = volume > 2.0 * vol_ma12
+    
+    # Align indicators to 12-hour timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(50, n):
-        if np.isnan(rsi[i]) or np.isnan(ema_50_slope[i]) or np.isnan(vol_ma20[i]):
+    for i in range(100, n):
+        # Skip if data not ready
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(vol_ma12[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold + 4h uptrend + volume spike
-            if rsi[i] < 30 and ema_50_slope[i] > 0 and vol_spike[i]:
-                signals[i] = 0.20
+            # Long: price breaks above daily R1 + Donchian high + volume spike
+            if (close[i] > r1_1d_aligned[i] and 
+                close[i] > high_20_aligned[i] and 
+                vol_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought + 4h downtrend + volume spike
-            elif rsi[i] > 70 and ema_50_slope[i] < 0 and vol_spike[i]:
-                signals[i] = -0.20
+            # Short: price breaks below daily S1 + Donchian low + volume spike
+            elif (close[i] < s1_1d_aligned[i] and 
+                  close[i] < low_20_aligned[i] and 
+                  vol_spike[i]):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI mean reversion or trend change
+            # Exit: price breaks opposite pivot level or Donchian level
             if position == 1:
-                if rsi[i] > 50 or ema_50_slope[i] <= 0:
+                if (close[i] < s1_1d_aligned[i] or close[i] < low_20_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if rsi[i] < 50 or ema_50_slope[i] >= 0:
+                if (close[i] > r1_1d_aligned[i] or close[i] > high_20_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI14_4hEMA50_Trend_VolumeSpike"
-timeframe = "1h"
+name = "12h_Donchian20_DailyPivot_Level_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
