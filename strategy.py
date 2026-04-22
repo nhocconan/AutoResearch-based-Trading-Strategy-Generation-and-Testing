@@ -1,70 +1,69 @@
-# 1d_OBV_Signal_Trend_Filtered
-# Hypothesis: Daily OBV trend with price above/below SMA200 filter. OBV confirms trend strength via volume-price relationship.
-# Works in bull markets via breakouts and bear markets via trend following with volume confirmation.
-# Target: <25 trades/year to minimize fee drift.
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mdata import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 200:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Hypothesis: 4h Donchian breakout with 1d EMA34 trend and volume confirmation
+    # Breakouts from price channels capture directional moves in both bull and bear markets
+    # EMA34 filters trend direction, volume surge confirms breakout strength
     
-    # Daily OBV for trend strength
+    # Load daily data once
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate OBV: cumulative volume * sign(price change)
-    price_change = np.diff(close_1d, prepend=close_1d[0])
-    obv = np.cumsum(volume_1d * np.where(price_change > 0, 1, np.where(price_change < 0, -1, 0)))
+    # Daily EMA34 trend filter
+    ema_1d_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
-    # Daily EMA200 for trend filter
-    ema_1d_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # 4h Donchian Channel (20-period)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Align to 1d timeframe
-    obv_aligned = align_htf_to_ltf(prices, df_1d, obv)
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    # Calculate Donchian upper and lower bands
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Price relative to SMA200 (daily)
-    sma_1d_200 = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
-    sma_1d_200_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_200)
+    # Volume filter (20-period MA surge)
+    vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_surge = prices['volume'].values > 1.5 * vol_ma20
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
     for i in range(200, n):
-        if np.isnan(obv_aligned[i]) or np.isnan(ema_1d_200_aligned[i]) or np.isnan(sma_1d_200_aligned[i]):
+        # Skip if data not ready
+        if (np.isnan(ema_1d_34_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: OBV rising and price above SMA200
-            if obv_aligned[i] > obv_aligned[i-1] and close[i] > sma_1d_200_aligned[i]:
+            # Long: Donchian breakout above upper band with volume surge AND daily EMA34 uptrend
+            if close[i] > donchian_upper[i] and vol_surge[i] and close[i] > ema_1d_34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: OBV falling and price below SMA200
-            elif obv_aligned[i] < obv_aligned[i-1] and close[i] < sma_1d_200_aligned[i]:
+            # Short: Donchian breakout below lower band with volume surge AND daily EMA34 downtrend
+            elif close[i] < donchian_lower[i] and vol_surge[i] and close[i] < ema_1d_34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: OBV trend reversal or price crosses SMA200 in opposite direction
+            # Exit: Price returns to opposite Donchian band
             if position == 1:
-                if obv_aligned[i] < obv_aligned[i-1] or close[i] < sma_1d_200_aligned[i]:
+                if close[i] < donchian_lower[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if obv_aligned[i] > obv_aligned[i-1] or close[i] > sma_1d_200_aligned[i]:
+                if close[i] > donchian_upper[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -72,6 +71,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_OBV_Signal_Trend_Filtered"
-timeframe = "1d"
+name = "4h_Donchian_Breakout_1dEMA34_Trend_VolumeSurge_v1"
+timeframe = "4h"
 leverage = 1.0
