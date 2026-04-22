@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h KAMA trend + RSI mean reversion with volume confirmation.
-Long when KAMA turns upward, RSI < 40, and volume spike.
-Short when KAMA turns downward, RSI > 60, and volume spike.
-Exit when KAMA reverses or RSI reaches extreme.
-Designed for low trade frequency (20-40/year) to minimize fee drift.
+Hypothesis: 6h Supertrend (ATR=10, multiplier=3) with 1d ADX filter (>25) and volume confirmation.
+Long when Supertrend turns green, ADX>25, and volume > 1.5x 20-period average.
+Short when Supertrend turns red, ADX>25, and volume > 1.5x 20-period average.
+Exit when Supertrend reverses.
+Uses ADX to avoid whipsaws in ranging markets and Supertrend for clear trend signals.
+Designed for low trade frequency (15-30/year) to minimize fee drift.
 """
 import numpy as np
 import pandas as pd
@@ -15,47 +16,118 @@ def generate_signals(prices):
     if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for KAMA trend filter - ONCE before loop
+    # Load daily data for ADX filter - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 14:
         return np.zeros(n)
     
-    # Calculate daily KAMA
-    close_d = pd.Series(df_daily['close'].values)
-    # Efficiency Ratio
-    change = abs(close_d.diff(10))
-    volatility = close_d.diff().abs().rolling(10).sum()
-    er = change / volatility
-    er = er.fillna(0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    sc = sc.fillna(0)
-    # KAMA calculation
-    kama = np.zeros(len(close_d))
-    kama[0] = close_d.iloc[0]
-    for i in range(1, len(close_d)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close_d.iloc[i] - kama[i-1])
-    kama = kama
+    # Calculate 14-period ADX on daily data
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
     
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_daily, kama)
+    # True Range
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 4h RSI (14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Directional Movement
+    up_move = high_d[1:] - high_d[:-1]
+    down_move = low_d[:-1] - low_d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate 4h volume average (20-period)
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = result[i-1] - (result[i-1] / period) + (data[i] / period)
+        return result
+    
+    tr_smooth = wilders_smooth(tr, 14)
+    plus_dm_smooth = wilders_smooth(plus_dm, 14)
+    minus_dm_smooth = wilders_smooth(minus_dm, 14)
+    
+    # DI+ and DI-
+    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
+    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    
+    # Calculate Supertrend on 6h data
+    atr_period = 10
+    multiplier = 3
+    
+    # True Range for ATR
+    tr1_6h = high[1:] - low[1:]
+    tr2_6h = np.abs(high[1:] - close[:-1])
+    tr3_6h = np.abs(low[1:] - close[:-1])
+    tr_6h = np.concatenate([[np.nan], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
+    
+    # ATR using Wilder's smoothing
+    atr = wilders_smooth(tr_6h, atr_period)
+    
+    # Upper and Lower Bands
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (multiplier * atr)
+    lower_band = hl2 - (multiplier * atr)
+    
+    # Supertrend calculation
+    supertrend = np.full_like(close, np.nan)
+    direction = np.full_like(close, np.nan)  # 1 for uptrend, -1 for downtrend
+    
+    # Initialize
+    if not np.isnan(atr[atr_period-1]):
+        upper_band[atr_period-1] = hl2[atr_period-1] + (multiplier * atr[atr_period-1])
+        lower_band[atr_period-1] = hl2[atr_period-1] - (multiplier * atr[atr_period-1])
+        supertrend[atr_period-1] = upper_band[atr_period-1]
+        direction[atr_period-1] = -1  # Start in downtrend
+    
+    for i in range(atr_period, n):
+        if np.isnan(atr[i]) or np.isnan(upper_band[i-1]) or np.isnan(lower_band[i-1]):
+            continue
+            
+        # Update bands
+        upper_band[i] = upper_band[i-1]
+        lower_band[i] = lower_band[i-1]
+        
+        if close[i-1] > upper_band[i-1]:
+            upper_band[i] = hl2[i] + (multiplier * atr[i])
+        if close[i-1] < lower_band[i-1]:
+            lower_band[i] = hl2[i] - (multiplier * atr[i])
+            
+        # Determine trend
+        if close[i] > upper_band[i]:
+            direction[i] = 1  # Uptrend
+        elif close[i] < lower_band[i]:
+            direction[i] = -1  # Downtrend
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+                
+        supertrend[i] = upper_band[i] if direction[i] == -1 else lower_band[i]
+    
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -64,10 +136,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after lookback
+    for i in range(max(atr_period, 14) + 14, n):  # Start after all lookbacks
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(supertrend[i]) or np.isnan(direction[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,32 +156,22 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: KAMA turning up, RSI oversold, volume spike
-            if (i > 20 and kama_aligned[i] > kama_aligned[i-1] and 
-                rsi[i] < 40 and 
+            # Long: Supertrend uptrend, ADX>25, volume spike
+            if (direction[i] == 1 and 
+                adx_aligned[i] > 25 and 
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA turning down, RSI overbought, volume spike
-            elif (i > 20 and kama_aligned[i] < kama_aligned[i-1] and 
-                  rsi[i] > 60 and 
+            # Short: Supertrend downtrend, ADX>25, volume spike
+            elif (direction[i] == -1 and 
+                  adx_aligned[i] > 25 and 
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
-            exit_signal = False
-            
-            if position == 1:
-                # Exit long: KAMA turns down OR RSI overbought
-                if kama_aligned[i] < kama_aligned[i-1] or rsi[i] > 70:
-                    exit_signal = True
-            else:  # position == -1
-                # Exit short: KAMA turns up OR RSI oversold
-                if kama_aligned[i] > kama_aligned[i-1] or rsi[i] < 30:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit when Supertrend reverses
+            if (position == 1 and direction[i] == -1) or \
+               (position == -1 and direction[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,7 +179,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_KAMA_RSI_Volume_MeanReversion"
-timeframe = "4h"
+name = "6H_Supertrend_ADX25_Volume"
+timeframe = "6h"
 leverage = 1.0
 #%%
