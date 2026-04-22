@@ -13,94 +13,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data (primary timeframe) and 1w data (HTF) - ONCE before loop
+    # Load 1d data (HTF) - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d ATR (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate weekly ATR (14-period) for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr1_w = high_1w - low_1w
-    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1_w[0] = 0
-    tr2_w[0] = 0
-    tr3_w[0] = 0
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    atr_14_1w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate daily ATR (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]
+    tr = np.maximum(high_1d - low_1d, np.maximum(abs(high_1d - close_1d_prev), abs(low_1d - close_1d_prev)))
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 6h Donchian channels (20-period)
+    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 6s volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to daily timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1w)
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    
-    # 1d RSI (14-period) for momentum filter
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = rsi  # already on 1d timeframe
+    # Align all indicators to 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(atr_14_1w_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or np.isnan(rsi_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(donch_high_20[i]) or 
+            np.isnan(donch_low_20[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility regime filter: only trade when 1d ATR is above weekly ATR (high volatility regime)
-        vol_regime = atr_14_aligned[i] > atr_14_1w_aligned[i]
-        
         if position == 0:
-            # Long: RSI oversold (<30) + volume spike + volatility regime
-            if (rsi_aligned[i] < 30 and 
-                volume[i] > 2.0 * vol_avg_20_aligned[i] and 
-                vol_regime):
+            # Long: Price breaks above 20-period Donchian high with volume AND above daily EMA34 (uptrend)
+            if (close[i] > donch_high_20[i] and 
+                volume[i] > 1.5 * vol_avg_20[i] and 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought (>70) + volume spike + volatility regime
-            elif (rsi_aligned[i] > 70 and 
-                  volume[i] > 2.0 * vol_avg_20_aligned[i] and 
-                  vol_regime):
+            # Short: Price breaks below 20-period Donchian low with volume AND below daily EMA34 (downtrend)
+            elif (close[i] < donch_low_20[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i] and 
+                  close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral zone (40-60) or volatility regime ends
+            # Exit: Price crosses back to opposite Donchian level
             if position == 1:
-                if rsi_aligned[i] > 40 or not vol_regime:
+                if close[i] < donch_low_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if rsi_aligned[i] < 60 or not vol_regime:
+                if close[i] > donch_high_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -108,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_RSI14_VolumeSpike_VolatilityRegime"
-timeframe = "1d"
+name = "6H_Donchian20_DailyEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
