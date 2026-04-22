@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d 20-period Donchian breakout with 1w trend filter and volume confirmation.
-Long when price breaks above upper Donchian with bullish 1w trend (price > EMA50) and volume spike.
-Short when price breaks below lower Donchian with bearish 1w trend (price < EMA50) and volume spike.
-Exit when price returns to middle Donchian.
-Designed for low trade frequency (5-15/year) to minimize fee drift.
+6H_Camarilla_1dPivot_Breakout_Trend_Filter
+Breakout at daily pivot-based levels (S3/R3) with 1d trend filter and volume confirmation.
+Long when price closes above R3 with bullish 1d trend (price > EMA34) and volume spike.
+Short when price closes below S3 with bearish 1d trend (price < EMA34) and volume spike.
+Exit when price returns to daily pivot point.
+Designed for low trade frequency (15-30/year) to minimize fee drag in both bull and bear markets.
 """
 import numpy as np
 import pandas as pd
@@ -20,26 +21,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data for trend filter and pivot calculation - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA50 to 1d timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align EMA34 to 6h timeframe
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 1d Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_donchian = high_series.rolling(window=20, min_periods=20).max().values
-    lower_donchian = low_series.rolling(window=20, min_periods=20).min().values
-    middle_donchian = (upper_donchian + lower_donchian) / 2.0
+    # Calculate daily OHLC for Camarilla pivot levels
+    high_d = df_1d['high'].values
+    low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
     
-    # Calculate 1d volume average (20-period)
+    # Previous day's OHLC for today's pivot levels
+    # Shift by 1 to use previous day's data
+    high_prev = np.roll(high_d, 1)
+    low_prev = np.roll(low_d, 1)
+    close_prev = np.roll(close_d, 1)
+    # First day has no previous, set to NaN
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
+    
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    range_val = high_prev - low_prev
+    
+    # Camarilla levels (S3 and R3)
+    s3 = close_prev - (range_val * 1.1 / 4)
+    r3 = close_prev + (range_val * 1.1 / 4)
+    
+    # Align all levels to 6h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -48,10 +69,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after lookback
+    for i in range(35, n):  # Start after EMA lookback
         # Skip if data not ready
-        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(middle_donchian[i]) or np.isnan(ema50_aligned[i]) or 
+        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema34_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,29 +90,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above upper Donchian with bullish 1w trend and volume spike
-            if (close[i] > upper_donchian[i] and 
-                close[i] > ema50_aligned[i] and  # Bullish trend: price above EMA50
+            # Long: Price closes above R3 with bullish 1d trend and volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema34_aligned[i] and  # Bullish trend: price above EMA34
                 volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian with bearish 1w trend and volume spike
-            elif (close[i] < lower_donchian[i] and 
-                  close[i] < ema50_aligned[i] and  # Bearish trend: price below EMA50
+            # Short: Price closes below S3 with bearish 1d trend and volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema34_aligned[i] and  # Bearish trend: price below EMA34
                   volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to middle Donchian
+            # Exit conditions: price returns to pivot point
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to middle Donchian
-                if close[i] <= middle_donchian[i]:
+                # Exit long: price returns to pivot
+                if close[i] <= pivot_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to middle Donchian
-                if close[i] >= middle_donchian[i]:
+                # Exit short: price returns to pivot
+                if close[i] >= pivot_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -102,7 +123,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian_20_1wEMA50_Trend_Volume"
-timeframe = "1d"
+name = "6H_Camarilla_S3R3_1dEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 #%%
