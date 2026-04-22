@@ -1,50 +1,37 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 
 """
-Hypothesis: Daily KAMA + RSI with Chop Filter
-Trades in the direction of the daily Kaufman Adaptive Moving Average (KAMA) trend when RSI confirms momentum.
-Uses weekly Choppiness Index to avoid trading in choppy markets (CHOP > 61.8) and only trade when trending (CHOP < 38.2).
-Designed for low trade frequency (7-25 trades/year) to minimize fee drag and work in both bull and bear markets by
-adapting to market conditions and filtering out noise.
+Hypothesis: 12-hour Williams Alligator with 1-day EMA trend filter and volume confirmation.
+Trades when the Alligator lines (jaw, teeth, lips) align in bullish/bearish order and price is outside the mouth,
+in the direction of the daily EMA trend. Volume spike confirms institutional interest. Designed for low trade
+frequency (12-37 trades/year) to minimize fee drift and work in both bull and bear markets by combining
+trend-following with volatility-based entry filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_fast=2, er_slow=30):
-    """Calculate Kaufman Adaptive Moving Average."""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close)).cumsum()
-    er = change / (volatility + 1e-10)
-    er = np.where(np.isnan(er), 0, er)
-    sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
-
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50).values
-
-def calculate_chop(high, low, close, period=14):
-    """Calculate Choppiness Index."""
-    atr = np.abs(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))))
-    atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum()
-    max_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    min_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    range_max_min = max_high - min_low
-    chop = 100 * np.log10(atr_sum / (range_max_min + 1e-10)) / np.log10(period)
-    return chop.fillna(50).values
+def calculate_alligator(high, low, close):
+    """
+    Calculate Williams Alligator lines:
+    Jaw (blue): 13-period SMMA, shifted 8 bars forward
+    Teeth (red): 8-period SMMA, shifted 5 bars forward
+    Lips (green): 5-period SMMA, shifted 3 bars forward
+    SMMA (Smoothed Moving Average) is similar to EMA but with different smoothing.
+    We'll use EMA as a proxy for SMMA for simplicity and speed.
+    """
+    # Use EMA as proxy for SMMA
+    jaw = pd.Series(close).ewm(span=13, adjust=False).mean()
+    teeth = pd.Series(close).ewm(span=8, adjust=False).mean()
+    lips = pd.Series(close).ewm(span=5, adjust=False).mean()
+    
+    # Shift forward: jaw 8, teeth 5, lips 3
+    jaw_shifted = jaw.shift(8)
+    teeth_shifted = teeth.shift(5)
+    lips_shifted = lips.shift(3)
+    
+    return jaw_shifted.values, teeth_shifted.values, lips_shifted.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -54,68 +41,67 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load daily data for KAMA and RSI - ONCE before loop
+    # Load daily data for trend filter and Alligator calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily KAMA for trend
+    # Daily EMA for trend filter (34-period)
     close_1d = df_1d['close'].values
-    kama = calculate_kama(close_1d)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily RSI for momentum
-    rsi = calculate_rsi(close_1d)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Calculate daily Alligator lines (jaw, teeth, lips)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    jaw, teeth, lips = calculate_alligator(high_1d, low_1d, close_1d_arr)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Load weekly data for Chop filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    # Weekly Chop for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    chop = calculate_chop(high_1w, low_1w, close_1w)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=2)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Chop filter: only trade when trending (CHOP < 38.2)
-        trending = chop_aligned[i] < 38.2
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        if position == 0 and trending:
-            # Long: price above KAMA and RSI > 50 (bullish momentum)
-            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50:
+        if position == 0 and vol_spike:
+            # Bullish alignment: Lips > Teeth > Jaw and price above Lips
+            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
+                close[i] > lips_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and RSI < 50 (bearish momentum)
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50:
+            # Bearish alignment: Lips < Teeth < Jaw and price below Lips
+            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
+                  close[i] < lips_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: chop becomes choppy or trend reverses
+            # Exit: price returns inside the Alligator's mouth (between teeth and jaw) or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: chop becomes choppy or price below KAMA
-                if chop_aligned[i] >= 61.8 or close[i] < kama_aligned[i]:
+                # Exit long: price closes below teeth or trend turns bearish
+                if close[i] < teeth_aligned[i] or lips_aligned[i] < teeth_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: chop becomes choppy or price above KAMA
-                if chop_aligned[i] >= 61.8 or close[i] > kama_aligned[i]:
+                # Exit short: price closes above teeth or trend turns bullish
+                if close[i] > teeth_aligned[i] or lips_aligned[i] > teeth_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -126,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "Daily_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "12h_Williams_Alligator_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
