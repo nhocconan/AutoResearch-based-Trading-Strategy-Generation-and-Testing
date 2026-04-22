@@ -3,36 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1-week EMA13 trend filter and volume confirmation.
-# Elder Ray measures bullish/bearish power by comparing high/low to EMA, capturing momentum exhaustion.
-# Weekly EMA13 provides strong trend filter in both bull and bear markets.
-# Volume spike (>2x 20-period average) confirms breakout strength.
-# Designed for low trade frequency (~15-35/year) to minimize fee decay while capturing strong trends.
+# Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume spike confirmation.
+# Donchian breakouts capture momentum moves while the 1d EMA filter ensures alignment with higher timeframe trend.
+# Volume spikes (>2x 20-period average) confirm breakout strength. Designed for low trade frequency (~15-35/year)
+# to minimize fee decay. Works in both bull and bear markets by following higher timeframe trend and requiring
+# volume confirmation, reducing false signals during ranging periods.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for EMA13 trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for EMA trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA on 1w close for trend filter
-    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 50-period EMA on 1d close for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA to 6h timeframe (waits for 1w bar to close)
-    ema_13_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
+    # Align 1d EMA to 12h timeframe (waits for 1d bar to close)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 13-period EMA on 6h close for Elder Ray
-    close_6h = prices['close'].values
-    ema_13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 20-period Donchian channels on 12h data
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate Elder Ray components
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    bull_power = high_6h - ema_13_6h  # Bull Power = High - EMA13
-    bear_power = low_6h - ema_13_6h   # Bear Power = Low - EMA13
+    # Upper band: highest high of last 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 periods
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -43,31 +42,32 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_13_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bull = bull_power[i]
-        bear = bear_power[i]
-        ema_13_val = ema_13_aligned[i]
+        price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
+        ema_val = ema_50_aligned[i]
         
         # Volume filter: current volume > 2.0 * 20-period average (strict filter for low frequency)
         vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long conditions: Bull Power > 0 (bullish momentum) + above weekly EMA + volume spike
-            if bull > 0 and ema_13_val > 0 and vol_spike:
+            # Long conditions: price breaks above upper Donchian band + uptrend + volume spike
+            if price > upper and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Bear Power < 0 (bearish momentum) + below weekly EMA + volume spike
-            elif bear < 0 and ema_13_val < 0 and vol_spike:
+            # Short conditions: price breaks below lower Donchian band + downtrend + volume spike
+            elif price < lower and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
@@ -76,13 +76,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Bull Power turns negative or weekly trend breaks
-                if bull <= 0 or ema_13_val <= 0:
+                # Exit when price breaks below lower Donchian band or trend breaks
+                if price < lower or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when Bear Power turns positive or weekly trend breaks
-                if bear >= 0 or ema_13_val >= 0:
+                # Exit when price breaks above upper Donchian band or trend breaks
+                if price > upper or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1wEMA13_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
