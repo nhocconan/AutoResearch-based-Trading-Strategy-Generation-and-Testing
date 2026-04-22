@@ -8,72 +8,79 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian breakout with 12h trend filter and volume confirmation
-    # Works in bull/bear by using 12h EMA for trend direction and volume to filter false breakouts
-    # Target: 50-150 trades over 4 years (12-37/year)
+    # Hypothesis: 4h Candlestick pattern (Engulfing) at daily pivot levels with volume confirmation
+    # Uses Engulfing patterns at S3/R3 levels for high-probability reversals
+    # Works in both bull and bear markets by capturing reversals at key support/resistance
     
-    # Load 12h data for trend filter (EMA50) and Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Load daily data for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h EMA50 for trend filter
-    ema_12h_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
+    # Daily pivot range (high-low)
+    range_1d = high_1d - low_1d
+    close_prev = close_1d
     
-    # 12h Donchian channel (20-period)
-    high_roll = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high = align_htf_to_ltf(prices, df_12h, high_roll)
-    donchian_low = align_htf_to_ltf(prices, df_12h, low_roll)
+    # Daily S3 and R3 levels
+    s3_1d = close_prev - (range_1d * 3.0 / 6)
+    r3_1d = close_prev + (range_1d * 3.0 / 6)
     
-    # 6h ATR for volatility filter (14-period)
+    # Align daily S3/R3 to 4h
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    
+    # 4h data
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volume = prices['volume'].values
+    
+    # Bullish Engulfing: current green candle fully engulfs previous red candle
+    bullish_engulf = (close > open_price) & (open_price < close) & \
+                     (close > open_price) & (open_price < np.roll(close, 1)) & \
+                     (np.roll(close, 1) < np.roll(open_price, 1))
+    # Bearish Engulfing: current red candle fully engulfs previous green candle
+    bearish_engulf = (close < open_price) & (open_price > close) & \
+                     (close < open_price) & (open_price > np.roll(close, 1)) & \
+                     (np.roll(close, 1) > np.roll(open_price, 1))
     
     # Volume filter (20-period MA)
-    vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 1.5 * vol_ma20
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_surge = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(s3_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high with volume surge AND 12h EMA50 uptrend
-            if close[i] > donchian_high[i] and vol_surge[i] and close[i] > ema_12h_50_aligned[i]:
+            # Long: Bullish engulfing at or below S3 with volume surge
+            if bullish_engulf[i] and low[i] <= s3_1d_aligned[i] * 1.002 and vol_surge[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 12h Donchian low with volume surge AND 12h EMA50 downtrend
-            elif close[i] < donchian_low[i] and vol_surge[i] and close[i] < ema_12h_50_aligned[i]:
+            # Short: Bearish engulfing at or above R3 with volume surge
+            elif bearish_engulf[i] and high[i] >= r3_1d_aligned[i] * 0.998 and vol_surge[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to the opposite Donchian level
+            # Exit: Price crosses the opposite S3/R3 level
             if position == 1:
-                if close[i] < donchian_low[i]:
+                if high[i] >= r3_1d_aligned[i] * 0.998:  # Reached R3, take profit
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donchian_high[i]:
+                if low[i] <= s3_1d_aligned[i] * 1.002:  # Reached S3, take profit
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -81,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_Breakout_12hEMA50_Trend_VolumeSurge_v1"
-timeframe = "6h"
+name = "4h_Engulfing_S3_R3_Pivot_VolumeSurge_v1"
+timeframe = "4h"
 leverage = 1.0
