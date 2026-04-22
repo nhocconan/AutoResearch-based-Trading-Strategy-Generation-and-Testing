@@ -1,82 +1,125 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Williams %R with 1-day trend filter and volume confirmation.
-Long when Williams %R < -80 (oversold) and 1-day close > 20 EMA (uptrend) and 1-day volume > 20-day average volume.
-Short when Williams %R > -20 (overbought) and 1-day close < 20 EMA (downtrend) and 1-day volume > 20-day average volume.
-Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
-Williams %R identifies overextended moves; trend filter ensures trading with higher timeframe momentum;
-volume confirmation ensures institutional participation. Designed for low turnover to avoid fee drag.
+Hypothesis: 4-hour Camarilla Pivot Reversal with 1-day Volume Filter and Chop Filter
+Long when price crosses below Camarilla S1 (strong support) in low volatility regime with high volume.
+Short when price crosses above Camarilla R1 (strong resistance) in low volatility regime with high volume.
+Exit when price reaches opposite Camarilla level (S3/R3) or volatility increases.
+Uses institutional pivot levels with volume confirmation and volatility filter to avoid choppy losses.
+Works in both bull and bear markets by fading extremes at institutional levels during low volatility.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Load 1-day data for trend and volume filters - ONCE before loop
+    # Calculate Camarilla levels from previous day - need OHLC from 1d data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values  # Previous day close
+    prev_high = df_1d['high'].shift(1).values    # Previous day high
+    prev_low = df_1d['low'].shift(1).values      # Previous day low
+    
+    # Calculate Camarilla levels for previous day
+    range_ = prev_high - prev_low
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # H1 = close + (range * 1.1/12), H2 = close + (range * 1.1/6), H3 = close + (range * 1.1/4), H4 = close + (range * 1.1/2)
+    # L1 = close - (range * 1.1/12), L2 = close - (range * 1.1/6), L3 = close - (range * 1.1/4), L4 = close - (range * 1.1/2)
+    H1 = prev_close + (range_ * 1.1 / 12)
+    H2 = prev_close + (range_ * 1.1 / 6)
+    H3 = prev_close + (range_ * 1.1 / 4)
+    H4 = prev_close + (range_ * 1.1 / 2)
+    L1 = prev_close - (range_ * 1.1 / 12)
+    L2 = prev_close - (range_ * 1.1 / 6)
+    L3 = prev_close - (range_ * 1.1 / 4)
+    L4 = prev_close - (range_ * 1.1 / 2)
+    
+    # Align Camarilla levels to 4h timeframe (they change only at daily boundaries)
+    H1_4h = align_htf_to_ltf(prices, df_1d, H1)
+    H2_4h = align_htf_to_ltf(prices, df_1d, H2)
+    H3_4h = align_htf_to_ltf(prices, df_1d, H3)
+    H4_4h = align_htf_to_ltf(prices, df_1d, H4)
+    L1_4h = align_htf_to_ltf(prices, df_1d, L1)
+    L2_4h = align_htf_to_ltf(prices, df_1d, L2)
+    L3_4h = align_htf_to_ltf(prices, df_1d, L3)
+    L4_4h = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # 1-day volume filter
     volume_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
     
-    # 20-period EMA on 1-day close
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Chopiness index filter (using 1d data for regime detection)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-day average volume on 1-day
-    avg_vol_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # True Range for chop calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high_1d[0] - low_1d[0]  # First value
     
-    # Align 1-day indicators to 12h timeframe
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    avg_vol_20_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20_1d)
+    # Chopiness index: log(sum(tr,14)) / (log(14) * true_range) * 100
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr_14 / (atr_14 * 14)) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # 4h price data
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(williams_r[i]) or np.isnan(ema_20_1d_aligned[i]) or np.isnan(avg_vol_20_1d_aligned[i]):
+        if (np.isnan(H1_4h[i]) or np.isnan(L1_4h[i]) or 
+            np.isnan(avg_vol_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Chop filter: only trade when chop > 50 (ranging market)
+        in_range = chop_aligned[i] > 50
+        
         if position == 0:
-            # Long: Oversold + uptrend + high volume
-            if williams_r[i] < -80 and close_1d[i] > ema_20_1d[i] and volume_1d[i] > avg_vol_20_1d_aligned[i]:
+            # Long: Price crosses below L1 (strong support) in ranging market with volume confirmation
+            if (in_range and 
+                close_4h[i] <= L1_4h[i] and 
+                close_4h[i-1] > L1_4h[i-1] and  # Crossed below
+                volume_1d[i] > avg_vol_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Overbought + downtrend + high volume
-            elif williams_r[i] > -20 and close_1d[i] < ema_20_1d[i] and volume_1d[i] > avg_vol_20_1d_aligned[i]:
+            # Short: Price crosses above H1 (strong resistance) in ranging market with volume confirmation
+            elif (in_range and 
+                  close_4h[i] >= H1_4h[i] and 
+                  close_4h[i-1] < H1_4h[i-1] and  # Crossed above
+                  volume_1d[i] > avg_vol_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Williams %R crosses -50
+            # Exit conditions
             exit_signal = False
             
-            if position == 1:
-                # Exit long: Williams %R rises above -50
-                if williams_r[i] > -50:
+            if position == 1:  # Long position
+                # Exit when price reaches H3 (resistance) or volatility increases (chop < 40)
+                if (close_4h[i] >= H3_4h[i] or chop_aligned[i] < 40):
                     exit_signal = True
-            else:  # position == -1
-                # Exit short: Williams %R falls below -50
-                if williams_r[i] < -50:
+            else:  # position == -1, Short position
+                # Exit when price reaches L3 (support) or volatility increases (chop < 40)
+                if (close_4h[i] <= L3_4h[i] or chop_aligned[i] < 40):
                     exit_signal = True
             
             if exit_signal:
@@ -87,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_Pivot_Reversal_Volume_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
