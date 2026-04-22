@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1-week Bollinger Band breakout and volume confirmation.
-# Uses weekly Bollinger Bands (20, 2.0) for trend context and 1-day ATR for volatility filtering.
-# Designed to capture strong momentum moves in both bull and bear markets while avoiding
+# Hypothesis: 12h timeframe with 1-week RSI mean-reversion and volume confirmation.
+# Uses weekly RSI(14) for overbought/oversold signals and 1-day ATR for volatility filtering.
+# Designed to capture reversals in both bull and bear markets while avoiding
 # choppy conditions. Targets 12-37 trades/year with disciplined risk control.
 
 def generate_signals(prices):
@@ -13,26 +13,24 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1-week data for Bollinger Bands (once before loop)
+    # Load 1-week data for RSI (once before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly Bollinger Bands
+    # Calculate weekly RSI(14)
     close_1w = df_1w['close'].values
-    bb_length = 20
-    bb_mult = 2.0
+    rsi_length = 14
     
-    # Middle band (SMA)
-    basis = pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).mean().values
-    # Standard deviation
-    dev = bb_mult * pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).std().values
-    # Upper and lower bands
-    upper = basis + dev
-    lower = basis - dev
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align BB to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
-    basis_aligned = align_htf_to_ltf(prices, df_1w, basis)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_length, adjust=False, min_periods=rsi_length).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_length, adjust=False, min_periods=rsi_length).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_1w = 100 - (100 / (1 + rs))
+    
+    # Align RSI to 12h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
     # Load 1-day data for ATR volatility filter
     df_1d = get_htf_data(prices, '1d')
@@ -62,9 +60,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or 
-            np.isnan(basis_aligned[i]) or 
+        if (np.isnan(rsi_1w_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -76,6 +72,7 @@ def generate_signals(prices):
         vol = volume[i]
         vol_ma = vol_ma_20[i]
         atr = atr_1d_aligned[i]
+        rsi = rsi_1w_aligned[i]
         
         # Volatility filter: avoid extremely low volatility environments
         vol_filter = atr > 0.01 * price  # ATR > 1% of price
@@ -83,17 +80,13 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5 * 20-period average
         vol_spike = vol > 1.5 * vol_ma
         
-        upper_band = upper_aligned[i]
-        lower_band = lower_aligned[i]
-        basis_val = basis_aligned[i]
-        
         if position == 0:
-            # Long entry: price breaks above weekly upper BB with volume and volatility
-            if price > upper_band and vol_spike and vol_filter:
+            # Long entry: RSI oversold (<30) with volume and volatility
+            if rsi < 30 and vol_spike and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below weekly lower BB with volume and volatility
-            elif price < lower_band and vol_spike and vol_filter:
+            # Short entry: RSI overbought (>70) with volume and volatility
+            elif rsi > 70 and vol_spike and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
@@ -102,13 +95,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit on retracement to weekly middle band (mean reversion)
-                if price < basis_val:
+                # Exit on RSI crossing above 50 (mean reversion)
+                if rsi > 50:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit on retracement to weekly middle band (mean reversion)
-                if price > basis_val:
+                # Exit on RSI crossing below 50 (mean reversion)
+                if rsi < 50:
                     exit_signal = True
             
             if exit_signal:
@@ -120,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyBB_Breakout_MeanReversion"
+name = "12h_WeeklyRSI_MeanReversion_Volume"
 timeframe = "12h"
 leverage = 1.0
