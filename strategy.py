@@ -31,7 +31,7 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe (primary timeframe)
+    # Align to 12h timeframe (primary timeframe)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -39,7 +39,7 @@ def generate_signals(prices):
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike filter (20-period average on 4h data)
+    # Volume spike filter (20-period average on 12h data)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -73,11 +73,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R2 + volume spike + above EMA34
             if price > r2 and vol > 1.5 * vol_ma and price > ema34:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S2 + volume spike + below EMA34
             elif price < s2 and vol > 1.5 * vol_ma and price < ema34:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         
         elif position != 0:
@@ -89,10 +89,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Spike"
-timeframe = "4h"
+name = "12h_Pivot_R2_S2_Breakout_1dEMA34_Volume_Spike_v2"
+timeframe = "12h"
 leverage = 1.0
