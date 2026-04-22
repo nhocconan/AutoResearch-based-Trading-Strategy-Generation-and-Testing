@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 34:
+    if n < 50:
         return np.zeros(n)
     
     # Load 1d data once for Pivot levels and EMA34
@@ -44,7 +44,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(50, n):
         # Skip if any data is not ready
         if (np.isnan(pp_aligned[i]) or 
             np.isnan(r1_aligned[i]) or 
@@ -64,8 +64,8 @@ def generate_signals(prices):
         s1 = s1_aligned[i]
         ema34 = ema34_aligned[i]
         
-        # Volume filter: current volume > 1.8 * 20-day average
-        vol_spike = vol > 1.8 * vol_ma
+        # Volume filter: current volume > 2.0 * 20-day average (increased threshold)
+        vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
             # Long conditions: price breaks above R1 + volume spike + price > EMA34
@@ -83,12 +83,12 @@ def generate_signals(prices):
             
             if position == 1:  # long position
                 # Exit when price crosses below PP or volume dries up
-                if price < pp or vol < 0.8 * vol_ma:
+                if price < pp or vol < 0.7 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
                 # Exit when price crosses above PP or volume dries up
-                if price > pp or vol < 0.8 * vol_ma:
+                if price > pp or vol < 0.7 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -100,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_1dEMA34_Volume"
+name = "4h_Pivot_R1_S1_Breakout_1dEMA34_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
