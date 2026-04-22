@@ -1,11 +1,10 @@
-# 77246
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour 50-period moving average crossover with 1-day volatility filter and volume confirmation.
-Long when 12h EMA50 crosses above SMA200 and 1-day ATR ratio > 1.5 (high volatility) with volume > 1.3x average.
-Short when 12h EMA50 crosses below SMA200 and 1-day ATR ratio > 1.5 with volume > 1.3x average.
-Exit when EMA50 crosses back in opposite direction or volatility drops.
-Designed for low frequency (~20-30 trades/year) with volatility filter to capture trending moves in both bull and bear markets.
+Hypothesis: 4-hour Donchian(20) breakout with 1-day volume spike and ADX trend filter.
+Long when price breaks above 4h Donchian high + volume > 1.5x daily average volume + ADX > 25.
+Short when price breaks below 4h Donchian low + volume > 1.5x daily average volume + ADX > 25.
+Exit when price returns to 4h Donchian midpoint.
+Designed for 4h timeframe with ~20-40 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,60 +21,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMAs and SMAs on 12h timeframe
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
-    
-    # Load 1-day data for volatility filter - ONCE before loop
+    # Load 1-day data for volume filter and ADX - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 14-day ATR for volatility regime
+    # Calculate Donchian channels (20-period) on 4h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Calculate daily volume average for filter
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Calculate ADX on 1-day data (trend filter)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
+    # True Range
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
     
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
+                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
+                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
+                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
+                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
     
-    # Calculate ATR ratio (current ATR / 50-period average ATR) to detect volatility expansion
-    atr_ma50 = pd.Series(atr14).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = np.where(atr_ma50 > 0, atr14 / atr_ma50, 1.0)
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Align volatility ratio to 12h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
     
-    # Volume filter: 20-period average volume on 12h timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d indicators to 4h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(ema50[i]) or np.isnan(sma200[i]) or 
-            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: EMA50 crosses above SMA200 with high volatility and volume confirmation
-            if (ema50[i] > sma200[i] and ema50[i-1] <= sma200[i-1] and 
-                atr_ratio_aligned[i] > 1.5 and volume[i] > 1.3 * vol_ma[i]):
+            # Long: Price breaks above Donchian high + volume + trend
+            if (close[i] > donchian_high[i] and 
+                volume[i] > 1.5 * vol_ma_1d_aligned[i] and 
+                adx_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: EMA50 crosses below SMA200 with high volatility and volume confirmation
-            elif (ema50[i] < sma200[i] and ema50[i-1] >= sma200[i-1] and 
-                  atr_ratio_aligned[i] > 1.5 and volume[i] > 1.3 * vol_ma[i]):
+            # Short: Price breaks below Donchian low + volume + trend
+            elif (close[i] < donchian_low[i] and 
+                  volume[i] > 1.5 * vol_ma_1d_aligned[i] and 
+                  adx_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -83,12 +103,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: EMA50 crosses below SMA200 OR volatility contraction
-                if (ema50[i] < sma200[i] and ema50[i-1] >= sma200[i-1]) or atr_ratio_aligned[i] < 1.2:
+                # Exit long: Price returns to midpoint
+                if close[i] <= donchian_mid[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: EMA50 crosses above SMA200 OR volatility contraction
-                if (ema50[i] > sma200[i] and ema50[i-1] <= sma200[i-1]) or atr_ratio_aligned[i] < 1.2:
+                # Exit short: Price returns to midpoint
+                if close[i] >= donchian_mid[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_EMA50_SMA200_Volatility_VolumeFilter"
-timeframe = "12h"
+name = "4H_Donchian_Breakout_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
