@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and 1w volume confirmation
-# Williams %R (14) identifies overbought/oversold conditions.
-# Trend filter: 1d EMA50 (bullish if close > EMA50, bearish if close < EMA50).
-# Volume confirmation: 1w volume > 1.5x 4-week average to avoid false signals.
-# Works in bull markets by buying oversold dips in uptrend and in bear markets by selling overbought rallies in downtrend.
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25) to minimize fee drag.
+# Hypothesis: 12h price action near 1d VWAP with 1w trend filter and 1d volume confirmation
+# VWAP acts as dynamic support/resistance. Price near VWAP with volume confirmation
+# indicates institutional interest. 1w EMA50 trend filter ensures alignment with
+# higher timeframe momentum. Works in bull markets by capturing bounces from VWAP
+# in uptrend and in bear markets by avoiding counter-trend trades. Targets 12-37 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,72 +19,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Load 1w data for volume confirmation (ONCE before loop)
+    # Load 1w data for trend filter (ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 4:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    volume_1w = df_1w['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Williams %R (14) on 6h data
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Load 1d data for VWAP and volume (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w volume 4-period average for spike detection
-    vol_avg_4_1w = pd.Series(volume_1w).rolling(window=4, min_periods=4).mean().values
-    vol_avg_4_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_4_1w)
+    # 1w EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 1d VWAP calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_num = np.cumsum(typical_price_1d * volume_1d)
+    vwap_den = np.cumsum(volume_1d)
+    vwap_1d = vwap_num / vwap_den
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # 1d volume 20-period average for spike detection
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_avg_4_1w_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + 1d uptrend + 1w volume spike
-            if (williams_r[i] < -80 and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_4_1w_aligned[i]):
+            # Long: Price near 1d VWAP (within 0.5%) + 1w uptrend + 1d volume spike
+            vwap_dist = abs(close[i] - vwap_1d_aligned[i]) / vwap_1d_aligned[i]
+            if (vwap_dist < 0.005 and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) + 1d downtrend + 1w volume spike
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_4_1w_aligned[i]):
+            # Short: Price near 1d VWAP (within 0.5%) + 1w downtrend + 1d volume spike
+            elif (vwap_dist < 0.005 and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Williams %R returns to -50 (mean reversion) or trend reversal
+            # Exit: price moves away from VWAP (>1.0%) or trend reversal
+            vwap_dist = abs(close[i] - vwap_1d_aligned[i]) / vwap_1d_aligned[i]
             if position == 1:
-                # Exit on return to -50 or trend reversal to downtrend
-                if (williams_r[i] >= -50 or 
-                    close[i] < ema_50_1d_aligned[i]):
+                if (vwap_dist > 0.01 or 
+                    close[i] < ema_50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit on return to -50 or trend reversal to uptrend
-                if (williams_r[i] <= -50 or 
-                    close[i] > ema_50_1d_aligned[i]):
+                if (vwap_dist > 0.01 or 
+                    close[i] > ema_50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -93,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1dEMA50_1wVolSpike"
-timeframe = "6h"
+name = "12h_VWAP_1wEMA50_1dVolSpike"
+timeframe = "12h"
 leverage = 1.0
