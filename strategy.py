@@ -1,96 +1,111 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-
-"""
-Hypothesis: 12h timeframe with Camarilla pivot levels (R1/S1) from daily data,
-combined with EMA trend filter and volume confirmation. Uses 12h for lower
-frequency to reduce trade count and fee drag. Targets 50-150 total trades over
-4 years. Works in both bull and bear markets by using EMA filter for trend
-direction and volume for confirmation.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: Daily candlestick patterns combined with weekly trend filter and volume confirmation
+# This strategy targets swing trading on daily timeframe with low trade frequency (~10-20 trades/year)
+# Uses: Daily Engulfing candle pattern + Weekly EMA50 trend filter + Volume spike confirmation
+# Designed to work in both bull and bear markets by following the weekly trend direction
+# Engulfing patterns signal strong reversals, weekly EMA prevents counter-trend trades
+# Volume spike confirms institutional participation
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 35:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data once for Camarilla levels and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load daily data once for Engulfing patterns
+    df_daily = get_htf_data(prices, '1d')
+    daily_open = df_daily['open'].values
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
+    daily_volume = df_daily['volume'].values
     
-    # Calculate Camarilla levels (based on previous day's HLC)
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + range_1d * 1.1 / 12
-    s1_1d = close_1d - range_1d * 1.1 / 12
-    pp_1d = (high_1d + low_1d + close_1d) / 3
+    # Load weekly data once for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_close = df_weekly['close'].values
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily Engulfing patterns
+    # Bullish engulfing: current green candle completely engulfs previous red candle
+    # Bearish engulfing: current red candle completely engulfs previous green candle
+    bullish_engulf = (
+        (daily_close > daily_open) &  # current candle is green
+        (daily_open < daily_close.shift(1)) &  # current open below previous close
+        (daily_close > daily_open.shift(1)) &  # current close above previous open
+        (daily_open < daily_close.shift(1)) &  # redundant but clear
+        (daily_close > daily_open.shift(1))
+    )
     
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    bearish_engulf = (
+        (daily_close < daily_open) &  # current candle is red
+        (daily_open > daily_close.shift(1)) &  # current open above previous close
+        (daily_close < daily_open.shift(1)) &  # current close below previous open
+        (daily_open > daily_close.shift(1)) &  # redundant but clear
+        (daily_close < daily_open.shift(1))
+    )
     
-    # Volume spike filter (20-period average on 12h data)
-    volume = prices['volume'].values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly EMA50 for trend filter
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align daily patterns to lower timeframe
+    bullish_engulf_aligned = align_htf_to_ltf(prices, df_daily, bullish_engulf.astype(float))
+    bearish_engulf_aligned = align_htf_to_ltf(prices, df_daily, bearish_engulf.astype(float))
+    
+    # Align weekly EMA50 to lower timeframe
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema50)
+    
+    # Volume spike filter (20-day average on daily data)
+    vol_ma_20 = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(35, n):
+    for i in range(50, n):
         # Skip if any data is not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(bullish_engulf_aligned[i]) or 
+            np.isnan(bearish_engulf_aligned[i]) or 
+            np.isnan(weekly_ema50_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        vol = volume[i]
-        vol_ma = vol_ma_20[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        pp = pp_aligned[i]
-        ema34 = ema34_aligned[i]
+        volume = prices['volume'].iloc[i]
+        bullish = bullish_engulf_aligned[i] > 0.5
+        bearish = bearish_engulf_aligned[i] > 0.5
+        weekly_ema = weekly_ema50_aligned[i]
+        vol_ma = vol_ma_20_aligned[i]
         
-        # Volume filter: current volume > 1.8 * 20-day average
-        vol_spike = vol > 1.8 * vol_ma
+        # Volume filter: current volume > 2.0 * 20-day average
+        vol_spike = volume > 2.0 * vol_ma
         
         if position == 0:
-            # Long conditions: price breaks above R1 + volume spike + price > EMA34
-            if price > r1 and vol_spike and price > ema34:
+            # Long: bullish engulfing + price above weekly EMA50 + volume spike
+            if bullish and price > weekly_ema and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below S1 + volume spike + price < EMA34
-            elif price < s1 and vol_spike and price < ema34:
+            # Short: bearish engulfing + price below weekly EMA50 + volume spike
+            elif bearish and price < weekly_ema and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses back through PP or volume dries up
+            # Exit: opposite engulfing pattern or price crosses weekly EMA50
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price crosses below PP or volume dries up
-                if price < pp or vol < 0.8 * vol_ma:
+                # Exit on bearish engulfing or price crosses below weekly EMA50
+                if bearish or price < weekly_ema:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price crosses above PP or volume dries up
-                if price > pp or vol < 0.8 * vol_ma:
+                # Exit on bullish engulfing or price crosses above weekly EMA50
+                if bullish or price > weekly_ema:
                     exit_signal = True
             
             if exit_signal:
@@ -102,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "12h"
+name = "Daily_Engulfing_WeeklyEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
