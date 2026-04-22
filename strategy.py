@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 6-hour Williams Fractal breakout with daily EMA34 trend filter and volume spike.
-Long when bullish fractal breaks with price above daily EMA34 and volume spike.
-Short when bearish fractal breaks with price below daily EMA34 and volume spike.
-Uses 1-day timeframe for trend and fractal confirmation to avoid false breakouts.
-Designed for low trade frequency (15-35 trades/year) requiring fractal breakout,
-trend alignment, and volume confirmation. Works in both bull and bear markets by
-following the daily EMA34 trend direction.
+Hypothesis: 12-hour Williams %R reversal with 1-day EMA trend filter and volume confirmation.
+Only trade reversals when Williams %R reaches extreme oversold/overbought levels (>80 or <20)
+and price shows rejection at the level, in the direction of the 1-day EMA34 trend.
+Uses 1-day Williams %R for mean reversion signals in ranging markets, filtered by daily trend.
+Designed for low trade frequency (12-37/year) by requiring extreme %R levels + trend alignment + volume spike.
+Works in both bull and bear markets by fading extremes only when aligned with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,27 +23,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily EMA34 for trend filter
+    # Load 1d data for Williams %R and EMA - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
+    # Calculate Williams %R(14) on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Williams Fractals on daily
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values
-    )
-    # Need 2 extra bars for fractal confirmation (requires 2 candles after)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Calculate EMA34 on 1d for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align to 12h
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,9 +54,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,25 +65,25 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: bullish fractal break + price above daily EMA34 + volume spike
-            if bullish_fractal_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_spike:
+            # Long: Williams %R < -80 (oversold) + price > EMA34 (uptrend) + volume spike
+            if williams_r_aligned[i] < -80 and close[i] > ema34_1d_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish fractal break + price below daily EMA34 + volume spike
-            elif bearish_fractal_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_spike:
+            # Short: Williams %R > -20 (overbought) + price < EMA34 (downtrend) + volume spike
+            elif williams_r_aligned[i] > -20 and close[i] < ema34_1d_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: fractal in opposite direction or price crosses EMA34
+            # Exit: Williams %R returns to neutral range (-50) or trend reversal
             exit_signal = False
             
             if position == 1:
-                # Exit long: bearish fractal or price below EMA34
-                if bearish_fractal_aligned[i] or close[i] < ema34_1d_aligned[i]:
+                # Exit long: Williams %R > -50 or price < EMA34
+                if williams_r_aligned[i] > -50 or close[i] < ema34_1d_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: bullish fractal or price above EMA34
-                if bullish_fractal_aligned[i] or close[i] > ema34_1d_aligned[i]:
+                # Exit short: Williams %R < -50 or price > EMA34
+                if williams_r_aligned[i] < -50 or close[i] > ema34_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -96,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Williams_Fractal_Breakout_1dEMA34_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_Reversal_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
