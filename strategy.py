@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Bollinger Bandwidth squeeze breakout with 1-day trend filter and volume confirmation.
-Long when price breaks above upper BB during low volatility (BW < 20th percentile) and 1d EMA50 up.
-Short when price breaks below lower BB during low volatility and 1d EMA50 down.
-Exit when price reverts to middle BB or volatility expands (BW > 80th percentile).
-Works in both bull and bear markets by following the 1d trend during low-volatility breakouts.
+Hypothesis: 12-hour Donchian breakout with 1-day ATR filter and volume confirmation.
+Long when price breaks above 20-period high with expanding volatility and volume spike.
+Short when price breaks below 20-period low with expanding volatility and volume spike.
+Exit when price returns to midline or volatility contracts.
+Designed for low trade frequency by requiring volatility expansion and volume confirmation.
+Works in both bull and bear markets by capturing breakouts in trending phases.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,28 +22,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands: 20-period, 2 std dev
-    close_series = pd.Series(close)
-    basis = close_series.rolling(window=20, min_periods=20).mean().values
-    dev = close_series.rolling(window=20, min_periods=20).std().values
-    upper_band = basis + 2.0 * dev
-    lower_band = basis - 2.0 * dev
-    
-    # Bandwidth: (upper - lower) / basis
-    bw = (upper_band - lower_band) / basis
-    # Percentile lookback: 50 periods
-    bw_lower = pd.Series(bw).rolling(window=50, min_periods=50).quantile(0.20).values
-    bw_upper = pd.Series(bw).rolling(window=50, min_periods=50).quantile(0.80).values
-    
-    # Load 1d data for trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data for Donchian channels - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # 50-period EMA on 1d close for trend
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # 20-period Donchian channels on 12h
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Align to 1h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_12h, donch_mid)
+    
+    # Load 1d data for ATR filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # 14-period ATR on 1d
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ATR to 1h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     # Volume confirmation: current volume > 1.5x 30-period average
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
@@ -50,43 +65,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bw[i]) or np.isnan(bw_lower[i]) or 
-            np.isnan(bw_upper[i]) or np.isnan(vol_ma_30[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(basis[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i]) or np.isnan(atr_aligned[i]) or 
+            np.isnan(vol_ma_30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility and breakout conditions
-        low_volatility = bw[i] < bw_lower[i]
-        high_volatility = bw[i] > bw_upper[i]
-        breakout_up = close[i] > upper_band[i]
-        breakout_down = close[i] < lower_band[i]
-        vol_confirm = volume[i] > 1.5 * vol_ma_30[i]
+        # Volatility expansion: current ATR > 1.2x ATR from 5 periods ago
+        vol_expanding = atr_aligned[i] > 1.2 * atr_aligned[i-5] if i >= 5 else False
+        
+        # Volume spike
+        vol_spike = volume[i] > 1.5 * vol_ma_30[i]
         
         if position == 0:
-            # Long: breakout up during low vol, 1d EMA50 up, volume confirmation
-            if low_volatility and breakout_up and ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and vol_confirm:
+            # Long: break above Donchian high with vol expansion and volume spike
+            if close[i] > donch_high_aligned[i] and vol_expanding and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout down during low vol, 1d EMA50 down, volume confirmation
-            elif low_volatility and breakout_down and ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and vol_confirm:
+            # Short: break below Donchian low with vol expansion and volume spike
+            elif close[i] < donch_low_aligned[i] and vol_expanding and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: return to middle band or volatility expands
+            # Exit: return to midline or volatility contraction
             exit_signal = False
             
             if position == 1:
-                # Exit long: price <= middle band or volatility expands
-                if close[i] <= basis[i] or high_volatility:
+                # Exit long: price returns to midline or volatility contracts
+                if close[i] <= donch_mid_aligned[i] or (i >= 5 and atr_aligned[i] < 0.8 * atr_aligned[i-5]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price >= middle band or volatility expands
-                if close[i] >= basis[i] or high_volatility:
+                # Exit short: price returns to midline or volatility contracts
+                if close[i] >= donch_mid_aligned[i] or (i >= 5 and atr_aligned[i] < 0.8 * atr_aligned[i-5]):
                     exit_signal = True
             
             if exit_signal:
@@ -97,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_BollingerBandwidthSqueeze_1dTrend_Volume"
-timeframe = "6h"
+name = "12H_DonchianBreakout_1dATR_Volume"
+timeframe = "12h"
 leverage = 1.0
