@@ -29,13 +29,13 @@ def generate_signals(prices):
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 12h timeframe (primary timeframe)
+    # Align to 4h timeframe (primary timeframe)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike filter (20-period average on 12h data)
+    # Volume spike filter (20-period average on 4h data)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -85,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Pivot_R1_S1_Breakout_1dEMA34_Volume_Spike"
-timeframe = "12h"
+name = "4h_Pivot_R1_S1_Breakout_1dEMA34_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
