@@ -47,6 +47,10 @@ def generate_signals(prices):
     # Calculate 20-period average volume for volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Pre-calculate session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -57,6 +61,13 @@ def generate_signals(prices):
             np.isnan(atr_14_aligned[i]) or 
             np.isnan(ema20_4h_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Skip if outside session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Donchian20_4hEMA20_ATRVolFilter_VolSpike"
+name = "1h_Donchian20_4hEMA20_ATRVolFilter_VolSpike_Session"
 timeframe = "1h"
 leverage = 1.0
