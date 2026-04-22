@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,7 +33,7 @@ def generate_signals(prices):
     r2 = pivot + (high_1d - low_1d)
     s2 = pivot - (high_1d - low_1d)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 6h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -68,15 +68,15 @@ def generate_signals(prices):
         if position == 0:
             # Long: Price breaks above R2 + volume spike + volatility filter
             if (close[i] > r2_aligned[i] and 
-                volume[i] > 2.0 * vol_avg_20[i] and
+                volume[i] > 1.5 * vol_avg_20[i] and
                 atr[i] > 0.5 * atr[i-1] if i > 0 else True):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: Price breaks below S2 + volume spike + volatility filter
             elif (close[i] < s2_aligned[i] and 
-                  volume[i] > 2.0 * vol_avg_20[i] and
+                  volume[i] > 1.5 * vol_avg_20[i] and
                   atr[i] > 0.5 * atr[i-1] if i > 0 else True):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit: Price crosses back to opposite pivot level (full exit)
@@ -86,17 +86,17 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1
                 # Exit short: Price closes above R1
                 if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
 
-name = "12H_Pivot_R2_S2_Breakout_Volume_Volatility"
-timeframe = "12h"
+name = "6H_Pivot_R2_S2_Breakout_Volume_Volatility"
+timeframe = "6h"
 leverage = 1.0
