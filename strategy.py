@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) pullback with 4h trend filter and 1d volume confirmation
-# RSI < 30 in uptrend (price > 4h EMA50) for long, RSI > 70 in downtrend for short
-# Uses 1d volume spike to filter for institutional participation
-# Session filter (08-20 UTC) reduces noise
-# Target: 15-30 trades/year per symbol (60-120 total) to avoid fee drag
+# Hypothesis: 6h Elder Ray Index with 1-week EMA50 trend filter
+# Elder Ray measures bull/bear power relative to EMA13, filtering by weekly trend.
+# Works in bull markets (buy when bull power > 0 and weekly uptrend) and bear markets (sell when bear power < 0 and weekly downtrend).
+# Uses volume confirmation to avoid false signals. Target: 15-25 trades/year per symbol (60-100 total).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,72 +18,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14) on close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ema = pd.Series(gain).ewm(alpha=1/14, adjust=False).values
-    loss_ema = pd.Series(loss).ewm(alpha=1/14, adjust=False).values
-    rs = gain_ema / (loss_ema + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate EMA13 for Elder Ray
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Load 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Load 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > 1.5 * vol_ma20_1d
+    # Load 1-week data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align indicators to 1-hour timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Calculate 50-period EMA on weekly close for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation: 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > 1.5 * vol_ma20
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
+    
+    # Align weekly EMA50 to 6-hour timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + uptrend (price > 4h EMA50) + 1d volume spike
-            if (rsi[i] < 30 and close[i] > ema_50_4h_aligned[i] and vol_spike_1d_aligned[i]):
-                signals[i] = 0.20
+            # Long: Bull power positive + weekly uptrend + volume confirmation
+            if (bull_power[i] > 0 and close[i] > ema50_1w_aligned[i] and vol_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + downtrend (price < 4h EMA50) + 1d volume spike
-            elif (rsi[i] > 70 and close[i] < ema_50_4h_aligned[i] and vol_spike_1d_aligned[i]):
-                signals[i] = -0.20
+            # Short: Bear power negative + weekly downtrend + volume confirmation
+            elif (bear_power[i] < 0 and close[i] < ema50_1w_aligned[i] and vol_confirm[i]):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral zone (40-60)
+            # Exit: Elder power contradicts position or volume fails
             if position == 1:
-                if rsi[i] > 40:
+                if (bull_power[i] <= 0 or not vol_confirm[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if rsi[i] < 60:
+                if (bear_power[i] >= 0 or not vol_confirm[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI_Pullback_4hEMA50_1dVolume_Spike_Session"
-timeframe = "1h"
+name = "6h_ElderRay_1wEMA50_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
