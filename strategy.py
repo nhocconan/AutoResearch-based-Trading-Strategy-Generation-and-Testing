@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Donchian breakout with 1-day volume filter and trend filter.
-Long when price breaks above 20-period high, 1-day volume > 20-period average, and 1-day EMA50 rising.
-Short when price breaks below 20-period low, 1-day volume > 20-period average, and 1-day EMA50 falling.
-Exit when price reverses to touch the opposite Donchian band (mean reversion) or trend fails.
-Donchian provides clear breakout levels; volume filter ensures participation; 1-day EMA50 filters trend.
-Designed for low trade frequency by requiring three confirmations. Works in bull/bear by following daily trend.
+Hypothesis: 12-hour RSI mean-reversion with 1-day trend filter and volume confirmation.
+Long when RSI < 30 (oversold) and price above 1-day EMA200 (bullish bias).
+Short when RSI > 70 (overbought) and price below 1-day EMA200 (bearish bias).
+Exit when RSI returns to neutral (40-60 range) or opposite extreme is reached.
+Uses 1-day EMA200 to filter higher timeframe trend, reducing counter-trend trades.
+Designed for low trade frequency by requiring RSI extremes + trend alignment.
+Works in both bull and bear markets by following daily trend while using 12h RSI for entries.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,49 +23,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for EMA50 and volume filters - ONCE before loop
+    # Load 1-day data for EMA200 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 1-day EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # 1-day volume average (20-period)
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 6-hour Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(14, n):  # Start after enough data for RSI
         # Skip if data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above 20-period high, volume above average, EMA50 rising
-            if (high[i] > high_20[i-1] and  # Breakout condition
-                volume[i] > vol_avg_1d_aligned[i] and  # Volume confirmation
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):  # Uptrend
+            # Long: RSI oversold (<30) AND price above 1-day EMA200 AND volume confirmation
+            if (rsi[i] < 30 and 
+                close[i] > ema200_1d_aligned[i] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below 20-period low, volume above average, EMA50 falling
-            elif (low[i] < low_20[i-1] and  # Breakdown condition
-                  volume[i] > vol_avg_1d_aligned[i] and  # Volume confirmation
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):  # Downtrend
+            # Short: RSI overbought (>70) AND price below 1-day EMA200 AND volume confirmation
+            elif (rsi[i] > 70 and 
+                  close[i] < ema200_1d_aligned[i] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -72,14 +75,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price touches or goes below lower Donchian band OR trend fails
-                if (low[i] <= low_20[i] or 
-                    ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):
+                # Exit long: RSI returns to neutral (40-60) or becomes overbought (>70)
+                if (rsi[i] >= 40 and rsi[i] <= 60) or rsi[i] > 70:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price touches or goes above upper Donchian band OR trend fails
-                if (high[i] >= high_20[i] or 
-                    ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):
+                # Exit short: RSI returns to neutral (40-60) or becomes oversold (<30)
+                if (rsi[i] >= 40 and rsi[i] <= 60) or rsi[i] < 30:
                     exit_signal = True
             
             if exit_signal:
@@ -90,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Donchian_Breakout_1dVol_EMA50_Trend"
-timeframe = "6h"
+name = "12H_RSI_MeanReversion_1dEMA200_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
