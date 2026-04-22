@@ -3,129 +3,139 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily 1D Williams %R (14) + Weekly Supertrend (10, 3) trend filter + volume confirmation.
-# Williams %R identifies overbought/oversold conditions on daily timeframe.
-# Weekly Supertrend filters trades to only take in direction of higher timeframe trend.
-# Volume confirmation ensures institutional participation.
-# Works in both bull and bear markets by combining mean reversion (Williams %R) with trend filter.
-# Targets 10-25 trades/year with disciplined risk control.
+# Hypothesis: 4h Trix + Volume Spike + Choppiness Regime Filter
+# Trix (12) measures momentum with smoothing. In trending regimes (CHOP < 38.2), 
+# go long when Trix crosses above zero with volume spike, short when crosses below zero with volume spike.
+# In ranging regimes (CHOP > 61.8), fade moves: long when Trix < -0.1 with volume spike at support,
+# short when Trix > 0.1 with volume spike at resistance.
+# Uses 12h timeframe for trend confirmation to reduce noise.
+# Designed for low trade frequency (<30/year) with high win rate in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for Williams %R (once before loop)
+    # Load 1d data for Choppiness Index (once before loop)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Handle division by zero
-    
-    # Align Williams %R to daily timeframe (no additional delay needed as it's based on completed daily bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Load weekly data for Supertrend (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ATR (10-period) for Supertrend
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # Calculate True Range for Choppiness Index
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate Supertrend (10, 3)
-    # Basic Upper Band = (High + Low)/2 + multiplier * ATR
-    # Basic Lower Band = (High + Low)/2 - multiplier * ATR
-    hl2 = (high_1w + low_1w) / 2
-    upper_band = hl2 + 3 * atr
-    lower_band = hl2 - 3 * atr
+    # Calculate ADX components for Choppiness Index
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # Initialize Supertrend
-    supertrend = np.zeros_like(close_1w)
-    trend = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(1, len(close_1w)):
-        if close_1w[i] > upper_band[i-1]:
-            trend[i] = 1
-        elif close_1w[i] < lower_band[i-1]:
-            trend[i] = -1
-        else:
-            trend[i] = trend[i-1]
-        
-        if trend[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
+    # Calculate DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
     
-    # Align Supertrend to daily timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
-    trend_aligned = align_htf_to_ltf(prices, df_1w, trend)
+    # Calculate DX and Choppiness Index
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # Avoid division by zero
     
-    # Calculate 20-day average volume for volume spike detection
-    volume_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Align Choppiness Index to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Load 12h data for trend confirmation
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Calculate TRIX (12-period)
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1 period ago
+    ema1 = pd.Series(close_12h).ewm(span=12, adjust=False).mean()
+    ema2 = ema1.ewm(span=12, adjust=False).mean()
+    ema3 = ema2.ewm(span=12, adjust=False).mean()
+    trix_raw = ema3.pct_change() * 100  # Percentage change
+    trix = trix_raw.values
+    
+    # Align TRIX to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
+    
+    # Calculate 20-period average volume for volume spike detection
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(supertrend_aligned[i]) or 
-            np.isnan(trend_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(chop_aligned[i]) or 
+            np.isnan(trix_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = prices['close'].iloc[i]
-        vol = df_1d['volume'].values[i] if i < len(df_1d['volume']) else 0
-        vol_ma = vol_ma_aligned[i]
-        wr = williams_r_aligned[i]
-        st = supertrend_aligned[i]
-        tr_dir = trend_aligned[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        chop_val = chop_aligned[i]
+        trix_val = trix_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-day average
+        # Volume filter: current volume > 1.5 * 20-period average
         vol_spike = vol > 1.5 * vol_ma
         
         if position == 0:
-            # Long conditions: Williams %R oversold (-80 or below) + uptrend + volume spike
-            if wr <= -80 and tr_dir == 1 and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            # Short conditions: Williams %R overbought (-20 or above) + downtrend + volume spike
-            elif wr >= -20 and tr_dir == -1 and vol_spike:
-                signals[i] = -0.25
-                position = -1
+            # Determine market regime
+            is_trending = chop_val < 38.2  # Trending market
+            is_ranging = chop_val > 61.8   # Ranging market
+            
+            if is_trending:
+                # Trending regime: Trix momentum
+                if trix_val > 0 and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif trix_val < 0 and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
+            elif is_ranging:
+                # Ranging regime: fade extremes
+                if trix_val < -0.1 and vol_spike:
+                    signals[i] = 0.25
+                    position = 1
+                elif trix_val > 0.1 and vol_spike:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position != 0:
             # Exit conditions
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Williams %R reaches overbought (-20 or above) or trend changes
-                if wr >= -20 or tr_dir == -1:
+                # Exit when Trix crosses below zero or extreme reached
+                if trix_val < 0:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when Williams %R reaches oversold (-80 or below) or trend changes
-                if wr <= -80 or tr_dir == 1:
+                # Exit when Trix crosses above zero or extreme reached
+                if trix_val > 0:
                     exit_signal = True
             
             if exit_signal:
@@ -137,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_Supertrend_Volume"
-timeframe = "1d"
+name = "4h_Trix_Volume_Chop_Regime"
+timeframe = "4h"
 leverage = 1.0
