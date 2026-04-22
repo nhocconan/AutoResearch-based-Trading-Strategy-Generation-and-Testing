@@ -3,34 +3,40 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with weekly pivot direction and volume confirmation
-# Long when price breaks above 20-period high + weekly pivot support + volume spike
-# Short when price breaks below 20-period low + weekly pivot resistance + volume spike
-# Exit when price crosses opposite Donchian band or trend weakens
-# Designed for low trade frequency (~15-35/year) to minimize fee drain and work in both bull and bear markets.
+# Hypothesis: 12h Donchian(20) breakout with weekly trend filter and volume confirmation
+# Long when price breaks above upper band + price > weekly EMA50 + volume spike
+# Short when price breaks below lower band + price < weekly EMA50 + volume spike
+# Exit when price crosses back through middle band or trend reverses
+# Designed for low trade frequency (~15-30/year) to minimize fee drain and work in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for pivot direction
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Load weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    # Calculate weekly pivot point for bias
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Calculate 50-period EMA on weekly close for trend filter
+    ema_50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
     
-    # Calculate 20-period Donchian channels on 6h data
-    high = prices['high'].values
-    low = prices['low'].values
+    # Calculate daily data for Donchian channels (20-period)
+    df_daily = get_htf_data(prices, '1d')
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
     
-    # Donchian upper and lower bands
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period Donchian channels on daily timeframe
+    # Upper band = 20-period high, Lower band = 20-period low, Middle band = average
+    upper_band = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    lower_band = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
+    middle_band = (upper_band + lower_band) / 2
+    
+    # Align Donchian levels to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_band)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_band)
+    middle_aligned = align_htf_to_ltf(prices, df_daily, middle_band)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -41,9 +47,10 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or 
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
+            np.isnan(middle_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -53,35 +60,36 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        weekly_pivot_val = weekly_pivot_aligned[i]
+        upper = upper_aligned[i]
+        lower = lower_aligned[i]
+        middle = middle_aligned[i]
+        ema_val = ema_50_aligned[i]
         
         # Volume filter: current volume > 2.0 * 20-period average
         vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long conditions: break above upper band + price above weekly pivot + volume spike
-            if price > upper and price > weekly_pivot_val and vol_spike:
+            # Long conditions: price breaks above upper band + uptrend + volume spike
+            if price > upper and price > ema_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: break below lower band + price below weekly pivot + volume spike
-            elif price < lower and price < weekly_pivot_val and vol_spike:
+            # Short conditions: price breaks below lower band + downtrend + volume spike
+            elif price < lower and price < ema_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price crosses opposite Donchian band
+            # Exit conditions: price crosses back through middle band or trend reverses
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price crosses below lower band
-                if price < lower:
+                # Exit when price crosses below middle band or trend turns down
+                if price < middle or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price crosses above upper band
-                if price > upper:
+                # Exit when price crosses above middle band or trend turns up
+                if price > middle or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -93,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
