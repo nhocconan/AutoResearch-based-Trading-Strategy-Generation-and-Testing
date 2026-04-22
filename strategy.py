@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3 = high_1d + 2 * (pivot - low_1d)
     s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Align pivot levels to 1d timeframe (same as primary)
+    # Align pivot levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -70,33 +70,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 with volume spike
-            if (close[i] > r3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = 0.25
+            # Long: Price breaks above R2 with volume spike and ATR filter
+            if (close[i] > r2_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and atr[i] > 0):
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below S3 with volume spike
-            elif (close[i] < s3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]):
-                signals[i] = -0.25
+            # Short: Price breaks below S2 with volume spike and ATR filter
+            elif (close[i] < s2_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and atr[i] > 0):
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit: Price crosses back to opposite pivot level
             if position == 1:
-                # Exit long: Price closes below S3
-                if close[i] < s3_aligned[i]:
+                # Exit long: Price closes below S2
+                if close[i] < s2_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1
-                # Exit short: Price closes above R3
-                if close[i] > r3_aligned[i]:
+                # Exit short: Price closes above R2
+                if close[i] > r2_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
 
-name = "1D_Pivot_R3_S3_Breakout_Volume"
-timeframe = "1d"
+name = "4H_Pivot_R2_S2_Breakout_Volume_ATR"
+timeframe = "4h"
 leverage = 1.0
