@@ -5,14 +5,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian breakout with 1d EMA34 trend filter and volume confirmation
-    # Donchian channels provide clear support/resistance levels. Breakouts with volume
-    # confirm institutional participation. 1d EMA34 ensures alignment with higher timeframe trend.
-    # This combination reduces false breakouts and improves win rate in both bull and bear markets.
-    # Focus on 12h timeframe with strict entry conditions to limit trades to 12-37/year.
+    # Hypothesis: 4h Donchian breakout with 1d EMA34 trend filter and volume spike
+    # Donchian breakouts capture breakout momentum. EMA34 on 1d ensures alignment with
+    # daily trend. Volume spike confirms institutional participation. Session filter
+    # restricts to active hours. Target: 20-50 trades/year to avoid fee drag.
     
     # Price and volume data
     close = prices['close'].values
@@ -20,19 +19,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Load 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 12h Donchian Channels (20-period)
+    # Calculate 4h Donchian Channels (20-period)
     donchian_period = 20
-    upper_donchian = pd.Series(high_12h).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_donchian = pd.Series(low_12h).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    upper_donchian = pd.Series(high_4h).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_donchian = pd.Series(low_4h).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Align Donchian Channels to 12h timeframe
-    upper_donchian_aligned = align_htf_to_ltf(prices, df_12h, upper_donchian)
-    lower_donchian_aligned = align_htf_to_ltf(prices, df_12h, lower_donchian)
+    # Align Donchian Channels to 4h timeframe
+    upper_donchian_aligned = align_htf_to_ltf(prices, df_4h, upper_donchian)
+    lower_donchian_aligned = align_htf_to_ltf(prices, df_4h, lower_donchian)
     
     # Load 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -87,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dEMA34_Volume_Session_v2"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dEMA34_Volume_Session_v1"
+timeframe = "4h"
 leverage = 1.0
