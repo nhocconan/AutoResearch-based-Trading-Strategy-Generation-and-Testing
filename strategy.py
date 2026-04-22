@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points (ONCE before loop)
+    # Load daily data for pivot points (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 2:
@@ -31,13 +31,14 @@ def generate_signals(prices):
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 1d timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 20-period average with min_periods
+    vol_series = pd.Series(volume)
+    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,16 +53,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 + volume spike
+            # Long: Price breaks above R1 + volume spike (2x avg)
             if close[i] > r1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike
+            # Short: Price breaks below S1 + volume spike (2x avg)
             elif close[i] < s1_aligned[i] and volume[i] > 2.0 * vol_avg_20[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses back below/above pivot (full exit)
+            # Exit: Price crosses back to pivot level (full exit)
             if position == 1:
                 # Exit long: Price closes below pivot
                 if close[i] < pivot_aligned[i]:
@@ -79,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Pivot_R1_S1_Breakout_Volume_Spike"
-timeframe = "4h"
+name = "1D_Pivot_R1_S1_Breakout_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
