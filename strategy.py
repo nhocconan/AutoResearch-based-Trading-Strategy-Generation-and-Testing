@@ -8,9 +8,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h price closes above/below 1d Donchian channel with volume confirmation
-    # Uses 1d Donchian(20) as dynamic support/resistance, trades breakouts with volume filter
-    # Designed to capture sustained moves in both bull and bear markets with controlled frequency
+    # Hypothesis: 4h Bollinger Band squeeze breakout with 1d EMA34 trend filter and volume confirmation
+    # Combines volatility contraction (squeeze) with breakout in direction of higher timeframe trend
+    # Works in both bull and bear markets by filtering breakouts with trend and volume
     
     # Price and volume data
     close = prices['close'].values
@@ -18,29 +18,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Donchian channel calculation
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + bb_std * std
+    lower = sma - bb_std * std
+    bb_width = (upper - lower) / sma  # Normalized bandwidth
+    
+    # Bollinger squeeze: low volatility condition
+    bb_width_50 = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    squeeze = bb_width < 0.8 * bb_width_50  # Bandwidth below 80% of its 50-period average
+    
+    # Load 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 1d Donchian channels (20-period high/low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Volume confirmation (20-period average on 12h)
+    # Volume confirmation (20-period average)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_ma20  # Require 1.5x average volume
+    vol_surge = volume > 1.5 * vol_ma20  # 1.5x volume surge for breakout validation
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(50, n):  # Start after indicators warm up
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(ema34_1d_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -48,25 +53,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close breaks above 1d Donchian high with volume confirmation
-            if close[i] > donchian_high_aligned[i] and vol_spike[i]:
+            # Long breakout: squeeze + price breaks above upper band + volume surge + above 1d EMA34
+            if squeeze[i] and close[i] > upper[i] and vol_surge[i] and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below 1d Donchian low with volume confirmation
-            elif close[i] < donchian_low_aligned[i] and vol_spike[i]:
+            # Short breakout: squeeze + price breaks below lower band + volume surge + below 1d EMA34
+            elif squeeze[i] and close[i] < lower[i] and vol_surge[i] and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to the middle of the Donchian channel
-            mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+            # Exit conditions: price returns to middle (SMA) or trend reversal vs 1d EMA34
             if position == 1:
-                if close[i] < mid:
+                if close[i] < sma[i] or close[i] < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > mid:
+                if close[i] > sma[i] or close[i] > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -74,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dVolConfirm_v1"
-timeframe = "12h"
+name = "4h_Bollinger_Squeeze_Breakout_1dEMA34_Trend_VolumeSurge_v1"
+timeframe = "4h"
 leverage = 1.0
