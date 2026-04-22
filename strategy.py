@@ -3,32 +3,39 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: Daily Donchian channel breakout with weekly EMA trend filter and volume confirmation.
+# Works in bull markets (breakouts continue) and bear markets (breakouts fail quickly, limiting losses).
+# Target: 10-25 trades/year on 1d timeframe to minimize fee drag.
+# Uses weekly EMA for trend filter to avoid whipsaws in ranging markets.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Daily data for pivot points and EMA
+    # Weekly data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point calculation
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # Donchian channels (20-day)
+    upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA34 for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align Donchian channels to daily timeframe (no shift needed as already daily)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     
-    # Align to 4h timeframe (primary)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # 4h ATR(14) for volatility filter and stop
+    # Daily ATR(14) for volatility filter and stop
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -42,39 +49,39 @@ def generate_signals(prices):
     
     # Volume filter (20-period MA)
     vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 2.0 * vol_ma20  # Strong volume surge
+    vol_surge = prices['volume'].values > 1.5 * vol_ma20  # Moderate volume surge
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema_34_4h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above S1 with volume surge, above daily EMA34
-            if (close[i] > s1_4h[i] and vol_surge[i] and close[i] > ema_34_4h[i]):
+            # Long: Price breaks above upper Donchian with volume surge and above weekly EMA34
+            if (close[i] > upper_aligned[i] and vol_surge[i] and close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below R1 with volume surge, below daily EMA34
-            elif (close[i] < r1_4h[i] and vol_surge[i] and close[i] < ema_34_4h[i]):
+            # Short: Price breaks below lower Donchian with volume surge and below weekly EMA34
+            elif (close[i] < lower_aligned[i] and vol_surge[i] and close[i] < ema_34_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses opposite level or volatility drops significantly
+            # Exit: Price crosses opposite Donchian level or volatility drops significantly
             if position == 1:
-                if close[i] < pivot_4h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
+                if close[i] < lower_aligned[i] or atr[i] < 0.5 * atr[i-1]:  # Volatility drop filter
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > pivot_4h[i] or atr[i] < 0.3 * atr[i-1]:  # Volatility drop filter
+                if close[i] > upper_aligned[i] or atr[i] < 0.5 * atr[i-1]:  # Volatility drop filter
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -82,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_PivotBreakout_VolumeSurge_EMA34Trend_v2"
-timeframe = "4h"
+name = "1d_DonchianBreakout_WeeklyEMA34_VolumeSurge"
+timeframe = "1d"
 leverage = 1.0
