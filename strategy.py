@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1H 4H-1D Trend Reversion with Volume Confirmation
-Hypothesis: Price tends to revert to the 4H EMA20 after moving 1.5*ATR away, 
-but only in the direction of the 1D trend (EMA50). Volume confirms momentum.
-Works in both bull/bear: In uptrends, buy dips to EMA20; in downtrends, sell rallies to EMA20.
-Targets 15-30 trades/year by requiring 4H/1D alignment + volume spike.
+Hypothesis: 6-hour ADX + Williams Alligator with 1-week trend filter.
+Long when ADX > 25 (trending) + Alligator bullish alignment (Lips > Teeth > Jaw) + weekly close > weekly EMA50.
+Short when ADX > 25 + Alligator bearish alignment (Lips < Teeth < Jaw) + weekly close < weekly EMA50.
+Exit when ADX < 20 (range) or Alligator alignment breaks.
+Weekly filter ensures we only trade in strong trends, avoiding whipsaws in ranging markets.
+Designed for low trade frequency (~10-20/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -19,87 +20,117 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate 1H ATR for entry distance
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = tr2[0] if not np.isnan(tr2[0]) else 0
-    tr3[0] = tr3[0] if not np.isnan(tr3[0]) else 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Load 4H data for EMA20 (dynamic mean reversion target)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 1-week data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_4h_20 = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_20_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_20)
     
-    # Load 1D data for EMA50 (trend filter)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_1d_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    # Calculate weekly EMA50 for trend filter
+    weekly_close = df_1w['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
-    # Volume filter: 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate ADX (14-period)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        else:
+            plus_dm[i] = 0
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+        else:
+            minus_dm[i] = 0
+    
+    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(high, 1)), abs(low - np.roll(low, 1))))
+    tr[0] = high[0] - low[0]
+    
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Calculate Williams Alligator (13,8,5 SMAs with 8,5,3 offsets)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    
+    jaw_shifted = jaw.shift(8).values
+    teeth_shifted = teeth.shift(5).values
+    lips_shifted = lips.shift(3).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_4h_20_aligned[i]) or np.isnan(ema_1d_50_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx[i]) or np.isnan(weekly_ema50_aligned[i]) or 
+            np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        weekly_close_price = df_1w['close'].values
+        # Get current weekly close value (need to find index)
+        # Simplified: use the weekly EMA50 as trend proxy
+        weekly_trend_up = weekly_close_price[-1] > weekly_ema50[-1] if len(weekly_close_price) > 0 else False
+        weekly_trend_down = weekly_close_price[-1] < weekly_ema50[-1] if len(weekly_close_price) > 0 else False
+        
+        # Better approach: use aligned weekly close
+        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, df_1w['close'].values)
+        weekly_close_val = weekly_close_aligned[i]
+        weekly_ema50_val = weekly_ema50_aligned[i]
+        
+        if np.isnan(weekly_close_val) or np.isnan(weekly_ema50_val):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        weekly_trend_up = weekly_close_val > weekly_ema50_val
+        weekly_trend_down = weekly_close_val < weekly_ema50_val
+        
         if position == 0:
-            # Long: 1D uptrend + price near 4H EMA20 (within 0.5*ATR) + volume confirmation
-            if (close[i] > ema_1d_50_aligned[i] and  # 1D uptrend
-                close[i] >= ema_4h_20_aligned[i] - 0.5 * atr[i] and  # near 4H EMA20
-                close[i] <= ema_4h_20_aligned[i] + 0.5 * atr[i] and
-                volume[i] > 1.5 * vol_ma[i]):  # volume spike
-                signals[i] = 0.20
+            # Long: ADX > 25 (trending) + Alligator bullish + weekly uptrend
+            if (adx[i] > 25 and 
+                lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i] and 
+                weekly_trend_up):
+                signals[i] = 0.25
                 position = 1
-            # Short: 1D downtrend + price near 4H EMA20 + volume confirmation
-            elif (close[i] < ema_1d_50_aligned[i] and  # 1D downtrend
-                  close[i] >= ema_4h_20_aligned[i] - 0.5 * atr[i] and  # near 4H EMA20
-                  close[i] <= ema_4h_20_aligned[i] + 0.5 * atr[i] and
-                  volume[i] > 1.5 * vol_ma[i]):  # volume spike
-                signals[i] = -0.20
+            # Short: ADX > 25 (trending) + Alligator bearish + weekly downtrend
+            elif (adx[i] > 25 and 
+                  lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i] and 
+                  weekly_trend_down):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price moves 1.5*ATR away from 4H EMA20 (mean reversion failed) or trend change
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price drops below 4H EMA20 - 1.5*ATR or 1D turns down
-                if (close[i] < ema_4h_20_aligned[i] - 1.5 * atr[i] or
-                    close[i] < ema_1d_50_aligned[i]):
+                # Exit long: ADX < 20 (range) or Alligator alignment breaks
+                if adx[i] < 20 or not (lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price rises above 4H EMA20 + 1.5*ATR or 1D turns up
-                if (close[i] > ema_4h_20_aligned[i] + 1.5 * atr[i] or
-                    close[i] > ema_1d_50_aligned[i]):
+                # Exit short: ADX < 20 (range) or Alligator alignment breaks
+                if adx[i] < 20 or not (lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i]):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_4H_EMA20_1D_EMA50_MeanReversion_Volume"
-timeframe = "1h"
+name = "6H_ADX_Alligator_WeeklyTrendFilter"
+timeframe = "6h"
 leverage = 1.0
