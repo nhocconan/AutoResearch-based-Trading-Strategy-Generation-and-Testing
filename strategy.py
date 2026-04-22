@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Time-Weighted Average Price (TWAP) with 1-day price trend filter.
-Long when price > TWAP and 1-day close > 1-day open (bullish daily candle).
-Short when price < TWAP and 1-day close < 1-day open (bearish daily candle).
-Exit when price crosses TWAP or daily trend reverses.
-TWAP provides a fair value reference; daily trend filter ensures alignment with higher timeframe momentum.
-Works in both bull and bear markets by following institutional price action while using TWAP for entry timing.
+Hypothesis: 6-hour MACD with 1-day ADX filter and volume confirmation.
+Long when MACD line crosses above signal line, ADX > 25 (trending), and volume > 50-period average volume.
+Short when MACD line crosses below signal line, ADX > 25, and volume > 50-period average volume.
+Exit when MACD reverses or volume drops below average.
+MACD captures momentum, ADX ensures trending markets, volume confirms institutional participation.
+Works in both bull and bear markets by following momentum in trending regimes.
 """
 
 import numpy as np
@@ -20,54 +20,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1-day data for trend filter - ONCE before loop
+    # MACD calculation (12,26,9)
+    close_series = pd.Series(close)
+    ema12 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema26 = close_series.ewm(span=26, adjust=False, min_periods=26).mean()
+    macd_line = (ema12 - ema26).values
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_histogram = macd_line - signal_line
+    
+    # Load 1-day data for ADX and volume filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily trend: 1 if bullish (close > open), -1 if bearish (close < open)
-    daily_trend = np.where(df_1d['close'] > df_1d['open'], 1, -1)
-    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
+    # ADX calculation (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # TWAP calculation for 12h period (simple average of typical price)
-    typical_price = (high + low + close) / 3.0
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Cumulative TWAP (resets daily)
-    twap = np.full(n, np.nan)
-    cum_tp = 0.0
-    count = 0
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    for i in range(n):
-        # Reset at start of each day (00:00 UTC)
-        if i > 0 and prices['open_time'].iloc[i].date() != prices['open_time'].iloc[i-1].date():
-            cum_tp = 0.0
-            count = 0
-        
-        cum_tp += typical_price[i]
-        count += 1
-        
-        if count > 0:
-            twap[i] = cum_tp / count
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx = np.concatenate([np.full(14, np.nan), adx[14:]])  # First 14 values are NaN
+    
+    # Volume average
+    volume_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(volume_1d).rolling(window=50, min_periods=50).mean().values
+    
+    # Align HTF data
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(twap[i]) or np.isnan(daily_trend_aligned[i]):
+        if (np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(avg_vol_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above TWAP and daily trend bullish
-            if close[i] > twap[i] and daily_trend_aligned[i] == 1:
+            # Long: MACD bullish crossover, ADX > 25, volume above average
+            if (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1] and
+                adx_aligned[i] > 25 and volume[i] > avg_vol_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below TWAP and daily trend bearish
-            elif close[i] < twap[i] and daily_trend_aligned[i] == -1:
+            # Short: MACD bearish crossover, ADX > 25, volume above average
+            elif (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1] and
+                  adx_aligned[i] > 25 and volume[i] > avg_vol_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -75,12 +105,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls below TWAP or daily trend turns bearish
-                if close[i] < twap[i] or daily_trend_aligned[i] == -1:
+                # Exit long: MACD bearish crossover
+                if macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises above TWAP or daily trend turns bullish
-                if close[i] > twap[i] or daily_trend_aligned[i] == 1:
+                # Exit short: MACD bullish crossover
+                if macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -91,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_TWAP_1dTrend_Filter"
-timeframe = "12h"
+name = "6H_MACD_1dADX_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
