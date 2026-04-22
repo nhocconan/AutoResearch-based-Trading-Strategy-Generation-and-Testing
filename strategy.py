@@ -3,100 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter.
-# Long when Bull Power > 0 + Bear Power < 0 + ADX > 25 (trending market)
-# Short when Bear Power < 0 + Bull Power < 0 + ADX > 25
-# Exit when ADX < 20 (range market) or power signals reverse.
-# Works in trending markets (both bull and bear) by capturing momentum with trend strength filter.
-# Avoids choppy markets where Elder Ray whipsaws. Target: 15-30 trades/year.
+# Hypothesis: 12h Bollinger Squeeze breakout with volume confirmation and weekly trend filter.
+# Long when price breaks above upper Bollinger Band during low volatility (squeeze) + volume spike + price > weekly EMA50
+# Short when price breaks below lower Bollinger Band during squeeze + volume spike + price < weekly EMA50
+# Exit when price re-enters the Bollinger Bands or volatility expands (BB width > 1.5x average)
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Target: 15-30 trades/year to minimize fee drag on 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA13 (Elder Ray) and ADX
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # ADX calculation (14-period)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Bollinger Bands (20, 2) on 12h closes
+    close = prices['close'].values
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = sma20 + 2 * std20
+    lower = sma20 - 2 * std20
+    bb_width = upper - lower
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Bollinger Squeeze: current width < 0.5 * 20-period average width
+    squeeze = bb_width < 0.5 * bb_width_ma
     
-    # Smooth TR, +DM, -DM (14-period)
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align to 6h
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Volume spike filter (20-period average)
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(sma20[i]) or 
+            np.isnan(std20[i]) or 
+            np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bull = bull_power_aligned[i]
-        bear = bear_power_aligned[i]
-        adx_val = adx_aligned[i]
+        price = close[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        ema50 = ema50_1w_aligned[i]
+        sq = squeeze[i]
+        
+        # Volume filter: current volume > 2.0 * 20-day average
+        vol_spike = vol > 2.0 * vol_ma
         
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power < 0 AND ADX > 25 (strong trend)
-            if bull > 0 and bear < 0 and adx_val > 25:
+            # Long conditions: price breaks above upper BB during squeeze + volume spike + price > weekly EMA50
+            if price > upper[i] and sq and vol_spike and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND Bull Power < 0 AND ADX > 25 (strong trend)
-            elif bear < 0 and bull < 0 and adx_val > 25:
+            # Short conditions: price breaks below lower BB during squeeze + volume spike + price < weekly EMA50
+            elif price < lower[i] and sq and vol_spike and price < ema50:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: ADX < 20 (weak trend/ranging) or power signals reverse
+            # Exit conditions: price re-enters Bollinger Bands or volatility expands
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when ADX weakens or Bull Power turns negative
-                if adx_val < 20 or bull <= 0:
+                # Exit when price re-enters below upper BB or volatility expands (BB width > 1.5x average)
+                if price < upper[i] or bb_width[i] > 1.5 * bb_width_ma[i]:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when ADX weakens or Bear Power turns positive
-                if adx_val < 20 or bear >= 0:
+                # Exit when price re-enters above lower BB or volatility expands
+                if price > lower[i] or bb_width[i] > 1.5 * bb_width_ma[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -108,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_ADX_Regime"
-timeframe = "6h"
+name = "12h_BollingerSqueeze_Breakout_Volume_WeeklyEMA50"
+timeframe = "12h"
 leverage = 1.0
