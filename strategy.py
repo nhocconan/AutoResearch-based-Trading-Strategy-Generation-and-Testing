@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1D Donchian(20) breakout with 1W ATR filter and volume confirmation.
-Long when price breaks above Donchian(20) high and weekly ATR > daily ATR.
-Short when price breaks below Donchian(20) low and weekly ATR > daily ATR.
-Exit when price crosses back through Donchian midline.
-Uses weekly volatility filter to avoid false breakouts in low volatility regimes.
-Works in both bull and bear markets by capturing breakouts with volatility confirmation.
+Hypothesis: 4-hour Bollinger Band squeeze breakout with daily volume confirmation and ADX trend filter.
+Long when price breaks above upper BB after low volatility squeeze (BBWidth < 20th percentile) and ADX > 25.
+Short when price breaks below lower BB after squeeze with ADX > 25.
+Exit when price crosses middle BB (20 SMA) or volatility expands (BBWidth > 80th percentile).
+Uses daily volume filter to ensure institutional participation. Works in both bull and bear markets
+by trading volatility breakouts in trending regimes (ADX > 25) while avoiding chop.
 """
 
 import numpy as np
@@ -14,93 +14,110 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1-day data for Donchian calculation - ONCE before loop
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std * std)
+    lower_band = sma - (bb_std * std)
+    bb_width = (upper_band - lower_band) / sma
+    
+    # Percentile ranks for BB width (20 and 80)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_20th = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20).values
+    bb_width_80th = bb_width_series.rolling(window=50, min_periods=20).quantile(0.80).values
+    
+    # ADX (14) for trend strength
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            high_diff = high[i] - high[i-1]
+            low_diff = low[i-1] - low[i]
+            plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
+            minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_dm_sm = np.zeros_like(plus_dm)
+        minus_dm_sm = np.zeros_like(minus_dm)
+        
+        atr[period-1] = np.mean(tr[:period])
+        plus_dm_sm[period-1] = np.mean(plus_dm[:period])
+        minus_dm_sm[period-1] = np.mean(minus_dm[:period])
+        
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sm[i] = (plus_dm_sm[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_sm[i] = (minus_dm_sm[i-1] * (period-1) + minus_dm[i]) / period
+        
+        plus_di = 100 * plus_dm_sm / (atr + 1e-10)
+        minus_di = 100 * minus_dm_sm / (atr + 1e-10)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = np.zeros_like(dx)
+        adx[2*period-1] = np.mean(dx[period-1:2*period-1])
+        for i in range(2*period, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        return adx
+    
+    adx = calculate_adx(high, low, close, 14)
+    
+    # Load 1-day data for volume filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian(20) channels on daily data
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
-    
-    # Align Donchian levels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    
-    # Load 1-week data for ATR filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    # Calculate ATR(14) on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate ATR(14) on daily data for comparison
-    tr1_d = high - low
-    tr2_d = np.abs(high - np.roll(close, 1))
-    tr3_d = np.abs(low - np.roll(close, 1))
-    tr1_d[0] = 0
-    tr2_d[0] = 0
-    tr3_d[0] = 0
-    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
-    atr_1d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
-    
-    # Align weekly ATR to 1d timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    volume_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(atr_1w_aligned[i]) or
-            np.isnan(atr_1d[i])):
+        if np.isnan(sma[i]) or np.isnan(bb_width[i]) or np.isnan(adx[i]) or np.isnan(bb_width_20th[i]) or np.isnan(bb_width_80th[i]) or np.isnan(avg_vol_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high and weekly ATR > daily ATR
-            if close[i] > donchian_high_aligned[i] and atr_1w_aligned[i] > atr_1d[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: Price breaks below Donchian low and weekly ATR > daily ATR
-            elif close[i] < donchian_low_aligned[i] and atr_1w_aligned[i] > atr_1d[i]:
-                signals[i] = -0.25
-                position = -1
+            # Look for Bollinger Band squeeze breakout with volume and trend confirmation
+            squeeze_condition = bb_width[i] < bb_width_20th[i]
+            volume_condition = volume_1d[i] > avg_vol_1d_aligned[i]
+            trend_condition = adx[i] > 25
+            
+            if squeeze_condition and volume_condition and trend_condition:
+                if close[i] > upper_band[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < lower_band[i]:
+                    signals[i] = -0.25
+                    position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls below Donchian midline
-                if close[i] < donchian_mid_aligned[i]:
+                # Exit long: price crosses below middle Bollinger Band or volatility expands
+                if close[i] < sma[i] or bb_width[i] > bb_width_80th[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises above Donchian midline
-                if close[i] > donchian_mid_aligned[i]:
+                # Exit short: price crosses above middle Bollinger Band or volatility expands
+                if close[i] > sma[i] or bb_width[i] > bb_width_80th[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -111,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_1WATR_Filter"
-timeframe = "1d"
+name = "4H_BB_Squeeze_Breakout_ADX_Volume"
+timeframe = "4h"
 leverage = 1.0
