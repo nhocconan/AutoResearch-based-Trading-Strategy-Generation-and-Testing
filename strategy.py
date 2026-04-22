@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1-day ADX trend filter
-# Uses 20-period Donchian channels for breakout detection, volume spike confirms breakout strength
-# 1-day ADX > 25 filters for trending markets to avoid choppy conditions
-# Trades only in direction of 1-day trend to reduce counter-trend losses
-# Target: 20-35 trades/year per symbol (80-140 total over 4 years) to avoid fee drag
-# Works in bull/bear markets by only trading with the trend on higher timeframe
+# Hypothesis: 4h Camarilla R2/S2 breakout with volume spike and 1d EMA trend filter
+# Uses wider R2/S2 levels to reduce noise and false breakouts, with 1d EMA for trend alignment
+# Volume spike confirms breakout strength. Target: 20-30 trades/year per symbol (80-120 total)
+# Trades only in direction of daily trend to avoid counter-trend losses in choppy markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,81 +18,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ADX trend filter
+    # Load 1-day data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period) on 1-day data
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            
-            # If both are positive, the smaller one becomes zero
-            if plus_dm[i] > 0 and minus_dm[i] > 0:
-                if plus_dm[i] > minus_dm[i]:
-                    minus_dm[i] = 0
-                else:
-                    plus_dm[i] = 0
-            
-            tr[i] = max(high[i] - low[i], 
-                       abs(high[i] - close[i-1]), 
-                       abs(low[i] - close[i-1]))
-        
-        # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(high)
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        
-        # Initial values
-        atr[period] = np.mean(tr[1:period+1])
-        plus_dm_sum = np.sum(plus_dm[1:period+1])
-        minus_dm_sum = np.sum(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_sum = (plus_dm_sum * (period-1) + plus_dm[i]) / period
-            minus_dm_sum = (minus_dm_sum * (period-1) + minus_dm[i]) / period
-            
-            if atr[i] != 0:
-                plus_di[i] = 100 * plus_dm_sum / atr[i]
-                minus_di[i] = 100 * minus_dm_sum / atr[i]
-        
-        # Calculate DX and ADX
-        dx = np.zeros_like(high)
-        adx = np.zeros_like(high)
-        
-        for i in range(2*period, len(high)):
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        # Wilder's smoothing for ADX
-        adx[2*period] = np.mean(dx[period+1:2*period+1])
-        for i in range(2*period+1, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-            
-        return adx
+    # Calculate daily range
+    daily_range = high_1d - low_1d
     
-    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # Calculate Camarilla levels for previous day (R2/S2 - wider levels for fewer false signals)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_range = np.roll(daily_range, 1)
     
-    # Calculate 20-period Donchian channels on 4-hour data
-    def donchian_channels(high, low, period=20):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(high, np.nan)
-        
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-(period-1):i+1])
-            lower[i] = np.min(low[i-(period-1):i+1])
-            
-        return upper, lower
+    # Set first day values to NaN
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_range[0] = np.nan
     
-    donch_upper, donch_lower = donchian_channels(high, low, 20)
+    # Calculate Camarilla R2 and S2 from previous day (wider bands)
+    r2 = prev_close + (prev_range * 1.1 / 6)
+    s2 = prev_close - (prev_range * 1.1 / 6)
+    
+    # Calculate 34-period EMA on 1d close for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume spike filter (20-period on 4h)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -105,39 +56,41 @@ def generate_signals(prices):
     in_session = (hours >= 8) & (hours <= 20)
     
     # Align indicators to 4-hour timeframe
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
-            np.isnan(adx_14_1d_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian upper + volume spike + ADX > 25 (trending)
-            if (close[i] > donch_upper[i] and vol_spike[i] and adx_14_1d_aligned[i] > 25):
+            # Long: Price breaks above R2 + volume spike + uptrend (price > 1d EMA34)
+            if (close[i] > r2_aligned[i] and vol_spike[i] and close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower + volume spike + ADX > 25 (trending)
-            elif (close[i] < donch_lower[i] and vol_spike[i] and adx_14_1d_aligned[i] > 25):
+            # Short: Price breaks below S2 + volume spike + downtrend (price < 1d EMA34)
+            elif (close[i] < s2_aligned[i] and vol_spike[i] and close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to opposite Donchian level
+            # Exit: Price returns to opposite S2/R2 level
             if position == 1:
-                if close[i] < donch_lower[i]:
+                if close[i] < s2_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donch_upper[i]:
+                if close[i] > r2_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -145,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_Spike_ADX25_Trend"
+name = "4h_Camarilla_R2_S2_Breakout_1dEMA34_Volume_Session"
 timeframe = "4h"
 leverage = 1.0
