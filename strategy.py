@@ -8,33 +8,40 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Daily RSI for regime filter (14-period)
+    # Daily close for HTF trend and volatility
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # RSI calculation
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # 1-day EMA34 for trend direction
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily RSI to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Daily True Range for volatility regime
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # 6h price arrays
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # 6h EMA50 for trend
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # 4-hour EMA50 for trend alignment
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 6h volume and volume SMA20 for confirmation
-    volume = prices['volume'].values
-    vol_sma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 4-hour ATR for entry trigger and stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF indicators to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -42,43 +49,51 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any data is not ready
-        if (np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema50[i]) or 
-            np.isnan(vol_sma20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(ema_50[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        vol = volume[i]
-        ema50_val = ema50[i]
-        rsi_val = rsi_1d_aligned[i]
-        vol_sma20_val = vol_sma20[i]
+        ema50_val = ema_50[i]
+        ema34_1d_val = ema_34_1d_aligned[i]
+        atr_val = atr[i]
+        atr_1d_val = atr_1d_aligned[i]
         
-        # Volume confirmation: volume above 20-period average
-        vol_confirmed = vol > vol_sma20_val
+        # Trend alignment: 4h EMA50 and daily EMA34 must agree
+        trend_up = ema50_val > ema34_1d_val
+        trend_down = ema50_val < ema34_1d_val
         
-        if position == 0 and vol_confirmed:
-            # Long: price above EMA50 + daily RSI in bullish range (50-70)
-            if price > ema50_val and 50 <= rsi_val <= 70:
+        # Volatility filter: only trade when volatility is elevated (trending market)
+        # Compare current daily ATR to its 50-period EMA
+        atr_ema_1d = pd.Series(atr_1d_aligned).ewm(span=50, adjust=False, min_periods=50).mean().values[i]
+        vol_filter = atr_1d_val > atr_ema_1d
+        
+        if position == 0 and vol_filter:
+            # Long: price above EMA50 with bullish trend alignment
+            if price > ema50_val and trend_up:
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price below EMA50 + daily RSI in bearish range (30-50)
-            elif price < ema50_val and 30 <= rsi_val <= 50:
+            # Short: price below EMA50 with bearish trend alignment
+            elif price < ema50_val and trend_down:
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
         
         elif position != 0:
-            # Exit: price crosses back below/above EMA50 or RSI exits range
-            if position == 1:
-                exit_cond = (price < ema50_val) or (rsi_val < 50)
-            else:  # position == -1
-                exit_cond = (price > ema50_val) or (rsi_val > 50)
+            # Exit: trend reversal or volatility collapse
+            trend_reversal = (position == 1 and ema50_val < ema34_1d_val) or \
+                            (position == -1 and ema50_val > ema34_1d_val)
             
-            if exit_cond:
+            # Volatility collapse: current ATR drops below 50% of previous
+            vol_collapse = atr_val < 0.5 * atr[i-1] if i > 0 else False
+            
+            if trend_reversal or vol_collapse:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA50_DailyRSI_VolumeFilter_v1"
-timeframe = "6h"
+name = "4h_EMA50_DailyEMA34_Trend_Align_Volatility_Filter"
+timeframe = "4h"
 leverage = 1.0
