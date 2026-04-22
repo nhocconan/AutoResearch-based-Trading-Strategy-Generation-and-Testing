@@ -34,10 +34,8 @@ def generate_signals(prices):
     s2 = pivot - (high_1d - low_1d)
     r3 = high_1d + 2 * (pivot - low_1d)
     s3 = low_1d - 2 * (high_1d - pivot)
-    r4 = r3 + (high_1d - low_1d)
-    s4 = s3 - (high_1d - low_1d)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 1d timeframe (same as primary)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -45,13 +43,11 @@ def generate_signals(prices):
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for volatility filter (14-period)
+    # ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -67,20 +63,19 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_avg_20[i]) or np.isnan(atr[i])):
+            np.isnan(s3_aligned[i]) or np.isnan(vol_avg_20[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 with volume spike AND volatility filter
-            if (close[i] > r3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and atr[i] > 0.5 * np.mean(atr[max(0, i-20):i+1])):
+            # Long: Price breaks above R3 with volume spike
+            if (close[i] > r3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 with volume spike AND volatility filter
-            elif (close[i] < s3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i] and atr[i] > 0.5 * np.mean(atr[max(0, i-20):i+1])):
+            # Short: Price breaks below S3 with volume spike
+            elif (close[i] < s3_aligned[i] and volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -102,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Pivot_R3_S3_Breakout_Volume_Volatility"
-timeframe = "12h"
+name = "1D_Pivot_R3_S3_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
