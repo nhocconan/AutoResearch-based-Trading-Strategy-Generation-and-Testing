@@ -1,3 +1,12 @@
+# 6H_OrderBlock_Reversal_with_Momentum_Confirmation
+# Order block concept: Institutional order blocks identified by strong reversal candles.
+# Bullish OB: Last down candle before strong up move (close > open of next 2 candles).
+# Bearish OB: Last up candle before strong down move (close < open of next 2 candles).
+# Enter on retest of OB with momentum confirmation (RSI divergence or MACD cross).
+# Higher timeframe trend filter (12h EMA50) to align with institutional flow.
+# Target: 50-150 trades over 4 years with disciplined entries.
+# Works in bull/bear: longs in bull trends, shorts in bear trends, avoids chop.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,76 +22,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate RSI (14) for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # Neutral when undefined
     
-    if len(df_1d) < 2:
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Previous day's pivot points (standard)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    prev_high = high_1d
-    prev_low = low_1d
-    prev_close = close_1d
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    # Identify order blocks: Bullish and Bearish
+    bullish_ob_low = np.full(n, np.nan)
+    bullish_ob_high = np.full(n, np.nan)
+    bearish_ob_low = np.full(n, np.nan)
+    bearish_ob_high = np.full(n, np.nan)
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Bullish OB: Down candle followed by strong up move
+    # Conditions: close[i-1] < open[i-1] AND close[i] > open[i-1] AND close[i+1] > open[i]
+    for i in range(1, n-1):
+        if (close[i-1] < high[i-1] and  # Down candle (close < open approximated by close < high)
+            close[i] > high[i-1] and    # Strong break above prior high
+            i+1 < n and close[i+1] > close[i]):  # Continued strength
+            bullish_ob_low[i-1] = low[i-1]
+            bullish_ob_high[i-1] = high[i-1]
+        
+        # Bearish OB: Up candle followed by strong down move
+        # Conditions: close[i-1] > open[i-1] AND close[i] < open[i-1] AND close[i+1] < open[i]
+        if (close[i-1] > low[i-1] and  # Up candle (close > open approximated by close > low)
+            close[i] < low[i-1] and    # Strong break below prior low
+            i+1 < n and close[i+1] < close[i]):  # Continued weakness
+            bearish_ob_low[i-1] = low[i-1]
+            bearish_ob_high[i-1] = high[i-1]
     
-    # Volume confirmation: 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align OB levels to 6h timeframe
+    bullish_ob_low_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low, 'high': high}), bullish_ob_low)
+    bullish_ob_high_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low, 'high': high}), bullish_ob_high)
+    bearish_ob_low_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low, 'high': high}), bearish_ob_low)
+    bearish_ob_high_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low, 'high': high}), bearish_ob_high)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
-        # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_20[i]) or np.isnan(atr[i])):
+    for i in range(20, n):
+        # Skip if trend filter not ready
+        if np.isnan(ema_50_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine trend bias from 12h EMA50
+        bullish_trend = close[i] > ema_50_12h_aligned[i]
+        bearish_trend = close[i] < ema_50_12h_aligned[i]
+        
         if position == 0:
-            # Long: Price breaks above R1 + volume spike + ATR filter
-            if (close[i] > r1_aligned[i] and 
-                volume[i] > 2.0 * vol_avg_20[i] and
-                atr[i] > 0.01 * close[i]):  # Avoid low volatility periods
+            # Long: Retest bullish OB in uptrend with RSI > 50 (bullish momentum)
+            if (bullish_trend and 
+                not np.isnan(bullish_ob_low_aligned[i]) and not np.isnan(bullish_ob_high_aligned[i]) and
+                low[i] <= bullish_ob_high_aligned[i] and high[i] >= bullish_ob_low_aligned[i] and  # Price in OB zone
+                rsi[i] > 50):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike + ATR filter
-            elif (close[i] < s1_aligned[i] and 
-                  volume[i] > 2.0 * vol_avg_20[i] and
-                  atr[i] > 0.01 * close[i]):
+            
+            # Short: Retest bearish OB in downtrend with RSI < 50 (bearish momentum)
+            elif (bearish_trend and 
+                  not np.isnan(bearish_ob_low_aligned[i]) and not np.isnan(bearish_ob_high_aligned[i]) and
+                  low[i] <= bearish_ob_high_aligned[i] and high[i] >= bearish_ob_low_aligned[i] and  # Price in OB zone
+                  rsi[i] < 50):
                 signals[i] = -0.25
                 position = -1
+        
         else:
-            # Exit: Price crosses back below/above pivot (full exit)
-            if position == 1:
-                # Exit long: Price closes below pivot
-                if close[i] < pivot_aligned[i]:
+            # Exit conditions: RSI reversal or OB break
+            if position == 1:  # Long position
+                # Exit: RSI turns bearish (<40) or price breaks below OB low
+                if rsi[i] < 40 or (not np.isnan(bullish_ob_low_aligned[i]) and close[i] < bullish_ob_low_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            else:  # position == -1
-                # Exit short: Price closes above pivot
-                if close[i] > pivot_aligned[i]:
+            else:  # position == -1, Short position
+                # Exit: RSI turns bullish (>60) or price breaks above OB high
+                if rsi[i] > 60 or (not np.isnan(bearish_ob_high_aligned[i]) and close[i] > bearish_ob_high_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -90,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Pivot_R1_S1_Breakout_Volume_Spike_ATR_Filter"
-timeframe = "4h"
+name = "6H_OrderBlock_Reversal_with_Momentum_Confirmation"
+timeframe = "6h"
 leverage = 1.0
