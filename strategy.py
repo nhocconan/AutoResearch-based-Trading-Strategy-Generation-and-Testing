@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla pivot reversal with 1d trend filter and volume confirmation.
-Long at S1 with bullish 1d EMA34 and volume mean reversion; short at R1 with bearish 1d EMA34 and volume mean reversion.
-Exit at S3/R3 or when trend weakens.
-Camarilla levels from prior 1d provide precise intraday reversal zones.
-1d EMA34 filter ensures alignment with daily trend to avoid counter-trend trades.
-Volume mean reversion (current < average) increases probability of mean-reverting bounce.
-Designed for 20-40 trades/year to minimize fee drag in ranging markets.
+Hypothesis: 12h Williams Fractal breakout with 1w EMA trend filter and volume confirmation.
+Long when price breaks above bearish fractal with bullish EMA trend and volume spike.
+Short when price breaks below bullish fractal with bearish EMA trend and volume spike.
+Exit when price returns to fractal level or EMA trend weakens.
+Williams Fractals require 2-bar confirmation, so we use additional_delay_bars=2.
+Designed for very low trade frequency (10-25/year) to minimize fee drift.
+Works in both bull (breakouts with trend) and bear (fading false breaks).
 """
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,47 +22,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for EMA34 filter - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 35:
+    # Load weekly data for EMA trend filter - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 35:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    ema34_d = pd.Series(df_daily['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly EMA(34) for trend
+    ema_34_weekly = pd.Series(df_weekly['close'].values).ewm(
+        span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 6-volume average (20-period)
+    # Align EMA to 12h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_weekly, ema_34_weekly)
+    
+    # Load daily data for Williams Fractals
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 10:
+        return np.zeros(n)
+    
+    # Compute Williams Fractals (requires 5-bar window: 2 left, 1 center, 2 right)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_daily['high'].values,
+        df_daily['low'].values,
+    )
+    
+    # Align fractals to 12h with 2-bar additional delay for confirmation
+    # Fractals need 2 future daily bars to confirm, so +2 delay
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_daily, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_daily, bullish_fractal, additional_delay_bars=2
+    )
+    
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate Camarilla levels from prior 1d
-    # Typical Price = (H + L + C) / 3
-    typical_price_d = (df_daily['high'].values + df_daily['low'].values + df_daily['close'].values) / 3.0
-    # Previous day's typical price
-    prev_typical = np.roll(typical_price_d, 1)
-    prev_typical[0] = np.nan  # First day has no previous
-    
-    # Camarilla multipliers
-    # S1 = TP - 1.1 * (H - L) / 12
-    # S2 = TP - 1.1 * (H - L) / 6
-    # S3 = TP - 1.1 * (H - L) / 4
-    # R1 = TP + 1.1 * (H - L) / 12
-    # R2 = TP + 1.1 * (H - L) / 6
-    # R3 = TP + 1.1 * (H - L) / 4
-    hl_range = df_daily['high'].values - df_daily['low'].values
-    s1 = prev_typical - 1.1 * hl_range / 12.0
-    s2 = prev_typical - 1.1 * hl_range / 6.0
-    s3 = prev_typical - 1.1 * hl_range / 4.0
-    r1 = prev_typical + 1.1 * hl_range / 12.0
-    r2 = prev_typical + 1.1 * hl_range / 6.0
-    r3 = prev_typical + 1.1 * hl_range / 4.0
-    
-    # Align Camarilla levels to 6h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_daily, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
-    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_daily, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
-    ema34_aligned = align_htf_to_ltf(prices, df_daily, ema34_d)
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -70,10 +63,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to avoid NaN in prev_typical
+    for i in range(35, n):  # Start after EMA warmup
         # Skip if data not ready
-        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,18 +85,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price at S1 with bullish 1d trend and volume mean reversion
-            if (close[i] <= s1_aligned[i] and 
-                close[i] > s2_aligned[i] and  # Above S2 to avoid deep pullback
-                ema34_aligned[i] > ema34_d[np.searchsorted(df_daily.index, prices['open_time'].iloc[i]) - 1 if i > 0 else 0] and  # Simplified: use aligned EMA34 > previous day's EMA34 proxy
-                volume[i] < 0.8 * vol_avg_20[i]):  # Volume mean reversion
+            # Long: Price breaks above bearish fractal with bullish EMA trend and volume
+            if (close[i] > bearish_fractal_aligned[i] and 
+                close[i] > ema_34_aligned[i] and  # Price above EMA = bullish bias
+                volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Price at R1 with bearish 1d trend and volume mean reversion
-            elif (close[i] >= r1_aligned[i] and 
-                  close[i] < r2_aligned[i] and  # Below R2 to avoid overextended
-                  ema34_aligned[i] < ema34_d[np.searchsorted(df_daily.index, prices['open_time'].iloc[i]) - 1 if i > 0 else 0] and
-                  volume[i] < 0.8 * vol_avg_20[i]):
+            # Short: Price breaks below bullish fractal with bearish EMA trend and volume
+            elif (close[i] < bullish_fractal_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and  # Price below EMA = bearish bias
+                  volume[i] > 2.0 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -109,18 +102,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price reaches S3/R3 or trend weakens
-                if close[i] <= s3_aligned[i] or close[i] >= r3_aligned[i]:
-                    exit_signal = True
-                # Optional: exit if EMA34 flips (trend change)
-                elif ema34_aligned[i] < ema34_d[np.searchsorted(df_daily.index, prices['open_time'].iloc[i]) - 1 if i > 0 else 0]:
+                # Exit long: price returns to fractal level OR price below EMA
+                if close[i] <= bearish_fractal_aligned[i] or close[i] < ema_34_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price reaches S3/R3 or trend weakens
-                if close[i] <= s3_aligned[i] or close[i] >= r3_aligned[i]:
-                    exit_signal = True
-                # Optional: exit if EMA34 flips (trend change)
-                elif ema34_aligned[i] > ema34_d[np.searchsorted(df_daily.index, prices['open_time'].iloc[i]) - 1 if i > 0 else 0]:
+                # Exit short: price returns to fractal level OR price above EMA
+                if close[i] >= bullish_fractal_aligned[i] or close[i] > ema_34_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -131,6 +118,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_CamarillaReversal_1dEMA34_VolumeMeanRev"
-timeframe = "6h"
+name = "12H_WilliamsFractal_EMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
+#%%
