@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
-# Donchian breakouts capture trend continuation. Weekly pivot (from prior week) provides
-# institutional reference: price above weekly pivot = bullish bias, below = bearish bias.
-# Volume > 1.5x average confirms breakout strength. Works in bull/bear by aligning with
-# weekly structure, avoiding counter-trend whipsaws. Target: 15-35 trades/year.
+# Hypothesis: 12h Williams %R with 1d trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions. Long when %R < -80 (oversold) and price above 1d EMA,
+# short when %R > -20 (overbought) and price below 1d EMA. Volume > 1.5x average confirms momentum.
+# Works in both bull and bear markets by aligning with daily trend direction, avoiding counter-trend whipsaws.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,33 +18,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for pivot points (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data for EMA trend (ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from prior week's OHLC
-    # Use shifted values to avoid look-ahead: pivot based on previous week's data
-    weekly_high = df_1w['high'].shift(1).values  # prior week high
-    weekly_low = df_1w['low'].shift(1).values    # prior week low
-    weekly_close = df_1w['close'].shift(1).values # prior week close
+    close_1d = df_1d['close'].values
     
-    # Standard pivot point calculation
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    # 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align weekly pivot levels to 6h timeframe (already delayed by shift(1))
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # Donchian channel (20-period) on 6h data
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Williams %R(14) calculation on 12h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,43 +40,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Donchian breakout above + price above weekly pivot + volume surge
-            if (close[i] > highest_high[i] and 
-                close[i] > weekly_pivot_aligned[i] and 
+            # Long: Williams %R < -80 (oversold) + price above 1d EMA + volume confirmation
+            if (williams_r[i] < -80 and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown below + price below weekly pivot + volume surge
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < weekly_pivot_aligned[i] and 
+            # Short: Williams %R > -20 (overbought) + price below 1d EMA + volume confirmation
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Donchian reversal or price crosses weekly pivot
+            # Exit: Williams %R crosses back to neutral zone or price crosses 1d EMA
             if position == 1:
-                # Exit long: price breaks below Donchian low or crosses below weekly pivot
-                if (close[i] < lowest_low[i] or 
-                    close[i] < weekly_pivot_aligned[i]):
+                # Exit long: Williams %R >= -50 or price crosses below 1d EMA
+                if (williams_r[i] >= -50 or 
+                    close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: price breaks above Donchian high or crosses above weekly pivot
-                if (close[i] > highest_high[i] or 
-                    close[i] > weekly_pivot_aligned[i]):
+                # Exit short: Williams %R <= -50 or price crosses above 1d EMA
+                if (williams_r[i] <= -50 or 
+                    close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -97,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_VolumeConfirmation"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA34_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
