@@ -5,97 +5,70 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Get daily data for regime filter (HTF)
+    # 1d EMA34 for trend direction
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily ATR calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    # 1d EMA100 for trend filter
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # 4h price data
+    # 4h Donchian(20) for breakout
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 4h volume spike confirmation
     volume = prices['volume'].values
-    
-    # 4h ATR for volatility
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 4h EMA for trend (fast and slow)
-    ema_fast = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_slow = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
-    
-    # Align daily indicators to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any data is not ready
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_ma_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(ema_fast[i]) or 
-            np.isnan(ema_slow[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_100_1d_aligned[i]) or 
+            np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        vol = volume[i]
-        atr_val = atr[i]
-        ema_fast_val = ema_fast[i]
-        ema_slow_val = ema_slow[i]
-        atr_1d = atr_1d_aligned[i]
-        atr_ma_1d = atr_ma_1d_aligned[i]
+        ema34 = ema_34_1d_aligned[i]
+        ema100 = ema_100_1d_aligned[i]
+        vol_spike_val = vol_spike[i]
         
-        # Volume filter: current volume above 20-period average
-        vol_ma = np.mean(volume[max(0, i-19):i+1]) if i >= 19 else 0
-        vol_filter = vol > vol_ma * 1.5 if vol_ma > 0 else False
-        
-        # Trend filter: EMA alignment
-        bullish_trend = ema_fast_val > ema_slow_val
-        bearish_trend = ema_fast_val < ema_slow_val
-        
-        # Volatility regime: trade only when daily ATR is elevated (trending market)
-        vol_regime = atr_1d > atr_ma_1d
-        
-        # Entry conditions
-        if position == 0 and vol_regime and vol_filter:
-            # Long: bullish trend + price above fast EMA + volatility expansion
-            if bullish_trend and price > ema_fast_val and atr_val > atr[i-1]:
+        if position == 0 and vol_spike_val:
+            # Long: price breaks above Donchian high + EMA34 > EMA100 (uptrend)
+            if price > donch_high[i] and ema34 > ema100:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish trend + price below fast EMA + volatility expansion
-            elif bearish_trend and price < ema_fast_val and atr_val > atr[i-1]:
+                entry_price = price
+            # Short: price breaks below Donchian low + EMA34 < EMA100 (downtrend)
+            elif price < donch_low[i] and ema34 < ema100:
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         
-        # Exit conditions
         elif position != 0:
-            # Exit on trend reversal or volatility collapse
-            trend_reversal = (position == 1 and ema_fast_val < ema_slow_val) or \
-                            (position == -1 and ema_fast_val > ema_slow_val)
-            vol_collapse = atr_val < 0.5 * atr[i-1]  # Sharp volatility drop
+            # Exit: price returns to Donchian mid-point or trend reversal
+            donch_mid = (donch_high[i] + donch_low[i]) / 2
+            trend_reversal = (position == 1 and ema34 < ema100) or (position == -1 and ema34 > ema100)
             
-            if trend_reversal or vol_collapse:
+            if (position == 1 and price < donch_mid) or (position == -1 and price > donch_mid) or trend_reversal:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_EMA_Volatility_Volume_Filter_v1"
+name = "4h_DonchianBreakout_EMA34EMA100Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
