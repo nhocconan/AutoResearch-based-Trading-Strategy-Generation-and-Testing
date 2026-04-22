@@ -8,81 +8,68 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
-    # Works in both bull and bear markets: breakouts from price channels capture directional moves
-    # Weekly pivot provides long-term bias, volume surge confirms breakout strength
+    # Hypothesis: 12h Williams Alligator + Elder Ray with 1d EMA50 trend filter
+    # Works in both bull and bear: Alligator identifies trend direction,
+    # Elder Ray measures bull/bear power, EMA50 filters for stronger trends
+    # Williams Alligator uses smoothed medians (not means) for better noise filtering
     
-    # Load weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Load daily data once for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using prior week)
-    pivot = (high_1w[:-1] + low_1w[:-1] + close_1w[:-1]) / 3
-    r1 = 2 * pivot - low_1w[:-1]
-    s1 = 2 * pivot - high_1w[:-1]
-    r2 = pivot + (high_1w[:-1] - low_1w[:-1])
-    s2 = pivot - (high_1w[:-1] - low_1w[:-1])
-    # Shift to align with current week (pivot based on prior week)
-    pivot = np.concatenate([np.array([np.nan]), pivot])
-    r1 = np.concatenate([np.array([np.nan]), r1])
-    s1 = np.concatenate([np.array([np.nan]), s1])
-    r2 = np.concatenate([np.array([np.nan]), r2])
-    s2 = np.concatenate([np.array([np.nan]), s2])
+    # Daily EMA50 trend filter
+    ema_1d_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    # Align weekly pivot to 6h
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # 6h Donchian channel (20-period)
+    # 12h Williams Alligator (Jaw=13, Teeth=8, Lips=5)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    vol = prices['volume'].values
     
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Median price
+    median_price = (high + low) / 2
     
-    # Volume filter (20-period surge)
-    vol_ma20 = pd.Series(vol).rolling(window=20, min_periods=20).mean().values
-    vol_surge = vol > 2.0 * vol_ma20
+    # Smoothed medians (using SMA as approximation for SMMA)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    
+    # 12h Elder Ray Power (13-period EMA)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(200, n):
+    for i in range(100, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_1d_50_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Donchian breakout above upper band with volume surge AND price above weekly R1 (bullish bias)
-            if close[i] > donchian_high[i] and vol_surge[i] and close[i] > r1_aligned[i]:
+            # Long: Lips > Teeth > Jaw (bullish alignment) AND bull power > 0 AND price above EMA50
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and bull_power[i] > 0 and close[i] > ema_1d_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout below lower band with volume surge AND price below weekly S1 (bearish bias)
-            elif close[i] < donchian_low[i] and vol_surge[i] and close[i] < s1_aligned[i]:
+            # Short: Jaw > Teeth > Lips (bearish alignment) AND bear power < 0 AND price below EMA50
+            elif jaw[i] > teeth[i] and teeth[i] > lips[i] and bear_power[i] < 0 and close[i] < ema_1d_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to Donchian middle or opposite band touch
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+            # Exit: Alligator lines cross or power changes sign
             if position == 1:
-                if close[i] < donchian_mid:
+                if lips[i] < teeth[i] or bull_power[i] <= 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > donchian_mid:
+                if lips[i] > teeth[i] or bear_power[i] >= 0:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -90,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_Breakout_WeeklyPivot_R1S1_VolumeSurge_v1"
-timeframe = "6h"
+name = "12h_Williams_Alligator_ElderRay_Power_1dEMA50_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
