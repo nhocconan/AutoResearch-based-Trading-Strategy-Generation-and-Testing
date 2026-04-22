@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-
 """
-Hypothesis: 12-hour Donchian Channel Breakout with 1-day ATR volatility filter and volume confirmation.
-Trades breakouts of the 20-period Donchian channel (upper/lower bands) in the direction of the breakout,
-filtered by elevated ATR (volatility expansion) and volume spike to avoid false breakouts in low volatility.
-Designed for low trade frequency (15-30 trades/year) to minimize fee drag and work in both bull and bear
-markets by requiring volatility expansion and volume confirmation, reducing whipsaws during ranging periods.
+Hypothesis: 1-day Williams %R with 1-week EMA trend filter and volume confirmation.
+Trades reversals at Williams %R oversold/overbought levels (below 20/above 80) in the direction of the weekly EMA trend.
+Uses volume spike to confirm institutional interest at key levels. Designed for low trade frequency
+(20-50 trades/year) to minimize fee drag and work in both bull and bear markets by aligning with
+higher timeframe trend and using mean-reversion at extreme levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_williams_r(high, low, close, period=14):
+    """Calculate Williams %R for given high, low, close arrays."""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return williams_r.fillna(0).values
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,73 +28,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for ATR and trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load weekly data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Daily ATR (14-period) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Weekly EMA for trend filter (34-period)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # 12-hour Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Williams %R (14-period)
+    williams_r = calculate_williams_r(high, low, close, 14)
     
-    # Volume spike: current volume > 1.5x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma_30[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility filter: ATR above 50-period average (expanding volatility)
-        atr_ma_50 = pd.Series(atr_14_1d_aligned).rolling(window=50, min_periods=50).mean().values
-        vol_expansion = atr_14_1d_aligned[i] > atr_ma_50[i]
-        
         # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma_30[i]
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        if position == 0 and vol_expansion and vol_spike:
-            # Long: breakout above Donchian high
-            if high[i] > donchian_high[i]:
+        if position == 0 and vol_spike:
+            # Long: Williams %R below 20 (oversold) with uptrend bias
+            if williams_r[i] < -20 and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below Donchian low
-            elif low[i] < donchian_low[i]:
+            # Short: Williams %R above -80 (overbought) with downtrend bias
+            elif williams_r[i] > -80 and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: opposite Donchian breakout or volatility contraction
+            # Exit: Williams %R returns to neutral range or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below Donchian low
-                if low[i] < donchian_low[i]:
+                # Exit long: Williams %R rises above -50 or closes below weekly EMA
+                if williams_r[i] > -50 or close[i] < ema_34_1w_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above Donchian high
-                if high[i] > donchian_high[i]:
+                # Exit short: Williams %R falls below -50 or closes above weekly EMA
+                if williams_r[i] < -50 or close[i] > ema_34_1w_aligned[i]:
                     exit_signal = True
-            
-            # Also exit if volatility contracts significantly
-            if atr_14_1d_aligned[i] < 0.7 * atr_ma_50[i]:
-                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -98,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_ATR14_Volume30_Breakout"
-timeframe = "12h"
+name = "1d_WilliamsR_Reversal_1wEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
