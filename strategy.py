@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,7 +33,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all levels to 6h timeframe
+    # Align all levels to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
@@ -96,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "12H_Camarilla_R4_S4_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
