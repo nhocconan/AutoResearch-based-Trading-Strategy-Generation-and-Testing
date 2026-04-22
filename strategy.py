@@ -1,55 +1,43 @@
-#!/usr/bin/env python3
+# #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 1d Williams %R mean reversion + volume spike
-# Long when CHOP > 61.8 (range) + WILLR < -80 (oversold) + volume spike
-# Short when CHOP > 61.8 (range) + WILLR > -20 (overbought) + volume spike
-# Exit when WILLR crosses back through -50 or volatility drops
-# Works in ranging markets (2025-2026 bear/range) by fading extremes; avoids trends where WILLR fails
-# Target: 20-30 trades/year to minimize fee drag
+# Hypothesis: 4h Camarilla pivot levels (R1/S1) breakout with volume spike and 1d EMA34 trend filter.
+# Long when price breaks above R1 + volume spike + price > 1d EMA34
+# Short when price breaks below S1 + volume spike + price < 1d EMA34
+# Exit when price crosses back through pivot point (PP) or volume drops below 80% of average.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Target: 20-40 trades/year to avoid excessive fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Load 1d data for Williams %R calculation
+    # Load 1d data for Camarilla calculation and EMA34
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R (14-period)
-    # WILLR = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    willr_1d = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero when high == low
-    willr_1d = np.where((highest_high - lowest_low) == 0, -50, willr_1d)
+    # Calculate Camarilla levels (based on previous day)
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    # PP = (H+L+C)/3
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12
+    s1_1d = close_1d - range_1d * 1.1 / 12
+    pp_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Load 1d data for Choppiness Index calculation
-    # CHOP = 100 * log10(SUM(ATR(1)) / (HH - LL)) / log10(N)
-    # where ATR(1) = max(high-low, abs(high-previous close), abs(low-previous close))
-    tr1 = np.maximum(
-        high_1d - low_1d,
-        np.maximum(
-            np.abs(high_1d - np.roll(close_1d, 1)),
-            np.abs(low_1d - np.roll(close_1d, 1))
-        )
-    )
-    tr1[0] = high_1d[0] - low_1d[0]  # first period
-    atr1_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(atr1_sum / (hh_14 - ll_14)) / np.log10(14)
-    # Handle division by zero when hh == ll
-    chop_1d = np.where((hh_14 - ll_14) == 0, 50, chop_1d)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align to 4h
-    willr_aligned = align_htf_to_ltf(prices, df_1d, willr_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
@@ -58,10 +46,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if data not ready
-        if (np.isnan(willr_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -71,34 +61,36 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        willr = willr_aligned[i]
-        chop = chop_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        pp = pp_aligned[i]
+        ema34 = ema34_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-day average
-        vol_spike = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: choppy market (range) + oversold + volume spike
-            if chop > 61.8 and willr < -80 and vol_spike:
+            # Long conditions: price breaks above R1 + volume spike + price > EMA34
+            if price > r1 and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: choppy market (range) + overbought + volume spike
-            elif chop > 61.8 and willr > -20 and vol_spike:
+            # Short conditions: price breaks below S1 + volume spike + price < EMA34
+            elif price < s1 and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: WILLR crosses back through -50 or volatility drops
+            # Exit conditions: price crosses back through PP or volume dries up
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when WILLR crosses above -50 (overbought territory) or volume drops
-                if willr > -50 or vol < 0.8 * vol_ma:
+                # Exit when price crosses below PP or volume dries up
+                if price < pp or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when WILLR crosses below -50 (oversold territory) or volume drops
-                if willr < -50 or vol < 0.8 * vol_ma:
+                # Exit when price crosses above PP or volume dries up
+                if price > pp or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Choppiness_WilliamsR_MeanReversion_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
