@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian channel breakout with weekly trend filter and volume confirmation.
-Long when price breaks above 6h Donchian upper band with bullish weekly trend (price > weekly EMA50) and volume spike.
-Short when price breaks below 6h Donchian lower band with bearish weekly trend (price < weekly EMA50) and volume spike.
-Exit when price returns to 6h Donchian middle band or trend reverses.
-Designed for low trade frequency (12-30/year) to minimize fee drift while capturing breakouts in all regimes.
+Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
+Long when price > Alligator's Jaw with bullish 1d trend and volume spike.
+Short when price < Alligator's Jaw with bearish 1d trend and volume spike.
+Exit when price crosses back below/above Jaw or trend reverses.
+Williams Alligator uses SMAs of 13, 8, 5 periods shifted forward by 8, 5, 3 bars.
+Designed for low trade frequency (15-25/year) to minimize fee drift in 12h timeframe.
 """
 import numpy as np
 import pandas as pd
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,27 +21,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:
+    # Load 12h data for Williams Alligator - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Williams Alligator on 12h
+    close_12h = pd.Series(df_12h['close'].values)
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    jaw_12h = close_12h.rolling(window=13, min_periods=13).mean()
+    jaw_12h = jaw_12h.shift(8)
+    # Teeth: 8-period SMMA, shifted 5 bars forward
+    teeth_12h = close_12h.rolling(window=8, min_periods=8).mean()
+    teeth_12h = teeth_12h.shift(5)
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    lips_12h = close_12h.rolling(window=5, min_periods=5).mean()
+    lips_12h = lips_12h.shift(3)
     
-    # Align EMA50 to 6h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Jaw is the main trend indicator
+    jaw_12h_values = jaw_12h.values
     
-    # Calculate 6h Donchian channel (20-period)
-    donch_len = 20
-    high_roll = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
-    low_roll = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
-    upper = high_roll
-    lower = low_roll
-    middle = (upper + lower) / 2.0
+    # Align Jaw to 12h timeframe (we're trading on 12h)
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h_values)
     
-    # Calculate 6h volume average (20-period)
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 55:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align EMA50 to 12h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate 12h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -49,10 +65,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(donch_len, n):  # Start after Donchian lookback
+    for i in range(20, n):  # Start after volume lookback
         # Skip if data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(ema50_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,15 +85,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above upper band with bullish weekly trend and volume spike
-            if (close[i] > upper[i] and 
-                close[i] > ema50_1w_aligned[i] and  # Bullish trend: price above weekly EMA50
+            # Long: Price > Jaw with bullish 1d trend and volume spike
+            if (close[i] > jaw_aligned[i] and 
+                close[i] > ema50_aligned[i] and  # Bullish trend: price above EMA50
                 volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower band with bearish weekly trend and volume spike
-            elif (close[i] < lower[i] and 
-                  close[i] < ema50_1w_aligned[i] and  # Bearish trend: price below weekly EMA50
+            # Short: Price < Jaw with bearish 1d trend and volume spike
+            elif (close[i] < jaw_aligned[i] and 
+                  close[i] < ema50_aligned[i] and  # Bearish trend: price below EMA50
                   volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = -0.25
                 position = -1
@@ -86,12 +102,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to middle band OR trend turns bearish
-                if close[i] <= middle[i] or close[i] < ema50_1w_aligned[i]:
+                # Exit long: price crosses below Jaw OR trend turns bearish
+                if close[i] <= jaw_aligned[i] or close[i] < ema50_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to middle band OR trend turns bullish
-                if close[i] >= middle[i] or close[i] > ema50_1w_aligned[i]:
+                # Exit short: price crosses above Jaw OR trend turns bullish
+                if close[i] >= jaw_aligned[i] or close[i] > ema50_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -102,7 +118,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Donchian_WeeklyEMA50_Trend_Volume"
-timeframe = "6h"
+name = "12H_WilliamsAlligator_1dEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 #%%
