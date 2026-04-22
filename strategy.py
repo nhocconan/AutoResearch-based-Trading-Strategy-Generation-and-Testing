@@ -1,9 +1,13 @@
-# 12H_VWAP_Trend_1wMA50_Filter
-# Hypothesis: 12-hour VWAP with weekly MA50 trend filter for low-frequency, high-conviction trades.
-# Long when price > VWAP and weekly MA50 rising; short when price < VWAP and weekly MA50 falling.
-# VWAP provides intraday fair value; weekly MA50 filters higher timeframe trend.
-# Designed for low trade frequency (<30/year) by requiring dual timeframe alignment.
-# Works in bull/bear markets by following weekly trend while using 12h VWAP for entries.
+#!/usr/bin/env python3
+"""
+Hypothesis: 4-hour Williams %R with 1-day trend filter and volume confirmation.
+Buy when Williams %R crosses above -80 (oversold) in an uptrend (price > 1-day EMA50) with volume spike.
+Sell when Williams %R crosses below -20 (overbought) in a downtrend (price < 1-day EMA50) with volume spike.
+Exit on opposite Williams %R cross or trend reversal.
+Williams %R captures mean reversion in extremes; 1-day EMA50 filters higher timeframe trend.
+Volume spike confirms institutional interest. Designed for low trade frequency by requiring multiple confirmations.
+Works in both bull and bear markets by following daily trend while using 4h Williams %R for entries.
+"""
 
 import numpy as np
 import pandas as pd
@@ -19,46 +23,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for MA50 trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1-day data for EMA50 trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    ma50_1w_aligned = align_htf_to_ltf(prices, df_1w, ma50_1w)
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate typical price and VWAP components
-    typical_price = (high + low + close) / 3.0
-    tp_vol = typical_price * volume
+    # Williams %R (14 periods)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Avoid division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Cumulative TP*V and cumulative volume for VWAP
-    cum_tp_vol = np.cumsum(tp_vol)
-    cum_vol = np.cumsum(volume)
-    
-    # VWAP = cumulative TP*V / cumulative volume
-    vwap = np.divide(cum_tp_vol, cum_vol, out=np.zeros_like(cum_tp_vol), where=cum_vol!=0)
+    # Volume spike: current volume > 1.5 * 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after enough data for weekly MA50
+    for i in range(20, n):  # Start after enough data for Williams %R and volume MA
         # Skip if data not ready
-        if np.isnan(vwap[i]) or np.isnan(ma50_1w_aligned[i]):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price above VWAP and weekly MA50 rising
-            if (close[i] > vwap[i] and 
-                ma50_1w_aligned[i] > ma50_1w_aligned[i-1]):
+            # Long: Williams %R crosses above -80 (from below), price > 1-day EMA50, volume spike
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and
+                close[i] > ema50_1d_aligned[i] and
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below VWAP and weekly MA50 falling
-            elif (close[i] < vwap[i] and 
-                  ma50_1w_aligned[i] < ma50_1w_aligned[i-1]):
+            # Short: Williams %R crosses below -20 (from above), price < 1-day EMA50, volume spike
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and
+                  close[i] < ema50_1d_aligned[i] and
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -66,14 +74,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls below VWAP OR weekly MA50 turns down
-                if (close[i] < vwap[i] or 
-                    ma50_1w_aligned[i] < ma50_1w_aligned[i-1]):
+                # Exit long: Williams %R crosses below -20 OR trend turns down
+                if (williams_r[i] < -20 and williams_r[i-1] >= -20) or \
+                   (close[i] < ema50_1d_aligned[i]):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises above VWAP OR weekly MA50 turns up
-                if (close[i] > vwap[i] or 
-                    ma50_1w_aligned[i] > ma50_1w_aligned[i-1]):
+                # Exit short: Williams %R crosses above -80 OR trend turns up
+                if (williams_r[i] > -80 and williams_r[i-1] <= -80) or \
+                   (close[i] > ema50_1d_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -84,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_VWAP_Trend_1wMA50_Filter"
-timeframe = "12h"
+name = "4H_WilliamsR_1dEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
