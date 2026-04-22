@@ -8,42 +8,26 @@ def generate_signals(prices):
     if n < 34:
         return np.zeros(n)
     
-    # Load 1d data once for Choppiness Index
+    # Load 1d data once for Camarilla levels and EMA34
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Choppiness Index (14-period)
-    atr_1d = np.zeros(len(df_1d))
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.abs(high_1d[0] - low_1d[0])], tr])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla levels (based on current day's HLC)
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12
+    s1_1d = close_1d - range_1d * 1.1 / 12
+    pp_1d = (high_1d + low_1d + close_1d) / 3
     
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr_14 / (max_hh - min_ll)) / np.log10(14)
-    chop = np.where((max_hh - min_ll) == 0, 50, chop)  # avoid division by zero
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    chop_align = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Price channels: Donchian(20) on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    upper_donch = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_donch = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    upper_donch_aligned = align_htf_to_ltf(prices, df_12h, upper_donch)
-    lower_donch_aligned = align_htf_to_ltf(prices, df_12h, lower_donch)
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume spike filter (20-period average)
     volume = prices['volume'].values
@@ -52,12 +36,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if any data is not ready
-        if (np.isnan(chop_align[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(upper_donch_aligned[i]) or 
-            np.isnan(lower_donch_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,38 +51,36 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        chop_val = chop_align[i]
-        ema50 = ema50_12h_aligned[i]
-        upper = upper_donch_aligned[i]
-        lower = lower_donch_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        pp = pp_aligned[i]
+        ema34 = ema34_aligned[i]
         
-        # Regime filter: Choppiness > 61.8 = ranging market (mean revert)
-        ranging = chop_val > 61.8
-        
-        # Volume filter: current volume > 1.5 * 20-day average
-        vol_spike = vol > 1.5 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long: price breaks below lower Donchian + ranging + volume spike
-            if price < lower and ranging and vol_spike:
+            # Long conditions: price breaks above R1 + volume spike + price > EMA34
+            if price > r1 and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks above upper Donchian + ranging + volume spike
-            elif price > upper and ranging and vol_spike:
+            # Short conditions: price breaks below S1 + volume spike + price < EMA34
+            elif price < s1 and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit: price returns to middle of channel or volatility breaks down
-            mid = (upper + lower) / 2
+            # Exit conditions: price crosses back through PP or volume dries up
             exit_signal = False
             
             if position == 1:  # long position
-                if price > mid:
+                # Exit when price crosses below PP or volume dries up
+                if price < pp or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                if price < mid:
+                # Exit when price crosses above PP or volume dries up
+                if price > pp or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_ChopRange_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
