@@ -1,69 +1,64 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Williams Alligator with 1-day trend filter and volume confirmation.
-Alligator lines (Jaw/Teeth/Lips) provide trend direction and strength. Using daily trend filter
-avoids counter-trend trades. Volume spikes confirm institutional interest.
-This should work in both bull and bear regimes by adapting to the daily trend.
-Target: 20-50 trades/year per symbol.
+Hypothesis: 6-hour Hull Moving Average crossover with 12-hour RSI filter and volume confirmation.
+HMA reduces lag while maintaining smoothness, providing timely trend signals.
+12-hour RSI filters out overextended moves, and volume confirms institutional interest.
+This combination should work in both bull and bear regimes by focusing on mean-reversion
+within the trend context, avoiding excessive whipsaw.
+Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5):
-    """Calculate Williams Alligator lines"""
-    # Jaw (Blue): 13-period SMMA shifted 8 bars ahead
-    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().shift(8)
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    # Teeth (Red): 8-period SMMA shifted 5 bars ahead
-    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().shift(5)
-    
-    # Lips (Green): 5-period SMMA shifted 3 bars ahead
-    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().shift(3)
-    
-    return jaw.values, teeth.values, lips.values
+    wma2 = pd.Series(series).ewm(span=half_period, adjust=False).mean()
+    wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma2 - wma1
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
+    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Load daily data - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Load 12h data - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate daily Alligator for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h RSI for filter
+    close_12h = df_12h['close'].values
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_12h = 100 - (100 / (1 + rs))
     
-    jaw_1d, teeth_1d, lips_1d = calculate_alligator(high_1d, low_1d, close_1d)
+    # Align 12h RSI to 6h timeframe
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
-    # Determine daily trend: Alligator alignment
-    # Bullish: Lips > Teeth > Jaw (green > red > blue)
-    # Bearish: Jaw > Teeth > Lips (blue > red > green)
-    bullish_trend = (lips_1d > teeth_1d) & (teeth_1d > jaw_1d)
-    bearish_trend = (jaw_1d > teeth_1d) & (teeth_1d > lips_1d)
+    # Calculate 6H HMA for entry signals
+    hma_fast = calculate_hma(close, 9)
+    hma_slow = calculate_hma(close, 21)
     
-    # Align Alligator components to 4h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
-    
-    # Calculate 4h Alligator for entry signals
-    jaw_4h, teeth_4h, lips_4h = calculate_alligator(high, low, close)
-    
-    # Calculate 4h volume average (20-period)
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
@@ -74,10 +69,8 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
-            np.isnan(jaw_4h[i]) or np.isnan(teeth_4h[i]) or np.isnan(lips_4h[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]) or 
+            np.isnan(rsi_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -94,29 +87,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (green > red > blue), bullish daily trend, volume spike
-            if (lips_4h[i] > teeth_4h[i] and teeth_4h[i] > jaw_4h[i] and  # Alligator bullish alignment
-                bullish_aligned[i] > 0.5 and                             # Bullish daily trend
-                volume[i] > 1.8 * vol_avg_20[i]):                        # Volume spike
+            # Long: HMA bullish cross, RSI not overbought, volume spike
+            if (hma_fast[i] > hma_slow[i] and 
+                hma_fast[i-1] <= hma_slow[i-1] and  # Fresh cross
+                rsi_12h_aligned[i] < 70 and        # Not overbought
+                volume[i] > 1.5 * vol_avg_20[i]):  # Volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaw > Teeth > Lips (blue > red > green), bearish daily trend, volume spike
-            elif (jaw_4h[i] > teeth_4h[i] and teeth_4h[i] > lips_4h[i] and  # Alligator bearish alignment
-                  bearish_aligned[i] > 0.5 and                              # Bearish daily trend
-                  volume[i] > 1.8 * vol_avg_20[i]):                         # Volume spike
+            # Short: HMA bearish cross, RSI not oversold, volume spike
+            elif (hma_fast[i] < hma_slow[i] and 
+                  hma_fast[i-1] >= hma_slow[i-1] and  # Fresh cross
+                  rsi_12h_aligned[i] > 30 and        # Not oversold
+                  volume[i] > 1.5 * vol_avg_20[i]):  # Volume spike
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Alligator lines cross in opposite direction
+            # Exit conditions: HMA cross in opposite direction
             exit_signal = False
             
             if position == 1:
-                # Exit long: Lips < Teeth or Teeth < Jaw (loss of bullish alignment)
-                if (lips_4h[i] < teeth_4h[i]) or (teeth_4h[i] < jaw_4h[i]):
+                # Exit long: HMA bearish cross
+                if hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Jaw < Teeth or Teeth < Lips (loss of bearish alignment)
-                if (jaw_4h[i] < teeth_4h[i]) or (teeth_4h[i] < lips_4h[i]):
+                # Exit short: HMA bullish cross
+                if hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -127,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_HMA_Cross_12hRSI_Filter_Volume"
+timeframe = "6h"
 leverage = 1.0
