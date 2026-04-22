@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1-day RSI and volume confirmation for mean reversion.
-# Williams %R(14) > -20 indicates overbought, < -80 indicates oversold.
-# RSI(14) on 1-day confirms momentum divergence: RSI < 30 for long, > 70 for short.
-# Volume spike filters for conviction. Designed to work in both bull and bear markets
-# by fading extremes during pullbacks in trends or mean reversion in ranges.
-# Target: 20-30 trades/year per symbol (80-120 total) to minimize fee drag.
+# Hypothesis: 12h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+# Uses 1-week timeframe to determine trend direction via weekly pivot levels (R1/S1).
+# Breakouts in direction of weekly trend are taken with volume confirmation.
+# Designed for 12h timeframe to capture multi-day swings with low frequency.
+# Target: 12-37 trades/year per symbol (48-148 total) to minimize fee drift.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,65 +19,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams %R on 6h (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Load 1-week data for trend filter via pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # RSI on 1-day (14-period)
+    # Calculate weekly pivot points (using prior week's data)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # We use the prior week's data, so we shift by 1
+    pivot_1w = (np.roll(high_1w, 1) + np.roll(low_1w, 1) + np.roll(close_1w, 1)) / 3
+    r1_1w = 2 * pivot_1w - np.roll(low_1w, 1)
+    s1_1w = 2 * pivot_1w - np.roll(high_1w, 1)
+    
+    # Trend filter: price above R1 = bullish, below S1 = bearish
+    trend_bullish = close_1w > r1_1w
+    trend_bearish = close_1w < s1_1w
+    
+    # Load 1-day data for Donchian channel (using prior day's data to avoid look-ahead)
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Volume spike filter (24-period on 6h)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > 1.5 * vol_ma24
+    # Donchian channel: 20-period high/low (prior period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align indicators to 6-hour timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), williams_r)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Shift to use only completed periods (avoid look-ahead)
+    high_20 = np.roll(high_20, 1)
+    low_20 = np.roll(low_20, 1)
+    
+    # Volume spike filter (12-period on 12h)
+    vol_ma12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    vol_spike = volume > 2.0 * vol_ma12
+    
+    # Align indicators to 12-hour timeframe
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_1w, trend_bullish.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_1w, trend_bearish.astype(float))
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(vol_ma24[i])):
+        if (np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]) or
+            np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(vol_ma12[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + RSI < 30 + volume spike
-            if (williams_r_aligned[i] < -80 and 
-                rsi_1d_aligned[i] < 30 and 
+            # Long: price breaks above Donchian high + weekly bullish trend + volume spike
+            if (close[i] > high_20_aligned[i] and 
+                trend_bullish_aligned[i] > 0.5 and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) + RSI > 70 + volume spike
-            elif (williams_r_aligned[i] > -20 and 
-                  rsi_1d_aligned[i] > 70 and 
+            # Short: price breaks below Donchian low + weekly bearish trend + volume spike
+            elif (close[i] < low_20_aligned[i] and 
+                  trend_bearish_aligned[i] > 0.5 and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Williams %R returns to neutral range (-50) or RSI reverts
+            # Exit: price breaks opposite Donchian level or trend changes
             if position == 1:
-                if (williams_r_aligned[i] > -50 or rsi_1d_aligned[i] > 50):
+                if (close[i] < low_20_aligned[i] or trend_bullish_aligned[i] <= 0.5):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if (williams_r_aligned[i] < -50 or rsi_1d_aligned[i] < 50):
+                if (close[i] > high_20_aligned[i] or trend_bearish_aligned[i] <= 0.5):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -86,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_RSI1D_Volume_Spike"
-timeframe = "6h"
+name = "12h_Donchian20_WeeklyPivot_Trend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
