@@ -5,12 +5,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h ADX trend strength + RSI mean reversion + volume confirmation
-    # ADX > 25 indicates strong trend (works in bull/bear), RSI < 30/ > 70 for entries
-    # Volume spike confirms institutional interest. Trend filter avoids counter-trend trades.
+    # Hypothesis: 4h ADX + 1d EMA34 trend filter + volume spike + session filter
+    # ADX > 25 indicates strong trend; EMA34 filters trend direction; volume spike confirms
+    # Session filter (08-20 UTC) avoids low-liquidity hours; tight entries to limit trades
+    # Works in bull/bear by only taking strong trend-aligned moves
     
     # Price and volume data
     close = prices['close'].values
@@ -18,119 +19,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First TR is just high-low
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
-        def wilders_smoothing(arr, period):
-            result = np.full_like(arr, np.nan)
-            if len(arr) >= period:
-                # First value is simple average
-                result[period-1] = np.nanmean(arr[:period])
-                # Wilder's smoothing: prev*(period-1) + current) / period
-                for i in range(period, len(arr)):
-                    if not np.isnan(result[i-1]):
-                        result[i] = (result[i-1] * (period-1) + arr[i]) / period
-            return result
-        
-        tr_smooth = wilders_smoothing(tr, period)
-        dm_plus_smooth = wilders_smoothing(dm_plus, period)
-        dm_minus_smooth = wilders_smoothing(dm_minus, period)
-        
-        # Directional Indicators
-        plus_di = 100 * dm_plus_smooth / tr_smooth
-        minus_di = 100 * dm_minus_smooth / tr_smooth
-        
-        # DX and ADX
-        dx = np.where((plus_di + minus_di) != 0, 
-                      100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        adx = wilders_smoothing(dx, period)
-        
-        return adx
+    # Session filter: 08-20 UTC (pre-compute)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    adx = calculate_adx(high, low, close, 14)
+    # Load 4h data for ADX (trend strength)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # RSI (14-period)
-    def calculate_rsi(prices, period=14):
-        delta = np.diff(prices)
-        delta = np.concatenate([[np.nan], delta])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        # Wilder's smoothing for average gain/loss
-        def wilders_smoothing(arr, period):
-            result = np.full_like(arr, np.nan)
-            if len(arr) >= period:
-                result[period-1] = np.nanmean(arr[:period])
-                for i in range(period, len(arr)):
-                    if not np.isnan(result[i-1]):
-                        result[i] = (result[i-1] * (period-1) + arr[i]) / period
-            return result
-        
-        avg_gain = wilders_smoothing(gain, period)
-        avg_loss = wilders_smoothing(loss, period)
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # True Range
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    rsi = calculate_rsi(close, 14)
+    # Directional Movement
+    dm_plus = np.where((high_4h - np.roll(high_4h, 1)) > (np.roll(low_4h, 1) - low_4h), 
+                       np.maximum(high_4h - np.roll(high_4h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_4h, 1) - low_4h) > (high_4h - np.roll(high_4h, 1)), 
+                        np.maximum(np.roll(low_4h, 1) - low_4h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Volume spike (20-period)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            result[period-1] = np.nansum(arr[:period])
+            for i in range(period, len(arr)):
+                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    tr14 = wilders_smoothing(tr, 14)
+    dm_plus_14 = wilders_smoothing(dm_plus, 14)
+    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = wilders_smoothing(dx, 14)
+    adx_strong = adx > 25  # Strong trend
+    
+    # Load 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike filter (20-period)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(30, n):  # Start after indicator warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(adx[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(adx[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Only trade during session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Strong trend (ADX > 25) + oversold (RSI < 30) + volume spike
-            if adx[i] > 25 and rsi[i] < 30 and vol_spike[i]:
-                signals[i] = 0.25
+            # Long: Strong uptrend (ADX>25, DI+>DI-) + price above EMA34 + volume spike
+            if adx_strong[i] and di_plus[i] > di_minus[i] and close[i] > ema34_1d_aligned[i] and vol_spike[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Strong trend (ADX > 25) + overbought (RSI > 70) + volume spike
-            elif adx[i] > 25 and rsi[i] > 70 and vol_spike[i]:
-                signals[i] = -0.25
+            # Short: Strong downtrend (ADX>25, DI->DI+) + price below EMA34 + volume spike
+            elif adx_strong[i] and di_minus[i] > di_plus[i] and close[i] < ema34_1d_aligned[i] and vol_spike[i]:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: Weakening trend (ADX < 20) or RSI mean reversion
+            # Exit: Trend weakening (ADX<20) or trend reversal vs EMA34
             if position == 1:
-                if adx[i] < 20 or rsi[i] > 50:
+                if (not adx_strong[i]) or (di_minus[i] > di_plus[i]) or (close[i] < ema34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if adx[i] < 20 or rsi[i] < 50:
+                if (not adx_strong[i]) or (di_plus[i] > di_minus[i]) or (close[i] > ema34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_ADX_RSI_Volume_Trend_MeanRev_v1"
-timeframe = "4h"
+name = "1h_ADX_1dEMA34_Volume_Session_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
