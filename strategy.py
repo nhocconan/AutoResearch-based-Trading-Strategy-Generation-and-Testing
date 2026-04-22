@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour volume-weighted breakout with 12-hour trend filter and volatility filter.
-Long when price breaks above Donchian(20) high with volume > 1.5x average volume and 12h EMA50 rising.
-Short when price breaks below Donchian(20) low with volume > 1.5x average volume and 12h EMA50 falling.
-Exit when price crosses opposite Donchian boundary or EMA50 direction reverses.
-Volume confirmation reduces false breakouts; 12h EMA50 filters trend direction; volatility filter avoids choppy markets.
-Designed for low trade frequency by requiring multiple confirmations.
-Works in both bull and bear markets by following 12h trend while using 4h breakouts for entries.
+Hypothesis: 6-hour Volume-Weighted Average Price (VWAP) with 1-week high-low channel filter.
+Long when price > VWAP and above weekly low, short when price < VWAP and below weekly high.
+VWAP provides intraday fair value; weekly channel filters extremes and prevents counter-trend trades.
+Designed for low trade frequency by requiring both VWAP deviation and channel position.
+Works in ranging markets (mean reversion to VWAP) and trends (filter prevents false signals).
 """
 
 import numpy as np
@@ -23,57 +21,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12-hour data for EMA50 trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate VWAP (typical price * volume) cumulative
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = np.where(vwap_denominator > 0, vwap_numerator / vwap_denominator, 0.0)
+    
+    # Load 1-week data for high-low channel - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 4:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly highest high and lowest low (expanding window)
+    high_1w_expanding = np.maximum.accumulate(high_1w)
+    low_1w_expanding = np.minimum.accumulate(low_1w)
     
-    # Volume average (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter (14-period)
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align to 6h timeframe
+    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w_expanding)
+    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w_expanding)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_avg[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(atr[i])):
+    for i in range(1, n):  # Start from 1 for VWAP calculation
+        # Skip if VWAP or weekly data not ready
+        if vwap_denominator[i] == 0 or np.isnan(high_1w_aligned[i]) or np.isnan(low_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility filter: avoid extremely low volatility (choppy) markets
-        vol_filter = atr[i] > 0.01 * close[i]  # ATR > 1% of price
-        
         if position == 0:
-            # Long: Price breaks above Donchian high, volume > 1.5x average, 12h EMA50 rising, volatility filter
-            if (close[i] > high_20[i] and 
-                volume[i] > 1.5 * vol_avg[i] and 
-                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and
-                vol_filter):
+            # Long: Price above VWAP and above weekly low (not in extreme high zone)
+            if close[i] > vwap[i] and close[i] > low_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low, volume > 1.5x average, 12h EMA50 falling, volatility filter
-            elif (close[i] < low_20[i] and 
-                  volume[i] > 1.5 * vol_avg[i] and 
-                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and
-                  vol_filter):
+            # Short: Price below VWAP and below weekly high (not in extreme low zone)
+            elif close[i] < vwap[i] and close[i] < high_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -81,14 +68,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price falls below Donchian low OR 12h EMA50 starts falling
-                if (close[i] < low_20[i] or 
-                    ema50_12h_aligned[i] < ema50_12h_aligned[i-1]):
+                # Exit long: Price crosses below VWAP
+                if close[i] < vwap[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price rises above Donchian high OR 12h EMA50 starts rising
-                if (close[i] > high_20[i] or 
-                    ema50_12h_aligned[i] > ema50_12h_aligned[i-1]):
+                # Exit short: Price crosses above VWAP
+                if close[i] > vwap[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Volume_Weighted_Breakout_12hEMA50_Trend_VolFilter"
-timeframe = "4h"
+name = "6H_VWAP_WeeklyChannel_Filter"
+timeframe = "6h"
 leverage = 1.0
