@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1D Donchian Channel breakout with weekly trend filter and volume confirmation.
-In bull markets, price breaks above 20-day high with upward weekly trend.
-In bear markets, price breaks below 20-day low with downward weekly trend.
-Volume surge confirms institutional participation.
-Designed for low trade frequency (10-25/year) to minimize fee drag on daily timeframe.
+Hypothesis: 6h Donchian channel breakout with 1d ADX filter and volume confirmation.
+Long when price breaks above Donchian upper with strong ADX trend and volume spike.
+Short when price breaks below Donchian lower with strong ADX trend and volume spike.
+Exit when price crosses Donchian middle or ADX weakens.
+Uses 1d ADX for trend strength filter to avoid whipsaws in ranging markets.
+Designed for low trade frequency (15-35/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,65 +21,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter - ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
+    # Load daily data for ADX filter - ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate Donchian Channel (20-period) on daily
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate Donchian Channel (20-period) on 6h
+    lookback = 20
+    dc_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    dc_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    dc_middle = (dc_upper + dc_lower) / 2.0
     
-    # Calculate weekly EMA34 trend
-    ema34_weekly = pd.Series(df_weekly['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    # Calculate 1d ADX (14-period)
+    # ADX requires +DI, -DI, and TR
+    high_d = pd.Series(df_daily['high'].values)
+    low_d = pd.Series(df_daily['low'].values)
+    close_d = pd.Series(df_daily['close'].values)
     
-    # Calculate daily volume average (20-period)
+    # True Range
+    tr1 = high_d - low_d
+    tr2 = abs(high_d - close_d.shift(1))
+    tr3 = abs(low_d - close_d.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_d = tr.rolling(window=14, min_periods=14).mean()
+    
+    # Directional Movement
+    up_move = high_d.diff()
+    down_move = -low_d.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed values
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr_d)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr_d)
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_d = dx.rolling(window=14, min_periods=14).mean()
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx_d.values)
+    
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-calculate session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(lookback, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above 20-day high with bullish weekly trend and volume
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema34_aligned[i] and  # Price above weekly EMA = bullish trend
+            # Long: Price breaks above Donchian upper with strong ADX and volume
+            if (close[i] > dc_upper[i] and 
+                adx_aligned[i] > 25 and  # Strong trend
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 20-day low with bearish weekly trend and volume
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema34_aligned[i] and  # Price below weekly EMA = bearish trend
+            # Short: Price breaks below Donchian lower with strong ADX and volume
+            elif (close[i] < dc_lower[i] and 
+                  adx_aligned[i] > 25 and  # Strong trend
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to Donchian midpoint
+            # Exit conditions
+            exit_signal = False
+            
             if position == 1:
-                if close[i] < donchian_mid[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                # Exit long: price crosses below middle OR ADX weakens
+                if close[i] < dc_middle[i] or adx_aligned[i] < 20:
+                    exit_signal = True
             else:  # position == -1
-                if close[i] > donchian_mid[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                # Exit short: price crosses above middle OR ADX weakens
+                if close[i] > dc_middle[i] or adx_aligned[i] < 20:
+                    exit_signal = True
+            
+            if exit_signal:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1D_DonchianBreakout_1wEMA34Trend_Volume"
-timeframe = "1d"
+name = "6H_DonchianBreakout_1dADX_Volume"
+timeframe = "6h"
 leverage = 1.0
+#%%
