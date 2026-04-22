@@ -5,53 +5,43 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 34:
         return np.zeros(n)
     
-    # Load 1d data once for calculations
+    # Load 1d data once for Camarilla levels and EMA34
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for volatility
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]  # first value
-    tr3[0] = tr1[0]  # first value
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla levels (based on current day's HLC)
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12
+    s1_1d = close_1d - range_1d * 1.1 / 12
+    pp_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Calculate 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1d RSI(14) for overbought/oversold
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = (100 - (100 / (1 + rs))).values
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align to 12h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Volume spike filter (20-period average on 12h data)
+    # Volume spike filter (20-period average)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(300, n):
+    for i in range(34, n):
         # Skip if any data is not ready
-        if (np.isnan(atr_aligned[i]) or 
-            np.isnan(ema200_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -61,35 +51,36 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_aligned[i]
-        ema200 = ema200_aligned[i]
-        rsi = rsi_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        pp = pp_aligned[i]
+        ema34 = ema34_aligned[i]
         
-        # Volume filter: current volume > 2.0 * 20-period average
-        vol_spike = vol > 2.0 * vol_ma
+        # Volume filter: current volume > 1.8 * 20-day average
+        vol_spike = vol > 1.8 * vol_ma
         
         if position == 0:
-            # Long conditions: price > EMA200 + RSI < 30 (oversold) + volume spike
-            if price > ema200 and rsi < 30 and vol_spike:
+            # Long conditions: price breaks above R1 + volume spike + price > EMA34
+            if price > r1 and vol_spike and price > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price < EMA200 + RSI > 70 (overbought) + volume spike
-            elif price < ema200 and rsi > 70 and vol_spike:
+            # Short conditions: price breaks below S1 + volume spike + price < EMA34
+            elif price < s1 and vol_spike and price < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: ATR-based stop or mean reversion signal
+            # Exit conditions: price crosses back through PP or volume dries up
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price drops below EMA200 - 1.5*ATR or RSI > 70
-                if price < ema200 - 1.5 * atr or rsi > 70:
+                # Exit when price crosses below PP or volume dries up
+                if price < pp or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price rises above EMA200 + 1.5*ATR or RSI < 30
-                if price > ema200 + 1.5 * atr or rsi < 30:
+                # Exit when price crosses above PP or volume dries up
+                if price > pp or vol < 0.8 * vol_ma:
                     exit_signal = True
             
             if exit_signal:
@@ -101,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_EMA200_RSI_MeanReversion_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
