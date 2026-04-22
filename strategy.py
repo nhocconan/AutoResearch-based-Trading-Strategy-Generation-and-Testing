@@ -1,3 +1,4 @@
+# %pip install git+https://github.com/tsaithanhit/ccxt.git
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -8,25 +9,41 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1-hour 3-bar pullback strategy with 4-hour trend filter (4h close > 20-period EMA) 
-    # and volume confirmation. Takes long on pullbacks in uptrend, short on bounces in downtrend.
-    # Works in bull/bear via trend filter: only trades in direction of 4h trend.
-    # Targets ~20-30 trades/year to minimize fee drag while capturing meaningful moves.
+    # Hypothesis: 12-hour Donchian breakout with 1-day EMA50 trend filter and volume spike
+    # Works in bull/bear via trend filter: only take long in uptrend, short in downtrend.
+    # Donchian breakout captures momentum; EMA50 filters trend; volume confirms.
+    # Targets ~20-30 trades/year to minimize fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend filter (20-period EMA)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Load 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Volume spike filter (20-period on 1h)
+    # Calculate Donchian channels (20-period high/low) on 12h
+    # Using pandas rolling for proper handling
+    high_series = pd.Series(high_12h)
+    low_series = pd.Series(low_12h)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 12h timeframe (already aligned via get_htf_data alignment)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    
+    # Load 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume spike filter (20-period on 12h)
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_ma20  # Require 1.5x volume for confirmation
+    vol_spike = volume > 2.0 * vol_ma20  # Require 2x volume for confirmation
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -35,9 +52,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready or outside session
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(vol_ma20[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i]) or
             not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -45,41 +63,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 3-bar pullback in uptrend (close < low of previous 2 bars) with volume + 4h uptrend
-            if (i >= 2 and 
-                close[i] < low[i-1] and 
-                close[i] < low[i-2] and 
-                vol_spike[i] and 
-                close[i] > ema20_4h_aligned[i]):
-                signals[i] = 0.20
+            # Long: Price breaks above Donchian high with volume + price above 1d EMA50 (uptrend)
+            if close[i] > donchian_high_aligned[i] and vol_spike[i] and close[i] > ema50_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 3-bar bounce in downtrend (close > high of previous 2 bars) with volume + 4h downtrend
-            elif (i >= 2 and 
-                  close[i] > high[i-1] and 
-                  close[i] > high[i-2] and 
-                  vol_spike[i] and 
-                  close[i] < ema20_4h_aligned[i]):
-                signals[i] = -0.20
+            # Short: Price breaks below Donchian low with volume + price below 1d EMA50 (downtrend)
+            elif close[i] < donchian_low_aligned[i] and vol_spike[i] and close[i] < ema50_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Trend reversal (price crosses 4h EMA20) or opposite 3-bar setup
+            # Exit: Price returns to opposite Donchian level or trend reversal vs 1d EMA50
             if position == 1:
-                if close[i] < ema20_4h_aligned[i] or \
-                   (i >= 2 and close[i] > high[i-1] and close[i] > high[i-2]):
+                if close[i] < donchian_low_aligned[i] or close[i] < ema50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1
-                if close[i] > ema20_4h_aligned[i] or \
-                   (i >= 2 and close[i] < low[i-1] and close[i] < low[i-2]):
+                if close[i] > donchian_high_aligned[i] or close[i] > ema50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
 
-name = "1h_3Bar_Pullback_4hEMA20_Trend_Volume_Session_v1"
-timeframe = "1h"
+name = "12h_Donchian_20_Breakout_1dEMA50_Volume_Session_v1"
+timeframe = "12h"
 leverage = 1.0
