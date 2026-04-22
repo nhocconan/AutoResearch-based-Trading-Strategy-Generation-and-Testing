@@ -3,69 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d ADX trend filter and volume spike confirmation.
-# Williams Alligator (Jaw/Teeth/Lips) identifies trend phases: converging = no trend, diverging = trend.
-# Enter long when Lips > Teeth > Jaw (bullish alignment) with volume spike and 1d ADX > 25.
-# Enter short when Lips < Teeth < Jaw (bearish alignment) with volume spike and 1d ADX > 25.
-# Exit when Alligator lines re-converge or ADX < 20. Designed for low trade frequency (~15-30/year) to minimize fee decay.
-# Works in both bull and bear markets by requiring strong trend (ADX filter) and avoiding sideways markets.
+# Hypothesis: 1h mean-reversion strategy using 4h RSI extremes with 1d trend filter and volume confirmation.
+# Buy when 4h RSI < 30 (oversold) and price > 1d EMA50 (uptrend) with volume spike (>1.5x 20-period average).
+# Sell when 4h RSI > 70 (overbought) and price < 1d EMA50 (downtrend) with volume spike.
+# Designed for low trade frequency (~15-35/year) to minimize fee drag. Works in both bull and bear markets
+# by combining mean-reversion entries with trend filtering to avoid counter-trend trades.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for ADX calculation (once before loop)
+    # Load 4h data for RSI calculation (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    # Calculate 14-period RSI on 4h close
+    delta = pd.Series(close_4h).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_4h = 100 - (100 / (1 + rs))
+    rsi_4h = rsi_4h.replace([np.inf, -np.inf], 100).fillna(100).values
+    
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX(14) on 1d timeframe
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Calculate 50-period EMA on 1d close for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/14)
-    def wilders_smooth(data, period):
-        alpha = 1.0 / period
-        smoothed = np.full_like(data, np.nan)
-        smoothed[period-1] = np.nanmean(data[period-1:])  # simple average for first value
-        for i in range(period, len(data)):
-            smoothed[i] = alpha * data[i] + (1 - alpha) * smoothed[i-1]
-        return smoothed
-    
-    tr14 = wilders_smooth(tr, 14)
-    plus_dm14 = wilders_smooth(plus_dm, 14)
-    minus_dm14 = wilders_smooth(minus_dm, 14)
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm14 / tr14
-    minus_di = 100 * minus_dm14 / tr14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smooth(dx, 14)  # ADX is smoothed DX
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Williams Alligator on 12h timeframe (using median price)
-    median_price = (prices['high'].values + prices['low'].values) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Align 4h RSI and 1d EMA to 1h timeframe
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -76,8 +48,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_4h_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,40 +59,34 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        adx_val = adx_aligned[i]
+        rsi_val = rsi_4h_aligned[i]
+        ema_val = ema_50_aligned[i]
         
         # Volume filter: current volume > 1.5 * 20-period average
         vol_spike = vol > 1.5 * vol_ma
         
-        # Alligator alignments
-        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
-        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
-        
         if position == 0:
-            # Long conditions: bullish alignment + strong trend + volume spike
-            if bullish_alignment and adx_val > 25 and vol_spike:
-                signals[i] = 0.25
+            # Long conditions: 4h RSI < 30 (oversold) + uptrend + volume spike
+            if rsi_val < 30 and price > ema_val and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short conditions: bearish alignment + strong trend + volume spike
-            elif bearish_alignment and adx_val > 25 and vol_spike:
-                signals[i] = -0.25
+            # Short conditions: 4h RSI > 70 (overbought) + downtrend + volume spike
+            elif rsi_val > 70 and price < ema_val and vol_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position != 0:
-            # Exit conditions
+            # Exit conditions: RSI returns to neutral zone (40-60) or trend breaks
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when Alligator re-converges or trend weakens
-                if not bullish_alignment or adx_val < 20:
+                # Exit when RSI > 40 or price breaks below EMA
+                if rsi_val > 40 or price < ema_val:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when Alligator re-converges or trend weakens
-                if not bearish_alignment or adx_val < 20:
+                # Exit when RSI < 60 or price breaks above EMA
+                if rsi_val < 60 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
@@ -127,10 +94,10 @@ def generate_signals(prices):
                 position = 0
             else:
                 # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12h_WilliamsAlligator_1dADX_Volume"
-timeframe = "12h"
+name = "1h_RSI40_4hRSI_1dEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
