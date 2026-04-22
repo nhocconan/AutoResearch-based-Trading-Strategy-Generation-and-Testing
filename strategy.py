@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian breakout (20) with 1d ADX filter and volume confirmation.
-Long when price breaks above Donchian upper with strong ADX (trend) and volume spike.
-Short when price breaks below Donchian lower with strong ADX and volume spike.
-Exit when price crosses Donchian middle or ADX weakens.
-Uses 1d ADX for trend strength filter to avoid whipsaws in ranging markets.
-Designed for low trade frequency (20-40/year) to minimize fee drag.
+Hypothesis: 1d Donchian channel breakout with 1w EMA trend filter and volume confirmation.
+Long when price breaks above Donchian upper (20) with price above weekly EMA(34) and volume > 1.5x average.
+Short when price breaks below Donchian lower (20) with price below weekly EMA(34) and volume > 1.5x average.
+Exit when price crosses Donchian middle.
+Designed for low trade frequency (10-25/year) to minimize fee damp on daily timeframe.
+Works in bull (breakouts) and bear (breakdowns) with trend filter preventing counter-trend whipsaws.
 """
 import numpy as np
 import pandas as pd
@@ -21,49 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for ADX filter - ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    # Load weekly data for EMA filter - ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 35:
         return np.zeros(n)
     
-    # Calculate Donchian Channel (20-period) on 4h
+    # Calculate Donchian Channel (20-period) on daily
     lookback = 20
     dc_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     dc_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     dc_middle = (dc_upper + dc_lower) / 2.0
     
-    # Calculate 1d ADX (14-period)
-    high_d = pd.Series(df_daily['high'].values)
-    low_d = pd.Series(df_daily['low'].values)
-    close_d = pd.Series(df_daily['close'].values)
+    # Calculate weekly EMA(34)
+    weekly_close = pd.Series(df_weekly['close'].values)
+    weekly_ema = weekly_close.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # True Range
-    tr1 = high_d - low_d
-    tr2 = abs(high_d - close_d.shift(1))
-    tr3 = abs(low_d - close_d.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_d = tr.rolling(window=14, min_periods=14).mean()
+    # Align weekly EMA to daily timeframe
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
     
-    # Directional Movement
-    up_move = high_d.diff()
-    down_move = -low_d.diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr_d)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr_d)
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_d = dx.rolling(window=14, min_periods=14).mean()
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx_d.values)
-    
-    # Calculate 4h volume average (20-period)
+    # Calculate daily volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,46 +48,36 @@ def generate_signals(prices):
     for i in range(lookback, n):
         # Skip if data not ready
         if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+            np.isnan(weekly_ema_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian upper with strong ADX and volume
+            # Long: Price breaks above Donchian upper with weekly uptrend and volume
             if (close[i] > dc_upper[i] and 
-                adx_aligned[i] > 25 and  # Strong trend
+                close[i] > weekly_ema_aligned[i] and  # Above weekly EMA (uptrend)
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower with strong ADX and volume
+            # Short: Price breaks below Donchian lower with weekly downtrend and volume
             elif (close[i] < dc_lower[i] and 
-                  adx_aligned[i] > 25 and  # Strong trend
+                  close[i] < weekly_ema_aligned[i] and  # Below weekly EMA (downtrend)
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit when price crosses Donchian middle
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below middle OR ADX weakens
-                if close[i] < dc_middle[i] or adx_aligned[i] < 20:
+                # Exit long: price crosses below middle
+                if close[i] < dc_middle[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above middle OR ADX weakens
-                if close[i] > dc_middle[i] or adx_aligned[i] < 20:
+                # Exit short: price crosses above middle
+                if close[i] > dc_middle[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -121,7 +88,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_DonchianBreakout_1dADX_Volume"
-timeframe = "4h"
+name = "1D_DonchianBreakout_1wEMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
 #%%
