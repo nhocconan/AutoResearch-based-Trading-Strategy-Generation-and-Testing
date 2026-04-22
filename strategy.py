@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Volume-Weighted Average Price (VWAP) Reversion with 12-hour Exponential Moving Average trend filter.
-Trades mean-reversion when price deviates significantly from VWAP, but only in the direction of the 12h EMA trend.
-Uses Bollinger Bands to identify overextended conditions. Designed for low trade frequency (15-30 trades/year)
-to minimize fee drag and work in both bull and bear markets by aligning with higher timeframe trend and using
-statistical mean-reversion at extreme deviations.
+Hypothesis: 1-hour EMA21 trend following with 4-hour ATR-based range filter and volume spike.
+Only trade in the direction of the EMA21 trend (up or down) when price breaks above/below
+the 4-hour ATR-based upper/lower bounds with volume confirmation. Uses 4h ATR to define
+volatility-adjusted breakout levels, avoiding false breakouts in low volatility periods.
+Designed for low trade frequency (15-35 trades/year) by requiring multiple confirmations:
+trend alignment, volatility breakout, and volume spike. Works in both bull and bear markets
+by following the EMA21 trend direction, which adapts to market conditions.
 """
 
 import numpy as np
@@ -22,69 +24,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # EMA21 on 1h for trend direction
+    close_s = pd.Series(close)
+    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Load 4h data for ATR-based range - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    # 12h EMA for trend filter (21-period)
-    close_12h = df_12h['close'].values
-    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    # Calculate ATR(14) on 4h
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate VWAP (typical price * volume) / volume
-    typical_price = (high + low + close) / 3
-    vwap = (typical_price * volume).cumsum() / volume.cumsum()
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Bollinger Bands (20, 2) around VWAP for mean reversion signals
-    vwap_series = pd.Series(vwap)
-    vwap_ma_20 = vwap_series.rolling(window=20, min_periods=20).mean().values
-    vwap_std_20 = vwap_series.rolling(window=20, min_periods=20).std().values
-    upper_band = vwap_ma_20 + 2.0 * vwap_std_20
-    lower_band = vwap_ma_20 - 2.0 * vwap_std_20
+    # 4h EMA20 as middle reference
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Upper and lower bands: EMA20 ± 1.5 * ATR
+    upper_band = ema20_4h + 1.5 * atr_14
+    lower_band = ema20_4h - 1.5 * atr_14
+    
+    # Align to 1h
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    upper_band_aligned = align_htf_to_ltf(prices, df_4h, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_4h, lower_band)
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(vwap_ma_20[i]) or 
-            np.isnan(vwap_std_20[i]) or np.isnan(vwap[i])):
+        if (np.isnan(ema21[i]) or np.isnan(ema20_4h_aligned[i]) or 
+            np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        
         if position == 0:
-            # Long: price below lower Bollinger Band and uptrend bias (price > 12h EMA)
-            if close[i] < lower_band[i] and close[i] > ema_21_12h_aligned[i]:
-                signals[i] = 0.25
+            # Long: EMA21 uptrend + price breaks above upper band + volume spike
+            if ema21[i] > ema21[i-1] and close[i] > upper_band_aligned[i] and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short: price above upper Bollinger Band and downtrend bias (price < 12h EMA)
-            elif close[i] > upper_band[i] and close[i] < ema_21_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: EMA21 downtrend + price breaks below lower band + volume spike
+            elif ema21[i] < ema21[i-1] and close[i] < lower_band_aligned[i] and vol_spike:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: price returns to VWAP (mean reversion complete) or trend reverses
+            # Exit: EMA21 trend reversal or price returns to middle band
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses above VWAP or closes below 12h EMA
-                if close[i] > vwap[i] or close[i] < ema_21_12h_aligned[i]:
+                # Exit long: EMA21 turns down or price closes below EMA20
+                if ema21[i] < ema21[i-1] or close[i] < ema20_4h_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses below VWAP or closes above 12h EMA
-                if close[i] < vwap[i] or close[i] > ema_21_12h_aligned[i]:
+                # Exit short: EMA21 turns up or price closes above EMA20
+                if ema21[i] > ema21[i-1] or close[i] > ema20_4h_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_VWAP_MeanReversion_12hEMA21_Trend"
-timeframe = "4h"
+name = "1h_EMA21_Trend_4hATRBreakout_Volume"
+timeframe = "1h"
 leverage = 1.0
