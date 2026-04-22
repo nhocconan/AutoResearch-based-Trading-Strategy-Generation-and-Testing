@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 1-hour RSI(14) mean reversion with 4-hour RSI(14) trend filter and volume spike confirmation.
-Goes long when 1h RSI < 30 (oversold) and 4h RSI > 50 (uptrend), short when 1h RSI > 70 (overbought) and 4h RSI < 50 (downtrend).
-Requires volume > 1.3x 20-period average for entry confirmation.
-Exits when RSI returns to neutral (40-60 range) or opposite extreme.
-Targets 15-37 trades/year (60-150 total over 4 years) with disciplined entries to avoid fee drag.
-Uses 4h trend to avoid counter-trend trades in both bull and bear markets.
+Hypothesis: 6-hour 55-period Exponential Moving Average (EMA) crossover with 1-week Ichimoku Cloud filter and volume confirmation.
+Long when: 6h EMA(55) crosses above EMA(89) AND price > 1-week Ichimoku Cloud (Senkou Span A/B) AND volume > 1.3x 20-period average.
+Short when: 6h EMA(55) crosses below EMA(89) AND price < 1-week Ichimoku Cloud AND volume > 1.3x 20-period average.
+Exit when opposite EMA crossover occurs.
+Ichimoku Cloud from weekly timeframe provides strong trend filter that works in both bull and bear markets by avoiding counter-trend trades.
+Targets 12-37 trades/year (50-150 total over 4 years) with disciplined entry/exit to minimize fee drag.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,43 +23,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for RSI trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 1w data for Ichimoku Cloud - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h RSI(14) for trend filter
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_4h = 100 - (100 / (1 + rs))
-    rsi_14_4h = rsi_14_4h.values
-    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
+    # Calculate Ichimoku Components on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1h RSI(14) for entry signals
-    delta_1h = np.diff(close, prepend=close[0])
-    gain_1h = np.where(delta_1h > 0, delta_1h, 0)
-    loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
-    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_1h = avg_gain_1h / (avg_loss_1h + 1e-10)
-    rsi_14_1h = 100 - (100 / (1 + rs_1h))
-    rsi_14_1h = rsi_14_1h.values
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    tenkan_sen = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
     
-    # Volume spike: current volume > 1.3x 20-period average
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    kijun_sen = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    senkou_span_b = ((pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
+                      pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    
+    # The cloud is between Senkou Span A and B
+    ichimoku_cloud_top = np.maximum(senkou_span_a, senkou_span_b)
+    ichimoku_cloud_bottom = np.minimum(senkou_span_a, senkou_span_b)
+    
+    # Align Ichimoku levels to 6h timeframe
+    ichimoku_top_aligned = align_htf_to_ltf(prices, df_1w, ichimoku_cloud_top.values)
+    ichimoku_bottom_aligned = align_htf_to_ltf(prices, df_1w, ichimoku_cloud_bottom.values)
+    
+    # 6h EMA indicators
+    ema_fast = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema_slow = pd.Series(close).ewm(span=89, adjust=False, min_periods=89).mean().values
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(rsi_14_4h_aligned[i]) or np.isnan(rsi_14_1h[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
+            np.isnan(ichimoku_top_aligned[i]) or np.isnan(ichimoku_bottom_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,36 +78,36 @@ def generate_signals(prices):
         # Volume confirmation
         vol_spike = volume[i] > 1.3 * vol_ma_20[i]
         
+        # EMA crossover signals
+        ema_cross_up = (ema_fast[i] > ema_slow[i]) and (ema_fast[i-1] <= ema_slow[i-1])
+        ema_cross_down = (ema_fast[i] < ema_slow[i]) and (ema_fast[i-1] >= ema_slow[i-1])
+        
         if position == 0 and vol_spike:
-            # Long: 1h RSI oversold (<30) and 4h RSI uptrend (>50)
-            if rsi_14_1h[i] < 30 and rsi_14_4h_aligned[i] > 50:
-                signals[i] = 0.20
+            # Long: EMA bullish crossover AND price above Ichimoku cloud
+            if ema_cross_up and close[i] > ichimoku_top_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 1h RSI overbought (>70) and 4h RSI downtrend (<50)
-            elif rsi_14_1h[i] > 70 and rsi_14_4h_aligned[i] < 50:
-                signals[i] = -0.20
+            # Short: EMA bearish crossover AND price below Ichimoku cloud
+            elif ema_cross_down and close[i] < ichimoku_bottom_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral range (40-60) or hits opposite extreme
+            # Exit on opposite EMA crossover
             exit_signal = False
             
-            if position == 1:
-                # Exit long: RSI returns to neutral or becomes overbought
-                if rsi_14_1h[i] >= 40 or rsi_14_1h[i] > 70:
-                    exit_signal = True
-            else:  # position == -1
-                # Exit short: RSI returns to neutral or becomes oversold
-                if rsi_14_1h[i] <= 60 or rsi_14_1h[i] < 30:
-                    exit_signal = True
+            if position == 1 and ema_cross_down:
+                exit_signal = True
+            elif position == -1 and ema_cross_up:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_RSI14_MeanReversion_4hRSITrend_Volume"
-timeframe = "1h"
+name = "6h_EMA55_89_IchimokuCloud_Volume"
+timeframe = "6h"
 leverage = 1.0
