@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Long when price breaks above 10-period high with 1-day EMA34 rising and volume spike.
-Short when price breaks below 10-period low with 1-day EMA34 falling and volume spike.
-Exit when price crosses 10-period moving average.
-Designed for low trade frequency by requiring multiple confirmations and using 12h timeframe.
-Works in both bull and bear markets by following the daily trend.
+Hypothesis: 4-hour Bollinger Band squeeze breakout with 1-day trend filter and volume confirmation.
+Long when price breaks above upper BB during low volatility (BBW < 50th percentile) with 1-day EMA50 up and volume spike.
+Short when price breaks below lower BB during low volatility with 1-day EMA50 down and volume squeeze.
+Exit when price re-enters the Bollinger Bands.
+Uses volatility contraction/expansion to capture breakouts with low false signals.
+Works in both bull and bear markets by following daily trend direction.
 """
 
 import numpy as np
@@ -22,62 +22,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for EMA trend filter - ONCE before loop
+    # Load 1-day data for EMA50 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Bollinger Bands (20, 2)
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    # Donchian channel: 10-period high/low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=10, min_periods=10).max().values
-    donchian_low = low_series.rolling(window=10, min_periods=10).min().values
-    ma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    # Bollinger Band Width for squeeze detection
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    # Percentile lookback for squeeze definition (50th percentile = median)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).rank(pct=True).values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1-day EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation: current volume > 1.5x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after enough data
+    for i in range(50, n):  # Start after enough data for indicators
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(ma_10[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width_percentile[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volatility squeeze condition (low volatility environment)
+        volatility_squeeze = bb_width_percentile[i] < 0.5  # Below 50th percentile
+        
         # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        vol_spike = volume[i] > 1.5 * vol_ma_30[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian high with 1-day EMA34 rising and volume spike
-            if (close[i] > donchian_high[i] and 
-                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and vol_spike):
+            # Long: Price breaks above upper BB during low volatility with 1-day EMA50 up and volume spike
+            if (close[i] > bb_upper[i] and 
+                volatility_squeeze and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and 
+                vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low with 1-day EMA34 falling and volume spike
-            elif (close[i] < donchian_low[i] and 
-                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and vol_spike):
+            # Short: Price breaks below lower BB during low volatility with 1-day EMA50 down and volume spike
+            elif (close[i] < bb_lower[i] and 
+                  volatility_squeeze and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and 
+                  vol_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses 10-period moving average
+            # Exit: Price re-enters the Bollinger Bands
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses below MA
-                if close[i] < ma_10[i]:
+                # Exit long: Price crosses below upper BB (or re-enters bands)
+                if close[i] < bb_middle[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price crosses above MA
-                if close[i] > ma_10[i]:
+                # Exit short: Price crosses above lower BB (or re-enters bands)
+                if close[i] > bb_middle[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -88,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4H_BollingerSqueeze_Breakout_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
