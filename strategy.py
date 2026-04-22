@@ -39,7 +39,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align all levels to 4h timeframe (primary)
+    # Align all levels to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
@@ -52,6 +52,10 @@ def generate_signals(prices):
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,15 +72,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 with volume spike AND above 1d EMA34 (uptrend)
+            # Long: Price breaks above R3 with volume spike AND above 1d EMA34 (uptrend) AND in session
             if (close[i] > r3_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
-                close[i] > ema_34_aligned[i]):
-                signals[i] = 0.25
+                close[i] > ema_34_aligned[i] and in_session[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S3 with volume spike AND below 1d EMA34 (downtrend)
+            # Short: Price breaks below S3 with volume spike AND below 1d EMA34 (downtrend) AND in session
             elif (close[i] < s3_aligned[i] and volume[i] > 2.0 * vol_avg_20[i] and 
-                  close[i] < ema_34_aligned[i]):
-                signals[i] = -0.25
+                  close[i] < ema_34_aligned[i] and in_session[i]):
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit: Price crosses back to opposite S1/R1 level (tighter stop)
@@ -86,17 +90,17 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
                 # Exit short: Price closes above R1
                 if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4H_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1H_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
