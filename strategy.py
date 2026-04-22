@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Donchian Channel breakout with 1-day trend filter and volume confirmation.
-Long when price breaks above Donchian upper channel (20-period) and 1d EMA50 is rising with volume spike.
-Short when price breaks below Donchian lower channel (20-period) and 1d EMA50 is falling with volume spike.
-Exit when price crosses the Donchian middle (10-period average of high/low) or 1d EMA50 reverses.
-Designed for low trade frequency by requiring multiple confirmations (breakout + trend + volume).
-Works in both bull and bear markets by following the 1d trend.
+Hypothesis: 4-hour RSI(2) Extreme with 12-hour Trend and Volume Confirmation.
+Long when RSI(2) < 10, 12h EMA50 rising, volume spike, price above SMA200.
+Short when RSI(2) > 90, 12h EMA50 falling, volume spike, price below SMA200.
+Exit when RSI(2) crosses above 50 (long) or below 50 (short).
+Designed for low trade frequency by requiring extreme oversold/overbought conditions.
+Works in both bull and bear markets by following the 12h trend.
 """
 
 import numpy as np
@@ -14,31 +14,35 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    # Upper = max(high, 20), Lower = min(low, 20), Middle = (upper + lower) / 2
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # RSI(2)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = gain_ma / (loss_ma + 1e-10)
+    rsi2 = 100 - (100 / (1 + rs))
     
-    # Load 1d data for trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # SMA200 for trend filter
+    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    
+    # Load 12h data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 50-period EMA on 1d close for trend
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 50-period EMA on 12h close for trend
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,11 +50,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(rsi2[i]) or np.isnan(sma200[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,27 +63,27 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: break above upper channel, 1d EMA50 rising, volume spike
-            if (close[i] > donchian_upper[i] and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and vol_spike):
+            # Long: RSI(2) < 10, 12h EMA50 rising, volume spike, price above SMA200
+            if (rsi2[i] < 10 and ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and 
+                vol_spike and close[i] > sma200[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower channel, 1d EMA50 falling, volume spike
-            elif (close[i] < donchian_lower[i] and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and vol_spike):
+            # Short: RSI(2) > 90, 12h EMA50 falling, volume spike, price below SMA200
+            elif (rsi2[i] > 90 and ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and 
+                  vol_spike and close[i] < sma200[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price crosses middle or 1d EMA50 reverses
+            # Exit: RSI(2) crosses above 50 (long) or below 50 (short)
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below middle or 1d EMA50 turns down
-                if close[i] < donchian_middle[i] or ema50_1d_aligned[i] < ema50_1d_aligned[i-1]:
+                # Exit long: RSI(2) crosses above 50
+                if rsi2[i] >= 50:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above middle or 1d EMA50 turns up
-                if close[i] > donchian_middle[i] or ema50_1d_aligned[i] > ema50_1d_aligned[i-1]:
+                # Exit short: RSI(2) crosses below 50
+                if rsi2[i] <= 50:
                     exit_signal = True
             
             if exit_signal:
@@ -91,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Donchian_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4H_RSI2_Extreme_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
