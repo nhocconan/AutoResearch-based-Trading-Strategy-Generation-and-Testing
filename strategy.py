@@ -1,7 +1,11 @@
-# 12h Donchian Breakout + 1d Trend + Volume Spike
-# Hypothesis: Breakouts on 12h with daily trend filter and volume confirmation capture strong moves
-# while avoiding false breakouts in chop. Trend filter reduces whipsaw in bear markets like 2022.
-# Volume surge confirms institutional participation. Designed for low trade frequency (~15-25/year).
+#!/usr/bin/env python3
+"""
+Hypothesis: 4-hour Williams %R with daily trend filter and volume confirmation.
+Long when Williams %R crosses above -80 (oversold) + daily close > daily EMA50 + volume > 1.5x average.
+Short when Williams %R crosses below -20 (overbought) + daily close < daily EMA50 + volume > 1.5x average.
+Exit when Williams %R crosses -50 (mean reversion midpoint) or daily trend changes.
+Designed for moderate trade frequency (~20-40/year) to balance signal quality and fee drag.
+"""
 
 import numpy as np
 import pandas as pd
@@ -17,73 +21,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for trend filter - ONCE before loop
+    # Load daily data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA50 for trend filter
     daily_close = df_1d['close'].values
-    daily_ema34 = pd.Series(daily_close).ewm(span=34, min_periods=34, adjust=False).mean().values
-    daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
+    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
     
-    # Calculate 12h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.fillna(0).values
     
-    # Calculate average volume for confirmation (20-period)
+    # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(daily_ema34_aligned[i]) or np.isnan(avg_volume[i]) or volume[i] == 0):
+        if (np.isnan(williams_r[i]) or np.isnan(daily_ema50_aligned[i]) or 
+            np.isnan(avg_volume[i]) or volume[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get current daily close and EMA for trend
-        daily_close_val = df_1d['close'].iloc[-1] if len(df_1d) > 0 else np.nan
-        daily_ema34_val = daily_ema34_aligned[i]
-        
-        if np.isnan(daily_close_val) or np.isnan(daily_ema34_val):
+        daily_close_val = None
+        daily_ema50_val = None
+        if i < len(daily_ema50_aligned):
+            daily_close_val = df_1d['close'].values[-1] if len(df_1d) > 0 else np.nan
+            daily_ema50_val = daily_ema50_aligned[i]
+        else:
+            daily_close_val = np.nan
+            daily_ema50_val = np.nan
+            
+        if np.isnan(daily_close_val) or np.isnan(daily_ema50_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        daily_trend_up = daily_close_val > daily_ema34_val
-        daily_trend_down = daily_close_val < daily_ema34_val
+        daily_trend_up = daily_close_val > daily_ema50_val
+        daily_trend_down = daily_close_val < daily_ema50_val
         
-        volume_confirm = volume[i] > 2.0 * avg_volume[i]
+        volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper + daily uptrend + volume spike
-            if (high[i] > highest_high[i] and 
+            # Long: Williams %R crosses above -80 + daily uptrend + volume confirmation
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
                 daily_trend_up and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + daily downtrend + volume spike
-            elif (low[i] < lowest_low[i] and 
+            # Short: Williams %R crosses below -20 + daily downtrend + volume confirmation
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
                   daily_trend_down and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to Donchian middle or trend fails
-            middle = (highest_high[i] + lowest_low[i]) / 2
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below Donchian middle or daily trend turns down
-                if low[i] < middle or not daily_trend_up:
+                # Exit long: Williams %R crosses above -50 or daily trend changes to down
+                if williams_r[i] >= -50 or not daily_trend_up:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above Donchian middle or daily trend turns up
-                if high[i] > middle or not daily_trend_down:
+                # Exit short: Williams %R crosses below -50 or daily trend changes to up
+                if williams_r[i] <= -50 or not daily_trend_down:
                     exit_signal = True
             
             if exit_signal:
@@ -94,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4H_WilliamsR_DailyTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
