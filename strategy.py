@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversals at R1/S1 with 1d trend and volume confirmation.
-# Uses 1d EMA34 for trend filter (works in bull/bear) + volume spike for momentum confirmation.
-# Session filter (08-20 UTC) reduces noise. Target: 20-50 trades/year (80-200 total over 4 years).
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation.
+# Works in bull/bear by using daily EMA50 trend filter. Volume spike confirms breakout strength.
+# Target: 20-50 trades/year (80-200 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,82 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend and pivot calculation - ONCE before loop
+    # Load daily data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Camarilla pivots (based on previous 1d bar)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    # Load 4h data for Donchian calculation - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    rango = high_1d - low_1d
-    r1 = close_1d_prev + (rango * 1.1 / 12)
-    s1 = close_1d_prev - (rango * 1.1 / 12)
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Align pivots to 4h timeframe (previous 1d bar's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Donchian upper/lower: highest high/lowest low of last 20 periods
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
     
     # Calculate 4h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    vol_4h = df_4h['volume'].values
+    vol_avg_20_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_avg_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(vol_avg_20_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price crosses below S1 (support) in uptrend with volume
-            if (close[i] < s1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_avg_20[i]):
+            # Long: Price breaks above Donchian high in uptrend with volume confirmation
+            if (close[i] > donch_high_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20_4h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price crosses above R1 (resistance) in downtrend with volume
-            elif (close[i] > r1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i]):
+            # Short: Price breaks below Donchian low in downtrend with volume confirmation
+            elif (close[i] < donch_low_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20_4h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to 1d close pivot (same for all 4h bars in the 1d period)
-            close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_prev)
+            # Exit: Price returns to opposite Donchian level
             if position == 1:
-                if close[i] >= close_1d_aligned[i]:
+                if close[i] < donch_low_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] <= close_1d_aligned[i]:
+                if close[i] > donch_high_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -100,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1S1_1dTrend_Volume_Session"
+name = "4H_Donchian20_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
