@@ -5,69 +5,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: Weekly Donchian breakout (20-week) with daily EMA34 trend and volume surge
-    # Works in both bull and bear markets: weekly structure filters noise, 
-    # breakouts from long-term channels capture major moves, volume confirms strength
-    # EMA34 ensures alignment with daily trend direction
+    # Hypothesis: 6h Williams Alligator + Elder Ray Power with 1d trend filter
+    # Works in both bull and bear markets: Alligator identifies trend state,
+    # Elder Ray measures bull/bear power, 1d EMA50 filters higher timeframe trend.
+    # Low trade frequency (~20-40/year) avoids fee drag.
     
-    # Load weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Load daily data once
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly Donchian channels (20-week lookback)
-    highest_high_20w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lowest_low_20w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Daily EMA50 trend filter
+    ema_1d_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    # Daily EMA34 trend filter
-    daily_ema34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    daily_ema34_aligned = align_htf_to_ltf(prices, df_1w, daily_ema34)
+    # Williams Alligator (6h): Jaw(13), Teeth(8), Lips(5) - smoothed with SMMA
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Volume filter (20-period surge on daily)
-    vol_ma20 = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > 2.0 * vol_ma20
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            # First value is SMA
+            result[period-1] = np.mean(arr[:period])
+            # Subsequent values: SMMA = (Prev SMMA*(period-1) + Current) / period
+            for i in range(period, len(arr)):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
+    
+    # Elder Ray Power (6h)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(300, n):
-        # Skip if weekly data not ready
-        if (np.isnan(highest_high_20w[i]) or np.isnan(lowest_low_20w[i]) or 
-            np.isnan(daily_ema34_aligned[i]) or np.isnan(vol_ma20[i])):
+    for i in range(100, n):
+        # Skip if data not ready
+        if (np.isnan(ema_1d_50_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Weekly Donchian breakout above 20w high + volume surge + daily EMA34 uptrend
-            if (prices['close'].values[i] > highest_high_20w[i] and 
-                vol_surge[i] and 
-                prices['close'].values[i] > daily_ema34_aligned[i]):
+            # Alligator sleeping: jaws, teeth, lips intertwined (no strong trend)
+            # Alligator awakening: lines separate in specific order
+            # Bullish: Lips > Teeth > Jaw (green > red > blue)
+            # Bearish: Jaw > Teeth > Lips (blue > red > green)
+            
+            # Long: Bullish alignment + Bull Power > 0 + 1d Uptrend
+            if (lips[i] > teeth[i] > jaw[i] and 
+                bull_power[i] > 0 and 
+                close[i] > ema_1d_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly Donchian breakout below 20w low + volume surge + daily EMA34 downtrend
-            elif (prices['close'].values[i] < lowest_low_20w[i] and 
-                  vol_surge[i] and 
-                  prices['close'].values[i] < daily_ema34_aligned[i]):
+            # Short: Bearish alignment + Bear Power < 0 + 1d Downtrend
+            elif (jaw[i] > teeth[i] > lips[i] and 
+                  bear_power[i] < 0 and 
+                  close[i] < ema_1d_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to weekly Donchian middle or opposite breakout
+            # Exit: Alligator returns to sleep (lines re-intertwine) OR Elder Power diverges
             if position == 1:
-                mid_point = (highest_high_20w[i] + lowest_low_20w[i]) / 2
-                if prices['close'].values[i] < mid_point:
+                # Exit long: Bearish power OR Alligator turns bearish
+                if (bear_power[i] < 0 or 
+                    jaw[i] > teeth[i] > lips[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                mid_point = (highest_high_20w[i] + lowest_low_20w[i]) / 2
-                if prices['close'].values[i] > mid_point:
+                # Exit short: Bullish power OR Alligator turns bullish
+                if (bull_power[i] > 0 or 
+                    lips[i] > teeth[i] > jaw[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -75,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_20w_EMA34_Trend_VolumeSurge_v1"
-timeframe = "1d"
+name = "6h_Williams_Alligator_ElderRay_Power_1dEMA50_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
