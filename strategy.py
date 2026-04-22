@@ -32,17 +32,13 @@ def generate_signals(prices):
     s1 = 2 * pivot - prev_high
     r2 = pivot + (high_1d - low_1d)
     s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume confirmation: 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,38 +58,38 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_avg_20[i]) or np.isnan(atr[i])):
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_avg_20[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 + volume spike + volatility filter
-            if (close[i] > r3_aligned[i] and 
-                volume[i] > 2.0 * vol_avg_20[i] and
+            # Long: Price breaks above R2 + volume spike + volatility filter
+            if (close[i] > r2_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20[i] and
                 atr[i] > 0.5 * atr[i-1] if i > 0 else True):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + volume spike + volatility filter
-            elif (close[i] < s3_aligned[i] and 
-                  volume[i] > 2.0 * vol_avg_20[i] and
+            # Short: Price breaks below S2 + volume spike + volatility filter
+            elif (close[i] < s2_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i] and
                   atr[i] > 0.5 * atr[i-1] if i > 0 else True):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit: Price crosses back to opposite pivot level (full exit)
             if position == 1:
-                # Exit long: Price closes below S2
-                if close[i] < s2_aligned[i]:
+                # Exit long: Price closes below S1
+                if close[i] < s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                # Exit short: Price closes above R2
-                if close[i] > r2_aligned[i]:
+                # Exit short: Price closes above R1
+                if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -101,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Pivot_R3_S3_Breakout_Volume_Volatility"
-timeframe = "6h"
+name = "12H_Pivot_R2_S2_Breakout_Volume_Volatility"
+timeframe = "12h"
 leverage = 1.0
