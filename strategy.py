@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,42 +13,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for long-term trend filter - ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA(50) for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
-    
-    # Load daily data for KAMA and RSI - ONCE before loop
+    # Load daily data for Donchian(20) and ATR(14) - ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate daily KAMA(14) - Kaufman Adaptive Moving Average
-    close_daily = df_daily['close'].values
-    change = np.abs(np.diff(close_daily, prepend=close_daily[0]))
-    volatility = np.abs(np.diff(close_daily))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+2) - 2/(30+2)) + 2/(30+2))**2
-    kama = np.zeros_like(close_daily)
-    kama[0] = close_daily[0]
-    for i in range(1, len(close_daily)):
-        kama[i] = kama[i-1] + sc[i] * (close_daily[i] - kama[i-1])
-    kama_aligned = align_htf_to_ltf(prices, df_daily, kama)
+    # Calculate Donchian(20) channels from daily data
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily RSI(14)
-    delta = np.diff(close_daily, prepend=close_daily[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_daily, rsi)
+    # Calculate ATR(14) from daily data
+    close_daily = df_daily['close'].values
+    tr1 = high_daily - low_daily
+    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
+    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align Donchian channels and ATR to 4h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
+    atr_14_aligned = align_htf_to_ltf(prices, df_daily, atr_14)
+    
+    # Calculate 4h volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -58,8 +49,8 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_weekly_aligned[i]) or np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,32 +67,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above weekly EMA50 + KAMA turning up + RSI > 50
-            if (close[i] > ema_50_weekly_aligned[i] and 
-                kama[i] > kama[i-1] and 
-                rsi[i] > 50):
+            # Long: Price breaks above upper Donchian(20) with volume and ATR filter
+            if (close[i] > upper_20_aligned[i] and 
+                volume[i] > 1.5 * vol_avg_20[i] and
+                atr_14_aligned[i] > 0):  # Ensure ATR is valid
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly EMA50 + KAMA turning down + RSI < 50
-            elif (close[i] < ema_50_weekly_aligned[i] and 
-                  kama[i] < kama[i-1] and 
-                  rsi[i] < 50):
+            # Short: Price breaks below lower Donchian(20) with volume and ATR filter
+            elif (close[i] < lower_20_aligned[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i] and
+                  atr_14_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Reverse conditions
+            # Exit: Price returns to the opposite Donchian channel
             if position == 1:
-                if (close[i] < ema_50_weekly_aligned[i] or 
-                    kama[i] < kama[i-1] or 
-                    rsi[i] < 50):
+                if close[i] < lower_20_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if (close[i] > ema_50_weekly_aligned[i] or 
-                    kama[i] > kama[i-1] or 
-                    rsi[i] > 50):
+                if close[i] > upper_20_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -109,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_KAMA_WeeklyTrend_RSI_Filter"
-timeframe = "1d"
+name = "4H_Donchian20_Volume_ATR_Filter"
+timeframe = "4h"
 leverage = 1.0
