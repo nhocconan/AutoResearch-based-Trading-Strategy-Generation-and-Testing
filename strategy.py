@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 4-hour Volume Weighted Average Price (VWAP) with 1-day Exponential Moving Average (EMA) trend filter.
-Trades long when price crosses above VWAP in an uptrend (price > daily EMA), short when price crosses below VWAP in a downtrend (price < daily EMA).
-Uses VWAP as a dynamic intraday support/resistance level and daily EMA for higher timeframe trend bias.
-Designed for low trade frequency (20-50 trades/year) by requiring both VWAP cross and trend alignment.
-Works in both bull and bear markets by following the daily trend direction.
+Hypothesis: 12-hour Williams Fractal Breakout with 1-day EMA trend filter and volume confirmation.
+Trades breakouts of daily Williams fractal levels (bearish fractal for long, bullish for short) in the direction of the daily EMA trend.
+Uses volume spike to confirm institutional interest at key fractal levels. Designed for low trade frequency
+(12-37 trades/year) to minimize fee drag and work in both bull and bear markets by aligning with
+higher timeframe trend and using mean-reversion at extreme fractal levels.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,59 +22,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP typical price and cumulative values
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    
-    # Cumulative sums for VWAP calculation
-    cum_pv = np.nancumsum(pv)
-    cum_vol = np.nancumsum(volume)
-    
-    # VWAP calculation (avoid division by zero)
-    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
-    
-    # Load daily data for trend filter - ONCE before loop
+    # Load daily data for fractal calculation and trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     # Daily EMA for trend filter (34-period)
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1d_aligned = align_ltf_to_htf(prices, df_1d, ema_34_1d)
+    
+    # Calculate daily Williams fractals
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Williams fractals need 2 extra bars for confirmation (center bar + 2 right bars)
+    bearish_fractal_aligned = align_ltf_to_htf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_ltf_to_htf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if VWAP or EMA not ready
-        if np.isnan(vwap[i]) or np.isnan(ema_34_1d_aligned[i]):
+    for i in range(50, n):
+        # Skip if data not ready
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Entry conditions: VWAP cross with trend alignment
-        if position == 0:
-            # Long: price crosses above VWAP with uptrend bias (price > daily EMA)
-            if close[i] > vwap[i] and close[i-1] <= vwap[i-1] and close[i] > ema_34_1d_aligned[i]:
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        
+        if position == 0 and vol_spike:
+            # Long: price breaks above bearish fractal (resistance) with uptrend bias
+            if not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below VWAP with downtrend bias (price < daily EMA)
-            elif close[i] < vwap[i] and close[i-1] >= vwap[i-1] and close[i] < ema_34_1d_aligned[i]:
+            # Short: price breaks below bullish fractal (support) with downtrend bias
+            elif not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price crosses back through VWAP
+            # Exit: price returns to opposite fractal level or trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below VWAP
-                if close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
+                # Exit long: price crosses below bullish fractal or closes below daily EMA
+                if not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i]:
+                    exit_signal = True
+                elif close[i] < ema_34_1d_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above VWAP
-                if close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
+                # Exit short: price crosses above bearish fractal or closes above daily EMA
+                if not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i]:
+                    exit_signal = True
+                elif close[i] > ema_34_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -85,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_EMA34_Trend_Follow"
-timeframe = "4h"
+name = "12h_Williams_Fractal_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
