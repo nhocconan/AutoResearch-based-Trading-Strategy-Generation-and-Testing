@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
+
 """
-Hypothesis: 12-hour weekly Donchian breakout with daily ATR filter and volume confirmation.
-This strategy targets breakouts from weekly price channels in trending markets, using
-daily ATR to filter low-volatility conditions and volume to confirm institutional
-participation. Weekly breakouts capture major trends, while daily ATR and volume filters
-avoid whipsaws in ranging markets. Designed to work in both bull and bear regimes by
-focusing on strong directional moves with confirmation.
+1d Donchian(20) breakout + weekly EMA34 trend + volume spike filter
+Targets breakouts in trending markets with volume confirmation and weekly trend filter.
+Designed to work in both bull and bear regimes by following the weekly trend.
+Expected trades: 15-25 per year per symbol.
 """
 
 import numpy as np
@@ -24,38 +23,33 @@ def generate_signals(prices):
     
     # Load weekly data - ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # Calculate weekly EMA34 for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Load daily data for ATR filter
+    # Calculate Donchian channels (20-period) on daily timeframe
+    # We need daily high/low for the Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily ATR (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate daily average true range as percentage of price for volatility filter
-    atr_pct = atr_14_aligned / close
+    # Calculate 20-period rolling max/min for Donchian channels
+    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 1d timeframe (our trading timeframe)
+    donchian_high = align_htf_to_ltf(prices, df_1d, high_max_20)
+    donchian_low = align_htf_to_ltf(prices, df_1d, low_min_20)
+    
+    # Calculate daily volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-calculate session hours (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -63,10 +57,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(atr_pct[i]) or np.isnan(volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,30 +77,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above weekly Donchian high with sufficient volatility and volume
-            vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-            if (close[i] > donchian_high_aligned[i] and 
-                atr_pct[i] > 0.01 and  # Minimum 1% ATR as percentage of price
-                volume[i] > 1.5 * vol_ma[i]):
+            # Long: Price breaks above Donchian high with bullish weekly trend and volume spike
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema34_1w_aligned[i] and  # Bullish trend: price above weekly EMA34
+                volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below weekly Donchian low with sufficient volatility and volume
-            elif (close[i] < donchian_low_aligned[i] and 
-                  atr_pct[i] > 0.01 and  # Minimum 1% ATR as percentage of price
-                  volume[i] > 1.5 * vol_ma[i]):
+            # Short: Price breaks below Donchian low with bearish weekly trend and volume spike
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema34_1w_aligned[i] and  # Bearish trend: price below weekly EMA34
+                  volume[i] > 2.0 * vol_avg_20[i]):  # Strong volume spike
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to opposite Donchian level or volatility drops
+            # Exit conditions: price returns to opposite Donchian level
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to weekly Donchian low or low volatility
-                if (close[i] < donchian_low_aligned[i] or atr_pct[i] < 0.005):
+                # Exit long: price returns to or below Donchian low
+                if close[i] <= donchian_low[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to weekly Donchian high or low volatility
-                if (close[i] > donchian_high_aligned[i] or atr_pct[i] < 0.005):
+                # Exit short: price returns to or above Donchian high
+                if close[i] >= donchian_high[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -117,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyDonchian_Breakout_ATR_Volume"
-timeframe = "12h"
+name = "1d_Donchian_20_1wEMA34_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
