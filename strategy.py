@@ -1,3 +1,5 @@
+# The hypothesis is that a combination of Donchian channel breakout with weekly pivot alignment and volume confirmation, restricted to active trading hours, will capture significant moves in BTC/ETH that persist across multiple 6-hour candles. This approach aims to filter out noise by requiring both a breakout from the 20-day Donchian channel (calculated on daily data) and alignment with the weekly pivot point (indicating the longer-term trend direction), while volume confirmation ensures the breakout has conviction. The session filter (08:00-20:00 UTC) avoids low-liquidity periods where false breakouts are more common. This strategy is designed to work in both bull and bear markets because it follows the trend as defined by the weekly pivot, and the Donchian breakout captures momentum in the direction of that trend.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -24,22 +26,27 @@ def generate_signals(prices):
     upper_20 = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
     lower_20 = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian channels to daily timeframe (no alignment needed for same TF)
-    upper_20_aligned = upper_20  # Same timeframe, no alignment needed
-    lower_20_aligned = lower_20
+    # Align Donchian channels to 6h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_daily, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_daily, lower_20)
     
-    # Load weekly data for trend filter
+    # Load weekly data for pivot calculation
     df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    # Calculate weekly pivot points (based on previous weekly bar)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly_prev = df_weekly['close'].values
+    pp = (high_weekly + low_weekly + close_weekly_prev) / 3.0
+    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
     
-    # Calculate daily volume average (20-period)
+    # Calculate 6h volume average (20-period)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-calculate session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,35 +54,45 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if data not ready
         if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(ema_50_weekly_aligned[i]) or np.isnan(vol_avg_20[i])):
+            np.isnan(pp_aligned[i]) or np.isnan(vol_avg_20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Price breaks above daily Donchian(20) AND price > weekly EMA(50) (bullish trend) with volume
+            # Long: Price breaks above upper Donchian(20) AND price > weekly pivot (bullish trend) with volume
             if (close[i] > upper_20_aligned[i] and 
-                close[i] > ema_50_weekly_aligned[i] and 
+                close[i] > pp_aligned[i] and 
                 volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below daily Donchian(20) AND price < weekly EMA(50) (bearish trend) with volume
+            # Short: Price breaks below lower Donchian(20) AND price < weekly pivot (bearish trend) with volume
             elif (close[i] < lower_20_aligned[i] and 
-                  close[i] < ema_50_weekly_aligned[i] and 
+                  close[i] < pp_aligned[i] and 
                   volume[i] > 1.5 * vol_avg_20[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to the opposite Donchian channel
+            # Exit: Price returns to the opposite Donchian channel or weekly pivot
             if position == 1:
-                if close[i] < lower_20_aligned[i]:
+                if close[i] < lower_20_aligned[i] or close[i] < pp_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close[i] > upper_20_aligned[i]:
+                if close[i] > upper_20_aligned[i] or close[i] > pp_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -83,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_WeeklyEMA50_Trend_Volume"
-timeframe = "1d"
+name = "6H_Donchian20_WeeklyPivot_Trend_Volume_Session"
+timeframe = "6h"
 leverage = 1.0
