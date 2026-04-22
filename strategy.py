@@ -5,10 +5,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data for pivot levels and ATR (HTF)
+    # Load daily data for pivot levels (HTF)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -50,7 +50,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all HTF data to 4h timeframe
+    # Align all HTF data to 1d timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
@@ -61,7 +61,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any data is not ready
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
-timeframe = "4h"
+name = "12h_DailyPivot_R1_S1_Breakout_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
