@@ -3,43 +3,54 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w MA50 trend filter and volume confirmation
-# Long when price breaks above 20-day high + price > weekly MA50 + volume spike
-# Short when price breaks below 20-day low + price < weekly MA50 + volume spike
-# Exit when price returns to opposite Donchian level or trend reverses
-# Designed for low trade frequency (~10-20/year) with strong trend following in both bull and bear markets
-# Weekly MA50 filters for long-term trend direction to avoid counter-trend trades
+# Hypothesis: 12h Choppiness Index regime filter + 1d ATR-based breakout with volume confirmation
+# Long when price breaks above ATR(14) upper band AND Choppiness < 38.2 (trending) AND volume spike
+# Short when price breaks below ATR(14) lower band AND Choppiness < 38.2 (trending) AND volume spike
+# Exit when price returns to ATR midline OR Choppiness > 61.8 (ranging) OR volatility drops
+# Designed for low trade frequency with regime awareness - avoids whipsaws in ranging markets
+# Uses ATR-based channels for volatility-adjusted breakouts and Choppiness Index for regime detection
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Donchian channel calculation
+    # Load 1d data for ATR calculation and Choppiness Index
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channel (20-period high/low)
-    # Donchian High = max(high over last 20 days)
-    # Donchian Low = min(low over last 20 days)
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate ATR(14) for volatility-based channels
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Donchian levels to 1d timeframe (already aligned, but keep for consistency)
-    donchian_high_aligned = donchian_high  # already 1d data
-    donchian_low_aligned = donchian_low    # already 1d data
+    # Calculate ATR midline (average of high and low)
+    atr_mid = (high_1d + low_1d) / 2
+    atr_upper = atr_mid + atr * 1.5  # Upper band
+    atr_lower = atr_mid - atr * 1.5  # Lower band
     
-    # Load 1w data for MA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Align ATR bands to 12h timeframe
+    atr_upper_aligned = align_htf_to_ltf(prices, df_1d, atr_upper)
+    atr_lower_aligned = align_htf_to_ltf(prices, df_1d, atr_lower)
+    atr_mid_aligned = align_htf_to_ltf(prices, df_1d, atr_mid)
     
-    # Calculate weekly MA50 for trend filter
-    ma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    ma_50_aligned = align_htf_to_ltf(prices, df_1w, ma_50_1w)
+    # Calculate Choppiness Index for regime detection
+    # CHOP = 100 * log10(sum(TR over n) / (HH(n) - LL(n))) / log10(n)
+    period = 14
+    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    hh = pd.Series(high_1d).rolling(window=period, min_periods=period).max().values
+    ll = pd.Series(low_1d).rolling(window=period, min_periods=period).min().values
+    chop_raw = 100 * np.log10(sum_tr / (hh - ll + 1e-10)) / np.log10(period)
+    chop_raw[hh == ll] = 50  # Avoid division by zero
+    chop = np.where((hh - ll) > 0, chop_raw, 50)
+    
+    # Align Choppiness Index to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     # Calculate 20-period average volume for volume spike detection
     volume = prices['volume'].values
@@ -48,11 +59,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ma_50_aligned[i]) or 
+        if (np.isnan(atr_upper_aligned[i]) or 
+            np.isnan(atr_lower_aligned[i]) or 
+            np.isnan(atr_mid_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,35 +74,40 @@ def generate_signals(prices):
         price = prices['close'].iloc[i]
         vol = volume[i]
         vol_ma = vol_ma_20[i]
-        donchian_high_val = donchian_high_aligned[i]
-        donchian_low_val = donchian_low_aligned[i]
-        ma_val = ma_50_aligned[i]
+        atr_upper_val = atr_upper_aligned[i]
+        atr_lower_val = atr_lower_aligned[i]
+        atr_mid_val = atr_mid_aligned[i]
+        chop_val = chop_aligned[i]
         
         # Volume filter: current volume > 2.0 * 20-day average
         vol_spike = vol > 2.0 * vol_ma
         
+        # Regime filters: trending market (CHOP < 38.2) vs ranging (CHOP > 61.8)
+        trending = chop_val < 38.2
+        ranging = chop_val > 61.8
+        
         if position == 0:
-            # Long conditions: price breaks above Donchian high + uptrend + volume spike
-            if price > donchian_high_val and price > ma_val and vol_spike:
+            # Long conditions: price breaks above ATR upper band AND trending AND volume spike
+            if price > atr_upper_val and trending and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Donchian low + downtrend + volume spike
-            elif price < donchian_low_val and price < ma_val and vol_spike:
+            # Short conditions: price breaks below ATR lower band AND trending AND volume spike
+            elif price < atr_lower_val and trending and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position != 0:
-            # Exit conditions: price returns to opposite Donchian level or trend reverses
+            # Exit conditions: price returns to ATR midline OR market becomes ranging OR volatility drops
             exit_signal = False
             
             if position == 1:  # long position
-                # Exit when price returns to Donchian low or trend turns down
-                if price <= donchian_low_val or price < ma_val:
+                # Exit when price returns to ATR midline or market ranges
+                if price <= atr_mid_val or ranging:
                     exit_signal = True
             
             elif position == -1:  # short position
-                # Exit when price returns to Donchian high or trend turns up
-                if price >= donchian_high_val or price > ma_val:
+                # Exit when price returns to ATR midline or market ranges
+                if price >= atr_mid_val or ranging:
                     exit_signal = True
             
             if exit_signal:
@@ -102,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wMA50_Volume"
-timeframe = "1d"
+name = "12h_ATR_Choppiness_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
