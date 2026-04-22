@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Hypothesis: 6h Chaikin Money Flow (CMF) with 1-week trend filter and volume confirmation.
-Long when CMF > 0.1 (accumulation) and weekly trend is up; short when CMF < -0.1 (distribution)
-and weekly trend is down. Uses 20-period CMF to avoid whipsaw. Designed for low trade frequency
-(12-37 trades/year) by requiring CMF extremes and trend alignment. Works in both bull and bear
-markets by following the weekly trend, avoiding counter-trend trades during regime changes.
+Hypothesis: Daily Camarilla Pivot R4/S4 breakout with volume confirmation and 1-day EMA trend filter.
+Goes long when price breaks above R4 during bullish trend (price > EMA34) with volume spike,
+short when breaks below S4 during bearish trend (price < EMA34) with volume spike.
+Exits on opposite pivot touch (S4 for longs, R4 for shorts). Designed for low trade frequency
+(12-37/year) by requiring breakout of extreme pivot levels, trend alignment, and volume confirmation.
+Works in both bull and bear markets by following daily trend via EMA34.
 """
 
 import numpy as np
@@ -17,59 +18,71 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Chaikin Money Flow (20-period)
-    mfm = ((close - low) - (high - close)) / (high - low)
-    mfm = np.where(high == low, 0, mfm)  # avoid division by zero
-    mfv = mfm * volume
-    cmf = pd.Series(mfv).rolling(window=20, min_periods=20).sum() / pd.Series(volume).rolling(window=20, min_periods=20).sum()
-    cmf = cmf.values
-    
-    # Load weekly data for trend filter - ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
+    # Load daily data for Camarilla pivots and EMA34 - ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 34:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend direction
-    weekly_close = df_weekly['close'].values
-    ema34_weekly = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    # Calculate Camarilla pivot levels from previous day's OHLC
+    # Formula: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
+    daily_close = df_daily['close'].values
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    
+    camarilla_r4 = daily_close + ((daily_high - daily_low) * 1.1 / 2)
+    camarilla_s4 = daily_close - ((daily_high - daily_low) * 1.1 / 2)
+    
+    # Align to 12h timeframe (these levels are valid for the entire day after daily close)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s4)
+    
+    # Daily EMA34 for trend filter
+    ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(cmf[i]) or np.isnan(ema34_weekly_aligned[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(ema34_daily_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        
         if position == 0:
-            # Long: CMF > 0.1 (accumulation) + weekly uptrend
-            if cmf[i] > 0.1 and ema34_weekly_aligned[i] > ema34_weekly_aligned[i-1]:
+            # Long: price breaks above R4 + bullish trend (price > EMA34) + volume spike
+            if close[i] > camarilla_r4_aligned[i] and close[i] > ema34_daily_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: CMF < -0.1 (distribution) + weekly downtrend
-            elif cmf[i] < -0.1 and ema34_weekly_aligned[i] < ema34_weekly_aligned[i-1]:
+            # Short: price breaks below S4 + bearish trend (price < EMA34) + volume spike
+            elif close[i] < camarilla_s4_aligned[i] and close[i] < ema34_daily_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: CMF returns to neutral zone (-0.1 to 0.1) or trend reversal
+            # Exit: price touches opposite pivot level
             exit_signal = False
             
             if position == 1:
-                # Exit long: CMF < 0.1 or weekly downtrend
-                if cmf[i] < 0.1 or ema34_weekly_aligned[i] < ema34_weekly_aligned[i-1]:
+                # Exit long: price touches or goes below S4
+                if close[i] <= camarilla_s4_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: CMF > -0.1 or weekly uptrend
-                if cmf[i] > -0.1 or ema34_weekly_aligned[i] > ema34_weekly_aligned[i-1]:
+                # Exit short: price touches or goes above R4
+                if close[i] >= camarilla_r4_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -80,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_CMF_WeeklyTrend"
-timeframe = "6h"
+name = "Daily_Camarilla_R4S4_Breakout_EMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
