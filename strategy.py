@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using 1w Camarilla R3/S3 breakout with 1w EMA50 trend filter, volume confirmation, and ATR trailing stop.
-Long when price breaks above 1w Camarilla R3 level AND price > 1w EMA50 AND volume > 1.5x 20-period average.
-Short when price breaks below 1w Camarilla S3 level AND price < 1w EMA50 AND volume > 1.5x 20-period average.
-Exit when price retraces to 1w Camarilla Pivot (midpoint) or ATR trailing stop hit (2.5*ATR from highest/lowest since entry).
+Hypothesis: 6h strategy using 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter, volume confirmation, and ATR trailing stop.
+Long when price breaks above 12h Camarilla R3 level AND price > 1d EMA50 AND volume > 1.5x 20-period average.
+Short when price breaks below 12h Camarilla S3 level AND price < 1d EMA50 AND volume > 1.5x 20-period average.
+Exit when price retraces to 12h Camarilla Pivot (midpoint) or ATR trailing stop hit (2.5*ATR from highest/lowest since entry).
 Uses discrete position sizing (0.25) to reduce trade frequency vs previous versions.
-Camarilla R3/S3 from 1w timeframe provides fewer but higher-quality breakouts suitable for 1d entries.
-Designed for 1d timeframe targeting ~7-25 trades/year per symbol (30-100 total over 4 years).
+Camarilla R3/S3 from 12h timeframe provides fewer but higher-quality breakouts suitable for 6h entries.
+Designed for 6h timeframe targeting ~12-25 trades/year per symbol (50-100 total over 4 years).
 Focus on BTC and ETH as primary targets with SOL as secondary confirmation.
 """
 
@@ -24,36 +24,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w Camarilla pivot levels (R3, S3, Pivot)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 12h Camarilla pivot levels (R3, S3, Pivot)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Camarilla levels: based on previous 1w bar's high, low, close
+    # Camarilla levels: based on previous 12h bar's high, low, close
     # R3 = Close + (High - Low) * 1.125/4
     # S3 = Close - (High - Low) * 1.125/4
     # Pivot = (High + Low + Close) / 3
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
     
-    camarilla_r3 = c_1w + (h_1w - l_1w) * 1.125 / 4.0
-    camarilla_s3 = c_1w - (h_1w - l_1w) * 1.125 / 4.0
-    camarilla_pivot = (h_1w + l_1w + c_1w) / 3.0
+    camarilla_r3 = c_12h + (h_12h - l_12h) * 1.125 / 4.0
+    camarilla_s3 = c_12h - (h_12h - l_12h) * 1.125 / 4.0
+    camarilla_pivot = (h_12h + l_12h + c_12h) / 3.0
     
-    # Align 1w Camarilla levels to 1d timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
+    # Align 12h Camarilla levels to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_12h, camarilla_pivot)
     
-    # Calculate 1w EMA50 for trend filter
-    if len(df_1w) < 50:
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume average (20-period) on 1d timeframe
+    # Volume average (20-period) on 6h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for trailing stop calculation
@@ -91,13 +92,13 @@ def generate_signals(prices):
         ema_50_val = ema_50_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 1w Camarilla R3 AND price > 1w EMA50 AND volume spike
+            # Long: Price breaks above 12h Camarilla R3 AND price > 1d EMA50 AND volume spike
             if (price > r3_val and price > ema_50_val and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
-            # Short: Price breaks below 1w Camarilla S3 AND price < 1w EMA50 AND volume spike
+            # Short: Price breaks below 12h Camarilla S3 AND price < 1d EMA50 AND volume spike
             elif (price < s3_val and price < ema_50_val and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
@@ -113,7 +114,7 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to 1w Camarilla Pivot (midpoint)
+            # Primary exit: Price retraces to 12h Camarilla Pivot (midpoint)
             if position == 1 and price <= pivot_val:
                 exit_signal = True
             elif position == -1 and price >= pivot_val:
@@ -136,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike_ATRTrailingStop"
-timeframe = "1d"
+name = "6H_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
