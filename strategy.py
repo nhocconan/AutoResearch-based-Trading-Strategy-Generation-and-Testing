@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using 1w Camarilla R3/S3 breakout with volume confirmation and ATR trailing stop.
-Long when price breaks above 1w Camarilla R3 AND volume > 1.8x 20-period average.
-Short when price breaks below 1w Camarilla S3 AND volume > 1.8x 20-period average.
-Exit when price retraces to 1w Camarilla midpoint (R3+S3)/2 or ATR trailing stop hit (2.5*ATR from highest/lowest since entry).
+Hypothesis: 6h strategy using 1d Williams Alligator + Elder Ray + volume confirmation.
+Williams Alligator (Jaw/Teeth/Lips) defines trend direction and alignment.
+Elder Ray (Bull/Bear Power) measures trend strength via EMA13.
+Long when: Alligator aligned bullish (Lips>Teeth>Jaw) AND Bull Power > 0 AND volume > 1.5x 20-period average.
+Short when: Alligator aligned bearish (Lips<Teeth<Jaw) AND Bear Power < 0 AND volume > 1.5x 20-period average.
+Exit when: Alligator alignment breaks OR volume drops below average.
 Uses discrete position sizing (0.25) to control drawdown and fee churn.
-Designed for 1d timeframe to target 7-25 trades/year per symbol (30-100 total over 4 years).
-Works in both bull and bear markets by using volume confirmation to filter false breakouts and ATR stops to manage risk.
-1w Camarilla levels provide strong institutional support/resistance from higher timeframe.
+Designed for 6h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
+Williams Alligator filters whipsaws in sideways markets; Elder Ray confirms trend strength.
+Works in both bull and bear markets by requiring volume confirmation and strict alignment.
 """
 
 import numpy as np
@@ -16,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,51 +26,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d Williams Alligator and Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla pivot calculation (based on previous 1w bar)
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    r3 = pivot + (range_1w * 1.1 / 2) * 1.5  # R3 level (extended)
-    s3 = pivot - (range_1w * 1.1 / 2) * 1.5  # S3 level (extended)
-    mid = (r3 + s3) / 2.0  # Camarilla midpoint
+    # Williams Alligator: SMAs with specific offsets
+    # Jaw: 13-period SMA, offset 8 bars
+    # Teeth: 8-period SMA, offset 5 bars  
+    # Lips: 5-period SMA, offset 3 bars
+    jaw_1d = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_1d = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_1d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Align Camarilla levels to 1d timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    mid_aligned = align_htf_to_ltf(prices, df_1w, mid)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # Volume average (20-period) on 1d timeframe
+    # Align Alligator lines and Elder Ray to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Volume average (20-period) on 6h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR(14) for trailing stop calculation
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0  # for long trailing stop
-    lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14)
+    start_idx = max(20, 13+8, 8+5, 5+3)  # max of Alligator offsets + vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(mid_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,57 +76,48 @@ def generate_signals(prices):
         
         price = close[i]
         vol_ma_val = vol_ma[i]
-        atr_val = atr[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        mid_val = mid_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 1w Camarilla R3 AND volume spike
-            if (price > r3_val and volume[i] > 1.8 * vol_ma_val):
+            # Long: Alligator bullish alignment AND Bull Power positive AND volume spike
+            if (lips_val > teeth_val and teeth_val > jaw_val and 
+                bull_power_val > 0 and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-                highest_since_entry = price
-            # Short: Price breaks below 1w Camarilla S3 AND volume spike
-            elif (price < s3_val and volume[i] > 1.8 * vol_ma_val):
+            # Short: Alligator bearish alignment AND Bear Power negative AND volume spike
+            elif (lips_val < teeth_val and teeth_val < jaw_val and 
+                  bear_power_val < 0 and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
-                lowest_since_entry = price
         else:
-            # Update highest/lowest since entry for trailing stop
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, price)
-            elif position == -1:
-                lowest_since_entry = min(lowest_since_entry, price)
+            # Update position holding
+            signals[i] = 0.25 if position == 1 else -0.25
             
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to 1w Camarilla midpoint
-            if position == 1 and price <= mid_val:
-                exit_signal = True
-            elif position == -1 and price >= mid_val:
-                exit_signal = True
-            
-            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
-                exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
-                exit_signal = True
+            # Exit: Alligator alignment breaks OR volume drops below average
+            if position == 1:
+                if not (lips_val > teeth_val and teeth_val > jaw_val):
+                    exit_signal = True
+                elif volume[i] < vol_ma_val:  # volume drop
+                    exit_signal = True
+            elif position == -1:
+                if not (lips_val < teeth_val and teeth_val < jaw_val):
+                    exit_signal = True
+                elif volume[i] < vol_ma_val:  # volume drop
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
-            else:
-                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1D_Camarilla_R3S3_Breakout_VolumeConfirmation_ATRTrailingStop"
-timeframe = "1d"
+name = "6H_WilliamsAlligator_ElderRay_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
