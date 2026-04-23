@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R reversal with 1d Elder Ray power filter and volume spike confirmation.
-Long when Williams %R < -80 (oversold) AND Bull Power > 0 AND volume > 2x 20-period MA.
-Short when Williams %R > -20 (overbought) AND Bear Power < 0 AND volume > 2x 20-period MA.
-Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
-Uses 1d HTF for Elder Ray trend filter to avoid counter-trend trades in strong moves,
-volume spike for momentum confirmation, Williams %R for mean reversion in extremes.
-Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-Williams %R identifies overextended moves, Elder Ray confirms underlying bull/bear power,
-volume spike adds conviction to reversals. Works in both bull (buy oversold dips) and bear (sell overbought rallies).
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Camarilla R1 AND 1d EMA34 rising AND volume > 1.3x 20-period MA.
+Short when price breaks below Camarilla S1 AND 1d EMA34 falling AND volume > 1.3x 20-period MA.
+Exit when price touches opposite Camarilla level (S1 for long, R1 for short) or 1d EMA34 reverses.
+Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
+Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Camarilla levels provide intraday support/resistance, 1d EMA34 filters major trend, volume confirms breakout.
 """
 
 import numpy as np
@@ -25,84 +23,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Williams %R (14-period)
-    williams_r = np.full(n, np.nan)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Calculate 4h Camarilla levels (R1, S1) from previous bar
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
+    camarilla_r2 = np.full(n, np.nan)
+    camarilla_s2 = np.full(n, np.nan)
     
-    for i in range(14, n):
-        highest_high[i] = np.max(high[i-14:i+1])
-        lowest_low[i] = np.min(low[i-14:i+1])
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-        else:
-            williams_r[i] = -50  # neutral when no range
+    for i in range(1, n):
+        # Use previous bar's OHLC to avoid look-ahead
+        c = close[i-1]
+        h = high[i-1]
+        l = low[i-1]
+        rng = h - l
+        
+        camarilla_r1[i] = c + (rng * 1.1 / 12)
+        camarilla_s1[i] = c - (rng * 1.1 / 12)
+        camarilla_r2[i] = c + (rng * 1.1 / 6)
+        camarilla_s2[i] = c - (rng * 1.1 / 6)
     
-    # Calculate 1d Elder Ray power (Bull/Bear) for trend filter (HTF)
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # EMA13 for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
-    
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Calculate 6h volume MA (20-period) for spike filter
+    # Calculate 4h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(14, 20, 20)  # Williams %R, Elder Ray, volume MA
+    start_idx = max(1, 34, 20)  # Camarilla (needs 1), EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        wr = williams_r[i]
-        bull_power = bull_power_aligned[i]
-        bear_power = bear_power_aligned[i]
+        price = close[i]
+        r1 = camarilla_r1[i]
+        s1 = camarilla_s1[i]
+        r2 = camarilla_r2[i]
+        s2 = camarilla_s2[i]
+        ema_val = ema_34_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
-        # Volume filter: 6h volume > 2x 20-period MA (adaptive to volatility)
-        vol_filter = volume[i] > 2.0 * vol_ma_val
+        # Calculate EMA34 slope for trend direction (rising/falling)
+        if i >= start_idx + 1:
+            ema_prev = ema_34_aligned[i-1]
+            ema_rising = ema_val > ema_prev
+            ema_falling = ema_val < ema_prev
+        else:
+            ema_rising = False
+            ema_falling = False
+        
+        # Volume filter: 4h volume > 1.3x 20-period MA (adaptive to volatility)
+        vol_filter = volume[i] > 1.3 * vol_ma_val
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) AND Bull Power > 0 AND volume filter
-            if wr < -80 and bull_power > 0 and vol_filter:
+            # Long: Break above Camarilla R1 AND EMA34 rising AND volume filter
+            if price > r1 and ema_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) AND Bear Power < 0 AND volume filter
-            elif wr > -20 and bear_power < 0 and vol_filter:
+            # Short: Break below Camarilla S1 AND EMA34 falling AND volume filter
+            elif price < s1 and ema_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Williams %R crosses -50 (mean reversion midpoint)
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Long exit: Williams %R crosses above -50
-                if i >= start_idx + 1 and williams_r[i-1] <= -50 and wr > -50:
+                # Long exit: price touches Camarilla S1 (opposite) OR EMA34 starts falling
+                if price < s1 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: Williams %R crosses below -50
-                if i >= start_idx + 1 and williams_r[i-1] >= -50 and wr < -50:
+                # Short exit: price touches Camarilla R1 (opposite) OR EMA34 starts rising
+                if price > r1 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -113,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsR_Reversal_1dElderRay_Power_VolumeSpike"
-timeframe = "6h"
+name = "4H_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
