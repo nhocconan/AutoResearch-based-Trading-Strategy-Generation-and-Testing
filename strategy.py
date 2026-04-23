@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Williams %R combined with 1-day ADX trend filter and volume confirmation.
-Long when Williams %R crosses above -20 from below, ADX > 25 (trending), and volume > 1.5x average.
-Short when Williams %R crosses below -80 from above, ADX > 25 (trending), and volume > 1.5x average.
-Exit when Williams %R reverses or ADX < 20 (trend weakening).
-Williams %R identifies overbought/oversold levels in trending markets, ADX confirms trend strength,
-and volume confirms momentum. Designed for low trade frequency (~20-40/year) to capture strong trends
-while minimizing whipsaws. Works in both bull and bear markets by requiring strong trend confirmation.
+Hypothesis: 1-day Parabolic SAR trend following with weekly Supertrend filter and volume confirmation.
+Long when price > PSAR, weekly Supertrend is bullish, and volume > 1.5x average.
+Short when price < PSAR, weekly Supertrend is bearish, and volume > 1.5x average.
+Exit when price crosses PSAR or weekly Supertrend flips.
+Designed for low trade frequency (~10-25/year) to capture major trends while avoiding whipsaws.
+Works in both bull and bear markets by requiring trend alignment across timeframes.
 """
 
 import numpy as np
@@ -19,68 +18,110 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ADX - ONCE before loop
+    # Load daily data for PSAR - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Load 12-hour data for Williams %R - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load weekly data for Supertrend - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day ADX (14-period)
+    # Calculate daily Parabolic SAR (0.02 step, 0.2 max)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    psar = np.zeros_like(close_1d)
+    psar[0] = low_1d[0]
+    
+    # Initialize
+    bull = True
+    af = 0.02
+    ep = high_1d[0] if bull else low_1d[0]
+    
+    for i in range(1, len(close_1d)):
+        if bull:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR doesn't exceed prior lows
+            psar[i] = min(psar[i], low_1d[i-1], low_1d[i-2] if i >= 2 else low_1d[i-1])
+            if low_1d[i] < psar[i]:
+                bull = False
+                psar[i] = ep
+                af = 0.02
+                ep = low_1d[i]
+        else:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR doesn't fall below prior highs
+            psar[i] = max(psar[i], high_1d[i-1], high_1d[i-2] if i >= 2 else high_1d[i-1])
+            if high_1d[i] > psar[i]:
+                bull = True
+                psar[i] = ep
+                af = 0.02
+                ep = high_1d[i]
+        
+        # Update acceleration factor and extreme point
+        if bull:
+            if high_1d[i] > ep:
+                ep = high_1d[i]
+                af = min(af + 0.02, 0.2)
+        else:
+            if low_1d[i] < ep:
+                ep = low_1d[i]
+                af = min(af + 0.02, 0.2)
+    
+    # Calculate weekly Supertrend (10, 3.0)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # ATR
+    atr_period = 10
+    atr = np.zeros_like(close_1w)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
+    # Basic Upper and Lower Bands
+    basic_ub = (high_1w + low_1w) / 2 + 3.0 * atr
+    basic_lb = (high_1w + low_1w) / 2 - 3.0 * atr
     
-    # Directional Indicators
-    plus_di = 100 * dm_plus14 / tr14
-    minus_di = 100 * dm_minus14 / tr14
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(close_1w)
+    final_lb = np.zeros_like(close_1w)
+    supertrend = np.zeros_like(close_1w, dtype=bool)  # True = uptrend
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
-    adx_values = adx.values
-    
-    # Calculate 12-hour Williams %R (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Highest High and Lowest Low over 14 periods
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min()
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
-    williams_r_values = williams_r.values
+    for i in range(len(close_1w)):
+        if i == 0:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            final_ub[i] = basic_ub[i] if (basic_ub[i] < final_ub[i-1] or close_1w[i-1] > final_ub[i-1]) else final_ub[i-1]
+            final_lb[i] = basic_lb[i] if (basic_lb[i] > final_lb[i-1] or close_1w[i-1] < final_lb[i-1]) else final_lb[i-1]
+        
+        if i == 0:
+            supertrend[i] = True
+        else:
+            if supertrend[i-1]:
+                supertrend[i] = close_1w[i] > final_ub[i-1]
+            else:
+                supertrend[i] = close_1w[i] < final_lb[i-1]
     
     # Align HTF indicators to lower timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r_values)
+    psar_aligned = align_htf_to_ltf(prices, df_1d, psar)
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend.astype(float))
     
     # Volume average (20-period) on lower timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -90,27 +131,26 @@ def generate_signals(prices):
     
     for i in range(30, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+        if (np.isnan(psar_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
-        williams_r_val = williams_r_aligned[i]
+        psar_val = psar_aligned[i]
+        supertrend_val = supertrend_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
+        close_val = close[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -20 from below, strong trend (ADX > 25), volume confirmation
-            if (williams_r_val > -20 and williams_r_aligned[i-1] <= -20 and
-                adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+            # Long: price > PSAR, Supertrend bullish, volume confirmation
+            if (close_val > psar_val and supertrend_val > 0.5 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -80 from above, strong trend (ADX > 25), volume confirmation
-            elif (williams_r_val < -80 and williams_r_aligned[i-1] >= -80 and
-                  adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+            # Short: price < PSAR, Supertrend bearish, volume confirmation
+            elif (close_val < psar_val and supertrend_val < 0.5 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -118,12 +158,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R crosses below -80 from above OR trend weakening (ADX < 20)
-                if (williams_r_val < -80 and williams_r_aligned[i-1] >= -80) or adx_val < 20:
+                # Exit long: price < PSAR OR Supertrend bearish
+                if close_val < psar_val or supertrend_val < 0.5:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R crosses above -20 from below OR trend weakening (ADX < 20)
-                if (williams_r_val > -20 and williams_r_aligned[i-1] <= -20) or adx_val < 20:
+                # Exit short: price > PSAR OR Supertrend bullish
+                if close_val > psar_val or supertrend_val > 0.5:
                     exit_signal = True
             
             if exit_signal:
@@ -134,6 +174,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_1dADX_Volume_Trend"
-timeframe = "12h"
+name = "1D_PSAR_1wSupertrend_Volume"
+timeframe = "1d"
 leverage = 1.0
