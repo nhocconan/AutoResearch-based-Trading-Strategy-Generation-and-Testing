@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation.
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (measures buying/selling pressure)
-- Long: Bull Power > 0 AND Bear Power rising (less negative) AND price > 12h EMA50 AND volume > 1.5x 20-period avg
-- Short: Bear Power < 0 AND Bull Power falling (less positive) AND price < 12h EMA50 AND volume > 1.5x 20-period avg
-- Exit: Elder Ray signals reverse OR price crosses 12h EMA50
+Hypothesis: 1d Williams Alligator with 1w EMA8 trend filter and volume confirmation.
+- Williams Alligator: Jaw (EMA13, 8-period shift), Teeth (EMA8, 5-period shift), Lips (EMA5, 3-period shift)
+- Long: Lips > Teeth > Jaw (bullish alignment) AND price > 1w EMA8 AND volume > 1.5x 20-period avg
+- Short: Lips < Teeth < Jaw (bearish alignment) AND price < 1w EMA8 AND volume > 1.5x 20-period avg
+- Exit: Alligator alignment reverses OR price crosses 1w EMA8
 - Works in bull (buy strength on dips) and bear (sell weakness on rallies)
-- Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
+- Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
 """
 
 import numpy as np
@@ -26,35 +26,41 @@ def generate_signals(prices):
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # EMA13 for Elder Ray calculation
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Williams Alligator components
+    # Jaw: EMA13, 8-period shift
+    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)
+    jaw[:8] = np.nan
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Buying pressure
-    bear_power = low - ema_13   # Selling pressure (negative values)
+    # Teeth: EMA8, 5-period shift
+    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan
     
-    # Smoothed Elder Ray for trend confirmation (3-period EMA)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=3, adjust=False, min_periods=3).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=3, adjust=False, min_periods=3).mean().values
+    # Lips: EMA5, 3-period shift
+    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan
     
-    # Calculate 12h EMA50 for trend filter (HTF = 12h)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA8 for trend filter (HTF = 1w)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_8_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 13, 20)  # Need 50 for safety, 13 for EMA13, 20 for volume MA
+    start_idx = max(50, 13, 8, 5, 20)  # Need 50 for safety, 13 for jaw, 8 for teeth, 5 for lips, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
-            np.isnan(bull_power_smooth[i]) or
-            np.isnan(bear_power_smooth[i]) or
-            np.isnan(ema_50_12h_aligned[i])):
+            np.isnan(lips[i]) or
+            np.isnan(teeth[i]) or
+            np.isnan(jaw[i]) or
+            np.isnan(ema_8_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,35 +69,33 @@ def generate_signals(prices):
         # Volume confirmation (> 1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Elder Ray signals
-        bull_strong = bull_power_smooth[i] > 0 and bull_power_smooth[i] > bull_power_smooth[i-1]
-        bear_weak = bear_power_smooth[i] < 0 and bear_power_smooth[i] > bear_power_smooth[i-1]  # Less negative
-        bear_strong = bear_power_smooth[i] < 0 and bear_power_smooth[i] < bear_power_smooth[i-1]
-        bull_weak = bull_power_smooth[i] > 0 and bull_power_smooth[i] < bull_power_smooth[i-1]  # Less positive
+        # Williams Alligator signals
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:
-            # Long: Bull Power positive AND rising, Bear Power weak AND rising (less negative), price > 12h EMA50
-            if (bull_strong and bear_weak and 
+            # Long: Bullish alignment AND price > 1w EMA8
+            if (bullish_alignment and 
                 volume_confirm and 
-                close[i] > ema_50_12h_aligned[i]):
+                close[i] > ema_8_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power negative AND falling, Bull Power weak AND falling (less positive), price < 12h EMA50
-            elif (bear_strong and bull_weak and 
+            # Short: Bearish alignment AND price < 1w EMA8
+            elif (bearish_alignment and 
                   volume_confirm and 
-                  close[i] < ema_50_12h_aligned[i]):
+                  close[i] < ema_8_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power turns negative OR price < 12h EMA50 (trend flip)
-            if bull_power_smooth[i] <= 0 or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: Bearish alignment OR price < 1w EMA8 (trend flip)
+            if bearish_alignment or close[i] < ema_8_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power turns positive OR price > 12h EMA50 (trend flip)
-            if bear_power_smooth[i] >= 0 or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: Bullish alignment OR price > 1w EMA8 (trend flip)
+            if bullish_alignment or close[i] > ema_8_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "1d_WilliamsAlligator_Trend_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
