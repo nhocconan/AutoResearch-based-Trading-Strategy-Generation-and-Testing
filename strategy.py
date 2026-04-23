@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams %R mean reversion with 1d ADX regime filter and volume confirmation.
-Target: 12-37 trades/year per symbol (50-150 total over 4 years). Uses discrete position sizing (0.25) to minimize fee churn.
-Williams %R identifies overbought/oversold conditions, ADX filters for ranging markets (ADX < 25) where mean reversion works best,
-and volume confirmation avoids low-liquidity false signals. Works in both bull/bear via ADX regime filter.
+Hypothesis: 4h Williams Alligator strategy with 1d Elder Ray filter and volume confirmation.
+Target: 15-35 trades/year per symbol (60-140 total over 4 years). Uses discrete position sizing (0.25) to minimize fee churn.
+Williams Alligator identifies trend direction via smoothed medians (Jaw/Teeth/Lips).
+Elder Ray (Bull Power/Bear Power) from 1d confirms institutional buying/selling pressure.
+Volume spike filters weak breakouts. Works in bull/bear via 1d trend filter.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,58 +21,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Williams %R (14-period) for mean reversion signals
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_12h) / (highest_high - lowest_low + 1e-10) * -100
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
-    
-    # Calculate 1d ADX (14-period) for regime filter - ranging markets (ADX < 25) favor mean reversion
+    # Calculate 1d Elder Ray for trend/regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # 1d trend: Bull Power > 0 and rising = bullish regime
+    bull_power_ma = pd.Series(bull_power_1d).rolling(window=5, min_periods=5).mean().values
+    bear_power_ma = pd.Series(bear_power_1d).rolling(window=5, min_periods=5).mean().values
+    bullish_regime = (bull_power_ma > 0) & (bull_power_ma > np.roll(bull_power_ma, 1))
+    bearish_regime = (bear_power_ma < 0) & (bear_power_ma < np.roll(bear_power_ma, 1))
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    bullish_regime_aligned = align_htf_to_ltf(prices, df_1d, bullish_regime.astype(float))
+    bearish_regime_aligned = align_htf_to_ltf(prices, df_1d, bearish_regime.astype(float))
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    # Calculate 4h Williams Alligator (Smoothed Medians)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    median_4h = (high_4h + low_4h + close_4h) / 3
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) - all SMMA
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan)
+        sma = np.nanmean(arr[:period])
+        result[period-1] = sma
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(median_4h, 13)
+    teeth = smma(median_4h, 8)
+    lips = smma(median_4h, 5)
+    
+    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_4h, lips)
+    
+    # Alligator signals: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+    alligator_long = (lips_aligned > teeth_aligned) & (teeth_aligned > jaw_aligned)
+    alligator_short = (lips_aligned < teeth_aligned) & (teeth_aligned < jaw_aligned)
     
     # Calculate volume MA (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -80,51 +84,41 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # need Williams %R, ADX, volume MA
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(bullish_regime_aligned[i]) or np.isnan(bearish_regime_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams %R signals: Long when oversold (< -80), Short when overbought (> -20)
-        williams_long_signal = williams_r_aligned[i] < -80
-        williams_short_signal = williams_r_aligned[i] > -20
-        
-        # Regime filter: Only trade in ranging markets (ADX < 25) where mean reversion works
-        ranging_market = adx_aligned[i] < 25
-        
-        # Volume filter: 12h volume > 1.5x 20-period MA (moderate to avoid excessive trades)
-        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume filter: 4h volume > 1.8x 20-period MA (balanced to reduce trades)
+        vol_filter = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Oversold + ranging market + volume confirmation
-            if williams_long_signal and ranging_market and vol_filter:
+            # Long: Alligator uptrend AND bullish 1d regime AND volume confirmation
+            if alligator_long[i] and bullish_regime_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Overbought + ranging market + volume confirmation
-            elif williams_short_signal and ranging_market and vol_filter:
+            # Short: Alligator downtrend AND bearish 1d regime AND volume confirmation
+            elif alligator_short[i] and bearish_regime_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Williams %R returns to neutral range (-50 to -50) or ADX trends up
+            # Exit: Alligator reverses or 1d regime changes
             exit_signal = False
             if position == 1:
-                # Exit long when Williams %R rises above -50 (returns from oversold)
-                if williams_r_aligned[i] > -50:
+                # Exit long on Alligator downtrend or bearish regime
+                if not alligator_long[i] or bearish_regime_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when Williams %R falls below -50 (returns from overbought)
-                if williams_r_aligned[i] < -50:
+                # Exit short on Alligator uptrend or bullish regime
+                if not alligator_short[i] or bullish_regime_aligned[i]:
                     exit_signal = True
-            
-            # Also exit if market starts trending (ADX >= 30) - unfavorable for mean reversion
-            if adx_aligned[i] >= 30:
-                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -134,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_MeanReversion_1dADX_Regime_VolumeConfirmation"
-timeframe = "12h"
+name = "4H_WilliamsAlligator_1dElderRay_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
