@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Bollinger Band width regime filter combined with 12-hour Donchian breakout and volume confirmation.
-Long when price breaks above Donchian(20) high, BB width < 30th percentile (low volatility squeeze), and volume > 1.5x average.
-Short when price breaks below Donchian(20) low, BB width < 30th percentile, and volume > 1.5x average.
-Exit when price returns to Donchian middle or BB width > 70th percentile (high volatility).
-Designed to catch breakouts from low volatility contractions in both bull and bear markets.
+Hypothesis: 4-hour Donchian(20) breakout with 1-day ADX trend filter and volume confirmation.
+Long when price breaks above Donchian upper band, ADX > 25, and volume > 1.5x average.
+Short when price breaks below Donchian lower band, ADX > 25, and volume > 1.5x average.
+Exit when price reverses to opposite Donchian band or ADX < 20.
+Designed for low trade frequency (~20-40/year) to capture strong trends while minimizing whipsaws.
+Works in both bull and bear markets by requiring strong trend confirmation (ADX > 25).
 """
 
 import numpy as np
@@ -21,74 +22,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12-hour data for Donchian and BB width - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1-day data for ADX - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12-hour Bollinger Bands (20, 2)
-    close_12h = df_12h['close'].values
-    sma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
+    # Calculate 1-day ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12-hour Donchian channels (20)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align HTF indicators to lower timeframe
-    bb_width_aligned = align_htf_to_ltf(prices, df_12h, bb_width)
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_12h, donch_mid)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Volume average (20-period) on lower timeframe
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus14 / tr14
+    minus_di = 100 * dm_minus14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    adx_values = adx.values
+    
+    # Calculate 4-hour Donchian bands (20-period)
+    # We'll use the high/low from prices directly since we're on 4h timeframe
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Percentile thresholds for BB width (pre-compute to avoid look-ahead)
-    bb_width_series = pd.Series(bb_width_aligned)
-    bb_width_lower_thresh = bb_width_series.rolling(window=100, min_periods=100).quantile(0.30).values
-    bb_width_upper_thresh = bb_width_series.rolling(window=100, min_periods=100).quantile(0.70).values
+    # Align HTF indicators to lower timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(20, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(bb_width_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(donch_mid_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(bb_width_lower_thresh[i]) or 
-            np.isnan(bb_width_upper_thresh[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bb_width_val = bb_width_aligned[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
-        donch_mid_val = donch_mid_aligned[i]
+        adx_val = adx_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
-        close_val = close[i]
-        bb_width_lower_thresh_val = bb_width_lower_thresh[i]
-        bb_width_upper_thresh_val = bb_width_upper_thresh[i]
         
         if position == 0:
-            # Long: Donchian breakout up, low volatility squeeze, volume confirmation
-            if (close_val > donch_high_val and 
-                bb_width_val < bb_width_lower_thresh_val and 
+            # Long: Price breaks above Donchian upper band, strong trend (ADX > 25), volume confirmation
+            if (close[i] > donchian_high[i] and 
+                adx_val > 25 and 
                 vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down, low volatility squeeze, volume confirmation
-            elif (close_val < donch_low_val and 
-                  bb_width_val < bb_width_lower_thresh_val and 
+            # Short: Price breaks below Donchian lower band, strong trend (ADX > 25), volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  adx_val > 25 and 
                   vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
@@ -97,12 +106,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to Donchian mid OR high volatility (BB width > 70th percentile)
-                if (close_val < donch_mid_val or bb_width_val > bb_width_upper_thresh_val):
+                # Exit long: Price breaks below Donchian lower band OR trend weakening (ADX < 20)
+                if (close[i] < donchian_low[i]) or adx_val < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to Donchian mid OR high volatility
-                if (close_val > donch_mid_val or bb_width_val > bb_width_upper_thresh_val):
+                # Exit short: Price breaks above Donchian upper band OR trend weakening (ADX < 20)
+                if (close[i] > donchian_high[i]) or adx_val < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -113,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_BBWidth_DonchianBreakout_Volume"
-timeframe = "6h"
+name = "4H_Donchian20_1dADX_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
