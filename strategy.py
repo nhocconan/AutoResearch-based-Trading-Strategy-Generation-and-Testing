@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend + volume confirmation + ATR trailing stop
-Donchian channels capture volatility-based breakouts. EMA34 on 1d provides reliable trend filter.
-Volume spike confirms institutional interest. ATR trailing stop manages risk. 4h timeframe balances
-signal quality and trade frequency. Works in bull markets (breakouts with trend) and bear markets
-(short breakdowns with trend). Target: 25-40 trades/year (100-160 over 4 years) with discrete sizing 0.25.
+Hypothesis: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+Donchian breakout captures momentum, weekly pivot (from 1d data) provides institutional bias,
+volume confirmation filters false breakouts. 6h timeframe targets 12-37 trades/year.
+Works in bull (breakouts with trend) and bear (fades at weekly pivot levels).
 """
 
 import numpy as np
@@ -21,86 +20,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate Donchian(20) channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Calculate weekly pivot from 1d data (using prior week's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly high/low/close from prior 5 trading days (approximation)
+    week_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().values
+    week_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().values
+    week_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).last().values
     
-    # Calculate ATR(14) for volatility and trailing stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Weekly pivot point: (H + L + C) / 3
+    weekly_pivot = (week_high + week_low + week_close) / 3.0
     
-    # Calculate Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align HTF data to 6h timeframe
+    highest_high_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high}), highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low}), lowest_low)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # Volume confirmation: > 1.8x 20-period average
+    # Volume confirmation: > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_long = 0.0
-    lowest_since_short = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 14)  # need EMA34_1d, Donchian, ATR
+    start_idx = max(lookback, 5, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high_aligned[i]) or np.isnan(lowest_low_aligned[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                highest_since_long = 0.0
-                lowest_since_short = 0.0
             continue
         
         if position == 0:
-            # Long: Break above Donchian upper AND price > 1d EMA34 (uptrend) AND volume spike
-            if (close[i] > highest_high[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.8 * vol_ma[i]):
+            # Long: Breakout above Donchian high AND price above weekly pivot (bullish bias) AND volume spike
+            if (close[i] > highest_high_aligned[i] and 
+                close[i] > weekly_pivot_aligned[i] and 
+                volume[i] > 1.3 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-                highest_since_long = high[i]
-            # Short: Break below Donchian lower AND price < 1d EMA34 (downtrend) AND volume spike
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.8 * vol_ma[i]):
+            # Short: Breakdown below Donchian low AND price below weekly pivot (bearish bias) AND volume spike
+            elif (close[i] < lowest_low_aligned[i] and 
+                  close[i] < weekly_pivot_aligned[i] and 
+                  volume[i] > 1.3 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
-                lowest_since_short = low[i]
         else:
-            # Update highest/lowest since position entry
+            # Exit: Price crosses weekly pivot (mean reversion to pivot) OR Donchian middle
+            exit_signal = False
             if position == 1:
-                highest_since_long = max(highest_since_long, high[i])
-                # Exit: ATR trailing stop OR trend reversal
-                if close[i] < highest_since_long - 2.5 * atr[i] or close[i] < ema_34_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    highest_since_long = 0.0
-                else:
-                    signals[i] = 0.25
+                # Exit long when price crosses below weekly pivot
+                if close[i] < weekly_pivot_aligned[i]:
+                    exit_signal = True
             elif position == -1:
-                lowest_since_short = min(lowest_since_short, low[i])
-                # Exit: ATR trailing stop OR trend reversal
-                if close[i] > lowest_since_short + 2.5 * atr[i] or close[i] > ema_34_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    lowest_since_short = 0.0
-                else:
-                    signals[i] = -0.25
+                # Exit short when price crosses above weekly pivot
+                if close[i] > weekly_pivot_aligned[i]:
+                    exit_signal = True
+            
+            if exit_signal:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail"
-timeframe = "4h"
+name = "6H_Donchian20_WeeklyPivot_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
