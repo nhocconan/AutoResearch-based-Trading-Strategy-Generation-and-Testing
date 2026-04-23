@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R reversal with 12h EMA50 trend filter and volume confirmation.
-- Williams %R(14): oversold < -80 for long, overbought > -20 for short
-- Trend filter: price > 12h EMA50 for long bias, price < 12h EMA50 for short bias
-- Volume confirmation: > 1.8x 20-period average to avoid low-conviction trades
-- Exit: Williams %R crosses above -50 (long exit) or below -50 (short exit)
-- Uses momentum reversal in trending markets with volume conviction
-- Target: 80-180 total trades over 4 years (20-45/year) on 4h timeframe
-- Discrete position sizing: ±0.25 to minimize fee churn
+Hypothesis: 1h volume-weighted RSI mean reversion with 4h trend filter and session timing.
+- Long when: RSI(14) < 30, price > VWAP(20), and price > 4h EMA50 (uptrend filter)
+- Short when: RSI(14) > 70, price < VWAP(20), and price < 4h EMA50 (downtrend filter)
+- Exit: RSI returns to 40-60 range OR 4h EMA50 trend flip
+- Uses 1h for precise entry timing, 4h for trend direction, volume confirmation via VWAP
+- Session filter: 08-20 UTC to avoid low-liquidity periods
+- Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe
+- Discrete position sizing: ±0.20 to minimize fee churn
 - Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend)
 """
 
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,71 +25,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r[highest_high == lowest_low] = -50
+    # Session filter: 08-20 UTC (precompute for efficiency)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Volume confirmation: > 1.8x 20-period average (tight to avoid overtrading)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI(14) - momentum oscillator
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # VWAP(20) - volume-weighted average price
+    typical_price = (high + low + close) / 3
+    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum()
+    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum()
+    vwap = (vwap_num / vwap_den).replace([np.inf, -np.inf], np.nan).values
+    
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 14)  # Need 50 for EMA50, 20 for volume MA, 14 for Williams %R
+    start_idx = max(20, 14, 50)  # VWAP(20), RSI(14), EMA50(4h)
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i]) or
-            np.isnan(ema_50_12h_aligned[i])):
+        # Skip if outside trading session or data not ready
+        if not in_session[i] or \
+           np.isnan(rsi[i]) or \
+           np.isnan(vwap[i]) or \
+           np.isnan(ema_50_4h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.8x average)
-        volume_confirm = volume[i] > 1.8 * vol_ma[i]
-        
         if position == 0:
-            # Long: Williams %R crosses above -80 (from oversold) + volume confirmation + price > 12h EMA50
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
-                volume_confirm and 
-                close[i] > ema_50_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: RSI oversold, price above VWAP, and uptrend (price > 4h EMA50)
+            if (rsi[i] < 30 and 
+                close[i] > vwap[i] and 
+                close[i] > ema_50_4h_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: Williams %R crosses below -20 (from overbought) + volume confirmation + price < 12h EMA50
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
-                  volume_confirm and 
-                  close[i] < ema_50_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: RSI overbought, price below VWAP, and downtrend (price < 4h EMA50)
+            elif (rsi[i] > 70 and 
+                  close[i] < vwap[i] and 
+                  close[i] < ema_50_4h_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Williams %R crosses above -50 (momentum fading)
-            if williams_r[i] > -50 and williams_r[i-1] <= -50:
+            # Long exit: RSI returns to neutral range OR trend flip to downside
+            if (rsi[i] > 40 and rsi[i] < 60) or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Williams %R crosses below -50 (momentum fading)
-            if williams_r[i] < -50 and williams_r[i-1] >= -50:
+            # Short exit: RSI returns to neutral range OR trend flip to upside
+            if (rsi[i] > 40 and rsi[i] < 60) or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_WilliamsR_Reversal_12hEMA50_VolumeConfirm"
-timeframe = "4h"
+name = "1h_VWAP_RSI_MeanReversion_4hEMA50_Trend_Session"
+timeframe = "1h"
 leverage = 1.0
