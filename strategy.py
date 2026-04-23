@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) Breakout with 1w EMA50 Trend Filter and Volume Confirmation
-- Uses 12h Donchian channel breakout for entry signals
-- 1w EMA50 defines higher timeframe trend filter: only trade in direction of weekly trend
-- Volume confirmation (> 1.5x 20-period average) filters weak breakouts
-- Exit on opposite Donchian(10) touch or trend reversal
-- Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
-- Works in bull markets via breakouts with trend, avoids bear markets via trend filter
+Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+- Uses 1d Donchian channel breakout for entry signals
+- 1w EMA50 defines higher timeframe trend: only trade in direction of weekly trend
+- Volume confirmation (> 1.5x 20-period average) filters weak signals
+- Exit when price returns to Donchian midpoint or weekly trend reverses
+- Designed for 1d timeframe targeting 7-25 trades/year (30-100 over 4 years)
+- Works in both bull and bear markets by filtering breakouts with weekly trend
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,9 +23,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 1d Donchian(20) - upper and lower bands
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Calculate 1w EMA50 for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -55,33 +56,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian(20) high AND above 1w EMA50 AND volume spike
+            # Long: price breaks above Donchian upper AND price above 1w EMA50 AND volume spike
             if (close[i] > highest_high[i] and 
                 close[i] > ema_50_1w_aligned[i] and 
                 volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian(20) low AND below 1w EMA50 AND volume spike
+            # Short: price breaks below Donchian lower AND price below 1w EMA50 AND volume spike
             elif (close[i] < lowest_low[i] and 
                   close[i] < ema_50_1w_aligned[i] and 
                   volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price touches opposite Donchian(10) OR trend reverses
+            # Exit: price returns to Donchian midpoint OR weekly trend reverses
             exit_signal = False
             
-            # Calculate shorter Donchian(10) for exit
-            highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values[i]
-            lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values[i]
-            
             if position == 1:
-                # Exit long when price touches Donchian(10) low OR closes below 1w EMA50
-                if (close[i] <= lowest_low_10 or close[i] < ema_50_1w_aligned[i]):
+                # Exit long when price <= Donchian midpoint OR price closes below 1w EMA50
+                if (close[i] <= donchian_mid[i] or close[i] < ema_50_1w_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short when price touches Donchian(10) high OR closes above 1w EMA50
-                if (close[i] >= highest_high_10 or close[i] > ema_50_1w_aligned[i]):
+                # Exit short when price >= Donchian midpoint OR price closes above 1w EMA50
+                if (close[i] >= donchian_mid[i] or close[i] > ema_50_1w_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -92,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirmation"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
