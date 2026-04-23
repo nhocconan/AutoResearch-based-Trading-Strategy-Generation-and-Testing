@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d ADX trend filter and volume confirmation.
-Long when price breaks above R3 AND 1d ADX > 25 AND volume > 1.5x 20-period average.
-Short when price breaks below S3 AND 1d ADX > 25 AND volume > 1.5x 20-period average.
-Exit when price touches opposite Camarilla level (R2/S2) or ADX < 20 (trend weakens).
-Uses 1d HTF for ADX to avoid whipsaws in ranging markets. Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation.
+Long when price breaks above Camarilla R3 AND 1w EMA34 is rising AND volume > 1.8x 20-period average.
+Short when price breaks below Camarilla S3 AND 1w EMA34 is falling AND volume > 1.8x 20-period average.
+Exit when price touches the opposite Camarilla level (S3 for long, R3 for short) or reverses EMA34 direction.
+Uses 1w HTF for EMA34 trend (avoids whipsaws in ranging markets). Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -21,79 +21,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ADX for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Calculate 1w EMA34 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    # Calculate 12h Camarilla levels (based on previous 12h bar)
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
+    # We need previous bar's high/low/close to calculate current bar's levels
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    period = 14
-    alpha = 1.0 / period
-    
-    def wilders_smoothing(data, period):
-        """Wilder's smoothing (EMA with alpha=1/period)"""
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value: simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Rest: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    tr_smoothed = wilders_smoothing(tr, period)
-    plus_dm_smoothed = wilders_smoothing(plus_dm, period)
-    minus_dm_smoothed = wilders_smoothing(minus_dm, period)
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smoothed / tr_smoothed
-    minus_di = 100 * minus_dm_smoothed / tr_smoothed
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, period)
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    # Camarilla levels use previous day's data, so we shift by 1
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_range = prev_high - prev_low
-    
-    # Camarilla multipliers
-    R3 = prev_close + prev_range * 1.1000 / 4
-    S3 = prev_close - prev_range * 1.1000 / 4
-    R2 = prev_close + prev_range * 1.1000 / 6
-    S2 = prev_close - prev_range * 1.1000 / 6
-    
-    # Align Camarilla levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    for i in range(1, n):
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        rang = prev_high - prev_low
+        if rang > 0:  # Avoid division by zero
+            camarilla_r3[i] = prev_close + 1.1 * rang
+            camarilla_s3[i] = prev_close - 1.1 * rang
+        else:
+            camarilla_r3[i] = prev_close
+            camarilla_s3[i] = prev_close
     
     # 20-period volume average for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -102,32 +55,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30 + 14 + 14, 20)  # ADX needs 30 bars (14+14+2 for smoothing), volume MA needs 20
+    start_idx = max(34, 20)  # EMA34 (34), volume MA (20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        adx_val = adx_aligned[i]
-        r3 = R3_aligned[i]
-        s3 = S3_aligned[i]
-        r2 = R2_aligned[i]
-        s2 = S2_aligned[i]
+        ema_val = ema_34_aligned[i]
+        r3 = camarilla_r3[i]
+        s3 = camarilla_s3[i]
         vol_ma_val = vol_ma[i]
         
+        # Calculate EMA34 slope for trend direction (rising/falling)
+        if i >= start_idx + 1:
+            ema_prev = ema_34_aligned[i-1]
+            ema_rising = ema_val > ema_prev
+            ema_falling = ema_val < ema_prev
+        else:
+            ema_rising = False
+            ema_falling = False
+        
         if position == 0:
-            # Long: Break above R3 AND ADX > 25 AND volume spike
-            if price > r3 and adx_val > 25 and volume[i] > 1.5 * vol_ma_val:
+            # Long: Break above Camarilla R3 AND EMA34 rising AND volume spike
+            if price > r3 and ema_rising and volume[i] > 1.8 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 AND ADX > 25 AND volume spike
-            elif price < s3 and adx_val > 25 and volume[i] > 1.5 * vol_ma_val:
+            # Short: Break below Camarilla S3 AND EMA34 falling AND volume spike
+            elif price < s3 and ema_falling and volume[i] > 1.8 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -135,12 +95,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches S2 OR ADX < 20 (trend weakens)
-                if price < s2 or adx_val < 20:
+                # Long exit: price touches S3 level OR EMA34 starts falling
+                if price <= s3 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches R2 OR ADX < 20 (trend weakens)
-                if price > r2 or adx_val < 20:
+                # Short exit: price touches R3 level OR EMA34 starts rising
+                if price >= r3 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -151,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R3S3_Breakout_1dADX_Trend_VolumeConfirmation"
-timeframe = "6h"
+name = "12H_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
