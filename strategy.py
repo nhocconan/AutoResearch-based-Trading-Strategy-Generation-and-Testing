@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above 6h Donchian upper (20-period) AND price > 1d EMA50 AND volume > 1.5x 20-period average.
-Short when price breaks below 6h Donchian lower (20-period) AND price < 1d EMA50 AND volume > 1.5x 20-period average.
-Exit when price reverts to 6h Donchian midpoint OR ATR trailing stop (2.0*ATR from extreme).
-Uses 1d HTF for trend alignment and Donchian channels from 6h.
-Target: ~12-30 trades/year on 6h timeframe with discrete sizing 0.25.
-Works in bull via breakouts, in bear via short breakdowns with trend filter.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
+Long when price breaks above Camarilla R3 AND price > 1d EMA34 AND volume > 2.0x 20-period average.
+Short when price breaks below Camarilla S3 AND price < 1d EMA34 AND volume > 2.0x 20-period average.
+Exit when price reverts to Camarilla pivot (PP) OR ATR trailing stop (2.0*ATR from extreme).
+Uses 1d HTF for trend alignment and Camarilla levels from daily.
+Target: ~25-40 trades/year on 4h timeframe with discrete sizing 0.25.
 """
 
 import numpy as np
@@ -23,24 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 6h Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2.0
+    # Calculate Camarilla levels from previous day (using daily data)
+    high_1d_prev = np.roll(df_1d['high'].values, 1)
+    low_1d_prev = np.roll(df_1d['low'].values, 1)
+    close_1d_prev = np.roll(df_1d['close'].values, 1)
     
-    # 6h volume average (20-period) for spike filter
+    # Camarilla formula: PP = (H+L+C)/3, Range = H-L
+    pp = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+    rng = high_1d_prev - low_1d_prev
+    # R3 = PP + 1.1 * Range / 2, S3 = PP - 1.1 * Range / 2
+    r3 = pp + 1.1 * rng / 2.0
+    s3 = pp - 1.1 * rng / 2.0
+    
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    
+    # 4h volume average (20-period) for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for 6h trailing stop calculation
+    # ATR(14) for 4h trailing stop calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -56,12 +67,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 1)  # donchian20, ema_50_1d, and +1 for roll
+    start_idx = max(20, 34, 1)  # vol_ma20, ema_34_1d, and +1 for roll
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(donchian_mid[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pp_aligned[i]) or
             np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,21 +80,21 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_val = ema_50_1d_aligned[i]
-        upper = highest_20[i]
-        lower = lowest_20[i]
-        midpoint = donchian_mid[i]
+        ema_val = ema_34_1d_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        pp_val = pp_aligned[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above upper AND price > 1d EMA50 AND volume spike
-            if price > upper and price > ema_val and volume[i] > 1.5 * vol_ma_val:
+            # Long: price breaks above R3 AND price > 1d EMA34 AND volume spike
+            if price > r3_val and price > ema_val and volume[i] > 2.0 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: price breaks below lower AND price < 1d EMA50 AND volume spike
-            elif price < lower and price < ema_val and volume[i] > 1.5 * vol_ma_val:
+            # Short: price breaks below S3 AND price < 1d EMA34 AND volume spike
+            elif price < s3_val and price < ema_val and volume[i] > 2.0 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -97,10 +108,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: price reverts to Donchian midpoint
-            if position == 1 and price < midpoint:
+            # Primary exit: price reverts to pivot point (PP)
+            if position == 1 and price < pp_val:
                 exit_signal = True
-            elif position == -1 and price > midpoint:
+            elif position == -1 and price > pp_val:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
@@ -119,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike_MidExit_ATRTrailingStop"
-timeframe = "6h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_PPExit_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
