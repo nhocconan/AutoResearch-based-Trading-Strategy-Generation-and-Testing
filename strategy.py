@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams %R reversal with 1d EMA50 trend filter and volume confirmation.
-- Long: Williams %R(14) crosses above -80 AND price > 1d EMA50 AND volume > 1.8x 20-period avg
-- Short: Williams %R(14) crosses below -20 AND price < 1d EMA50 AND volume > 1.8x 20-period avg
-- Exit: Opposite Williams %R cross OR price crosses 1d EMA50
-- Uses 1d HTF for EMA50 and Williams %R (calculated from prior 1d bar)
-- Designed for low trade frequency (12-37/year) to minimize fee drag
-- Williams %R identifies overextended conditions for mean reversion in ranging markets
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR-based position sizing.
+- Long: Close > Donchian(20) high AND price > 1d EMA50
+- Short: Close < Donchian(20) low AND price < 1d EMA50
+- Exit: Opposite Donchian breakout OR price crosses 1d EMA50
+- Position size: 0.25 when ATR(14) < median ATR(50), else 0.15 (reduce size in high vol)
+- Uses 1d HTF for EMA50 (calculated from prior completed 1d bar)
+- Designed for low trade frequency (~20-50/year) to minimize fee drag
+- Works in bull (buy breakouts above Donchian high) and bear (sell breakdowns below Donchian low)
 """
 
 import numpy as np
@@ -15,16 +16,24 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Volume confirmation: > 1.8x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Donchian(20) - 20-period high/low
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # ATR(14) for volatility-based position sizing
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(abs(high - pd.Series(close).shift(1)))
+    tr3 = pd.Series(abs(low - pd.Series(close).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_median = pd.Series(atr).rolling(window=50, min_periods=50).median().values
     
     # Calculate 1d EMA50 for trend filter (HTF = 1d)
     df_1d = get_htf_data(prices, '1d')
@@ -32,74 +41,60 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R from prior 1d bar (HTF = 1d)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d_arr) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
-    
-    # Align Williams %R to 12h timeframe (use prior completed 1d bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 14)  # Need 50 for EMA, 20 for volume MA, 14 for Williams %R
+    start_idx = max(20, 14, 50)  # Need 20 for Donchian, 14 for ATR, 50 for EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(williams_r_aligned[i])):
+        if (np.isnan(high_roll[i]) or 
+            np.isnan(low_roll[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(atr_median[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.8x average)
-        volume_confirm = volume[i] > 1.8 * vol_ma[i]
+        # Dynamic position size based on volatility
+        if atr[i] < atr_median[i]:
+            size = 0.25  # Normal size in low volatility
+        else:
+            size = 0.15  # Reduced size in high volatility
         
-        # Williams %R signals (using prior bar to avoid look-ahead)
-        williams_prev = williams_r_aligned[i-1]
-        williams_curr = williams_r_aligned[i]
-        
-        # Bullish reversal: Williams %R crosses above -80 (from oversold)
-        williams_cross_up = williams_prev <= -80 and williams_curr > -80
-        # Bearish reversal: Williams %R crosses below -20 (from overbought)
-        williams_cross_down = williams_prev >= -20 and williams_curr < -20
+        # Donchian breakout signals (using current close vs prior levels)
+        breakout_up = close[i] > high_roll[i-1]   # Close above prior Donchian high
+        breakout_down = close[i] < low_roll[i-1]  # Close below prior Donchian low
         
         if position == 0:
-            # Long: Williams %R bullish reversal AND price > 1d EMA50 AND volume confirmation
-            if williams_cross_up and volume_confirm and close[i] > ema_50_1d_aligned[i]:
-                signals[i] = 0.25
+            # Long: Donchian breakout up AND price > 1d EMA50
+            if breakout_up and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = size
                 position = 1
-            # Short: Williams %R bearish reversal AND price < 1d EMA50 AND volume confirmation
-            elif williams_cross_down and volume_confirm and close[i] < ema_50_1d_aligned[i]:
-                signals[i] = -0.25
+            # Short: Donchian breakout down AND price < 1d EMA50
+            elif breakout_down and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -size
                 position = -1
         elif position == 1:
-            # Long exit: Williams %R bearish reversal OR price < 1d EMA50 (trend flip)
-            if williams_cross_down or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: Donchian breakout down OR price < 1d EMA50 (trend flip)
+            if breakout_down or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = size
         elif position == -1:
-            # Short exit: Williams %R bullish reversal OR price > 1d EMA50 (trend flip)
-            if williams_cross_up or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: Donchian breakout up OR price > 1d EMA50 (trend flip)
+            if breakout_up or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -size
     
     return signals
 
-name = "12h_WilliamsR_Reversal_1dEMA50_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_ATRSize"
+timeframe = "4h"
 leverage = 1.0
