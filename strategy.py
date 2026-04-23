@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trailing stop.
-Long when price breaks above Donchian high(20) with volume > 1.5x average.
-Short when price breaks below Donchian low(20) with volume > 1.5x average.
-Exit when price crosses Donchian midpoint (mean of high/low) or ATR stoploss hit.
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 20-50 trades/year per symbol.
-Donchian channels provide clear structure, volume confirms breakout strength, ATR stop manages risk.
-Works in both bull (breakouts catch trends) and bear (breakdowns catch downtrends) markets.
+Hypothesis: 1d Williams %R with 1w EMA34 trend filter and volume confirmation.
+Long when Williams %R < -80 (oversold) AND price > 1w EMA34 AND volume > 1.5x average.
+Short when Williams %R > -20 (overbought) AND price < 1w EMA34 AND volume > 1.5x average.
+Exit when Williams %R crosses above -50 for long or below -50 for short.
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 10-25 trades/year per symbol.
+Williams %R identifies overextended moves, effective in both trending and ranging markets when combined with trend filter.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,85 +22,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for Donchian calculation - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 1d data for Williams %R calculation - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Calculate Williams %R(14) on 1d data
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate ATR(14) on 4h data for stoploss
-    tr1 = np.maximum(high_4h - low_4h, np.abs(high_4h - np.roll(close_4h, 1)))
-    tr2 = np.abs(low_4h - np.roll(close_4h, 1))
+    # Calculate ATR(14) on 1d data for stoploss
+    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, tr2)
-    tr[0] = high_4h[0] - low_4h[0]  # first bar
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = high_1d[0] - low_1d[0]  # first bar
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume average (20-period) on 4h timeframe
-    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Load 1w data for EMA34 trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
+        return np.zeros(n)
     
-    # Align all 4h indicators to LTF (15m) - completed bar only
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma)
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA34 on 1w data
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1w EMA34 to 1d timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Volume average (20-period) on 1d timeframe
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(atr_4h_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(atr_1d[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             continue
         
-        # Use 4h close for price comparison (aligned to LTF)
-        price_4h = close_4h[i]
+        # Use 1d close for price comparison
+        price_1d = close_1d[i]
         vol_ma_val = vol_ma_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume confirmation
-            if (price_4h > donchian_high_aligned[i] and 
-                volume_4h[i] > 1.5 * vol_ma_val):
+            # Long: Williams %R < -80 (oversold) AND price > 1w EMA34 AND volume confirmation
+            if (williams_r[i] < -80 and 
+                price_1d > ema34_1w_aligned[i] and 
+                volume_1d[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price_4h
-            # Short: price breaks below Donchian low with volume confirmation
-            elif (price_4h < donchian_low_aligned[i] and 
-                  volume_4h[i] > 1.5 * vol_ma_val):
+                entry_price = price_1d
+            # Short: Williams %R > -20 (overbought) AND price < 1w EMA34 AND volume confirmation
+            elif (williams_r[i] > -20 and 
+                  price_1d < ema34_1w_aligned[i] and 
+                  volume_1d[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price_4h
+                entry_price = price_1d
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below Donchian midpoint OR ATR stoploss
-                if price_4h < donchian_mid_aligned[i]:
+                # Exit long: Williams %R crosses above -50 (momentum weakening)
+                if williams_r[i] > -50:
                     exit_signal = True
-                elif price_4h < entry_price - 2.5 * atr_4h_aligned[i]:
+                # ATR-based stoploss
+                elif price_1d < entry_price - 2.5 * atr_1d[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above Donchian midpoint OR ATR stoploss
-                if price_4h > donchian_mid_aligned[i]:
+                # Exit short: Williams %R crosses below -50 (momentum weakening)
+                if williams_r[i] < -50:
                     exit_signal = True
-                elif price_4h > entry_price + 2.5 * atr_4h_aligned[i]:
+                # ATR-based stoploss
+                elif price_1d > entry_price + 2.5 * atr_1d[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -113,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Volume_ATRStop_MidExit"
-timeframe = "4h"
+name = "1D_WilliamsR_1wEMA34_Volume_ATRStop"
+timeframe = "1d"
 leverage = 1.0
