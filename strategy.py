@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R reversal with 1d EMA34 trend filter and volume spike confirmation.
-- Williams %R identifies overbought/oversold conditions (long < -80, short > -20)
-- Trend filter: 1d EMA34 ensures trades align with daily trend
-- Volume confirmation: > 1.8x 20-period average reduces false signals
-- Discrete position size 0.25 to manage drawdown
-- Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years)
-- Works in both bull/bear via 1d trend filter and mean-reversion logic
+Hypothesis: 12h Williams %R reversal with 1d EMA34 trend filter and volume confirmation.
+- Williams %R(14) identifies overbought/oversold conditions: > -20 = overbought, < -80 = oversold
+- Reversal signals: Long when %R crosses above -80 from below (oversold bounce)
+                   Short when %R crosses below -20 from above (overbought rejection)
+- 1d EMA34 ensures trades align with daily trend to avoid fighting the major trend
+- Volume confirmation (> 1.5x 20-period average) filters weak breakouts
+- Discrete position size 0.25 to manage drawdown in volatile markets like 2022 crash
+- Target: 12-25 trades/year on 12h timeframe (50-100 total over 4 years)
+- Works in both bull/bear markets via 1d trend filter and mean-reversion logic
 """
 
 import numpy as np
@@ -23,14 +25,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using 14-period lookback
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
     
-    # Volume confirmation: > 1.8x 20-period average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # 1d data for EMA34 trend filter
@@ -43,7 +43,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(period, 20, 34)
+    start_idx = max(20, 34)  # volume MA, 1d EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -54,28 +54,28 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume confirmation (> 1.8x average)
-        volume_confirm = volume[i] > 1.8 * vol_ma[i]
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) AND price above 1d EMA34 AND volume confirmation
-            if williams_r[i] < -80 and close[i] > ema_34_1d_aligned[i] and volume_confirm:
+            # Long: Williams %R crosses above -80 (oversold bounce) AND price above 1d EMA34 AND volume
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and close[i] > ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) AND price below 1d EMA34 AND volume confirmation
-            elif williams_r[i] > -20 and close[i] < ema_34_1d_aligned[i] and volume_confirm:
+            # Short: Williams %R crosses below -20 (overbought rejection) AND price below 1d EMA34 AND volume
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and close[i] < ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Williams %R > -50 (recovered from oversold) OR price crosses below 1d EMA34
-            if williams_r[i] > -50 or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: Williams %R crosses above -20 (overbought) OR price crosses below 1d EMA34
+            if williams_r[i] >= -20 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R < -50 (declined from overbought) OR price crosses above 1d EMA34
-            if williams_r[i] < -50 or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: Williams %R crosses below -80 (oversold) OR price crosses above 1d EMA34
+            if williams_r[i] <= -80 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -83,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_Reversal_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_WilliamsR_Reversal_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
