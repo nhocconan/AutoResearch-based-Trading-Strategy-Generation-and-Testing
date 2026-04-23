@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian channel breakout with 1-day ATR filter and volume confirmation.
-Long when price breaks above 20-period Donchian high, ATR(14) > 1.5x ATR(50), and volume > 1.5x average.
-Short when price breaks below 20-period Donchian low, ATR(14) > 1.5x ATR(50), and volume > 1.5x average.
-Exit when price returns to the Donchian midpoint or ATR condition fails.
-Designed for low trade frequency (~20-40/year) to capture strong trends while minimizing whipsaws.
-Works in both bull and bear markets by requiring volatility expansion (ATR ratio) and volume confirmation.
+Hypothesis: 1-day Donchian channel breakout with 1-week EMA200 trend filter and volume confirmation.
+Long when price breaks above Donchian(20) high, price > EMA200(1w), and volume > 1.5x average.
+Short when price breaks below Donchian(20) low, price < EMA200(1w), and volume > 1.5x average.
+Exit when price returns to Donchian middle or EMA200(1w) trend fails.
+Designed for low trade frequency (~10-25/year) to capture major trends while minimizing whipsaws.
+Works in both bull and bear markets by requiring strong trend filter (EMA200).
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,48 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ATR - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Load 1-week data for EMA200 - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    # Calculate 1-day ATR (14 and 50 period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1-week EMA200
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate 1-day Donchian channels (20-period)
+    # Upper band: highest high of last 20 days
+    # Lower band: lowest low of last 20 days
+    # Middle band: average of upper and lower
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     
-    # ATR 14
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR 50
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # ATR ratio (short-term / long-term volatility)
-    atr_ratio = np.where(atr50 > 0, atr14 / atr50, 0)
-    
-    # Align ATR ratio to lower timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # Donchian channel (20-period) on 4h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Volume average (20-period) on 4h
+    # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(20, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(donchian_high[i]) or 
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -71,20 +59,23 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        atr_ratio_val = atr_ratio_aligned[i]
+        ema200_val = ema200_1w_aligned[i]
+        high_val = high[i]
+        low_val = low[i]
+        close_val = close[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: break above Donchian high, volatility expansion, volume confirmation
-            if (close[i] > donchian_high[i] and 
-                atr_ratio_val > 1.5 and 
+            # Long: Price breaks above Donchian high, above EMA200, volume confirmation
+            if (high_val > donchian_high[i] and 
+                close_val > ema200_val and 
                 vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low, volatility expansion, volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  atr_ratio_val > 1.5 and 
+            # Short: Price breaks below Donchian low, below EMA200, volume confirmation
+            elif (low_val < donchian_low[i] and 
+                  close_val < ema200_val and 
                   vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
@@ -93,12 +84,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to Donchian midpoint OR volatility contraction
-                if close[i] <= donchian_mid[i] or atr_ratio_val < 1.0:
+                # Exit long: Price returns to Donchian middle OR price below EMA200
+                if (close_val <= donchian_mid[i]) or (close_val < ema200_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to Donchian midpoint OR volatility contraction
-                if close[i] >= donchian_mid[i] or atr_ratio_val < 1.0:
+                # Exit short: Price returns to Donchian middle OR price above EMA200
+                if (close_val >= donchian_mid[i]) or (close_val > ema200_val):
                     exit_signal = True
             
             if exit_signal:
@@ -109,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_1dATR_Ratio_Volume"
-timeframe = "4h"
+name = "1D_Donchian20_EMA200_1w_Volume"
+timeframe = "1d"
 leverage = 1.0
