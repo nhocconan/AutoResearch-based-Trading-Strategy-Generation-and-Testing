@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Bollinger Band squeeze breakout with 1d ATR regime filter and volume confirmation.
-Long when price breaks above upper BB(20,2) AND BB width < 20th percentile (squeeze) AND 1d ATR > 15th percentile (volatile regime) AND volume > 2x 20-period average.
-Short when price breaks below lower BB(20,2) AND same conditions.
-Exit when price re-enters the Bollinger Bands or BB width expands above 50th percentile.
-Uses 1d HTF for ATR regime to ensure breakouts occur in sufficient volatility. Target: 50-150 total trades over 4 years (12-37/year).
-Bollinger Bands from 20-period SMA and 2 std dev. BB width = (upper - lower) / middle.
+Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+Long when price breaks above Donchian upper (20) AND 1w EMA50 is rising AND volume > 1.6x 20-period average.
+Short when price breaks below Donchian lower (20) AND 1w EMA50 is falling AND volume > 1.6x 20-period average.
+Exit when price touches the opposite Donchian band or reverses EMA50 direction.
+Uses 1w HTF for EMA50 trend to reduce whipsaws in bear markets. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -22,52 +21,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + bb_std * std
-    lower_band = sma - bb_std * std
-    bb_width = (upper_band - lower_band) / sma  # normalized width
-    
-    # Calculate 1d ATR(14) for regime filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Calculate 1w EMA50 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Calculate 12h Donchian channels (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate percentiles for BB width and ATR regime (using expanding window to avoid look-ahead)
-    bb_width_percentile = np.full(n, np.nan)
-    atr_percentile = np.full(n, np.nan)
+    # Donchian upper/lower bands (20-period high/low)
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    for i in range(bb_period, n):
-        # BB width percentile: rank of current value among historical values
-        historical_width = bb_width[bb_period:i+1]
-        if len(historical_width) > 0:
-            current_width = bb_width[i]
-            bb_width_percentile[i] = (np.sum(historical_width <= current_width) / len(historical_width)) * 100
-        
-        # ATR percentile: rank of current ATR among historical values
-        if not np.isnan(atr_14_aligned[i]):
-            historical_atr = atr_14_aligned[bb_period:i+1]
-            historical_atr = historical_atr[~np.isnan(historical_atr)]
-            if len(historical_atr) > 0:
-                current_atr = atr_14_aligned[i]
-                atr_percentile[i] = (np.sum(historical_atr <= current_atr) / len(historical_atr)) * 100
+    # Align Donchian bands to 12h timeframe (already aligned as we loaded 12h data)
+    donchian_upper_aligned = donchian_upper  # Already aligned since we loaded 12h data
+    donchian_lower_aligned = donchian_lower  # Already aligned since we loaded 12h data
     
     # 20-period volume average for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,36 +53,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(bb_period, 20)  # BB (20), volume MA (20)
+    start_idx = max(50, 20, 20)  # EMA50 (50), Donchian (20), volume MA (20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(sma[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(bb_width_percentile[i]) or np.isnan(atr_percentile[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        bb_width_pct = bb_width_percentile[i]
-        atr_pct = atr_percentile[i]
+        ema_val = ema_50_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
         vol_ma_val = vol_ma[i]
         
+        # Calculate EMA50 slope for trend direction (rising/falling)
+        if i >= start_idx + 1:
+            ema_prev = ema_50_aligned[i-1]
+            ema_rising = ema_val > ema_prev
+            ema_falling = ema_val < ema_prev
+        else:
+            ema_rising = False
+            ema_falling = False
+        
         if position == 0:
-            # Long: Break above upper BB AND BB squeeze (width < 20th percentile) AND volatile regime (ATR > 15th percentile) AND volume spike
-            if (price > upper_band[i] and 
-                bb_width_pct < 20.0 and 
-                atr_pct > 15.0 and 
-                volume[i] > 2.0 * vol_ma_val):
+            # Long: Break above Donchian upper AND EMA50 rising AND volume spike
+            if price > upper and ema_rising and volume[i] > 1.6 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower BB AND same conditions
-            elif (price < lower_band[i] and 
-                  bb_width_pct < 20.0 and 
-                  atr_pct > 15.0 and 
-                  volume[i] > 2.0 * vol_ma_val):
+            # Short: Break below Donchian lower AND EMA50 falling AND volume spike
+            elif price < lower and ema_falling and volume[i] > 1.6 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -113,16 +93,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price re-enters BB OR BB width expands above 50th percentile (squeeze end)
-                if price < upper_band[i] and price > lower_band[i]:
-                    exit_signal = True
-                elif bb_width_pct > 50.0:
+                # Long exit: price touches lower band OR EMA50 starts falling
+                if price < lower or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price re-enters BB OR BB width expands above 50th percentile
-                if price < upper_band[i] and price > lower_band[i]:
-                    exit_signal = True
-                elif bb_width_pct > 50.0:
+                # Short exit: price touches upper band OR EMA50 starts rising
+                if price > upper or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -133,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_BollingerSqueezebreakout_ATRregime_VolumeConfirmation"
-timeframe = "6h"
+name = "12H_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
