@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA34 trend filter and volume confirmation.
-- Camarilla pivot levels (R3/S3) act as strong intraday support/resistance; breakouts capture momentum.
-- 12h EMA34 ensures alignment with intermediate trend to avoid counter-trend trades.
-- Volume > 1.5x 20-period average confirms breakout validity.
+Hypothesis: 6h Williams %R Reversal with 1d EMA34 trend filter and volume spike confirmation.
+- Williams %R identifies overbought/oversold conditions; reversals from extremes capture mean reversion in ranging markets.
+- 1d EMA34 ensures alignment with higher timeframe trend to avoid counter-trend trades.
+- Volume > 2.0x 20-period average confirms reversal validity and reduces false signals.
 - Discrete position size 0.25 limits drawdown during crashes.
-- Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years).
-- Designed to work in both bull and bear regimes via trend filter and volume confirmation.
+- Target: 12-25 trades/year on 6h timeframe (50-100 total over 4 years).
+- Works in bull markets via trend-aligned mean reversion and in bear markets via oversold bounces in downtrends.
 """
 
 import numpy as np
@@ -23,66 +23,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (R3, S3) from prior bar to avoid look-ahead
-    # Use prior bar's OHLC to compute today's levels
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    close_shift = np.roll(close, 1)
-    high_shift[0] = np.nan
-    low_shift[0] = np.nan
-    close_shift[0] = np.nan
+    # Williams %R (14-period) - using prior bar to avoid look-ahead
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    rr = highest_high - lowest_low
+    rr[rr == 0] = 1e-10
+    williams_r = -100 * (highest_high - close) / rr
     
-    pivot = (high_shift + low_shift + close_shift) / 3.0
-    range_ = high_shift - low_shift
-    r3 = pivot + range_ * 1.1 / 4.0  # R3 level
-    s3 = pivot - range_ * 1.1 / 4.0  # S3 level
-    
-    # Volume confirmation: > 1.5x 20-period average
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 12h data for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34)  # Camarilla needs prior bar, 12h EMA
+    start_idx = max(20, 34)  # Williams %R (14 needs 14, but we use 20 for volume MA), 1d EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_34_12h_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (> 2.0x average)
+        volume_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Close > R3 AND price above 12h EMA34 AND volume confirmation
-            if close[i] > r3[i] and close[i] > ema_34_12h_aligned[i] and volume_confirm:
+            # Long: Williams %R crosses above -80 (oversold reversal) AND price above 1d EMA34 AND volume confirmation
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and close[i] > ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < S3 AND price below 12h EMA34 AND volume confirmation
-            elif close[i] < s3[i] and close[i] < ema_34_12h_aligned[i] and volume_confirm:
+            # Short: Williams %R crosses below -20 (overbought reversal) AND price below 1d EMA34 AND volume confirmation
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and close[i] < ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < S3 OR price crosses below 12h EMA34
-            if close[i] < s3[i] or close[i] < ema_34_12h_aligned[i]:
+            # Long exit: Williams %R crosses above -20 (overbought) OR price crosses below 1d EMA34
+            if williams_r[i] > -20 and williams_r[i-1] <= -20 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > R3 OR price crosses above 12h EMA34
-            if close[i] > r3[i] or close[i] > ema_34_12h_aligned[i]:
+            # Short exit: Williams %R crosses below -80 (oversold) OR price crosses above 1d EMA34
+            if williams_r[i] < -80 and williams_r[i-1] >= -80 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Reversal_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
