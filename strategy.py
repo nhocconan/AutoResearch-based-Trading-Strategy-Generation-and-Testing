@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation
-Primary timeframe: 1d. Uses weekly EMA50 for trend filter and daily Donchian channels for breakouts.
-Volume confirmation (>1.5x 20-day average) filters false breakouts. Discrete sizing 0.25 to limit fee churn.
-Target: 15-25 trades/year per symbol. Works in bull (breakouts with trend) and bear (mean reversion via exits).
+Hypothesis: 6h Williams %R Extreme + 1d EMA34 Trend + Volume Spike
+Williams %R identifies overbought/oversold conditions. Extreme readings (%R < -90 for long, %R > -10 for short)
+combined with 1d EMA34 trend alignment and volume confirmation captures mean reversion in strong trends.
+Timeframe 6h balances signal quality and trade frequency. Target: 12-30 trades/year.
 """
 
 import numpy as np
@@ -20,72 +20,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter (loaded once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate Donchian channels (20-day) from 1d data
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Upper channel: 20-day high, Lower channel: 20-day low
-    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R on 6h data (14-period)
+    if len(close) < 14:
+        return np.zeros(n)
     
-    # Align Donchian levels to 1d timeframe (no shift needed as get_htf_data already gives completed bars)
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Volume confirmation: > 1.5x 20-day average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # need EMA50_1w, Donchian(20), vol MA
+    start_idx = max(34, 20, 14)  # need EMA34_1d, vol MA, Williams %R
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_channel_aligned[i]) or 
-            np.isnan(lower_channel_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Break above upper channel AND price > weekly EMA50 (uptrend) AND volume spike
-            if (close[i] > upper_channel_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # Long: Williams %R < -90 (extreme oversold) AND price > 1d EMA34 (uptrend) AND volume spike
+            if (williams_r[i] < -90 and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower channel AND price < weekly EMA50 (downtrend) AND volume spike
-            elif (close[i] < lower_channel_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # Short: Williams %R > -10 (extreme overbought) AND price < 1d EMA34 (downtrend) AND volume spike
+            elif (williams_r[i] > -10 and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price returns to weekly EMA50 (trend exhaustion) OR opposite channel touch
+            # Exit: Williams %R returns to neutral range (-50) OR loss of trend
             exit_signal = False
             if position == 1:
-                # Exit long when price touches weekly EMA50 (trend fading) OR breaks lower channel
-                if close[i] < ema_50_1w_aligned[i] or close[i] < lower_channel_aligned[i]:
+                # Exit long when Williams %R > -50 (return from oversold) OR price < 1d EMA34
+                if williams_r[i] > -50 or close[i] < ema_34_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when price touches weekly EMA50 (trend fading) OR breaks upper channel
-                if close[i] > ema_50_1w_aligned[i] or close[i] > upper_channel_aligned[i]:
+                # Exit short when Williams %R < -50 (return from overbought) OR price > 1d EMA34
+                if williams_r[i] < -50 or close[i] > ema_34_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -96,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirmation"
-timeframe = "1d"
+name = "6H_WilliamsR_Extreme_1dEMA34_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
