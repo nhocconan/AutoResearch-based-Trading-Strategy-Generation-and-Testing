@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Long when price breaks above R4 AND daily close > daily EMA34 AND volume > 2.0x average.
-Short when price breaks below S4 AND daily close < daily EMA34 AND volume > 2.0x average.
-Exit when price reaches opposite Camarilla level (R4 for long exit, S4 for short exit) or after 12 bars max hold.
-Uses discrete position sizing (0.30) to balance profit and risk. Targets 20-40 trades/year per symbol.
-Camarilla levels provide precise support/resistance, daily trend filter avoids counter-trend trades,
-volume spike confirms institutional interest. Max hold prevents stagnation.
+Hypothesis: 6h Williams %R extreme + 1d ADX trend filter + volume spike.
+Long when Williams %R < -80 (oversold) AND daily ADX > 25 (trending) AND volume > 2.0x average.
+Short when Williams %R > -20 (overbought) AND daily ADX > 25 (trending) AND volume > 2.0x average.
+Exit when Williams %R returns to -50 (mean reversion midpoint).
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 15-30 trades/year per symbol.
+Williams %R captures momentum extremes, ADX filters for trending markets only, volume confirms conviction.
 """
 
 import numpy as np
@@ -23,98 +22,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter - ONCE before loop
+    # Load 1d data for ADX filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1d data
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate ADX on 1d data (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # first period
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                          np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                           np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smooth TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/period)
+        def wilder_smooth(data, period):
+            result = np.full_like(data, np.nan)
+            alpha = 1.0 / period
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+                for i in range(period, len(data)):
+                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+            return result
+        
+        tr_smooth = wilder_smooth(tr, period)
+        dm_plus_smooth = wilder_smooth(dm_plus, period)
+        dm_minus_smooth = wilder_smooth(dm_minus, period)
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smooth / tr_smooth
+        di_minus = 100 * dm_minus_smooth / tr_smooth
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        # ADX is smoothed DX
+        adx = wilder_smooth(dx, period)
+        return adx
     
-    # Align 1d EMA to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla uses previous day's high, low, close
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # first bar uses current bar
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    
-    # Camarilla R4, S4 levels (more extreme than R3/S3)
-    rangep = prev_high_1d - prev_low_1d
-    camarilla_r4 = prev_close_1d + rangep * 1.1 / 2
-    camarilla_s4 = prev_close_1d - rangep * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Calculate Williams %R on 6h data (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        daily_trend_up = close[i] > ema34_1d_aligned[i]
-        daily_trend_down = close[i] < ema34_1d_aligned[i]
-        
+        strong_trend = adx_1d_aligned[i] > 25
         vol_current = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            bars_since_entry = 0
-            # Long: Price breaks above R4 AND daily uptrend AND volume spike
-            if (high[i] > camarilla_r4_aligned[i] and daily_trend_up and 
+            # Long: Williams %R oversold (< -80) AND strong trend AND volume spike
+            if (williams_r[i] < -80 and strong_trend and 
                 vol_current > 2.0 * vol_ma_val):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S4 AND daily downtrend AND volume spike
-            elif (low[i] < camarilla_s4_aligned[i] and daily_trend_down and 
+            # Short: Williams %R overbought (> -20) AND strong trend AND volume spike
+            elif (williams_r[i] > -20 and strong_trend and 
                   vol_current > 2.0 * vol_ma_val):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         else:
-            bars_since_entry += 1
-            
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price reaches S4 (opposite level) OR max hold reached (12 bars = 2 days)
-                if low[i] < camarilla_s4_aligned[i] or bars_since_entry >= 12:
+                # Exit long: Williams %R returns to midpoint (-50)
+                if williams_r[i] >= -50:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price reaches R4 (opposite level) OR max hold reached
-                if high[i] > camarilla_r4_aligned[i] or bars_since_entry >= 12:
+                # Exit short: Williams %R returns to midpoint (-50)
+                if williams_r[i] <= -50:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_Camarilla_R4S4_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6H_WilliamsR_1dADX_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
