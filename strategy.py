@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour RSI mean reversion with 1-day Bollinger Band squeeze and volume confirmation.
-Long when RSI < 30, BB width < 0.05 (squeeze), and volume > 1.5x average.
-Short when RSI > 70, BB width < 0.05 (squeeze), and volume > 1.5x average.
-Exit when RSI returns to 50 or BB width expands > 0.10.
-Designed for low trade frequency (~15-30/year) to capture mean reversion during low volatility.
-Works in both bull and bear markets by exploiting oversold/overbought conditions during consolidation.
+Hypothesis: 4-hour Donchian channel breakout with 1-day trend filter (EMA200) and volume confirmation.
+Long when price breaks above Donchian upper channel (20-period) with EMA200 uptrend and volume > 1.5x average.
+Short when price breaks below Donchian lower channel with EMA200 downtrend and volume > 1.5x average.
+Exit when price returns to Donchian middle (mean) or reverses with volume confirmation.
+Designed for low trade frequency (~20-50/year) to capture strong trends while minimizing whipsaws and fee impact.
+Works in both bull and bear markets by requiring trend alignment (EMA200 slope).
 """
 
 import numpy as np
@@ -18,76 +18,57 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Bollinger Bands - ONCE before loop
+    # Donchian channel (20-period) on 4h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    middle = (highest_high + lowest_low) / 2.0
+    
+    # Load 1-day data for EMA200 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 1-day Bollinger Bands (20, 2)
+    # Calculate 1-day EMA200
     close_1d = df_1d['close'].values
-    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
-    bb_width = (upper_bb - lower_bb) / sma20
+    ema200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 12-hour RSI (14-period)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Align EMA200 to 4h timeframe
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
     
-    close_12h = df_12h['close'].values
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    
-    for i in range(15, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # Neutral before enough data
-    
-    # Align HTF indicators to lower timeframe
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
-    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
-    
-    # Volume average (20-period) on lower timeframe
+    # Volume average (20-period) on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(bb_width_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema200_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bb_width_val = bb_width_aligned[i]
-        rsi_val = rsi_aligned[i]
+        ema200_val = ema200_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: RSI oversold, BB squeeze, volume confirmation
-            if (rsi_val < 30 and bb_width_val < 0.05 and vol_current > 1.5 * vol_ma_val):
+            # Long: Price breaks above Donchian upper, EMA200 uptrend, volume confirmation
+            if (close[i] > highest_high[i] and 
+                close[i] > ema200_val and  # Price above EMA200 (uptrend)
+                vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought, BB squeeze, volume confirmation
-            elif (rsi_val > 70 and bb_width_val < 0.05 and vol_current > 1.5 * vol_ma_val):
+            # Short: Price breaks below Donchian lower, EMA200 downtrend, volume confirmation
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < ema200_val and  # Price below EMA200 (downtrend)
+                  vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -95,12 +76,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: RSI returns to neutral OR BB expands
-                if rsi_val >= 50 or bb_width_val > 0.10:
+                # Exit long: Price returns to middle OR breaks below lower with volume
+                if (close[i] >= middle[i] or 
+                    (close[i] < lowest_low[i] and vol_current > vol_ma_val)):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: RSI returns to neutral OR BB expands
-                if rsi_val <= 50 or bb_width_val > 0.10:
+                # Exit short: Price returns to middle OR breaks above upper with volume
+                if (close[i] <= middle[i] or 
+                    (close[i] > highest_high[i] and vol_current > vol_ma_val)):
                     exit_signal = True
             
             if exit_signal:
@@ -111,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_RSI_1dBB_Squeeze_Volume"
-timeframe = "12h"
+name = "4H_Donchian20_1dEMA200_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
