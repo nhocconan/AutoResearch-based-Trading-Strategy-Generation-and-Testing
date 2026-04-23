@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w ADX trend filter and volume confirmation.
-Long when price breaks above 20-period Donchian high AND 1w ADX > 25 AND volume > 1.5x 20-period average.
-Short when price breaks below 20-period Donchian low AND 1w ADX > 25 AND volume > 1.5x 20-period average.
-Exit when price touches the opposite Donchian level (Donchian low for longs, Donchian high for shorts).
-Uses 1w HTF for ADX trend strength (avoids whipsaws in ranging markets). Target: 30-100 total trades over 4 years (7-25/year).
-Donchian breakouts capture strong momentum moves; ADX filter ensures we only trade in trending regimes (works in both bull and bear markets when trends exist).
+Hypothesis: 6h Camarilla R3/S3 mean reversion with 12h volume regime filter.
+Long when price touches S3 level AND 12h volume ratio > 1.3 AND close > open (bullish rejection candle).
+Short when price touches R3 level AND 12h volume ratio > 1.3 AND close < open (bearish rejection candle).
+Exit at R1/S1 levels or opposite R3/S3 touch.
+Uses Camarilla pivot levels from 1d for structure and 12h HTF for volume regime to avoid low-volume false signals.
+Target: 50-150 total trades over 4 years (12-37/year). Camarilla R3/S3 often act as support/resistance with reversal potential.
 """
 
 import numpy as np
@@ -22,85 +22,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w ADX for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX components
-    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Calculate pivot and Camarilla levels using previous day's OHLC
+    pivot = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3.0
+    range_1d = high_1d[:-1] - low_1d[:-1]
     
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Camarilla levels
+    r3 = pivot + range_1d * 1.1 / 4
+    s3 = pivot - range_1d * 1.1 / 4
+    r1 = pivot + range_1d * 1.1 / 12
+    s1 = pivot - range_1d * 1.1 / 12
     
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_1w = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
-    minus_di_1w = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
-    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
-    adx_1w = pd.Series(dx_1w).rolling(window=14, min_periods=14).mean().values
+    # Align 1d Camarilla levels to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1d[:-1], r3)  # use previous day's levels
+    s3_6h = align_htf_to_ltf(prices, df_1d[:-1], s3)
+    r1_6h = align_htf_to_ltf(prices, df_1d[:-1], r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d[:-1], s1)
     
-    # Align 1w ADX to 1d timeframe
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Calculate 12h volume ratio for regime filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 20-period volume average for spike filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = align_htf_to_ltf(prices, df_12h, vol_12h / vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14 + 13 + 13)  # donchian (20), adx calculation (14+13+13)
+    start_idx = max(20, 20)  # volume MA needs 20 periods
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(vol_ratio_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        adx_val = adx_1w_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        vol_ma_val = vol_ma[i]
+        vol_ratio = vol_ratio_12h[i]
+        is_bullish = close[i] > open_price if (open_price := prices['open'].iloc[i]) else False
+        is_bearish = close[i] < open_price if (open_price := prices['open'].iloc[i]) else False
         
         if position == 0:
-            # Long: Break above Donchian high AND ADX > 25 AND volume spike
-            if price > upper and adx_val > 25 and volume[i] > 1.5 * vol_ma_val:
+            # Long: Price touches S3 AND high volume regime AND bullish rejection
+            if price <= s3_6h[i] and vol_ratio > 1.3 and is_bullish:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low AND ADX > 25 AND volume spike
-            elif price < lower and adx_val > 25 and volume[i] > 1.5 * vol_ma_val:
+            # Short: Price touches R3 AND high volume regime AND bearish rejection
+            elif price >= r3_6h[i] and vol_ratio > 1.3 and is_bearish:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit when price touches opposite Donchian level
-            if position == 1 and price < lower:  # Long exit at Donchian low
-                exit_signal = True
-            elif position == -1 and price > upper:  # Short exit at Donchian high
-                exit_signal = True
-            else:
-                exit_signal = False
+            # Exit conditions
+            exit_signal = False
+            if position == 1:  # Long position
+                if price >= r1_6h[i] or price <= s3_6h[i]:  # Profit at R1 or stop at S3
+                    exit_signal = True
+            else:  # Short position
+                if price <= s1_6h[i] or price >= r3_6h[i]:  # Profit at S1 or stop at R3
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -110,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_Breakout_1wADX25_Trend_VolumeConfirmation_LevelExit"
-timeframe = "1d"
+name = "6H_Camarilla_R3S3_MeanReversion_12hVolumeRegime_RejectionCandle"
+timeframe = "6h"
 leverage = 1.0
