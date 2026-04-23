@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above Donchian(20) high AND price > 1d EMA50 AND volume spike.
-Short when price breaks below Donchian(20) low AND price < 1d EMA50 AND volume spike.
-Exit on opposite Donchian(10) break or EMA50 trend reversal.
-Uses discrete position sizing (0.25) to minimize fee drag. Target: 12-37 trades/year.
+Hypothesis: 6h Volume-Weighted Average Price (VWAP) deviation with 1d EMA50 trend filter and ATR-based volatility regime.
+In trending markets (price > 1d EMA50 for long, price < 1d EMA50 for short), enter when price deviates significantly from VWAP (mean reversion within trend).
+In ranging markets (price near 1d EMA50), avoid trading to reduce whipsaw.
+Uses ATR to normalize deviation threshold, adapting to volatility.
+Designed for 6h timeframe to achieve 12-35 trades/year with discrete sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
@@ -30,68 +30,58 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate Donchian channels on 12h timeframe
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Calculate 6h VWAP (typical price * volume cumsum / volume cumsum)
+    typical_price = (high + low + close) / 3.0
+    tpv = typical_price * volume
+    cum_tpv = np.nancumsum(tpv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_tpv, cum_vol, out=np.full_like(cum_tpv, np.nan), where=cum_vol!=0)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 6h ATR(14) for volatility normalization
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar TR = high - low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Donchian(20) for entry
-    donch_high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Donchian(10) for exit
-    donch_high_10 = pd.Series(high_12h).rolling(window=10, min_periods=10).max().values
-    donch_low_10 = pd.Series(low_12h).rolling(window=10, min_periods=10).min().values
-    
-    # Align all 12h indicators to lower timeframe
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_12h, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_12h, donch_low_20)
-    donch_high_10_aligned = align_htf_to_ltf(prices, df_12h, donch_high_10)
-    donch_low_10_aligned = align_htf_to_ltf(prices, df_12h, donch_low_10)
-    
-    # Volume spike: current volume > 2.0x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Calculate normalized VWAP deviation: (price - VWAP) / ATR
+    vwap_dev = (close - vwap) / atr
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # need EMA50 and Donchian periods
+    start_idx = max(50, 14)  # need EMA50 and ATR14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_ma_20[i]) or 
-            np.isnan(ema_50_aligned[i]) or 
-            np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(donch_high_10_aligned[i]) or np.isnan(donch_low_10_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(atr[i]) or np.isnan(vwap_dev[i]) or 
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian(20) high AND price > 1d EMA50 AND volume spike
-            if close[i] > donch_high_20_aligned[i] and close[i] > ema_50_aligned[i] and volume_spike[i]:
+            # Long: price below VWAP (oversold) AND uptrend (price > 1d EMA50) AND deviation < -1.0
+            if close[i] < vwap[i] and close[i] > ema_50_aligned[i] and vwap_dev[i] < -1.0:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian(20) low AND price < 1d EMA50 AND volume spike
-            elif close[i] < donch_low_20_aligned[i] and close[i] < ema_50_aligned[i] and volume_spike[i]:
+            # Short: price above VWAP (overbought) AND downtrend (price < 1d EMA50) AND deviation > 1.0
+            elif close[i] > vwap[i] and close[i] < ema_50_aligned[i] and vwap_dev[i] > 1.0:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit: price returns to VWAP (mean reversion complete) OR trend reversal
             exit_signal = False
             if position == 1:
-                # Exit long: price breaks below Donchian(10) low OR price crosses below 1d EMA50
-                if close[i] < donch_low_10_aligned[i] or close[i] < ema_50_aligned[i]:
+                # Exit long when price >= VWAP (reversion) OR trend breaks (price <= 1d EMA50)
+                if close[i] >= vwap[i] or close[i] <= ema_50_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short: price breaks above Donchian(10) high OR price crosses above 1d EMA50
-                if close[i] > donch_high_10_aligned[i] or close[i] > ema_50_aligned[i]:
+                # Exit short when price <= VWAP (reversion) OR trend breaks (price >= 1d EMA50)
+                if close[i] <= vwap[i] or close[i] >= ema_50_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -102,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "6H_VWAP_Deviation_1dEMA50_Trend_ATR_Normalized"
+timeframe = "6h"
 leverage = 1.0
