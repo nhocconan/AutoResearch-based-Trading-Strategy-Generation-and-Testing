@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike confirmation.
-Uses Camarilla pivot levels from 1h timeframe for precise entry, combined with
-4h EMA50 trend filter to avoid counter-trend trades. Volume spike confirms breakout momentum.
-Designed for 1h timeframe with tight entry conditions to target 15-37 trades/year.
-Uses discrete position sizing (0.20) to minimize fee drag.
-Works in bull markets via trend-following breakouts and in bear markets via short-side symmetry.
+Hypothesis: 6h Williams %R mean reversion with 1d ADX regime filter and volume confirmation.
+In high ADX (>25) trending markets, fade extreme Williams %R readings (<-80 for long, >-20 for short).
+In low ADX (<20) ranging markets, use Williams %R for mean reversion at oversold/overbought levels.
+Volume spike confirms momentum. Designed for 6h timeframe to capture swings with controlled trade frequency.
+Uses discrete position sizing (0.25) to balance return and fee drag.
+Target: 50-150 total trades over 4 years = 12-37/year.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,91 +22,127 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA50 for trend filter (HTF direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate 1d ADX for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1h Camarilla pivot levels (R1, S1) based on previous 1h bar
-    high_1h = df_4h['high'].values  # Use 4h high/low for 1h pivot calculation? No - need 1h data
-    # Actually, we need to get 1h data for Camarilla calculation
-    # But we only have 1h prices as primary timeframe - we can use rolling window on 1h data
-    # Let's calculate 1h Camarilla using 1h OHLC directly
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # For 1h timeframe, we need to calculate Camarilla levels from previous 1h bar
-    # We'll use rolling window on the 1h prices
-    # Typical price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    # We need previous bar's values, so shift by 1
-    typical_price_prev = np.roll(typical_price, 1)
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    typical_price_prev[0] = np.nan
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    range_prev = high_prev - low_prev
+    # Smoothed values
+    tr_period = 14
+    tr_sum = pd.Series(tr).rolling(window=tr_period, min_periods=tr_period).sum().values
+    dm_plus_sum = pd.Series(dm_plus).rolling(window=tr_period, min_periods=tr_period).sum().values
+    dm_minus_sum = pd.Series(dm_minus).rolling(window=tr_period, min_periods=tr_period).sum().values
     
-    # Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    camarilla_r1 = typical_price_prev + (range_prev * 1.1 / 12)
-    camarilla_s1 = typical_price_prev - (range_prev * 1.1 / 12)
+    # Avoid division by zero
+    tr_sum[tr_sum == 0] = 1e-10
     
-    # Calculate volume spike: current volume > 2.0x 20-period MA
+    di_plus = 100 * dm_plus_sum / tr_sum
+    di_minus = 100 * dm_minus_sum / tr_sum
+    
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=tr_period, min_periods=tr_period).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 6h Williams %R
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    # Avoid division by zero
+    hh_ll = highest_high - lowest_low
+    hh_ll[hh_ll == 0] = 1e-10
+    
+    williams_r = -100 * (highest_high - close) / hh_ll
+    
+    # Calculate volume spike: current volume > 1.5x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    volume_spike = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 1)  # need EMA50 and volume MA20
+    start_idx = max(period, 20, tr_period*2)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(camarilla_r1[i]) or 
-            np.isnan(camarilla_s1[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: 4h EMA50 direction
-        trend_up = close[i] > ema_50_4h_aligned[i]
-        trend_down = close[i] < ema_50_4h_aligned[i]
+        adx_val = adx_aligned[i]
+        wr = williams_r[i]
+        vol_spike = volume_spike[i]
+        
+        # Regime determination
+        is_trending = adx_val > 25
+        is_ranging = adx_val < 20
         
         if position == 0:
-            # Long: Break above Camarilla R1 AND uptrend on 4h AND volume spike
-            if close[i] > camarilla_r1[i] and trend_up and volume_spike[i]:
-                signals[i] = 0.20
+            # Long conditions
+            long_condition = False
+            if is_trending:
+                # In trend: fade extreme oversold
+                long_condition = wr < -80 and vol_spike
+            elif is_ranging:
+                # In range: mean reversion from oversold
+                long_condition = wr < -70 and vol_spike
+            
+            # Short conditions
+            short_condition = False
+            if is_trending:
+                # In trend: fade extreme overbought
+                short_condition = wr > -20 and vol_spike
+            elif is_ranging:
+                # In range: mean reversion from overbought
+                short_condition = wr > -30 and vol_spike
+            
+            if long_condition:
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S1 AND downtrend on 4h AND volume spike
-            elif close[i] < camarilla_s1[i] and trend_down and volume_spike[i]:
-                signals[i] = -0.20
+            elif short_condition:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: break of opposite Camarilla level (S1 for longs, R1 for shorts)
+            # Exit conditions
             exit_signal = False
             if position == 1:
-                # Exit long on break below Camarilla S1
-                if close[i] < camarilla_s1[i]:
-                    exit_signal = True
+                # Exit long: Williams %R returns to overbought or adverse extreme
+                exit_signal = wr > -20 or (is_trending and wr < -85)
             elif position == -1:
-                # Exit short on break above Camarilla R1
-                if close[i] > camarilla_r1[i]:
-                    exit_signal = True
+                # Exit short: Williams %R returns to oversold or adverse extreme
+                exit_signal = wr < -80 or (is_trending and wr > -15)
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R1S1_Breakout_4hEMA50_Trend_VolumeSpike"
-timeframe = "1h"
+name = "6H_WilliamsR_MeanReversion_1dADXRegime_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
