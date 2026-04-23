@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation.
-- Long: Price breaks above Donchian(20) high + price > 12h EMA50 + volume > 2.0x 20-period avg
-- Short: Price breaks below Donchian(20) low + price < 12h EMA50 + volume > 2.0x 20-period avg
-- Exit: Opposite Donchian breakout or price crosses 12h EMA50
-- Uses Donchian for structure, 12h EMA50 for HTF trend, volume spike for conviction
-- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
+Hypothesis: 1d Donchian channel breakout with 1w EMA50 trend filter and volume confirmation.
+- Donchian(20): Upper/lower bands from 20-period high/low - price channel structure
+- 1w EMA50: Weekly trend filter - ensures trades align with higher timeframe momentum
+- Volume confirmation: > 1.8x 20-period average volume - filters low-quality breakouts
+- Long: Close > Donchian Upper + price > 1w EMA50 + volume confirmation
+- Short: Close < Donchian Lower + price < 1w EMA50 + volume confirmation
+- Exit: Opposite Donchian breakout or price crosses 1w EMA50
+- Uses Donchian for breakout structure, 1w EMA50 for HTF trend alignment, volume for confirmation
+- Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
 - Discrete position sizing: ±0.25 to minimize fee churn
-- Works in bull markets (breakouts with uptrend) and bear markets (breakouts with downtrend)
+- Works in bull markets (breakouts above EMA50) and bear markets (breakouts below EMA50)
 """
 
 import numpy as np
@@ -24,66 +27,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: > 2.0x 20-period average (tighter to reduce trades)
+    # Volume confirmation: > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Donchian Channel (20-period)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 50 for EMA50, 20 for Donchian and volume MA
+    start_idx = max(20, 50)  # Need 20 for Donchian, 50 for EMA50
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i])):
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average - tighter threshold)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
-        
-        # Donchian breakout conditions
-        breakout_up = close[i] > donch_high[i-1]  # Break above previous period's high
-        breakout_down = close[i] < donch_low[i-1]  # Break below previous period's low
+        # Volume confirmation (> 1.8x average)
+        volume_confirm = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
-            # Long: Donchian breakout up + price > 12h EMA50 + volume confirmation
-            if (breakout_up and 
-                close[i] > ema_50_12h_aligned[i] and 
+            # Long: Close > Donchian Upper + price > 1w EMA50 + volume confirmation
+            if (close[i] > donchian_upper[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down + price < 12h EMA50 + volume confirmation
-            elif (breakout_down and 
-                  close[i] < ema_50_12h_aligned[i] and 
+            # Short: Close < Donchian Lower + price < 1w EMA50 + volume confirmation
+            elif (close[i] < donchian_lower[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Donchian breakout down OR price < 12h EMA50
-            if breakout_down or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: Close < Donchian Lower OR price < 1w EMA50
+            if close[i] < donchian_lower[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Donchian breakout up OR price > 12h EMA50
-            if breakout_up or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: Close > Donchian Upper OR price > 1w EMA50
+            if close[i] > donchian_upper[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -91,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1d_DonchianBreakout_1wEMA50_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
