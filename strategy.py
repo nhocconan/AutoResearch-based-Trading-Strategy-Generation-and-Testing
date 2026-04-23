@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-Long when price breaks above Donchian upper channel AND price > 1w EMA50 AND volume > 1.5x average.
-Short when price breaks below Donchian lower channel AND price < 1w EMA50 AND volume > 1.5x average.
-Exit when price crosses the Donchian midline OR ATR-based stoploss is hit.
-Uses discrete position sizing (0.30) to minimize fee churn. Targets 20-40 trades/year per symbol.
-Donchian channels provide clear breakout levels, effective in trending markets with trend filter for bear markets.
+Hypothesis: 6h ADX(14) + Volume Spike + EMA50 Trend Filter
+Long when ADX > 25 (trending) AND volume > 2.0x 20-period average AND close > EMA50
+Short when ADX > 25 (trending) AND volume > 2.0x 20-period average AND close < EMA50
+Exit when ADX < 20 (trend weakens) OR volume < 1.5x average
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 15-35 trades/year per symbol.
+ADX filters choppy markets, volume confirms institutional participation, EMA50 provides trend direction.
+Works in both bull and bear markets by only taking strong trend trades with volume confirmation.
 """
 
 import numpy as np
@@ -22,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Donchian calculation - ONCE before loop
+    # Load 1d data for ADX calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -30,35 +31,44 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian Channels(20) on 1d data
-    highest_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
-    
-    # Calculate ATR(14) on 1d data for stoploss
-    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
-    tr2 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, tr2)
+    # Calculate ADX(14) on 1d data
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = high_1d[0] - low_1d[0]  # first bar
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # Load 1w data for EMA50 trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
-        return np.zeros(n)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_1d
+    minus_di = 100 * minus_dm_smooth / atr_1d
     
-    close_1w = df_1w['close'].values
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate EMA50 on 1w data
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1w EMA50 to 1d timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # EMA50 on 1d close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume average (20-period) on 1d timeframe
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
@@ -67,8 +77,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr_1d[i]) or np.isnan(ema50_1w_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,53 +85,38 @@ def generate_signals(prices):
                 entry_price = 0.0
             continue
         
-        # Use 1d close for price comparison
-        price_1d = close_1d[i]
+        # Current 6h close for price comparison
+        price_6h = close[i]
         vol_ma_val = vol_ma_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper AND price > 1w EMA50 AND volume confirmation
-            if (price_1d > highest_high[i] and 
-                price_1d > ema50_1w_aligned[i] and 
-                volume_1d[i] > 1.5 * vol_ma_val):
-                signals[i] = 0.30
-                position = 1
-                entry_price = price_1d
-            # Short: price breaks below Donchian lower AND price < 1w EMA50 AND volume confirmation
-            elif (price_1d < lowest_low[i] and 
-                  price_1d < ema50_1w_aligned[i] and 
-                  volume_1d[i] > 1.5 * vol_ma_val):
-                signals[i] = -0.30
-                position = -1
-                entry_price = price_1d
+            # Entry conditions: Strong trend + volume confirmation
+            if (adx_aligned[i] > 25 and 
+                volume[i] > 2.0 * vol_ma_val):
+                if price_6h > ema50_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = price_6h
+                elif price_6h < ema50_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = price_6h
         else:
-            # Exit conditions
+            # Exit conditions: Trend weakening or volume drying up
             exit_signal = False
             
-            if position == 1:
-                # Exit long: price crosses below Donchian midline
-                if price_1d < donchian_mid[i]:
-                    exit_signal = True
-                # ATR-based stoploss
-                elif price_1d < entry_price - 2.5 * atr_1d[i]:
-                    exit_signal = True
-            else:  # position == -1
-                # Exit short: price crosses above Donchian midline
-                if price_1d > donchian_mid[i]:
-                    exit_signal = True
-                # ATR-based stoploss
-                elif price_1d > entry_price + 2.5 * atr_1d[i]:
-                    exit_signal = True
+            if adx_aligned[i] < 20 or volume[i] < 1.5 * vol_ma_val:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1D_Donchian20_1wEMA50_Volume_ATRStop"
-timeframe = "1d"
+name = "6H_ADX_Volume_EMA50_Trend"
+timeframe = "6h"
 leverage = 1.0
