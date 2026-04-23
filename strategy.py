@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 1d Williams %R extremes with volume confirmation and ATR trailing stop.
-Long when 1d Williams %R crosses above -80 from below AND volume > 1.5x 20-period average.
-Short when 1d Williams %R crosses below -20 from above AND volume > 1.5x 20-period average.
-Exit when price retraces to 50% of the move from extreme OR ATR trailing stop (2.5*ATR) hit.
-Uses discrete position sizing (0.30) to balance return and drawdown.
-Williams %R identifies overbought/oversold conditions on higher timeframe, volume confirms momentum,
-and ATR trailing stop manages risk in both trending and ranging markets.
+Hypothesis: 6h strategy using 1d Elder Ray (Bull/Bear Power) + 1w ADX regime filter + volume confirmation.
+Long when: Bull Power > 0, ADX > 25 (trending), and volume > 1.5x 20-period average.
+Short when: Bear Power < 0, ADX > 25 (trending), and volume > 1.5x 20-period average.
+Exit when Elder Power reverses sign or volume drops below average.
+Uses discrete position sizing (0.25) to limit drawdown in bear markets (2022-like).
+Designed for 6h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
+Works in both bull and bear markets by requiring trending regime (ADX>25) and volume confirmation to avoid whipsaws.
+1d Elder Ray provides institutional buying/selling pressure, while 1w ADX ensures we only trade strong trends.
 """
 
 import numpy as np
@@ -23,133 +24,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Williams %R (14-period)
+    # Calculate 1d Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # EMA13 on 1d close
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema13_1d  # Bull Power: High - EMA13
+    bear_power_1d = low_1d - ema13_1d   # Bear Power: Low - EMA13
     
-    # Align Williams %R to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align 1d Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Volume average (20-period) on 4h timeframe
+    # Calculate 1w ADX for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w[0] = tr1[0]
+    
+    # +DI and -DI
+    plus_dm = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    # Smoothed TR, +DM, -DM (period=14)
+    tr_ma = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_ma = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_ma = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # +DI and -DI
+    plus_di = 100 * plus_dm_ma / tr_ma
+    minus_di = 100 * minus_dm_ma / tr_ma
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1w ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume average (20-period) on 6h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR(14) for trailing stop calculation
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    williams_r_high = -100  # track highest Williams %R during long
-    williams_r_low = 0      # track lowest Williams %R during short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14)
+    start_idx = max(20, 14, 13)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
+        adx_val = adx_aligned[i]
         vol_ma_val = vol_ma[i]
-        atr_val = atr[i]
-        wr = williams_r_aligned[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -80 from below AND volume spike
-            if i > start_idx:
-                prev_wr = williams_r_aligned[i-1]
-                if (prev_wr <= -80 and wr > -80 and volume[i] > 1.5 * vol_ma_val):
-                    signals[i] = 0.30
-                    position = 1
-                    entry_price = price
-                    williams_r_high = wr
-            # Short: Williams %R crosses below -20 from above AND volume spike
-            elif i > start_idx:
-                prev_wr = williams_r_aligned[i-1]
-                if (prev_wr >= -20 and wr < -20 and volume[i] > 1.5 * vol_ma_val):
-                    signals[i] = -0.30
-                    position = -1
-                    entry_price = price
-                    williams_r_low = wr
+            # Long: Bull Power > 0, ADX > 25 (trending), volume spike
+            if (bull_power > 0 and adx_val > 25 and volume[i] > 1.5 * vol_ma_val):
+                signals[i] = 0.25
+                position = 1
+            # Short: Bear Power < 0, ADX > 25 (trending), volume spike
+            elif (bear_power < 0 and adx_val > 25 and volume[i] > 1.5 * vol_ma_val):
+                signals[i] = -0.25
+                position = -1
         else:
-            # Update extreme Williams %R during position
-            if position == 1:
-                williams_r_high = max(williams_r_high, wr)
-            elif position == -1:
-                williams_r_low = min(williams_r_low, wr)
-            
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to 50% of the move from extreme
-            if position == 1 and williams_r_high > -100:
-                # Normalize Williams %R to 0-100 scale for retracement calculation
-                wr_norm = (wr + 100)  # 0 to 100
-                wr_high_norm = (williams_r_high + 100)  # 0 to 100
-                # Exit when Williams %R retraces 50% from extreme
-                if wr_norm <= wr_high_norm * 0.5:
-                    exit_signal = True
-            elif position == -1 and williams_r_low < 0:
-                # Normalize Williams %R to 0-100 scale for retracement calculation
-                wr_norm = (wr + 100)  # 0 to 100
-                wr_low_norm = (williams_r_low + 100)  # 0 to 100
-                # Exit when Williams %R retraces 50% from extreme (toward 100)
-                if wr_norm >= wr_low_norm + (100 - wr_low_norm) * 0.5:
-                    exit_signal = True
+            # Primary exit: Elder Power reverses sign
+            if position == 1 and bull_power <= 0:
+                exit_signal = True
+            elif position == -1 and bear_power >= 0:
+                exit_signal = True
             
-            # ATR-based trailing stop: 2.5 * ATR from extreme price
-            if position == 1:
-                # Track highest price during long for trailing stop
-                if not hasattr(generate_signals, 'long_high_price'):
-                    generate_signals.long_high_price = entry_price
-                generate_signals.long_high_price = max(generate_signals.long_high_price, price)
-                if price < generate_signals.long_high_price - 2.5 * atr_val:
-                    exit_signal = True
-            elif position == -1:
-                # Track lowest price during short for trailing stop
-                if not hasattr(generate_signals, 'short_low_price'):
-                    generate_signals.short_low_price = entry_price
-                generate_signals.short_low_price = min(generate_signals.short_low_price, price)
-                if price > generate_signals.short_low_price + 2.5 * atr_val:
-                    exit_signal = True
+            # Secondary exit: Volume drops below average (loss of momentum)
+            elif volume[i] < vol_ma_val:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                williams_r_high = -100
-                williams_r_low = 0
-                # Reset tracking variables
-                if hasattr(generate_signals, 'long_high_price'):
-                    delattr(generate_signals, 'long_high_price')
-                if hasattr(generate_signals, 'short_low_price'):
-                    delattr(generate_signals, 'short_low_price')
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_WilliamsR_VolumeConfirmation_50PercentRetracement_ATRTrailingStop"
-timeframe = "4h"
+name = "6H_ElderRay_1dADX_Regime_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
