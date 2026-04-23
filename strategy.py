@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and volume confirmation.
-- Williams Alligator: Jaw (EMA13, 8-bar shift), Teeth (EMA8, 5-bar shift), Lips (EMA5, 3-bar shift)
-- Long: Lips > Teeth > Jaw (bullish alignment) + price > 1w EMA50 + volume > 1.8x 20-period avg volume
-- Short: Lips < Teeth < Jaw (bearish alignment) + price < 1w EMA50 + volume > 1.8x 20-period avg volume
-- Exit: ATR trailing stop (2.0x ATR from extreme) OR Alligator alignment breaks
-- Uses 1w EMA50 as higher timeframe trend filter to align with weekly momentum
-- Volume confirmation reduces false signals in ranging markets
-- ATR trailing stop manages risk during strong trends
-- Target: 7-25 trades/year (30-100 total over 4 years) to minimize fee drag on 1d timeframe
+Hypothesis: 6h Williams %R Extreme Reversal with 1d Volume Regime Filter and ATR Trailing Stop.
+- Williams %R(14): Long when < -80 (oversold) and turning up, Short when > -20 (overbought) and turning down
+- 1d Volume Regime: Only trade when 1d volume > 1.2x 20-period average (high conviction moves)
+- ATR Trailing Stop: 2.0x ATR from extreme for risk management
+- Uses 1d volume filter to avoid low-conviction reversals in choppy markets
+- Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag on 6h timeframe
 """
 
 import numpy as np
@@ -33,26 +30,25 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])  # align with close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: > 1.8x 20-period average (spike filter)
+    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Volume confirmation: > 1.2x 20-period average (volume filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Williams Alligator: Smoothed Moving Average (SMMA) with shifts
-    # Jaw: SMMA(13, 8) - EMA13 of close, shifted 8 bars forward
-    # Teeth: SMMA(8, 5) - EMA8 of close, shifted 5 bars forward
-    # Lips: SMMA(5, 3) - EMA5 of close, shifted 3 bars forward
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().shift(3).values
+    # Load 1d data ONCE before loop for volume regime filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate 1d volume and its 20-period MA
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1w EMA50 to 1d timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d volume MA to 6h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,16 +56,14 @@ def generate_signals(prices):
     short_extreme = 0.0  # lowest low since short entry
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14, 13, 8, 5, 50)  # Need 20 for volume MA, 14 for ATR, 13 for Jaw, 8 for Teeth, 5 for Lips, 50 for 1w EMA
+    start_idx = max(20, 14)  # Need 20 for volume MA, 14 for Williams %R and ATR
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or 
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,21 +71,23 @@ def generate_signals(prices):
                 short_extreme = 0.0
             continue
         
-        # Williams Alligator alignment conditions
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]  # Lips > Teeth > Jaw
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]  # Lips < Teeth < Jaw
+        # Williams %R reversal conditions
+        williams_oversold = williams_r[i] < -80  # Oversold territory
+        williams_overbought = williams_r[i] > -20  # Overbought territory
+        williams_rising = williams_r[i] > williams_r[i-1]  # Williams %R turning up
+        williams_falling = williams_r[i] < williams_r[i-1]  # Williams %R turning down
         
-        # Volume spike confirmation (> 1.8x average)
-        volume_spike = volume[i] > 1.8 * vol_ma[i]
+        # 1d volume regime filter: only trade in high volume conviction
+        high_volume_regime = volume_1d_aligned[i] > 1.2 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Long: Bullish alignment + price > 1w EMA50 + volume spike
-            if bullish_alignment and close[i] > ema_50_aligned[i] and volume_spike:
+            # Long: Williams %R oversold + turning up + high volume regime
+            if williams_oversold and williams_rising and high_volume_regime:
                 signals[i] = 0.25
                 position = 1
                 long_extreme = high[i]
-            # Short: Bearish alignment + price < 1w EMA50 + volume spike
-            elif bearish_alignment and close[i] < ema_50_aligned[i] and volume_spike:
+            # Short: Williams %R overbought + turning down + high volume regime
+            elif williams_overbought and williams_falling and high_volume_regime:
                 signals[i] = -0.25
                 position = -1
                 short_extreme = low[i]
@@ -101,11 +97,11 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Price reverses 2.0x ATR from long extreme (trailing stop)
-            # 2. Alligator alignment breaks (not bullish)
+            # 2. Williams %R exits oversold territory (> -50)
             trailing_stop_long = close[i] < long_extreme - 2.0 * atr[i]
-            alignment_exit = not bullish_alignment
+            momentum_exit = williams_r[i] > -50
             
-            if trailing_stop_long or alignment_exit:
+            if trailing_stop_long or momentum_exit:
                 signals[i] = 0.0
                 position = 0
                 long_extreme = 0.0
@@ -117,11 +113,11 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Price reverses 2.0x ATR from short extreme (trailing stop)
-            # 2. Alligator alignment breaks (not bearish)
+            # 2. Williams %R exits overbought territory (< -50)
             trailing_stop_short = close[i] > short_extreme + 2.0 * atr[i]
-            alignment_exit = not bearish_alignment
+            momentum_exit = williams_r[i] < -50
             
-            if trailing_stop_short or alignment_exit:
+            if trailing_stop_short or momentum_exit:
                 signals[i] = 0.0
                 position = 0
                 short_extreme = 0.0
@@ -130,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsAlligator_1wEMA50_VolumeSpike_ATRStop"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_1dVolumeRegime_ATRStop"
+timeframe = "6h"
 leverage = 1.0
