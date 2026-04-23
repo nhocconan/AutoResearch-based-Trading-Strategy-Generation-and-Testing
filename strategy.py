@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
-Long when price breaks above upper Donchian channel and close > 1d EMA34 (uptrend) with volume > 1.5x average.
-Short when price breaks below lower Donchian channel and close < 1d EMA34 (downtrend) with volume > 1.5x average.
-Uses 12h timeframe to target 50-150 total trades over 4 years. Donchian channels provide price structure.
-Volume confirmation ensures breakout conviction. Trend filter prevents counter-trend trades.
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+Long when price breaks above upper Donchian channel and close > 12h EMA50 (uptrend) with volume > 1.5x average.
+Short when price breaks below lower Donchian channel and close < 12h EMA50 (downtrend) with volume > 1.5x average.
+Uses 4h timeframe to target 75-200 total trades over 4 years. Donchian provides price structure,
+12h EMA50 filters for higher timeframe trend alignment. Volume confirmation ensures breakout conviction.
 Works in both bull and bear markets by aligning with higher timeframe direction.
 """
 
@@ -22,28 +22,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Donchian channel calculation - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data for EMA50 trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian channels (20-period) from 1d data
-    # Upper = max(high over last 20 periods)
-    # Lower = min(low over last 20 periods)
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA50 on 12h
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Load 1d data for EMA34 trend filter - ONCE before loop
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align HTF indicators to 4h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Align HTF indicators to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Donchian channels on 4h (primary timeframe)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume average (20-period) on primary timeframe
     vol_ma_primary = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,16 +47,16 @@ def generate_signals(prices):
     
     for i in range(60, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma_primary[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma_primary[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        ema34_val = ema34_1d_aligned[i]
+        ema50_val = ema50_12h_aligned[i]
+        upper_donchian = highest_high[i]
+        lower_donchian = lowest_low[i]
         vol_ma_val = vol_ma_primary[i]
         
         # Get current price and volume
@@ -70,12 +64,12 @@ def generate_signals(prices):
         vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian AND price > 1d EMA34 (uptrend) AND volume confirmation
-            if (price > upper_val and price > ema34_val and vol_current > 1.5 * vol_ma_val):
+            # Long: price breaks above upper Donchian AND price > 12h EMA50 (uptrend) AND volume confirmation
+            if (price > upper_donchian and price > ema50_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian AND price < 1d EMA34 (downtrend) AND volume confirmation
-            elif (price < lower_val and price < ema34_val and vol_current > 1.5 * vol_ma_val):
+            # Short: price breaks below lower Donchian AND price < 12h EMA50 (downtrend) AND volume confirmation
+            elif (price < lower_donchian and price < ema50_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -83,12 +77,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below lower Donchian OR price breaks below 1d EMA34 (trend reversal)
-                if price < lower_val or price < ema34_val:
+                # Exit long: price breaks below lower Donchian OR price breaks below 12h EMA50 (trend reversal)
+                if price < lower_donchian or price < ema50_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above upper Donchian OR price breaks above 1d EMA34 (trend reversal)
-                if price > upper_val or price > ema34_val:
+                # Exit short: price breaks above upper Donchian OR price breaks above 12h EMA50 (trend reversal)
+                if price > upper_donchian or price > ema50_val:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_1dEMA34_Volume"
-timeframe = "12h"
+name = "4H_Donchian20_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
