@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray + 1d EMA50 Trend + Volume Spike
-Elder Ray measures bull/bear power relative to EMA13. In trending markets,
-sustained bull/bear power with trend alignment and volume confirmation
-captures momentum moves. 6h timeframe reduces noise and overtrading.
+Hypothesis: 12h Williams %R + 1d EMA50 Trend + Volume Spike
+Williams %R identifies overbought/oversold conditions. In trending markets with volume confirmation,
+mean reversion from extremes captures profitable swings. 12h timeframe reduces noise and overtrading.
 Uses 1d EMA50 for trend filter and volume spike (>2x 20-period average) for confirmation.
 Target: 12-37 trades/year (50-150 over 4 years) with discrete sizing 0.25.
 """
@@ -31,12 +30,10 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate EMA13 for Elder Ray (on 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull power: high minus EMA13
-    bear_power = low - ema_13   # Bear power: low minus EMA13
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
     # Volume confirmation: > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,40 +42,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 20, 50)  # need EMA13, vol MA, EMA50_1d
+    start_idx = max(14, 20, 50)  # need Williams %R, vol MA, EMA50_1d
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull power > 0 (bulls in control) AND price > 1d EMA50 (uptrend) AND volume spike
-            if (bull_power[i] > 0 and 
+            # Long: Williams %R oversold (< -80) AND price > 1d EMA50 (uptrend) AND volume spike
+            if (williams_r[i] < -80 and 
                 close[i] > ema_50_1d_aligned[i] and 
                 volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear power < 0 (bears in control) AND price < 1d EMA50 (downtrend) AND volume spike
-            elif (bear_power[i] < 0 and 
+            # Short: Williams %R overbought (> -20) AND price < 1d EMA50 (downtrend) AND volume spike
+            elif (williams_r[i] > -20 and 
                   close[i] < ema_50_1d_aligned[i] and 
                   volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Elder Ray divergence OR loss of trend
+            # Exit: Williams %R returns to neutral range OR loss of trend
             exit_signal = False
             if position == 1:
-                # Exit long when bear power > 0 (bears taking over) OR price < 1d EMA50
-                if bear_power[i] > 0 or close[i] < ema_50_1d_aligned[i]:
+                # Exit long when Williams %R > -50 (returning from oversold) OR price < 1d EMA50
+                if williams_r[i] > -50 or close[i] < ema_50_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when bull power < 0 (bulls taking over) OR price > 1d EMA50
-                if bull_power[i] < 0 or close[i] > ema_50_1d_aligned[i]:
+                # Exit short when Williams %R < -50 (returning from overbought) OR price > 1d EMA50
+                if williams_r[i] < -50 or close[i] > ema_50_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -89,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ElderRay_1dEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12H_WilliamsR_1dEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
