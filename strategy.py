@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R3 AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
-Short when price breaks below Camarilla S3 AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
-Exit when price touches the opposite Camarilla level (S3 for long, R3 for short) or reverses EMA34 direction.
-Uses 1d HTF for EMA34 trend (avoids whipsaws in ranging markets). Target: 75-200 total trades over 4 years (19-50/year).
+Hypothesis: 6h Donchian(20) breakout with 1d ATR filter and weekly pivot direction.
+Long when price breaks above Donchian upper band AND 1d ATR(14) < 1d ATR(50) (low volatility regime) AND price > weekly pivot.
+Short when price breaks below Donchian lower band AND 1d ATR(14) < 1d ATR(50) AND price < weekly pivot.
+Exit when price touches the opposite Donchian band or ATR regime shifts to high volatility.
+Uses 1d HTF for ATR regime filter and 1w HTF for pivot direction (avoids whipsaws in ranging markets).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,72 +22,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (HTF)
+    # Calculate 1d ATR(14) and ATR(50) for volatility regime filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # We need previous day's OHLC, so we shift the 1d data by 1
-    if len(df_1d) < 2:
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    
+    # Calculate 1w pivot points (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
+    # Weekly pivot: (H + L + C) / 3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    camarilla_r3_1d = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
-    camarilla_s3_1d = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
+    # Calculate 6h Donchian channels (20-period)
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # AlCamarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    
-    # 20-period volume average for spike filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    for i in range(lookback - 1, n):
+        upper[i] = np.max(high[i - lookback + 1:i + 1])
+        lower[i] = np.min(low[i - lookback + 1:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # EMA34 (34), volume MA (20)
+    start_idx = max(lookback - 1, 50, 50)  # Donchian (20), ATR(50) (50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or 
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema_val = ema_34_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        vol_ma_val = vol_ma[i]
+        atr14 = atr_14_aligned[i]
+        atr50 = atr_50_aligned[i]
+        pivot = pivot_1w_aligned[i]
+        up = upper[i]
+        lo = lower[i]
         
-        # Calculate EMA34 slope for trend direction (rising/falling)
-        if i >= start_idx + 1:
-            ema_prev = ema_34_aligned[i-1]
-            ema_rising = ema_val > ema_prev
-            ema_falling = ema_val < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
+        # Low volatility regime: ATR(14) < ATR(50)
+        low_vol_regime = atr14 < atr50
         
         if position == 0:
-            # Long: Break above Camarilla R3 AND EMA34 rising AND volume spike
-            if price > r3 and ema_rising and volume[i] > 2.0 * vol_ma_val:
+            # Long: Break above Donchian upper AND low vol regime AND price > weekly pivot
+            if price > up and low_vol_regime and price > pivot:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S3 AND EMA34 falling AND volume spike
-            elif price < s3 and ema_falling and volume[i] > 2.0 * vol_ma_val:
+            # Short: Break below Donchian lower AND low vol regime AND price < weekly pivot
+            elif price < lo and low_vol_regime and price < pivot:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -94,12 +104,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches S3 level OR EMA34 starts falling
-                if price < s3 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
+                # Long exit: price touches lower band OR high volatility regime
+                if price < lo or not low_vol_regime:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches R3 level OR EMA34 starts rising
-                if price > r3 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
+                # Short exit: price touches upper band OR high volatility regime
+                if price > up or not low_vol_regime:
                     exit_signal = True
             
             if exit_signal:
@@ -110,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6H_Donchian20_Breakout_1dATR_LowVol_1wPivot_Filter"
+timeframe = "6h"
 leverage = 1.0
