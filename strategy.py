@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above H3 (1d) AND close > 1d EMA50 (uptrend) AND volume > 2.0x 20-period MA.
-Short when price breaks below L3 (1d) AND close < 1d EMA50 (downtrend) AND volume > 2.0x 20-period MA.
-Exit when price returns to H4/L4 levels or opposite extreme is hit.
-Uses tighter H3/L3 levels for selective breakouts with strong volume confirmation to avoid overtrading.
-Designed for ~25-35 trades/year with proven edge from DB top performers.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+Long when price breaks above 20-period high AND close > 1d EMA50 (uptrend) AND volume > 2.0x 20-period MA.
+Short when price breaks below 20-period low AND close < 1d EMA50 (downtrend) AND volume > 2.0x 20-period MA.
+Exit when price returns to midpoint of Donchian channel or opposite breakout occurs.
+Designed for ~15-25 trades/year on 12h timeframe with proven edge from DB top performers.
 """
 
 import numpy as np
@@ -31,23 +30,13 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    # Camarilla calculation: based on previous day's range
-    range_1d = high_1d - low_1d
-    h3 = close_1d_arr + 1.125/4 * range_1d  # H3 level (equivalent to R1 in some definitions)
-    l3 = close_1d_arr - 1.125/4 * range_1d  # L3 level (equivalent to S1 in some definitions)
-    h4 = close_1d_arr + 1.125 * range_1d    # H4 level
-    l4 = close_1d_arr - 1.125 * range_1d    # L4 level
-    
-    # Align Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Calculate 12h Donchian channel (20-period)
+    period = 20
+    # For 12h timeframe, we need to calculate on 12h data
+    # Since we're generating 12h signals, prices is already 12h data
+    highest_20 = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_20 = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    midpoint_20 = (highest_20 + lowest_20) / 2.0
     
     # Calculate volume MA (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,13 +45,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # need EMA50, volume MA20
+    start_idx = max(50, period, 20)  # need EMA50, Donchian20, volume MA20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(midpoint_20[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,33 +61,32 @@ def generate_signals(prices):
         trend_up = close[i] > ema_50_1d_aligned[i]
         trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Volume filter: 4h volume > 2.0x 20-period MA (stricter to reduce trades)
+        # Volume filter: 12h volume > 2.0x 20-period MA
         vol_filter = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Camarilla breakout conditions
-        breakout_up = close[i] > h3_aligned[i]  # Break above H3
-        breakout_down = close[i] < l3_aligned[i]  # Break below L3
-        return_to_h4 = close[i] < h4_aligned[i]  # Return below H4 (exit long)
-        return_to_l4 = close[i] > l4_aligned[i]  # Return above L4 (exit short)
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_20[i]  # Break above 20-period high
+        breakout_down = close[i] < lowest_20[i]  # Break below 20-period low
+        return_to_mid = abs(close[i] - midpoint_20[i]) < (highest_20[i] - lowest_20[i]) * 0.1  # Within 10% of midpoint
         opposite_extreme = (position == 1 and breakout_down) or \
                            (position == -1 and breakout_up)
         
         if position == 0:
-            # Long: Break above H3 AND uptrend AND volume confirmation
+            # Long: Break above highest_20 AND uptrend AND volume confirmation
             if breakout_up and trend_up and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below L3 AND downtrend AND volume confirmation
+            # Short: Break below lowest_20 AND downtrend AND volume confirmation
             elif breakout_down and trend_down and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to H4/L4 or opposite extreme hit
+            # Exit conditions: return to midpoint or opposite extreme hit
             exit_signal = False
             if position == 1:
-                exit_signal = return_to_h4 or opposite_extreme
+                exit_signal = return_to_mid or opposite_extreme
             elif position == -1:
-                exit_signal = return_to_l4 or opposite_extreme
+                exit_signal = return_to_mid or opposite_extreme
             
             if exit_signal:
                 signals[i] = 0.0
@@ -108,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_H3L3_Breakout_1dEMA50_Trend_VolumeConfirm"
-timeframe = "4h"
+name = "12H_Donchian20_Breakout_1dEMA50_Trend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
