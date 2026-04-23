@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d EMA50 trend filter and ATR volatility regime.
-Bull Power = High - EMA13, Bear Power = Low - EMA13. In uptrends (price > 1d EMA50), look for Bull Power expansion (>0 and rising) for longs.
-In downtrends (price < 1d EMA50), look for Bear Power contraction (<0 and falling) for shorts. Uses ATR to normalize threshold and avoid whipsaw in ranging markets.
-Designed for 6h timeframe to achieve 12-30 trades/year with discrete sizing (0.25) to minimize fee drag. Works in both bull (trend continuation) and bear (mean reversion within trend) markets.
+Hypothesis: 12h Williams %R mean reversion with 1d EMA200 trend filter and volume spike confirmation.
+In strong trends (price > 1d EMA200 for long, price < 1d EMA200 for short), enter when Williams %R indicates oversold/overbought conditions (below -80 for long, above -20 for short) with volume > 1.5x 20-period average.
+Exit when Williams %R returns to neutral range (-50 to -50) or trend reverses.
+Uses discrete position sizing (0.25) to limit fee drag and targets 12-30 trades/year on 12h timeframe.
+Designed to work in both bull and bear markets by trading mean reversion within the dominant trend.
 """
 
 import numpy as np
@@ -20,69 +21,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA200 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_200 = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # Calculate 6h EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Calculate 12h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13
-    
-    # Calculate 6h ATR(14) for volatility normalization
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar TR = high - low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Normalize Elder Ray by ATR
-    bull_power_norm = bull_power / atr
-    bear_power_norm = bear_power / atr
+    # Calculate 12h volume spike: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 13, 14)  # need EMA50, EMA13, ATR14
+    start_idx = max(200, 14, 20)  # need EMA200, Williams %R, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(bull_power_norm[i]) or np.isnan(bear_power_norm[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Uptrend (price > 1d EMA50) AND Bull Power expanding (>0 and rising)
-            if close[i] > ema_50_aligned[i] and bull_power_norm[i] > 0 and bull_power_norm[i] > bull_power_norm[i-1]:
+            # Long: oversold (Williams %R < -80) AND uptrend (price > 1d EMA200) AND volume spike
+            if williams_r[i] < -80 and close[i] > ema_200_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Downtrend (price < 1d EMA50) AND Bear Power contracting (<0 and falling)
-            elif close[i] < ema_50_aligned[i] and bear_power_norm[i] < 0 and bear_power_norm[i] < bear_power_norm[i-1]:
+            # Short: overbought (Williams %R > -20) AND downtrend (price < 1d EMA200) AND volume spike
+            elif williams_r[i] > -20 and close[i] < ema_200_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Trend reversal OR Elder Ray divergence
+            # Exit: Williams %R returns to neutral range (-50 to -50) OR trend reversal
             exit_signal = False
             if position == 1:
-                # Exit long when trend breaks OR Bull Power deteriorates (<=0 or falling)
-                if close[i] <= ema_50_aligned[i] or bull_power_norm[i] <= 0 or bull_power_norm[i] < bull_power_norm[i-1]:
+                # Exit long when Williams %R >= -50 (reversion) OR trend breaks (price <= 1d EMA200)
+                if williams_r[i] >= -50 or close[i] <= ema_200_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when trend breaks OR Bear Power expands (>=0 or rising)
-                if close[i] >= ema_50_aligned[i] or bear_power_norm[i] >= 0 or bear_power_norm[i] > bear_power_norm[i-1]:
+                # Exit short when Williams %R <= -50 (reversion) OR trend breaks (price >= 1d EMA200)
+                if williams_r[i] <= -50 or close[i] >= ema_200_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -93,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ElderRay_Trend_1dEMA50_ATR_Normalized"
-timeframe = "6h"
+name = "12H_WilliamsR_MeanReversion_1dEMA200_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
