@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams %R with daily trend filter and volume confirmation.
-Long when Williams %R crosses above -20 (oversold bounce) + daily close > daily EMA50 + volume > 1.5x average.
-Short when Williams %R crosses below -80 (overbought rejection) + daily close < daily EMA50 + volume > 1.5x average.
-Exit when Williams %R crosses -50 (mean reversion) or daily trend changes.
-Designed for low trade frequency (~15-30/year) to minimize fee drag in both bull and bear markets.
+Hypothesis: 1-day RSI with weekly Bollinger Band squeeze and volume confirmation.
+Long when RSI crosses above 30 (mean reversion) + weekly Bollinger Band width < 20th percentile + volume > 1.5x average.
+Short when RSI crosses below 70 (mean reversion) + weekly Bollinger Band width < 20th percentile + volume > 1.5x average.
+Exit when RSI crosses 50 (mean reversion complete) or weekly Bollinger Band width > 80th percentile (volatility expansion).
+Designed for low trade frequency (~10-20/year) to minimize fee drift in both bull and bear markets.
 """
 
 import numpy as np
@@ -16,25 +16,44 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1-week data for Bollinger Band squeeze filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    daily_close = df_1d['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    # Calculate weekly Bollinger Bands (20-period, 2 std)
+    weekly_close = df_1w['close'].values
+    weekly_sma20 = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean()
+    weekly_std20 = pd.Series(weekly_close).rolling(window=20, min_periods=20).std()
+    weekly_upper = weekly_sma20 + 2 * weekly_std20
+    weekly_lower = weekly_sma20 - 2 * weekly_std20
+    weekly_bb_width = (weekly_upper - weekly_lower) / weekly_sma20 * 100  # as percentage
     
-    # Calculate Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate percentile ranks for BB width (20th and 80th percentiles)
+    weekly_bb_width_series = pd.Series(weekly_bb_width)
+    weekly_bb_width_20th = weekly_bb_width_series.rolling(window=50, min_periods=50).quantile(0.20)
+    weekly_bb_width_80th = weekly_bb_width_series.rolling(window=50, min_periods=50).quantile(0.80)
+    weekly_bb_width_20th_vals = weekly_bb_width_20th.values
+    weekly_bb_width_80th_vals = weekly_bb_width_80th.values
+    
+    # Align BB width percentiles to daily timeframe
+    weekly_bb_width_20th_aligned = align_htf_to_ltf(prices, df_1w, weekly_bb_width_20th_vals)
+    weekly_bb_width_80th_aligned = align_htf_to_ltf(prices, df_1w, weekly_bb_width_80th_vals)
+    
+    # Calculate daily RSI (14-period)
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_vals = rsi.values
     
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -44,42 +63,31 @@ def generate_signals(prices):
     
     for i in range(14, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(daily_ema50_aligned[i]) or 
-            np.isnan(avg_volume[i]) or volume[i] == 0):
+        if (np.isnan(rsi_vals[i]) or np.isnan(weekly_bb_width_20th_aligned[i]) or 
+            np.isnan(weekly_bb_width_80th_aligned[i]) or np.isnan(avg_volume[i]) or volume[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        daily_close_val = None
-        daily_ema50_val = None
-        if i < len(daily_ema50_aligned):
-            daily_close_val = df_1d['close'].values[-1] if len(df_1d) > 0 else np.nan
-            daily_ema50_val = daily_ema50_aligned[i]
-        else:
-            daily_close_val = np.nan
-            daily_ema50_val = np.nan
-            
-        if np.isnan(daily_close_val) or np.isnan(daily_ema50_val):
+        bb_squeeze = weekly_bb_width_20th_aligned[i] > 0 and weekly_bb_width_80th_aligned[i] > 0
+        if not bb_squeeze:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
-        daily_trend_up = daily_close_val > daily_ema50_val
-        daily_trend_down = daily_close_val < daily_ema50_val
-        
-        volume_confirm = volume[i] > 1.5 * avg_volume[i]
+        vol_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -20 + daily uptrend + volume confirmation
-            if (williams_r[i] > -20 and williams_r[i-1] <= -20 and 
-                daily_trend_up and volume_confirm):
+            # Long: RSI crosses above 30 + BB squeeze + volume confirmation
+            if (rsi_vals[i] > 30 and rsi_vals[i-1] <= 30 and 
+                weekly_bb_width_80th_aligned[i] > weekly_bb_width[i] and vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -80 + daily downtrend + volume confirmation
-            elif (williams_r[i] < -80 and williams_r[i-1] >= -80 and 
-                  daily_trend_down and volume_confirm):
+            # Short: RSI crosses below 70 + BB squeeze + volume confirmation
+            elif (rsi_vals[i] < 70 and rsi_vals[i-1] >= 70 and 
+                  weekly_bb_width_80th_aligned[i] > weekly_bb_width[i] and vol_confirm):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -87,12 +95,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R crosses above -50 or daily trend changes to down
-                if williams_r[i] >= -50 or not daily_trend_up:
+                # Exit long: RSI crosses above 50 or BB width expands beyond 80th percentile
+                if rsi_vals[i] >= 50 or weekly_bb_width[i] >= weekly_bb_width_80th_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R crosses below -50 or daily trend changes to up
-                if williams_r[i] <= -50 or not daily_trend_down:
+                # Exit short: RSI crosses below 50 or BB width expands beyond 80th percentile
+                if rsi_vals[i] <= 50 or weekly_bb_width[i] >= weekly_bb_width_80th_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -103,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_DailyTrend_VolumeFilter"
-timeframe = "12h"
+name = "1D_RSI_WeeklyBBSqueeze_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
