@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian channel breakout with 1-day ATR filter and volume confirmation.
-Long when price breaks above Donchian(20) high, ATR(14) > 1.2 * ATR(50), and volume > 1.3 * average volume.
-Short when price breaks below Donchian(20) low, ATR(14) > 1.2 * ATR(50), and volume > 1.3 * average volume.
-Exit when price returns to Donchian midpoint or ATR condition fails.
-Designed for low trade frequency (~20-40/year) to capture strong volatility breakouts while avoiding chop.
-Works in both bull and bear markets by requiring volatility expansion (ATR ratio > 1.2) to confirm genuine breakouts.
+Hypothesis: 4-hour Williams %R (14) combined with 1-day ADX trend filter and volume confirmation.
+Long when Williams %R crosses above -80 (oversold), ADX > 25 (trending), and volume > 1.5x average.
+Short when Williams %R crosses below -20 (overbought), ADX > 25 (trending), and volume > 1.5x average.
+Exit when Williams %R reverses or ADX < 20 (trend weakening).
+Designed for low trade frequency (~20-40/year) to capture mean-reversion in trending markets.
+Works in both bull and bear markets by requiring strong trend confirmation (ADX > 25).
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,12 +22,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ATR - ONCE before loop
+    # Load 1-day data for ADX - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day ATR(14) and ATR(50)
+    # Calculate 1-day ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -39,52 +39,67 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
-    # ATR(14)
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR(50)
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # ATR ratio: short-term / long-term
-    atr_ratio = np.where(atr50 > 0, atr14 / atr50, 0.0)
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
     
-    # Align ATR ratio to lower timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Directional Indicators
+    plus_di = 100 * dm_plus14 / tr14
+    minus_di = 100 * dm_minus14 / tr14
     
-    # Donchian channel (20-period) on 4h
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    adx_values = adx.values
     
-    # Volume average (20-period) on 4h
+    # Calculate 4-hour Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.values
+    
+    # Align HTF indicators to lower timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    williams_r_aligned = williams_r  # Already on 4h timeframe
+    
+    # Volume average (20-period) on lower timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(14, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        atr_ratio_val = atr_ratio_aligned[i]
+        adx_val = adx_aligned[i]
+        williams_r_val = williams_r_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: Donchian breakout high, volatility expansion, volume confirmation
-            if (close[i] > donch_high[i-1] and 
-                atr_ratio_val > 1.2 and 
-                vol_current > 1.3 * vol_ma_val):
+            # Long: Williams %R crosses above -80 (oversold), strong trend (ADX > 25), volume confirmation
+            if (williams_r_val > -80 and williams_r_aligned[i-1] <= -80 and
+                adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout low, volatility expansion, volume confirmation
-            elif (close[i] < donch_low[i-1] and 
-                  atr_ratio_val > 1.2 and 
-                  vol_current > 1.3 * vol_ma_val):
+            # Short: Williams %R crosses below -20 (overbought), strong trend (ADX > 25), volume confirmation
+            elif (williams_r_val < -20 and williams_r_aligned[i-1] >= -20 and
+                  adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -92,12 +107,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to midpoint OR volatility contraction
-                if (close[i] <= donch_mid[i] or atr_ratio_val < 1.0):
+                # Exit long: Williams %R crosses below -20 (overbought) OR trend weakening (ADX < 20)
+                if (williams_r_val < -20 and williams_r_aligned[i-1] >= -20) or adx_val < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to midpoint OR volatility contraction
-                if (close[i] >= donch_mid[i] or atr_ratio_val < 1.0):
+                # Exit short: Williams %R crosses above -80 (oversold) OR trend weakening (ADX < 20)
+                if (williams_r_val > -80 and williams_r_aligned[i-1] <= -80) or adx_val < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -108,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian_Breakout_ATR_Volume"
+name = "4H_WilliamsR_1dADX_Volume_MeanReversion"
 timeframe = "4h"
 leverage = 1.0
