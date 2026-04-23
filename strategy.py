@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA20 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R1 AND 4h EMA20 uptrend AND volume > 1.5x 20-period average.
-Short when price breaks below Camarilla S1 AND 4h EMA20 downtrend AND volume > 1.5x 20-period average.
-Exit when price retouches Camarilla pivot point (PP).
-Uses discrete position sizing (0.20) to minimize fee churn. Targets 15-37 trades/year per symbol.
-Camarilla levels provide intraday structure, 4h EMA20 ensures alignment with intermediate trend,
-volume filters weak breakouts. Session filter (08-20 UTC) reduces noise trades.
-Designed to work in both trending and ranging markets with strict entry conditions to avoid overtrading.
+Hypothesis: 6h Williams %R reversal with 1d Elder Ray (Bull/Bear Power) volume confirmation.
+Long when Williams %R < -80 (oversold) AND 1d Bear Power > 0 (bulls gaining control) AND volume > 1.5x 20-period average.
+Short when Williams %R > -20 (overbought) AND 1d Bull Power < 0 (bears gaining control) AND volume > 1.5x 20-period average.
+Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) OR ATR stoploss hit (2.0*ATR).
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 15-30 trades/year per symbol.
+Williams %R provides mean reversion signals, Elder Ray confirms underlying momentum shift, volume filters weak signals.
+Designed to work in ranging markets with occasional trending periods, avoiding overtrading through strict triple confluence.
 """
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,7 +23,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from daily data
+    # Calculate Williams %R(14) on 6h timeframe
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Load 1d data for Elder Ray calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
@@ -33,53 +39,40 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels (based on previous day's OHLC)
-    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_r1 = camarilla_pp + (high_1d - low_1d) * 1.1 / 12.0
-    camarilla_s1 = camarilla_pp - (high_1d - low_1d) * 1.1 / 12.0
-    camarilla_r3 = camarilla_pp + (high_1d - low_1d) * 1.1 / 4.0
-    camarilla_s3 = camarilla_pp - (high_1d - low_1d) * 1.1 / 4.0
+    # Calculate 1d EMA13 for Elder Ray
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # Load 4h EMA20 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 1:
-        return np.zeros(n)
+    # Align 1d indicators to 6h timeframe
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    
-    # Volume average (20-period) on 1h timeframe
+    # Volume average (20-period) on 6h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # ATR(10) for stoploss calculation (using 6h data)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(30, 20, 20)
+    start_idx = max(100, 13, 20, 10)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: only trade between 08-20 UTC
-        if hours[i] < 8 or hours[i] > 20:
+        if (np.isnan(williams_r[i]) or np.isnan(bull_power_1d_aligned[i]) or 
+            np.isnan(bear_power_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,50 +80,51 @@ def generate_signals(prices):
         
         price = close[i]
         vol_ma_val = vol_ma[i]
-        pp = camarilla_pp_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        ema20 = ema20_4h_aligned[i]
+        atr_val = atr[i]
+        wr = williams_r[i]
+        bull_power = bull_power_1d_aligned[i]
+        bear_power = bear_power_1d_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above Camarilla R1 AND 4h EMA20 uptrend AND volume spike
-            if (price > r1 and 
-                close[i] > ema20 and  # Current close above EMA20 for uptrend
+            # Long: Williams %R oversold (< -80) AND Bear Power > 0 (bulls gaining) AND volume spike
+            if (wr < -80 and 
+                bear_power > 0 and 
                 volume[i] > 1.5 * vol_ma_val):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S1 AND 4h EMA20 downtrend AND volume spike
-            elif (price < s1 and 
-                  close[i] < ema20 and  # Current close below EMA20 for downtrend
+                entry_price = price
+            # Short: Williams %R overbought (> -20) AND Bull Power < 0 (bears gaining) AND volume spike
+            elif (wr > -20 and 
+                  bull_power < 0 and 
                   volume[i] > 1.5 * vol_ma_val):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
+                entry_price = price
         else:
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retouches Camarilla pivot point
-            if position == 1 and price <= pp:
+            # Primary exit: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+            if position == 1 and wr > -50:
                 exit_signal = True
-            elif position == -1 and price >= pp:
+            elif position == -1 and wr < -50:
                 exit_signal = True
             
-            # Safety exit: Price breaks Camarilla R3/S3 (strong reversal)
-            elif position == 1 and price >= r3:
+            # ATR-based stoploss: 2.0 * ATR from entry
+            if position == 1 and price < entry_price - 2.0 * atr_val:
                 exit_signal = True
-            elif position == -1 and price <= s3:
+            elif position == -1 and price > entry_price + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R1S1_4hEMA20_VolumeSpike"
-timeframe = "1h"
+name = "6H_WilliamsR_1dElderRay_VolumeSpike_ATRStop"
+timeframe = "6h"
 leverage = 1.0
