@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-Long when price breaks above Donchian upper(20) AND 1w EMA34 is rising AND volume > 1.5x 20-period average.
-Short when price breaks below Donchian lower(20) AND 1w EMA34 is falling AND volume > 1.5x 20-period average.
-Exit when price touches the opposite Donchian level or reverses EMA34 direction.
-Uses 1w HTF for EMA34 trend to reduce whipsaws in bear markets. Target: 30-100 total trades over 4 years (7-25/year).
+Hypothesis: 6h Williams %R Extreme with 1d EMA34 trend filter and volume confirmation.
+Long when Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume > 1.5x 20-period average.
+Short when Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume > 1.5x 20-period average.
+Exit when Williams %R returns to -50 (mean reversion) or EMA34 trend reverses.
+Uses 1d HTF for EMA34 to avoid 6h whipsaws. Williams %R identifies exhaustion in both bull and bear markets.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -21,30 +22,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA34 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian upper(20) and lower(20)
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 1d timeframe (primary)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Calculate Williams %R (14-period) on 6h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = np.full(n, np.nan)
+    for i in range(n):
+        if highest_high[i] == lowest_low[i]:
+            williams_r[i] = -50  # Avoid division by zero
+        else:
+            williams_r[i] = ((highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])) * -100
     
     # 20-period volume average for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,21 +50,20 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 20)  # EMA34 (34), Donchian (20), volume MA (20)
+    start_idx = max(lookback, 20, 34)  # Williams %R (14), volume MA (20), EMA34 (34)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
+        wr = williams_r[i]
         ema_val = ema_34_aligned[i]
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
         vol_ma_val = vol_ma[i]
         
         # Calculate EMA34 slope for trend direction (rising/falling)
@@ -80,12 +76,12 @@ def generate_signals(prices):
             ema_falling = False
         
         if position == 0:
-            # Long: Break above Donchian upper AND EMA34 rising AND volume spike
-            if price > upper and ema_rising and volume[i] > 1.5 * vol_ma_val:
+            # Long: Williams %R oversold (< -80) AND price > 1d EMA34 AND volume spike
+            if wr < -80 and price > ema_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian lower AND EMA34 falling AND volume spike
-            elif price < lower and ema_falling and volume[i] > 1.5 * vol_ma_val:
+            # Short: Williams %R overbought (> -20) AND price < 1d EMA34 AND volume spike
+            elif wr > -20 and price < ema_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -93,12 +89,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches lower DONCHIAN OR EMA34 starts falling
-                if price < lower or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
+                # Long exit: Williams %R returns to -50 (mean reversion) OR EMA34 starts falling
+                if wr >= -50 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches upper DONCHIAN OR EMA34 starts rising
-                if price > upper or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
+                # Short exit: Williams %R returns to -50 (mean reversion) OR EMA34 starts rising
+                if wr <= -50 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -109,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirmation"
-timeframe = "1d"
+name = "6H_WilliamsR_Extreme_1dEMA34_Trend_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
