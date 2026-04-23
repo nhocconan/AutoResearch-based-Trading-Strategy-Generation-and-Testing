@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 Long when price breaks above Camarilla R3 AND 1d EMA34 is rising AND volume > 1.4x 20-period average.
 Short when price breaks below Camarilla S3 AND 1d EMA34 is falling AND volume > 1.4x 20-period average.
-Exit when price touches the opposite Camarilla level (S3 for longs, R3 for shorts) or reverses EMA34 direction.
-Uses 1d HTF for EMA34 trend (avoids whipsaws in ranging markets). Target: 75-150 total trades over 4 years (19-37/year).
+Exit when price touches the opposite Camarilla level (S3 for longs, R3 for shorts).
+Uses 1d HTF for EMA34 trend (avoids whipsaws in ranging markets). Target: 75-200 total trades over 4 years (19-50/year).
 Camarilla levels provide precise support/resistance; EMA34 filter ensures we trade with the dominant trend.
 """
 
@@ -44,7 +44,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.1 * rang
     camarilla_s3 = close_1d - 1.1 * rang
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels for current day)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels for current day)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3, additional_delay_bars=1)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3, additional_delay_bars=1)
     
@@ -95,12 +95,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches S3 OR EMA34 starts falling
-                if price < s3 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
+                # Long exit: price touches S3
+                if price < s3:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches R3 OR EMA34 starts rising
-                if price > r3 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
+                # Short exit: price touches R3
+                if price > r3:
                     exit_signal = True
             
             if exit_signal:
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirmation_LevelExit"
-timeframe = "12h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirmation_LevelExit"
+timeframe = "4h"
 leverage = 1.0
