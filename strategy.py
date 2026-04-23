@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1d EMA34 Trend Filter and Volume Spike
-- Uses Williams Alligator (Jaw/Teeth/Lips) for trend identification on 12h timeframe
-- Entry: Price > Lips AND Lips > Teeth AND Teeth > Jaw (bullish alignment) OR inverse for bearish
-- Filters: 1d EMA34 trend alignment + volume > 1.5x 20-period MA
-- Exit: Loss of Alligator alignment OR loss of 1d EMA34 trend
-- Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years)
-- Williams Alligator catches sustained trends while filtering choppy markets
-- Works in both bull and bear markets via trend filter and volume confirmation
+Hypothesis: 4h Donchian(20) Breakout with Volume Spike and Choppiness Regime Filter
+- Entry: Price breaks Donchian(20) high/low + volume > 2.0x 20-period MA + choppy market (CHOP > 61.8)
+- Exit: Price closes back inside Donchian(20) channel
+- Uses discrete position sizing (0.25) to minimize fee churn
+- Choppiness filter ensures trades occur in ranging markets where breakouts are more reliable
+- Target: 20-30 trades/year per symbol (<120 total over 4 years) to avoid fee drag
+- Works in both bull and bear markets via regime filter and volume confirmation
 """
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,87 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Williams Alligator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
-        return np.zeros(n)
-    
-    median_12h = (df_12h['high'].values + df_12h['low'].values) / 2
-    
-    # Jaw: Blue line (13-period SMMA, shifted 8 bars)
-    jaw = pd.Series(median_12h).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)
-    jaw[:8] = np.nan
-    
-    # Teeth: Red line (8-period SMMA, shifted 5 bars)
-    teeth = pd.Series(median_12h).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)
-    teeth[:5] = np.nan
-    
-    # Lips: Green line (5-period SMMA, shifted 3 bars)
-    lips = pd.Series(median_12h).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)
-    lips[:3] = np.nan
-    
-    # Align Alligator lines to primary timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    
-    # Calculate 1d EMA34 for trend filter
+    # Calculate ATR for Choppiness indicator (using 1d data)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: > 1.5x 20-period average
+    # Calculate True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with original index
+    
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Choppiness Index: CHOP = 100 * log10(sum(ATR(14)) / (max(high) - min(low)) over period) / log10(N)
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    sum_atr = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * (np.log10(sum_atr / (max_high - min_low)) / np.log10(14))
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Donchian(20) channels from 1d data
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 34, 20)  # need Alligator, EMA34_1d, vol MA
+    start_idx = max(34, 20)  # need ATR(14)+14 for CHOP, Donchian(20), vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bullish Alligator alignment (Lips > Teeth > Jaw) AND price > 1d EMA34 AND volume spike
-            if (lips_aligned[i] > teeth_aligned[i] and 
-                teeth_aligned[i] > jaw_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i]):
+            # Long: Break above Donchian high + volume spike + choppy market (CHOP > 61.8)
+            if (close[i] > donch_high_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i] and 
+                chop_aligned[i] > 61.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish Alligator alignment (Lips < Teeth < Jaw) AND price < 1d EMA34 AND volume spike
-            elif (lips_aligned[i] < teeth_aligned[i] and 
-                  teeth_aligned[i] < jaw_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i]):
+            # Short: Break below Donchian low + volume spike + choppy market (CHOP > 61.8)
+            elif (close[i] < donch_low_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i] and 
+                  chop_aligned[i] > 61.8):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Loss of Alligator alignment OR loss of 1d EMA34 trend
+            # Exit: Price closes back inside Donchian channel
             exit_signal = False
             if position == 1:
-                # Exit long when bearish alignment OR price < 1d EMA34
-                if not (lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]) or \
-                   close[i] < ema_34_1d_aligned[i]:
+                # Exit long when close < Donchian low
+                if close[i] < donch_low_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when bullish alignment OR price > 1d EMA34
-                if not (lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]) or \
-                   close[i] > ema_34_1d_aligned[i]:
+                # Exit short when close > Donchian high
+                if close[i] > donch_high_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -115,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsAlligator_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
