@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using 1w Camarilla R3/S3 breakout with volume confirmation and ATR trailing stop.
-Long when price breaks above 1w Camarilla R3 AND volume > 1.8x 20-period average.
-Short when price breaks below 1w Camarilla S3 AND volume > 1.8x 20-period average.
-Exit when price retraces to 1w Camarilla midpoint (R3+S3)/2 or ATR trailing stop hit (2.5*ATR from highest/lowest since entry).
+Hypothesis: 12h strategy using 1d Camarilla R3/S3 breakout with volume confirmation and ATR trailing stop.
+Long when price breaks above 1d Camarilla R3 AND volume > 1.5x 20-period average.
+Short when price breaks below 1d Camarilla S3 AND volume > 1.5x 20-period average.
+Exit when price retraces to 1d Camarilla midpoint (R3+S3)/2 or ATR trailing stop hit (2.0*ATR from highest/lowest since entry).
 Uses discrete position sizing (0.25) to control drawdown and fee churn.
-Designed for 1d timeframe to target 7-25 trades/year per symbol (30-100 total over 4 years).
+Designed for 12h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
 Works in both bull and bear markets by using volume confirmation to filter false breakouts and ATR stops to manage risk.
-1w Camarilla levels provide strong institutional support/resistance from higher timeframe.
+1d Camarilla levels provide strong institutional support/resistance from higher timeframe.
 """
 
 import numpy as np
@@ -24,28 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla pivot calculation (based on previous 1w bar)
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    r3 = pivot + (range_1w * 1.1 / 2)  # R3 level
-    s3 = pivot - (range_1w * 1.1 / 2)  # S3 level
+    # Camarilla pivot calculation (based on previous 1d bar)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 4)  # R3 level
+    s3 = pivot - (range_1d * 1.1 / 4)  # S3 level
     mid = (r3 + s3) / 2.0  # Camarilla midpoint
     
-    # Align Camarilla levels to 1d timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    mid_aligned = align_htf_to_ltf(prices, df_1w, mid)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    mid_aligned = align_htf_to_ltf(prices, df_1d, mid)
     
-    # Volume average (20-period) on 1d timeframe
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for trailing stop calculation
@@ -82,14 +82,14 @@ def generate_signals(prices):
         mid_val = mid_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 1w Camarilla R3 AND volume spike
-            if (price > r3_val and volume[i] > 1.8 * vol_ma_val):
+            # Long: Price breaks above 1d Camarilla R3 AND volume spike
+            if (price > r3_val and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
-            # Short: Price breaks below 1w Camarilla S3 AND volume spike
-            elif (price < s3_val and volume[i] > 1.8 * vol_ma_val):
+            # Short: Price breaks below 1d Camarilla S3 AND volume spike
+            elif (price < s3_val and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -104,16 +104,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to 1w Camarilla midpoint
+            # Primary exit: Price retraces to 1d Camarilla midpoint
             if position == 1 and price <= mid_val:
                 exit_signal = True
             elif position == -1 and price >= mid_val:
                 exit_signal = True
             
-            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
+            # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.0 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
+            elif position == -1 and price > lowest_since_entry + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Camarilla_R3S3_Breakout_VolumeConfirmation_ATRTrailingStop"
-timeframe = "1d"
+name = "12H_Camarilla_R3S3_Breakout_VolumeConfirmation_ATRTrailingStop"
+timeframe = "12h"
 leverage = 1.0
