@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA34 trend filter and volume confirmation.
-Long when price breaks above Camarilla R3 AND 4h EMA34 rising AND volume > 1.5x 20-period MA.
-Short when price breaks below Camarilla S3 AND 4h EMA34 falling AND volume > 1.5x 20-period MA.
-Exit when price touches opposite Camarilla level (S3 for long, R3 for short) or 4h EMA34 reverses.
-Uses 4h HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
-Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
-Camarilla provides intraday structure, 4h EMA34 filters major trend, volume confirms breakout strength.
-Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
+Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d Regime Filter (ADX + Chop).
+Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (trending) AND price > EMA21.
+Short when Bear Power < 0 AND Bull Power > 0 AND 1d ADX > 25 AND price < EMA21.
+Exit when Elder Power signals reverse OR 1d ADX < 20 (range) OR price crosses EMA21 opposite.
+Uses 1d HTF for regime to avoid whipsaws in low ADX markets. Elder Ray measures bull/bear strength via EMA13.
+Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+Elder Ray provides clear momentum, 1d ADX filters regime, EMA21 provides dynamic support/resistance.
 """
 
 import numpy as np
@@ -22,110 +21,125 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1h Camarilla levels (using previous bar's OHLC to avoid look-ahead)
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
+    # Calculate 6h EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
-    for i in range(1, n):
-        # Use previous bar's OHLC for current bar's Camarilla calculation
-        ph = high[i-1]
-        pl = low[i-1]
-        pc = close[i-1]
-        rng = ph - pl
-        
-        camarilla_r3[i] = pc + rng * 1.1 / 4
-        camarilla_s3[i] = pc - rng * 1.1 / 4
+    # Calculate 6h EMA21 for dynamic support/resistance
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 4h EMA34 for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Calculate 1d ADX for regime filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1h volume MA (20-period) for spike filter
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with 1d index
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smooth TR, DM+ , DM- with Welles Wilder's smoothing (alpha=1/period)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(values[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(values)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    atr_period = 14
+    tr_smooth = wilders_smoothing(tr, atr_period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, (dm_plus_smooth / tr_smooth) * 100, 0)
+    di_minus = np.where(tr_smooth != 0, (dm_minus_smooth / tr_smooth) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smoothing(dx, atr_period)  # ADX is smoothed DX
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 1d EMA21 for additional trend filter (optional)
+    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(1, 34, 20)  # Camarilla (needs 1), EMA34, volume MA
+    start_idx = max(21, 30)  # EMA21 needs 21, ADX needs ~30 for smoothing
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(ema21[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r3 = camarilla_r3[i]
-        s3 = camarilla_s3[i]
-        ema_val = ema_34_aligned[i]
-        vol_ma_val = vol_ma_20[i]
+        ema_val = ema21[i]
+        adx_val = adx_aligned[i]
         
-        # Calculate EMA34 slope for trend direction (rising/falling)
-        if i >= start_idx + 1:
-            ema_prev = ema_34_aligned[i-1]
-            ema_rising = ema_val > ema_prev
-            ema_falling = ema_val < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
-        
-        # Volume filter: 1h volume > 1.5x 20-period MA (adaptive to volatility)
-        vol_filter = volume[i] > 1.5 * vol_ma_val
+        # Elder Ray signals
+        bull_signal = bull_power[i] > 0 and bear_power[i] < 0  # Bullish: HP > EMA13 > LP
+        bear_signal = bear_power[i] < 0 and bull_power[i] > 0  # Bearish: LP < EMA13 < HP
         
         if position == 0:
-            # Long: Break above Camarilla R3 AND EMA34 rising AND volume filter AND in session
-            if price > r3 and ema_rising and vol_filter:
-                signals[i] = 0.20
+            # Long: Bullish Elder Ray AND 1d ADX > 25 (trending) AND price > EMA21
+            if bull_signal and adx_val > 25 and price > ema_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S3 AND EMA34 falling AND volume filter AND in session
-            elif price < s3 and ema_falling and vol_filter:
-                signals[i] = -0.20
+            # Short: Bearish Elder Ray AND 1d ADX > 25 AND price < EMA21
+            elif bear_signal and adx_val > 25 and price < ema_val:
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches Camarilla S3 (opposite) OR EMA34 starts falling
-                if price < s3 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
+                # Long exit: Elder Ray turns bearish OR ADX < 20 (range) OR price < EMA21
+                if not bull_signal or adx_val < 20 or price < ema_val:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches Camarilla R3 (opposite) OR EMA34 starts rising
-                if price > r3 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
+                # Short exit: Elder Ray turns bullish OR ADX < 20 OR price > EMA21
+                if not bear_signal or adx_val < 20 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R3S3_Breakout_4hEMA34_Trend_VolumeSpike_Session"
-timeframe = "1h"
+name = "6H_ElderRay_BullBearPower_1dADX25_Regime_EMA21"
+timeframe = "6h"
 leverage = 1.0
