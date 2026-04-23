@@ -1,35 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Williams Fractal breakout with weekly trend filter and volume confirmation.
-Long when price breaks above recent bullish fractal resistance, weekly close > weekly open (bullish), and volume > 2x average.
-Short when price breaks below recent bearish fractal support, weekly close < weekly open (bearish), and volume > 2x average.
-Exit when price returns to the opposite fractal level or volume drops below average.
-Williams Fractals identify key support/resistance levels; weekly trend filters ensure alignment with higher timeframe momentum.
-Designed for low trade frequency (~15-30/year) to capture breakouts with strong institutional participation.
-Works in bull markets via breakouts and in bear markets via breakdowns, both requiring volume confirmation.
+Hypothesis: 12-hour RSI mean reversion with 1-day Bollinger Band squeeze and volume confirmation.
+Long when RSI < 30, BB width < 0.05 (squeeze), and volume > 1.5x average.
+Short when RSI > 70, BB width < 0.05 (squeeze), and volume > 1.5x average.
+Exit when RSI returns to 50 or BB width expands > 0.10.
+Designed for low trade frequency (~15-30/year) to capture mean reversion during low volatility.
+Works in both bull and bear markets by exploiting oversold/overbought conditions during consolidation.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
-
-def calculate_williams_fractals(high, low):
-    """Calculate Williams Fractals: bearish (up) and bullish (down)"""
-    n = len(high)
-    bearish = np.zeros(n, dtype=bool)  # peak: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-2] and high[n] < high[n-1]
-    bullish = np.zeros(n, dtype=bool)  # trough: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-2] and low[n] > low[n-1]
-    
-    for i in range(2, n-2):
-        # Bearish fractal (peak)
-        if (high[i-2] < high[i-1] and high[i] < high[i-1] and 
-            high[i-3] < high[i-2] and high[i+1] < high[i-1]):
-            bearish[i] = True
-        # Bullish fractal (trough)
-        if (low[i-2] > low[i-1] and low[i] > low[i-1] and 
-            low[i-3] > low[i-2] and low[i+1] > low[i-1]):
-            bullish[i] = True
-            
-    return bearish, bullish
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,75 +18,76 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 1-day data for Bollinger Bands - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly trend: bullish if close > open, bearish if close < open
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True for bullish week
-    weekly_bearish = weekly_close < weekly_open  # True for bearish week
+    # Calculate 1-day Bollinger Bands (20, 2)
+    close_1d = df_1d['close'].values
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    bb_width = (upper_bb - lower_bb) / sma20
     
-    # Calculate Williams Fractals on 6h data
-    bearish_fractal, bullish_fractal = calculate_williams_fractals(high, low)
+    # Calculate 12-hour RSI (14-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Find most recent fractal levels
-    recent_bearish = np.full(n, np.nan)  # most recent bearish fractal high (resistance for shorts)
-    recent_bullish = np.full(n, np.nan)  # most recent bullish fractal low (support for longs)
+    close_12h = df_12h['close'].values
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    last_bearish_idx = -1
-    last_bullish_idx = -1
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
     
-    for i in range(n):
-        if bearish_fractal[i]:
-            last_bearish_idx = i
-        if bullish_fractal[i]:
-            last_bullish_idx = i
-            
-        if last_bearish_idx != -1:
-            recent_bearish[i] = high[last_bearish_idx]
-        if last_bullish_idx != -1:
-            recent_bullish[i] = low[last_bullish_idx]
+    for i in range(15, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align weekly trend to 6h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = 50  # Neutral before enough data
     
-    # Volume average (20-period) on 6h timeframe
+    # Align HTF indicators to lower timeframe
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
+    
+    # Volume average (20-period) on lower timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup period
+    for i in range(30, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
-            np.isnan(recent_bearish[i]) or np.isnan(recent_bullish[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bb_width_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        weekly_bull = weekly_bullish_aligned[i] > 0.5
-        weekly_bear = weekly_bearish_aligned[i] > 0.5
+        bb_width_val = bb_width_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above recent bullish fractal resistance, weekly bullish, volume surge
-            if (recent_bullish[i] > 0 and close[i] > recent_bullish[i] and 
-                weekly_bull and vol_current > 2.0 * vol_ma_val):
+            # Long: RSI oversold, BB squeeze, volume confirmation
+            if (rsi_val < 30 and bb_width_val < 0.05 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below recent bearish fractal support, weekly bearish, volume surge
-            elif (recent_bearish[i] > 0 and close[i] < recent_bearish[i] and 
-                  weekly_bear and vol_current > 2.0 * vol_ma_val):
+            # Short: RSI overbought, BB squeeze, volume confirmation
+            elif (rsi_val > 70 and bb_width_val < 0.05 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -113,12 +95,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to recent bullish fractal support OR weekly turns bearish
-                if (recent_bullish[i] > 0 and close[i] < recent_bullish[i]) or weekly_bear:
+                # Exit long: RSI returns to neutral OR BB expands
+                if rsi_val >= 50 or bb_width_val > 0.10:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to recent bearish fractal resistance OR weekly turns bullish
-                if (recent_bearish[i] > 0 and close[i] > recent_bearish[i]) or weekly_bull:
+                # Exit short: RSI returns to neutral OR BB expands
+                if rsi_val <= 50 or bb_width_val > 0.10:
                     exit_signal = True
             
             if exit_signal:
@@ -129,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsFractal_1wTrend_VolumeBreakout"
-timeframe = "6h"
+name = "12H_RSI_1dBB_Squeeze_Volume"
+timeframe = "12h"
 leverage = 1.0
