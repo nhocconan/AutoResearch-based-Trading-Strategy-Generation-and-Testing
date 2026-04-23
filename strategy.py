@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 Breakout with 1d EMA50 Trend Filter and Volume Spike
-- Camarilla R3/S3 levels act as strong intraday support/resistance on 1d timeframe
-- Breakouts beyond R3/S3 with volume confirmation indicate strong momentum
-- 1d EMA(50) filter ensures trades align with daily trend to avoid counter-trend whipsaws
-- Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years)
-- Works in both bull and bear markets by trading with the 1d trend
-- Volume spike (>2.0x 20-period average) filters weak breakouts
+Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation
+- Camarilla pivot levels (R3/S3) provide strong intraday support/resistance on 1d timeframe
+- Only trade breakouts in direction of 1w EMA(50) trend to avoid counter-trend whipsaws
+- Volume confirmation (> 2.0x 24-period average) ensures breakout has momentum
+- Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+- Works in both bull and bear markets by trading with the 1w trend
+- Camarilla levels are widely watched and provide institutional reference points
 """
 
 import numpy as np
@@ -23,39 +23,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and EMA
+    # Get daily data for Camarilla calculation and weekly data for trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:  # Need enough data for pivot and EMA
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 10 or len(df_1w) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # R3 = H + 2*(Pivot - L)
-    # S3 = L - 2*(H - Pivot)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r3_1d = high_1d + 2.0 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2.0 * (high_1d - pivot_1d)
+    # Calculate Camarilla pivot levels for daily timeframe
+    # Standard Camarilla formulas based on previous day's range
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+    # But we calculate on rolling window: use previous bar's high/low/close
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Align Camarilla levels to 6h timeframe (no extra delay needed for pivot points)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Calculate pivot point and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Camarilla levels
+    r3 = pivot + 1.1 * range_hl  # Resistance 3
+    s3 = pivot - 1.1 * range_hl  # Support 3
     
-    # Volume confirmation: > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 12h timeframe (need completed daily bar)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate 1w EMA(50) for trend filter
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    
+    # Volume confirmation: > 2.0x 24-period average (2*12h = 1 day)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # EMA, volume MA
+    start_idx = max(50, 24) + 1  # EMA, volume MA, plus 1 for previous day data
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -116,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
