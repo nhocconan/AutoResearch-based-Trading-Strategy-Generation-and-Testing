@@ -1,16 +1,35 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-hour Stochastic Oscillator with 4-hour trend filter and volume confirmation.
-Long when %K crosses above %D in oversold territory (<20), 4h EMA21 trending up, and volume > 1.5x average.
-Short when %K crosses below %D in overbought territory (>80), 4h EMA21 trending down, and volume > 1.5x average.
-Exit when %K crosses %D in opposite direction or 4h trend reverses.
-Uses 4h for trend direction, 1h for precise entry timing. Target 15-35 trades/year.
-Works in both bull and bear markets by requiring trend alignment and mean reversion in extreme zones.
+Hypothesis: 6-hour Williams Fractal breakout with weekly trend filter and volume confirmation.
+Long when price breaks above recent bullish fractal resistance, weekly close > weekly open (bullish), and volume > 2x average.
+Short when price breaks below recent bearish fractal support, weekly close < weekly open (bearish), and volume > 2x average.
+Exit when price returns to the opposite fractal level or volume drops below average.
+Williams Fractals identify key support/resistance levels; weekly trend filters ensure alignment with higher timeframe momentum.
+Designed for low trade frequency (~15-30/year) to capture breakouts with strong institutional participation.
+Works in bull markets via breakouts and in bear markets via breakdowns, both requiring volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
+
+def calculate_williams_fractals(high, low):
+    """Calculate Williams Fractals: bearish (up) and bullish (down)"""
+    n = len(high)
+    bearish = np.zeros(n, dtype=bool)  # peak: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-2] and high[n] < high[n-1]
+    bullish = np.zeros(n, dtype=bool)  # trough: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-2] and low[n] > low[n-1]
+    
+    for i in range(2, n-2):
+        # Bearish fractal (peak)
+        if (high[i-2] < high[i-1] and high[i] < high[i-1] and 
+            high[i-3] < high[i-2] and high[i+1] < high[i-1]):
+            bearish[i] = True
+        # Bullish fractal (trough)
+        if (low[i-2] > low[i-1] and low[i] > low[i-1] and 
+            low[i-3] > low[i-2] and low[i+1] > low[i-1]):
+            bullish[i] = True
+            
+    return bearish, bullish
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,91 +41,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4-hour data for trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load weekly data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 4-hour EMA21 for trend direction
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_prev = np.roll(ema21_4h, 1)
-    ema21_4h_prev[0] = ema21_4h[0]
-    ema21_4h_rising = ema21_4h > ema21_4h_prev
-    ema21_4h_falling = ema21_4h < ema21_4h_prev
+    # Calculate weekly trend: bullish if close > open, bearish if close < open
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open  # True for bullish week
+    weekly_bearish = weekly_close < weekly_open  # True for bearish week
     
-    # Calculate 1-hour Stochastic Oscillator (14,3,3)
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Williams Fractals on 6h data
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high, low)
     
-    # Avoid division by zero
-    diff = highest_high - lowest_low
-    k_percent = np.where(diff != 0, 100 * (close - lowest_low) / diff, 0)
+    # Find most recent fractal levels
+    recent_bearish = np.full(n, np.nan)  # most recent bearish fractal high (resistance for shorts)
+    recent_bullish = np.full(n, np.nan)  # most recent bullish fractal low (support for longs)
     
-    # Smooth %K to get %D (3-period SMA of %K)
-    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    last_bearish_idx = -1
+    last_bullish_idx = -1
     
-    # Volume average (20-period)
+    for i in range(n):
+        if bearish_fractal[i]:
+            last_bearish_idx = i
+        if bullish_fractal[i]:
+            last_bullish_idx = i
+            
+        if last_bearish_idx != -1:
+            recent_bearish[i] = high[last_bearish_idx]
+        if last_bullish_idx != -1:
+            recent_bullish[i] = low[last_bullish_idx]
+    
+    # Align weekly trend to 6h timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    
+    # Volume average (20-period) on 6h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to 1-hour timeframe
-    ema21_4h_rising_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h_rising)
-    ema21_4h_falling_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h_falling)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(ema21_4h_rising_aligned[i]) or np.isnan(ema21_4h_falling_aligned[i]) or 
-            np.isnan(k_percent[i]) or np.isnan(d_percent[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
+            np.isnan(recent_bearish[i]) or np.isnan(recent_bullish[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        k_val = k_percent[i]
-        d_val = d_percent[i]
-        k_prev = k_percent[i-1]
-        d_prev = d_percent[i-1]
+        weekly_bull = weekly_bullish_aligned[i] > 0.5
+        weekly_bear = weekly_bearish_aligned[i] > 0.5
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
-        ema21_rising = ema21_4h_rising_aligned[i]
-        ema21_falling = ema21_4h_falling_aligned[i]
         
         if position == 0:
-            # Long: %K crosses above %D in oversold (<20), 4h EMA21 rising, volume confirmation
-            if (k_prev <= d_prev and k_val > d_val and k_val < 20 and 
-                ema21_rising and vol_current > 1.5 * vol_ma_val):
-                signals[i] = 0.20
+            # Long: price breaks above recent bullish fractal resistance, weekly bullish, volume surge
+            if (recent_bullish[i] > 0 and close[i] > recent_bullish[i] and 
+                weekly_bull and vol_current > 2.0 * vol_ma_val):
+                signals[i] = 0.25
                 position = 1
-            # Short: %K crosses below %D in overbought (>80), 4h EMA21 falling, volume confirmation
-            elif (k_prev >= d_prev and k_val < d_val and k_val > 80 and 
-                  ema21_falling and vol_current > 1.5 * vol_ma_val):
-                signals[i] = -0.20
+            # Short: price breaks below recent bearish fractal support, weekly bearish, volume surge
+            elif (recent_bearish[i] > 0 and close[i] < recent_bearish[i] and 
+                  weekly_bear and vol_current > 2.0 * vol_ma_val):
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: %K crosses below %D OR 4h EMA21 starts falling
-                if (k_prev >= d_prev and k_val < d_val) or ema21_falling:
+                # Exit long: price returns to recent bullish fractal support OR weekly turns bearish
+                if (recent_bullish[i] > 0 and close[i] < recent_bullish[i]) or weekly_bear:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: %K crosses above %D OR 4h EMA21 starts rising
-                if (k_prev <= d_prev and k_val > d_val) or ema21_rising:
+                # Exit short: price returns to recent bearish fractal resistance OR weekly turns bullish
+                if (recent_bearish[i] > 0 and close[i] > recent_bearish[i]) or weekly_bull:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Stochastic_4hEMA21_Trend_Volume"
-timeframe = "1h"
+name = "6H_WilliamsFractal_1wTrend_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
