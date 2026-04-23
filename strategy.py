@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Weekly Camarilla Pivot Breakout with Daily Volume Spike and ATR Filter
-- Uses 1w Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout)
-- Daily ATR(14) filter: only trade when ATR > 0.5 * ATR(50) to avoid low-volatility chop
-- Daily volume confirmation: volume > 1.5 * 20-day average for institutional participation
-- Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years)
-- Works in both bull and bear markets by combining mean reversion (R3/S3) and breakout (R4/S4) logic
-- Weekly HTF provides stable structure, daily filters add precision
+Hypothesis: 12h Donchian(20) breakout with 1d ATR filter and volume confirmation
+- Primary timeframe: 12h (target 12-37 trades/year, 50-150 over 4 years)
+- Entry: Price breaks Donchian(20) high/low with volume > 1.5x 20-period average
+- Trend filter: Only trade breakouts in direction of 1d ATR trend (rising ATR = volatile/trending market)
+- Exit: Opposite Donchian(10) breakout or ATR contraction (< 0.8x 20-period ATR average)
+- Works in bull/bear markets by capturing volatility expansion breakouts
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,100 +22,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Camarilla calculations
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    
-    R3_1w = pivot_1w + range_1w * 1.1 / 2
-    S3_1w = pivot_1w - range_1w * 1.1 / 2
-    R4_1w = pivot_1w + range_1w * 1.1
-    S4_1w = pivot_1w - range_1w * 1.1
-    
-    # Align HTF levels to LTF
-    R3_1w_aligned = align_htf_to_ltf(prices, df_1w, R3_1w)
-    S3_1w_aligned = align_htf_to_ltf(prices, df_1w, S3_1w)
-    R4_1w_aligned = align_htf_to_ltf(prices, df_1w, R4_1w)
-    S4_1w_aligned = align_htf_to_ltf(prices, df_1w, S4_1w)
-    
-    # Calculate 1d ATR(14) and ATR(50) for volatility filter
+    # Calculate 1d ATR(14) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first bar
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    # ATR(14)
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Daily volume confirmation: > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Donchian channels on 12h data
+    lookback = 20
+    exit_lookback = 10
+    
+    # Upper/lower Donchian(20) for entry
+    donch_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donch_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Upper/lower Donchian(10) for exit
+    donch_high_exit = pd.Series(high).rolling(window=exit_lookback, min_periods=exit_lookback).max().values
+    donch_low_exit = pd.Series(low).rolling(window=exit_lookback, min_periods=exit_lookback).min().values
+    
+    # Volume confirmation: > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR trend filter: rising ATR (> 0.5x 20-period ATR MA) indicates trending/volatile market
+    atr_ma = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # for ATR50 and volume MA
+    start_idx = max(lookback, 20, 14)  # for Donchian, volume MA, ATR
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R3_1w_aligned[i]) or np.isnan(S3_1w_aligned[i]) or 
-            np.isnan(R4_1w_aligned[i]) or np.isnan(S4_1w_aligned[i]) or
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(donch_high_exit[i]) or np.isnan(donch_low_exit[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(atr_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility filter: only trade when ATR(14) > 0.5 * ATR(50)
-        vol_filter = atr_14_aligned[i] > 0.5 * atr_50_aligned[i]
-        
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
-        
         if position == 0:
-            # Long conditions:
-            # 1. R3 reversal: price crosses above S3 with volume and volatility
-            # 2. R4 breakout: price breaks above R4 with volume and volatility
-            long_reversal = (close[i] > S3_1w_aligned[i] and 
-                           close[i-1] <= S3_1w_aligned[i-1] and
-                           vol_filter and vol_confirm)
-            long_breakout = (close[i] > R4_1w_aligned[i] and 
-                           vol_filter and vol_confirm)
+            # Long breakout: price > Donchian(20) high + volume + rising ATR
+            long_breakout = (close[i] > donch_high[i-1] and 
+                           volume[i] > 1.5 * vol_ma[i] and
+                           atr_14_1d_aligned[i] > 0.5 * atr_ma[i])
             
-            # Short conditions:
-            # 1. S3 reversal: price crosses below R3 with volume and volatility
-            # 2. S4 breakdown: price breaks below S4 with volume and volatility
-            short_reversal = (close[i] < R3_1w_aligned[i] and 
-                            close[i-1] >= R3_1w_aligned[i-1] and
-                            vol_filter and vol_confirm)
-            short_breakout = (close[i] < S4_1w_aligned[i] and 
-                            vol_filter and vol_confirm)
+            # Short breakout: price < Donchian(20) low + volume + rising ATR
+            short_breakout = (close[i] < donch_low[i-1] and 
+                            volume[i] > 1.5 * vol_ma[i] and
+                            atr_14_1d_aligned[i] > 0.5 * atr_ma[i])
             
-            if long_reversal or long_breakout:
+            if long_breakout:
                 signals[i] = 0.25
                 position = 1
-            elif short_reversal or short_breakout:
+            elif short_breakout:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -124,14 +101,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below S3 (reversal fail) or crosses above R4 (take profit)
-                if (close[i] < S3_1w_aligned[i] and close[i-1] >= S3_1w_aligned[i-1]) or \
-                   (close[i] > R4_1w_aligned[i] and close[i-1] <= R4_1w_aligned[i-1]):
+                # Exit long: price < Donchian(10) low OR ATR contraction (< 0.8x ATR MA)
+                if (close[i] < donch_low_exit[i-1]) or \
+                   (atr_14_1d_aligned[i] < 0.8 * atr_ma[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: price crosses above R3 (reversal fail) or crosses below S4 (take profit)
-                if (close[i] > R3_1w_aligned[i] and close[i-1] <= R3_1w_aligned[i-1]) or \
-                   (close[i] < S4_1w_aligned[i] and close[i-1] >= S4_1w_aligned[i-1]):
+                # Exit short: price > Donchian(10) high OR ATR contraction
+                if (close[i] > donch_high_exit[i-1]) or \
+                   (atr_14_1d_aligned[i] < 0.8 * atr_ma[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -142,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyCamarilla_R3S4_Breakout_1dATR_VolumeFilter"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dATRTrend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
