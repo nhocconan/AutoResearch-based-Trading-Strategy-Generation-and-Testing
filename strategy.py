@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter, volume confirmation, and ATR trailing stop
-- Long when: price breaks above 20-period high + price > 1d EMA50 + volume > 1.5x 20-period average
-- Short when: price breaks below 20-period low + price < 1d EMA50 + volume > 1.5x 20-period average
-- Exit when: price reverses 2.5x ATR from extreme (trailing stop) OR opposite Donchian breakout
-- Uses 1d EMA50 as trend filter to align with higher timeframe momentum
-- Volume confirmation (1.5x average) reduces false breakouts while maintaining sufficient trade frequency
-- ATR trailing stop manages risk without look-ahead
-- Designed for both bull and bear markets: trend filter adapts to regime
-- Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag on 12h timeframe
+Hypothesis: 4h Williams Alligator with 1d EMA50 trend filter and volume confirmation
+- Long when: Alligator jaws (13) < teeth (8) < lips (5) AND price > 1d EMA50 AND volume > 1.5x 20-period average
+- Short when: Alligator jaws (13) > teeth (8) > lips (5) AND price < 1d EMA50 AND volume > 1.5x 20-period average
+- Exit when: Alligator reverses (jaws crosses teeth) OR price crosses 1d EMA50 in opposite direction
+- Uses 1d EMA50 as trend filter to avoid counter-trend trades
+- Williams Alligator identifies trending vs ranging markets - effective in both bull and bear regimes
+- Volume confirmation reduces false signals
+- Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag on 4h timeframe
 """
 
 import numpy as np
@@ -25,21 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for trailing stop
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Williams Alligator: SMAs of median price (typical price) with different periods
+    # Jaws: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    # Using typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
     
-    # Calculate Donchian channels (20-period)
-    # Upper band = highest high of last 20 periods
-    # Lower band = lowest low of last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate SMMA (Smoothed Moving Average) - similar to Wilder's smoothing
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: (prev * (period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaws = smma(typical_price, 13)  # Blue line
+    teeth = smma(typical_price, 8)   # Red line
+    lips = smma(typical_price, 5)    # Green line
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,79 +55,64 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0  # highest high since long entry
-    short_extreme = 0.0  # lowest low since short entry
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14, 50)  # Need 20 for Donchian/volume, 14 for ATR, 50 for EMA
+    start_idx = max(20, 13, 50)  # Need 20 for volume MA, 13 for jaws, 50 for EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
-                short_extreme = 0.0
             continue
         
-        # Donchian breakout conditions (using current bar's close vs previous bar's bands)
-        breakout_up = close[i] > donchian_upper[i-1]  # Break above previous period's upper band
-        breakout_down = close[i] < donchian_lower[i-1]  # Break below previous period's lower band
+        # Alligator alignment conditions
+        # Long alignment: jaws < teeth < lips (alligator eating with mouth up)
+        long_align = jaws[i] < teeth[i] and teeth[i] < lips[i]
+        # Short alignment: jaws > teeth > lips (alligator eating with mouth down)
+        short_align = jaws[i] > teeth[i] and teeth[i] > lips[i]
         
-        # Volume confirmation (> 1.5x average)
+        # Volume confirmation
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Donchian breakout up + price > 1d EMA50 + volume confirmation
-            if breakout_up and close[i] > ema_50_aligned[i] and volume_confirm:
+            # Long: Alligator long alignment + price > 1d EMA50 + volume confirmation
+            if long_align and close[i] > ema_50_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-                long_extreme = high[i]
-            # Short: Donchian breakout down + price < 1d EMA50 + volume confirmation
-            elif breakout_down and close[i] < ema_50_aligned[i] and volume_confirm:
+            # Short: Alligator short alignment + price < 1d EMA50 + volume confirmation
+            elif short_align and close[i] < ema_50_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
-                short_extreme = low[i]
         elif position == 1:
-            # Update long extreme
-            long_extreme = max(long_extreme, high[i])
+            # Exit conditions for long:
+            # 1. Alligator reverses (jaws crosses above teeth) 
+            # 2. Price crosses below 1d EMA50
+            alligator_reverse = jaws[i] > teeth[i]
+            price_below_ema = close[i] < ema_50_aligned[i]
             
-            # Exit conditions:
-            # 1. Price reverses 2.5x ATR from long extreme (trailing stop)
-            # 2. Donchian breakout down (opposite signal)
-            trailing_stop_long = close[i] < long_extreme - 2.5 * atr[i]
-            breakout_down_exit = close[i] < donchian_lower[i-1]
-            
-            if trailing_stop_long or breakout_down_exit:
+            if alligator_reverse or price_below_ema:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update short extreme
-            short_extreme = min(short_extreme, low[i])
+            # Exit conditions for short:
+            # 1. Alligator reverses (jaws crosses below teeth)
+            # 2. Price crosses above 1d EMA50
+            alligator_reverse = jaws[i] < teeth[i]
+            price_above_ema = close[i] > ema_50_aligned[i]
             
-            # Exit conditions:
-            # 1. Price reverses 2.5x ATR from short extreme (trailing stop)
-            # 2. Donchian breakout up (opposite signal)
-            trailing_stop_short = close[i] > short_extreme + 2.5 * atr[i]
-            breakout_up_exit = close[i] > donchian_upper[i-1]
-            
-            if trailing_stop_short or breakout_up_exit:
+            if alligator_reverse or price_above_ema:
                 signals[i] = 0.0
                 position = 0
-                short_extreme = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_Donchian20_1dEMA50_VolumeConfirm_ATRStop"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_1dEMA50_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
