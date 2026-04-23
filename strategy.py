@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 1d ATR volatility filter and volume confirmation.
-Long when price breaks above Donchian(20) high AND ATR(14) < 0.8 * ATR(50) (low volatility regime) AND volume > 1.5x 20-period average.
-Short when price breaks below Donchian(20) low AND ATR(14) < 0.8 * ATR(50) AND volume > 1.5x 20-period average.
-Exit when price retraces to Donchian midpoint or ATR trailing stop (2.0*ATR from extreme).
-Uses discrete position sizing (0.25) to minimize fee drag. Targets 15-30 trades/year per symbol.
-Donchian provides objective breakout levels; low volatility filter avoids choppy markets; volume confirms breakout strength.
-Works in bull (breakouts with volume) and bear (breakdowns with volume) markets by capturing expansion phases after low volatility.
+Hypothesis: 12h Camarilla R3S3 breakout with 1w EMA50 trend filter and volume confirmation.
+Long when price breaks above Camarilla R3 AND 1w EMA50 rising AND volume > 1.5x 20-period average.
+Short when price breaks below Camarilla S3 AND 1w EMA50 falling AND volume > 1.5x 20-period average.
+Exit when price reaches Camarilla PP (pivot point) or ATR trailing stop (2.5*ATR from extreme).
+Uses discrete position sizing (0.25) to minimize fee drag. Targets 12-37 trades/year per symbol.
+Camarilla levels provide precise intraday support/resistance; 1w EMA50 filters for major trend;
+volume confirms breakout authenticity. Works in bull (breakouts with volume in uptrend) and 
+bear (breakdowns with volume in downtrend) by trading with the higher timeframe momentum.
 """
 
 import numpy as np
@@ -23,54 +24,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR(14) and ATR(50) for volatility regime filter
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Calculate 1d Camarilla levels (R3, S3, PP)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # first bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Camarilla calculations
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_range = high_1d - low_1d
+    camarilla_r3 = camarilla_pp + camarilla_range * 1.1 / 4.0
+    camarilla_s3 = camarilla_pp - camarilla_range * 1.1 / 4.0
     
-    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50_1d = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # Align ATR arrays to 4h timeframe
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
-    atr50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr50_1d)
-    
-    # Calculate Donchian(20) channels from 1d OHLC
-    # Upper = 20-period high, Lower = 20-period low
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid_1d = (donch_high_1d + donch_low_1d) / 2.0
-    
-    # Align Donchian levels to 4h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid_1d)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for trailing stop calculation (using 4h data)
-    tr1_4h = np.abs(high - low)
-    tr2_4h = np.abs(high - np.roll(close, 1))
-    tr3_4h = np.abs(low - np.roll(close, 1))
-    tr1_4h[0] = 0
-    tr2_4h[0] = 0
-    tr3_4h[0] = 0
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    # ATR(14) for trailing stop calculation (using 12h data)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,13 +72,13 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 20)  # ATR50 needs 50, Donchian needs 20, vol MA needs 20
+    start_idx = max(50, 20)  # EMA50 needs 50, vol MA needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr14_1d_aligned[i]) or np.isnan(atr50_1d_aligned[i]) or 
-            np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(donch_mid_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_4h[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,24 +86,24 @@ def generate_signals(prices):
         
         price = close[i]
         vol_ma_val = vol_ma[i]
-        atr_4h_val = atr_4h[i]
-        atr14_val = atr14_1d_aligned[i]
-        atr50_val = atr50_1d_aligned[i]
-        donch_high = donch_high_aligned[i]
-        donch_low = donch_low_aligned[i]
-        donch_mid = donch_mid_aligned[i]
+        atr_val = atr[i]
+        ema50_val = ema50_1w_aligned[i]
+        camarilla_pp = camarilla_pp_aligned[i]
+        camarilla_r3 = camarilla_r3_aligned[i]
+        camarilla_s3 = camarilla_s3_aligned[i]
         
-        # Volatility filter: low volatility regime (ATR14 < 0.8 * ATR50)
-        vol_filter = atr14_val < 0.8 * atr50_val
+        # EMA50 trend: rising if current > previous, falling if current < previous
+        ema50_rising = i == 0 or ema50_val > ema50_1w_aligned[i-1]
+        ema50_falling = i == 0 or ema50_val < ema50_1w_aligned[i-1]
         
         if position == 0:
-            # Long: Break above Donchian high AND low volatility AND volume spike
-            if close[i] > donch_high and vol_filter and volume[i] > 1.5 * vol_ma_val:
+            # Long: Break above Camarilla R3 AND EMA50 rising AND volume spike
+            if close[i] > camarilla_r3 and ema50_rising and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Break below Donchian low AND low volatility AND volume spike
-            elif close[i] < donch_low and vol_filter and volume[i] > 1.5 * vol_ma_val:
+            # Short: Break below Camarilla S3 AND EMA50 falling AND volume spike
+            elif close[i] < camarilla_s3 and ema50_falling and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -123,16 +117,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to Donchian midpoint
-            if position == 1 and close[i] <= donch_mid:
+            # Primary exit: Price reaches Camarilla PP (pivot point)
+            if position == 1 and close[i] >= camarilla_pp:
                 exit_signal = True
-            elif position == -1 and close[i] >= donch_mid:
+            elif position == -1 and close[i] <= camarilla_pp:
                 exit_signal = True
             
-            # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 2.0 * atr_4h_val:
+            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 2.0 * atr_4h_val:
+            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -145,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dATR_VolFilter_VolumeSpike_MidExit_ATRTrailingStop"
-timeframe = "4h"
+name = "12H_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike_PPExit_ATRTrailingStop"
+timeframe = "12h"
 leverage = 1.0
