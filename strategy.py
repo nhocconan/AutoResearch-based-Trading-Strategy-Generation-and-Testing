@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray + ADX trend filter with volume confirmation.
-- Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low (measures bull/bear strength)
-- ADX > 25 indicates strong trend (filters choppy markets)
-- Long: Bull Power > 0 AND Bear Power < 0 AND ADX > 25 AND volume > 1.5x 20-period avg
-- Short: Bear Power > 0 AND Bull Power < 0 AND ADX > 25 AND volume > 1.5x 20-period avg
-- Exit: Elder Ray divergence (Bull Power <= 0 for long, Bear Power <= 0 for short) OR ADX < 20 (trend weakens)
-- Uses 12h HTF for EMA13 calculation to reduce noise
-- Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
+Hypothesis: 4h TRIX momentum + 1d volume spike + choppiness regime filter.
+- TRIX(12) crossing zero line captures momentum shifts with reduced whipsaw vs MACD
+- Volume > 2.0x 20-period average confirms conviction behind breakout
+- Choppiness Index (CHOP) > 61.8 = ranging market (mean revert at Camarilla H3/L3)
+- CHOP < 38.2 = trending market (follow TRIX crossovers)
+- Long: TRIX crosses above zero + volume confirmation + CHOP < 38.2 (trending)
+- Short: TRIX crosses below zero + volume confirmation + CHOP < 38.2 (trending)
+- Exit: TRIX crosses zero in opposite direction OR CHOP > 61.8 and price touches Camarilla H3/L3
+- Uses TRIX for clean momentum, volume for conviction, CHOP for regime adaptation
+- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
 - Discrete position sizing: ±0.25 to minimize fee churn
-- Works in bull (buy strength in uptrend) and bear (sell strength in downtrend)
+- Works in bull (buy momentum in uptrend) and bear (sell momentum in downtrend)
 """
 
 import numpy as np
@@ -26,106 +28,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: > 1.5x 20-period average
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h EMA13 for Elder Ray (less noisy than 6h)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    ema_13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_13_12h)
+    # Calculate TRIX(12) on close prices
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1 period ago, then percent change
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix_raw = 100 * (ema3 / ema3.shift(1) - 1)
+    trix = trix_raw.values
     
-    # Calculate Elder Ray components
-    bull_power = high_12h - ema_13_12h  # Measures bull strength
-    bear_power = ema_13_12h - low_12h   # Measures bear strength
-    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
+    # Calculate 1d Choppiness Index (CHOP) for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX from 12h data for trend strength
-    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    prev_close_12h = np.concatenate([[close_12h[0]], close_12h[:-1]])
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - prev_close_12h)
-    tr3 = np.abs(low_12h - prev_close_12h)
-    tr_12h = np.maximum(np.maximum(tr1, tr2), tr3)
+    # True Range for 1d
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
     
-    # +DM = max(high - prev_high, 0) if > max(prev_low - low, 0) else 0
-    prev_high_12h = np.concatenate([[high_12h[0]], high_12h[:-1]])
-    prev_low_12h = np.concatenate([[low_12h[0]], low_12h[:-1]])
-    plus_dm = high_12h - prev_high_12h
-    minus_dm = prev_low_12h - low_12h
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
+    # ATR(14) for 1d
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        """Wilder's smoothing (equivalent to EMA with alpha=1/period)"""
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.mean(data[:period])
-            # Subsequent values: prev_result * (1 - 1/period) + current * (1/period)
-            alpha = 1.0 / period
-            for i in range(period, len(data)):
-                if not np.isnan(result[i-1]):
-                    result[i] = result[i-1] * (1 - alpha) + data[i] * alpha
-        return result
+    # Sum of TR over 14 periods
+    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    atr_12h = wilder_smooth(tr_12h, 14)
-    plus_di_12h = 100 * wilder_smooth(plus_dm, 14) / atr_12h
-    minus_di_12h = 100 * wilder_smooth(minus_dm, 14) / atr_12h
-    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h)
-    adx_12h = wilder_smooth(dx_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index: CHOP = 100 * log10(tr_sum_14 / (atr_1d * 14)) / log10(14)
+    # Avoid division by zero
+    divisor = atr_1d * 14
+    divisor = np.where(divisor == 0, 1e-10, divisor)
+    chop_ratio = tr_sum_14 / divisor
+    chop_ratio = np.where(chop_ratio <= 0, 1e-10, chop_ratio)
+    chop = 100 * np.log10(chop_ratio) / np.log10(14)
+    
+    # Align TRIX, volume MA, and CHOP to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, prices, trix)  # Same timeframe, no alignment needed but for consistency
+    vol_ma_aligned = align_htf_to_ltf(prices, prices, vol_ma)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate 1d Camarilla levels for exit in ranging markets
+    rng = high_1d - low_1d
+    camarilla_h3 = close_1d + rng * (1.1 / 6)
+    camarilla_l3 = close_1d - rng * (1.1 / 6)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 20, 14+14+14)  # EMA13, vol MA, ADX smoothing
+    start_idx = max(36, 20, 14)  # TRIX needs 36 (3*12), volume MA 20, CHOP 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_ma[i]) or 
-            np.isnan(ema_13_12h_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or
-            np.isnan(bear_power_aligned[i]) or
-            np.isnan(adx_12h_aligned[i])):
+        if (np.isnan(trix_aligned[i]) or 
+            np.isnan(trix_aligned[i-1]) or  # Need previous value for crossover
+            np.isnan(vol_ma_aligned[i]) or
+            np.isnan(chop_aligned[i]) or
+            np.isnan(h3_aligned[i]) or
+            np.isnan(l3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (> 2.0x average)
+        volume_confirm = volume[i] > 2.0 * vol_ma_aligned[i]
+        
+        # TRIX crossover signals
+        trix_cross_above = trix_aligned[i-1] <= 0 and trix_aligned[i] > 0
+        trix_cross_below = trix_aligned[i-1] >= 0 and trix_aligned[i] < 0
+        
+        # Regime filters
+        is_trending = chop_aligned[i] < 38.2
+        is_ranging = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power < 0 AND ADX > 25 AND volume confirmation
-            if (bull_power_aligned[i] > 0 and 
-                bear_power_aligned[i] < 0 and 
-                adx_12h_aligned[i] > 25 and 
-                volume_confirm):
+            # Long: TRIX crosses above zero + volume confirmation + trending market
+            if trix_cross_above and volume_confirm and is_trending:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power > 0 AND Bull Power < 0 AND ADX > 25 AND volume confirmation
-            elif (bear_power_aligned[i] > 0 and 
-                  bull_power_aligned[i] < 0 and 
-                  adx_12h_aligned[i] > 25 and 
-                  volume_confirm):
+            # Short: TRIX crosses below zero + volume confirmation + trending market
+            elif trix_cross_below and volume_confirm and is_trending:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power <= 0 (weakening bulls) OR ADX < 20 (trend weakening)
-            if bull_power_aligned[i] <= 0 or adx_12h_aligned[i] < 20:
+            # Long exit: TRIX crosses below zero OR (ranging market and price touches H3)
+            if trix_cross_below or (is_ranging and close[i] >= h3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power <= 0 (weakening bears) OR ADX < 20 (trend weakening)
-            if bear_power_aligned[i] <= 0 or adx_12h_aligned[i] < 20:
+            # Short exit: TRIX crosses above zero OR (ranging market and price touches L3)
+            if trix_cross_above or (is_ranging and close[i] <= l3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_ADX_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "4h_TRIX_VolumeSpike_CHOP_Regime_CamarillaExit"
+timeframe = "4h"
 leverage = 1.0
