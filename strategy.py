@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Williams %R with daily trend filter and volume confirmation.
-Long when Williams %R crosses above -80 (oversold) + daily close > daily EMA50 + volume > 1.5x average.
-Short when Williams %R crosses below -20 (overbought) + daily close < daily EMA50 + volume > 1.5x average.
-Exit when Williams %R crosses -50 (mean reversion midpoint) or daily trend changes.
-Designed for moderate trade frequency (~20-40/year) to balance signal quality and fee drag.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Uses tighter volume filter (>2.5x 24-period average) to reduce overtrading seen in prior variants.
+- Adds ATR-based volatility filter to avoid low-momentum environments that cause whipsaws.
+- Maintains discrete position size 0.25 for drawdown control.
+- Target: 15-25 trades/year on 4h timeframe (60-100 total over 4 years) to stay well within fee-efficient range.
+- Designed to work in both bull and bear regimes via trend filter + volume + volatility confirmation.
 """
 
 import numpy as np
@@ -16,94 +17,96 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter - ONCE before loop
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    daily_close = df_1d['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    # Prior 1d OHLC (completed daily bar)
+    high_1d = df_1d['high'].shift(1).values
+    low_1d = df_1d['low'].shift(1).values
+    close_1d = df_1d['close'].shift(1).values
     
-    # Calculate Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = williams_r.fillna(0).values
+    # Align to 4h timeframe
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Calculate average volume for confirmation
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Calculate Camarilla levels
+    camarilla_h3 = close_1d_aligned + 1.1 * (high_1d_aligned - low_1d_aligned) / 4
+    camarilla_l3 = close_1d_aligned - 1.1 * (high_1d_aligned - low_1d_aligned) / 4
+    
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: > 2.5x 24-period average (tighter than 2.0x)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    
+    # ATR(14) for volatility filter - avoid low volatility chop
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0  # first bar has no prior close
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # ATR ratio: current ATR / 50-period ATR average (regime filter)
+    atr_ma_long = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / np.where(atr_ma_long > 0, atr_ma_long, 1)  # avoid div by zero
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    # Start from index where all indicators are ready
+    start_idx = max(34, 24, atr_period, 50)  # EMA34, volume MA, ATR, ATR MA
+    
+    for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(daily_ema50_aligned[i]) or 
-            np.isnan(avg_volume[i]) or volume[i] == 0):
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        daily_close_val = None
-        daily_ema50_val = None
-        if i < len(daily_ema50_aligned):
-            daily_close_val = df_1d['close'].values[-1] if len(df_1d) > 0 else np.nan
-            daily_ema50_val = daily_ema50_aligned[i]
-        else:
-            daily_close_val = np.nan
-            daily_ema50_val = np.nan
-            
-        if np.isnan(daily_close_val) or np.isnan(daily_ema50_val):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        daily_trend_up = daily_close_val > daily_ema50_val
-        daily_trend_down = daily_close_val < daily_ema50_val
-        
-        volume_confirm = volume[i] > 1.5 * avg_volume[i]
+        # Volume confirmation (> 2.5x average) + ATR ratio > 0.8 (avoid low vol)
+        volume_confirm = volume[i] > 2.5 * vol_ma[i]
+        vol_regime = atr_ratio[i] > 0.8
         
         if position == 0:
-            # Long: Williams %R crosses above -80 + daily uptrend + volume confirmation
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
-                daily_trend_up and volume_confirm):
+            # Long: Close > H3 AND price above 1d EMA34 AND volume confirmation AND vol regime
+            if close[i] > camarilla_h3[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm and vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 + daily downtrend + volume confirmation
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
-                  daily_trend_down and volume_confirm):
+            # Short: Close < L3 AND price below 1d EMA34 AND volume confirmation AND vol regime
+            elif close[i] < camarilla_l3[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm and vol_regime:
                 signals[i] = -0.25
                 position = -1
-        else:
-            # Exit conditions
-            exit_signal = False
-            
-            if position == 1:
-                # Exit long: Williams %R crosses above -50 or daily trend changes to down
-                if williams_r[i] >= -50 or not daily_trend_up:
-                    exit_signal = True
-            else:  # position == -1
-                # Exit short: Williams %R crosses below -50 or daily trend changes to up
-                if williams_r[i] <= -50 or not daily_trend_down:
-                    exit_signal = True
-            
-            if exit_signal:
+        elif position == 1:
+            # Long exit: Close < L3 OR price crosses below 1d EMA34
+            if close[i] < camarilla_l3[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.25
+        elif position == -1:
+            # Short exit: Close > H3 OR price crosses above 1d EMA34
+            if close[i] > camarilla_h3[i] or close[i] > ema_34_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "4H_WilliamsR_DailyTrend_VolumeFilter"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeATR_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
