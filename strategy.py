@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Bull/Bear Power with 1d ADX25 regime filter and volume confirmation.
-Long when Bull Power > 0, Bear Power < 0, ADX > 25 (trending), and volume > 1.5x 20-period average.
-Short when Bull Power < 0, Bear Power > 0, ADX > 25 (trending), and volume > 1.5x 20-period average.
-Exit when Elder Ray signals reverse OR ATR trailing stop (2.0*ATR from extreme).
-Uses discrete position sizing (0.25) targeting ~20-40 trades/year on 6h timeframe.
-Elder Ray measures bull/bear power via EMA13; ADX filters for trending markets only.
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Camarilla R1 (1d) AND close > 1d EMA34 AND volume > 1.8x 20-period average.
+Short when price breaks below Camarilla S1 (1d) AND close < 1d EMA34 AND volume > 1.8x 20-period average.
+Exit when price retraces to Camarilla pivot point (PP) OR ATR trailing stop (2.0*ATR from extreme).
+Uses discrete position sizing (0.30) targeting ~30 trades/year on 4h timeframe.
+Camarilla R1/S1 provides tighter breakout levels than R3/S3 for more frequent but still high-quality signals.
+Volume threshold set to 1.8x to balance signal quality and frequency.
+ATR multiplier set to 2.0 for reasonable risk control.
+4h timeframe captures intraday to multi-day moves while avoiding excessive fee drag.
 """
 
 import numpy as np
@@ -14,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,51 +25,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA13 for Elder Ray
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 1d ADX(14) for regime filter
+    # Calculate Camarilla levels from 1d (PP, R1, S1)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Camarilla pivot point
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla R1 and S1
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM and TR
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13_1d_aligned
-    bear_power = low - ema13_1d_aligned
+    # Align Camarilla levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for trailing stop calculation (6h timeframe)
+    # ATR(14) for trailing stop calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -82,12 +69,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 14, 20)  # EMA13 needs 13, ADX needs 14, vol MA needs 20
+    start_idx = max(34, 20, 14)  # EMA34 needs 34, vol MA needs 20, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema13_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -97,19 +84,20 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        adx_val = adx_1d_aligned[i]
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
+        ema34_val = ema34_1d_aligned[i]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0, Bear Power < 0, ADX > 25 (trending), volume spike
-            if bull_val > 0 and bear_val < 0 and adx_val > 25 and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = 0.25
+            # Long: Break above Camarilla R1 AND uptrend (price > EMA34) AND volume spike (1.8x avg)
+            if close[i] > r1_val and close[i] > ema34_val and volume[i] > 1.8 * vol_ma_val:
+                signals[i] = 0.30
                 position = 1
                 highest_since_entry = price
-            # Short: Bull Power < 0, Bear Power > 0, ADX > 25 (trending), volume spike
-            elif bull_val < 0 and bear_val > 0 and adx_val > 25 and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = -0.25
+            # Short: Break below Camarilla S1 AND downtrend (price < EMA34) AND volume spike (1.8x avg)
+            elif close[i] < s1_val and close[i] < ema34_val and volume[i] > 1.8 * vol_ma_val:
+                signals[i] = -0.30
                 position = -1
                 lowest_since_entry = price
         else:
@@ -122,10 +110,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Elder Ray signals reverse
-            if position == 1 and (bull_val <= 0 or bear_val >= 0):
+            # Primary exit: Price retraces to Camarilla pivot point (PP)
+            if position == 1 and close[i] <= pp_val:
                 exit_signal = True
-            elif position == -1 and (bull_val >= 0 or bear_val <= 0):
+            elif position == -1 and close[i] >= pp_val:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
@@ -140,10 +128,10 @@ def generate_signals(prices):
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "6H_ElderRay_BullBearPower_1dADX25_Trend_VolumeConfirmation_ElderRayExit_ATRTrailingStop"
-timeframe = "6h"
+name = "4H_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeConfirmation_PPExit_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
