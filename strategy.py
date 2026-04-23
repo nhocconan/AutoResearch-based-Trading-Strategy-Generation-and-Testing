@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation.
-Long when price breaks above Donchian(20) upper band AND 1d close > 1d EMA50 AND volume > 1.5x 20-period average volume.
-Short when price breaks below Donchian(20) lower band AND 1d close < 1d EMA50 AND volume > 1.5x 20-period average volume.
-Exit when price retraces to Donchian(20) midpoint OR ATR trailing stop (2.0*ATR from extreme).
-Uses discrete position sizing (0.25) targeting ~12-30 trades/year on 12h timeframe.
+Hypothesis: 4h Donchian channel breakout with 1d trend filter and volume confirmation.
+Long when price breaks above Donchian(20) high AND 1d close > 1d EMA50 AND volume > 1.5x 20-period average volume.
+Short when price breaks below Donchian(20) low AND 1d close < 1d EMA50 AND volume > 1.5x 20-period average volume.
+Exit when price crosses Donchian midpoint OR ATR trailing stop (2.0*ATR from extreme).
+Uses discrete position sizing (0.25) targeting ~20-50 trades/year on 4h timeframe.
 Donchian channels provide clear breakout levels that work in both trending and ranging markets.
 """
 
@@ -31,15 +31,15 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian(20) channels for 12h
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2.0
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # 12h volume average (20-period) for spike filter
+    # Volume average (20-period) for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for 12h trailing stop calculation
+    # ATR(14) for trailing stop calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -59,9 +59,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,17 +70,17 @@ def generate_signals(prices):
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
         ema_val = ema_50_1d_aligned[i]
-        upper = highest_20[i]
-        lower = lowest_20[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         mid = donchian_mid[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian upper band AND bullish trend (1d close > EMA50) AND volume spike
+            # Long: Break above Donchian high AND bullish trend AND volume spike
             if price > upper and close[i] > ema_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Price breaks below Donchian lower band AND bearish trend (1d close < EMA50) AND volume spike
+            # Short: Break below Donchian low AND bearish trend AND volume spike
             elif price < lower and close[i] < ema_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
@@ -96,7 +95,7 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to Donchian midpoint
+            # Primary exit: Price crosses Donchian midpoint
             if position == 1 and price < mid:
                 exit_signal = True
             elif position == -1 and price > mid:
@@ -118,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike_MidExit_ATRTrailingStop"
-timeframe = "12h"
+name = "4H_Donchian20_1dEMA50_Trend_VolumeSpike_MidExit_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
