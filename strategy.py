@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 mean reversion with 1d volume regime filter.
-Long when price touches S3 level AND 1d volume > 1.5x 20-period average AND RSI(14) < 30.
-Short when price touches R3 level AND 1d volume > 1.5x 20-period average AND RSI(14) > 70.
-Exit when price reaches opposite Camarilla level (R3 for longs, S3 for shorts) or midpoint (P).
-Uses 1d HTF for volume regime to avoid low-liquidity false signals. Target: 50-150 total trades over 4 years (12-37/year).
-Camarilla levels provide precise intraday support/resistance; volume regime ensures institutional participation; RSI filter confirms exhaustion.
-Works in both bull (buy dips at S3) and bear (sell rallies at R3) markets when volume confirms institutional interest.
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1w ADX trend filter.
+Long when price breaks above Camarilla R3 AND 1d volume > 2.0x 20-period average AND 1w ADX > 20.
+Short when price breaks below Camarilla S3 AND 1d volume > 2.0x 20-period average AND 1w ADX > 20.
+Exit when price touches the opposite Camarilla level (S3 for longs, R3 for shorts).
+Uses 1d HTF for volume confirmation (avoids fake breakouts) and 1w HTF for ADX trend strength (avoids whipsaws in ranging markets).
+Target: 50-150 total trades over 4 years (12-37/year).
+Camarilla levels provide precise intraday support/resistance; volume confirmation ensures institutional participation; ADX filter ensures we only trade in trending regimes.
 """
 
 import numpy as np
@@ -23,89 +23,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d volume regime (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 1d volume MA for spike filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1w ADX for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 6h RSI for momentum exhaustion
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate ADX components
+    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di_1w = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
+    minus_di_1w = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1w
+    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
+    adx_1w = pd.Series(dx_1w).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1w ADX to 12h timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Calculate 1d Camarilla levels (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels: R3, S3
+    # R3 = close + 1.1*(high-low)/2
+    # S3 = close - 1.1*(high-low)/2
+    camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 20  # need 20 bars for Camarilla calculation (based on prior day)
+    start_idx = max(20, 14 + 13 + 13)  # vol_ma (20), adx calculation (14+13+13)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_1d_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        # Calculate Camarilla levels for 6h bar using prior 6h bar's OHLC
-        # Camarilla uses previous period's range
-        if i == 0:
-            # Need previous bar data, skip first bar
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        phigh = high[i-1]
-        plow = low[i-1]
-        pclose = close[i-1]
-        
-        range_val = phigh - plow
-        if range_val <= 0:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # Camarilla levels
-        R3 = pclose + range_val * 1.1 / 4
-        S3 = pclose - range_val * 1.1 / 4
-        R4 = pclose + range_val * 1.1 / 2
-        S4 = pclose - range_val * 1.1 / 2
-        P = (phigh + plow + pclose) / 3  # pivot point
         
         price = close[i]
-        vol_regime = vol_1d_aligned[i]
-        rsi_val = rsi[i]
+        adx_val = adx_1w_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: Price at S3 support AND high volume regime AND RSI oversold
-            if abs(price - S3) < 0.001 * price and vol_regime > 1.5 and rsi_val < 30:
+            # Long: Break above Camarilla R3 AND volume spike AND ADX > 20
+            if price > r3 and volume[i] > 2.0 * vol_ma_val and adx_val > 20:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price at R3 resistance AND high volume regime AND RSI overbought
-            elif abs(price - R3) < 0.001 * price and vol_regime > 1.5 and rsi_val > 70:
+            # Short: Break below Camarilla S3 AND volume spike AND ADX > 20
+            elif price < s3 and volume[i] > 2.0 * vol_ma_val and adx_val > 20:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
-            exit_signal = False
-            if position == 1:
-                # Long exit: price reaches R3 (resistance) or P (pivot)
-                if price >= R3 * 0.999 or price >= P * 0.999:
-                    exit_signal = True
-            elif position == -1:
-                # Short exit: price reaches S3 (support) or P (pivot)
-                if price <= S3 * 1.001 or price <= P * 1.001:
-                    exit_signal = True
+            # Exit when price touches opposite Camarilla level
+            if position == 1 and price < s3:  # Long exit at Camarilla S3
+                exit_signal = True
+            elif position == -1 and price > r3:  # Short exit at Camarilla R3
+                exit_signal = True
+            else:
+                exit_signal = False
             
             if exit_signal:
                 signals[i] = 0.0
@@ -115,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R3S3_MeanReversion_1dVolumeRegime_RSIExhaustion"
-timeframe = "6h"
+name = "12H_Camarilla_R3S3_Breakout_1dVolumeSpike_1wADX20_Trend_LevelExit"
+timeframe = "12h"
 leverage = 1.0
