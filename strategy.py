@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-Long when price breaks above upper Donchian(20) AND close > 12h EMA50 AND volume > 2.0x average.
-Short when price breaks below lower Donchian(20) AND close < 12h EMA50 AND volume > 2.0x average.
-Exit when price crosses the Donchian midpoint OR volume drops below 1.5x average.
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 20-30 trades/year per symbol.
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Camarilla R1 AND close > 1d EMA34 AND volume > 1.8x average.
+Short when price breaks below Camarilla S1 AND close < 1d EMA34 AND volume > 1.8x average.
+Exit when price reverts to Camarilla pivot point (PP) OR volume drops below average.
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 15-25 trades/year per symbol.
+Camarilla levels derived from prior 1d OHLC provide institutional support/resistance.
 Works in bull markets via breakouts and bear markets via short breakdowns with trend filter.
-Volume multiplier increased to reduce false signals and control trade frequency.
 """
 
 import numpy as np
@@ -23,23 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for EMA50 trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data for Camarilla pivot calculation and EMA34 trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate EMA50 on 12h data
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA34 on 1d data
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h EMA50 to 4h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate Camarilla levels from prior 1d OHLC
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1/12
+    # S1 = C - (H - L) * 1.1/12
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Calculate Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Align 1d indicators to 12h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,28 +57,29 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(pp_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_12h_aligned[i]
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        mid = donchian_mid[i]
+        ema34_val = ema34_1d_aligned[i]
+        pp = pp_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
         price = close[i]
         vol_current = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: break above upper Donchian AND price > 12h EMA50 AND volume spike
-            if (price > upper and price > ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Long: break above R1 AND price > 1d EMA34 AND volume spike
+            if (price > r1 and price > ema34_val and vol_current > 1.8 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian AND price < 12h EMA50 AND volume spike
-            elif (price < lower and price < ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Short: break below S1 AND price < 1d EMA34 AND volume spike
+            elif (price < s1 and price < ema34_val and vol_current > 1.8 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -78,12 +87,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below midpoint OR volume drops below 1.5x average
-                if (price < mid or vol_current < 1.5 * vol_ma_val):
+                # Exit long: price returns to pivot point OR volume drops below average
+                if (price <= pp or vol_current < vol_ma_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above midpoint OR volume drops below 1.5x average
-                if (price > mid or vol_current < 1.5 * vol_ma_val):
+                # Exit short: price returns to pivot point OR volume drops below average
+                if (price >= pp or vol_current < vol_ma_val):
                     exit_signal = True
             
             if exit_signal:
@@ -94,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_12hEMA50_Volume"
-timeframe = "4h"
+name = "12H_Camarilla_R1S1_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
