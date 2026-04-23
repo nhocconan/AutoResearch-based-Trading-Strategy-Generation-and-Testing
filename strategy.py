@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume spike confirmation.
-Long when Williams %R < -80 (oversold) and close > 1d EMA50 (uptrend) with volume > 2.0x average.
-Short when Williams %R > -20 (overbought) and close < 1d EMA50 (downtrend) with volume > 2.0x average.
-Uses 6h timeframe to target 50-150 total trades over 4 years. Williams %R identifies exhaustion points.
-Trend filter ensures alignment with higher timeframe direction. Volume spike confirms reversal conviction.
-Works in both bull and bear markets by avoiding counter-trend trades and focusing on high-probability reversals.
+Hypothesis: 12h Williams Alligator with 1w trend filter and volume confirmation.
+Long when Jaw < Teeth < Lips (bullish alignment) and price > Lips and volume > 1.5x average.
+Short when Jaw > Teeth > Lips (bearish alignment) and price < Jaw and volume > 1.5x average.
+Uses 12h timeframe to target 50-150 total trades over 4 years. Williams Alligator identifies
+trend phases via smoothed moving averages. 1w trend filter ensures alignment with higher timeframe.
+Volume confirmation reduces false signals. Works in both bull and bear markets by capturing
+trends in either direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(series, period):
+    """Smoothed Moving Average (SMMA) / Wilder's MA"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=np.float64)
+    result = np.empty_like(series, dtype=np.float64)
+    result[:] = np.nan
+    # First value is simple SMA
+    result[period-1] = np.mean(series[:period])
+    # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+    for i in range(period, len(series)):
+        result[i] = (result[i-1] * (period-1) + series[i]) / period
+    return result
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,29 +36,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Williams %R calculation - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load 1w data for Williams Alligator calculation - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    median_1w = (high_1w + low_1w) / 2.0  # Typical price for Alligator
     
-    # Calculate Williams %R (14-period) on 1d timeframe
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100.0
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50.0, williams_r)
+    # Calculate Williams Alligator lines (13,8,5 period SMMA with 8,5,3 offset)
+    jaw = smma(median_1w, 13)  # Blue line (13-period)
+    teeth = smma(median_1w, 8)  # Red line (8-period)
+    lips = smma(median_1w, 5)   # Green line (5-period)
     
-    # Load 1d data for EMA50 trend filter - ONCE before loop
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Apply offsets: Jaw offset 8, Teeth offset 5, Lips offset 3
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
     
-    # Align HTF indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Load 1w data for EMA34 trend filter - ONCE before loop
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align HTF indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Volume average (20-period) on primary timeframe
     vol_ma_primary = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,17 +71,19 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after warmup period
+    for i in range(100, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma_primary[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_primary[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        williams_r_val = williams_r_aligned[i]
-        ema50_val = ema50_1d_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema34_val = ema34_1w_aligned[i]
         vol_ma_val = vol_ma_primary[i]
         
         # Get current price and volume
@@ -70,12 +91,16 @@ def generate_signals(prices):
         vol_current = volume[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume spike
-            if (williams_r_val < -80.0 and price > ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Bullish alignment: Jaw < Teeth < Lips (Alligator sleeping then waking up)
+            # Long when price > Lips (above green line) AND price > 1w EMA34 (uptrend) AND volume confirmation
+            if (jaw_val < teeth_val and teeth_val < lips_val and price > lips_val and 
+                price > ema34_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume spike
-            elif (williams_r_val > -20.0 and price < ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Bearish alignment: Jaw > Teeth > Lips (Alligator sleeping then waking up)
+            # Short when price < Jaw (below blue line) AND price < 1w EMA34 (downtrend) AND volume confirmation
+            elif (jaw_val > teeth_val and teeth_val > lips_val and price < jaw_val and 
+                  price < ema34_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -83,12 +108,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R > -50 (neutral) OR price breaks below 1d EMA50 (trend reversal)
-                if williams_r_val > -50.0 or price < ema50_val:
+                # Exit long: price breaks below Teeth (red line) OR price breaks below 1w EMA34 (trend reversal)
+                if price < teeth_val or price < ema34_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R < -50 (neutral) OR price breaks above 1d EMA50 (trend reversal)
-                if williams_r_val < -50.0 or price > ema50_val:
+                # Exit short: price breaks above Teeth (red line) OR price breaks above 1w EMA34 (trend reversal)
+                if price > teeth_val or price > ema34_val:
                     exit_signal = True
             
             if exit_signal:
@@ -99,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsR_MeanReversion_1dEMA50_VolumeSpike"
-timeframe = "6h"
+name = "12H_WilliamsAlligator_1wEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
