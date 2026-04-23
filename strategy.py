@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike, and choppiness regime filter.
-Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 2x 20-period average AND choppiness < 61.8 (trending regime).
-Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 2x 20-period average AND choppiness < 61.8.
-Exit when price crosses the Camarilla H5/L5 level (midpoint between R3/S3 and H4/L4).
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 20-50 trades/year per symbol.
-The daily EMA34 provides a robust trend filter that works in both bull and bear markets by avoiding counter-trend entries.
-Choppiness filter avoids whipsaws in ranging markets.
+Hypothesis: 6h Williams %R reversal with 1d EMA50 trend filter and volume confirmation.
+Long when Williams %R crosses above -80 from oversold AND close > 1d EMA50 AND volume > 1.3x 20-period average.
+Short when Williams %R crosses below -20 from overbought AND close < 1d EMA50 AND volume > 1.3x 20-period average.
+Exit when Williams %R crosses -50 (mean reversion) or opposing signal occurs.
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-37 trades/year per symbol.
+Williams %R is a momentum oscillator that identifies overbought/oversold conditions, effective in ranging markets.
+The 1d EMA50 ensures alignment with higher timeframe trend, reducing counter-trend trades.
+Volume confirmation adds conviction to reversals.
 """
 
 import numpy as np
@@ -23,100 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for price action - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 6h data for Williams %R calculation - ONCE before loop
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 14:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Volume average (20-period) on 4h timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Williams %R on 6h data (14-period)
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_6h) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Load 1d data for EMA34 trend filter - ONCE before loop
+    # Align Williams %R to 6h timeframe (already on 6h, but align for safety)
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    
+    # Load 1d data for EMA50 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1d data
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA50 on 1d data
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1d EMA50 to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels on 1d data
-    # Camarilla levels based on previous day's OHLC
-    # We need to shift by 1 to avoid look-ahead (use previous day's data)
-    high_1d_shifted = np.roll(high_4h, 1)  # This is wrong approach - need proper 1d OHLC
-    # Correct approach: get actual 1d OHLC from df_1d
-    if len(df_1d) >= 1:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
-        
-        # Calculate typical price for pivots
-        # Camarilla levels use previous day's OHLC
-        # We'll use the previous completed 1d candle
-        # For now, use close-1d as approximation for pivot calculation
-        # Proper Camarilla: based on (H+L+C) of previous period
-        # Since we don't have 1d OHLC aligned properly, we'll use a simplified version
-        # Using close price for pivot points
-        pivot = close_1d  # Simplified - in reality should be (H+L+C)/3 of previous day
-        range_ = high_1d - low_1d
-        
-        # Camarilla levels
-        R3 = pivot + (range_ * 1.1 / 2)
-        S3 = pivot - (range_ * 1.1 / 2)
-        R4 = pivot + (range_ * 1.1)
-        S4 = pivot - (range_ * 1.1)
-        H5 = pivot + (range_ * 1.1 / 4)
-        L5 = pivot - (range_ * 1.1 / 4)
-        
-        # Align Camarilla levels to 4h timeframe
-        R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-        S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-        H5_aligned = align_htf_to_ltf(prices, df_1d, H5)
-        L5_aligned = align_htf_to_ltf(prices, df_1d, L5)
-    else:
-        # Fallback if no 1d data
-        R3_aligned = np.full(n, np.nan)
-        S3_aligned = np.full(n, np.nan)
-        H5_aligned = np.full(n, np.nan)
-        L5_aligned = np.full(n, np.nan)
-    
-    # Calculate Choppiness Index on 4h data
-    def choppiness_index(high, low, close, window=14):
-        """Calculate Choppiness Index"""
-        atr = np.zeros(len(high))
-        for i in range(1, len(high)):
-            atr[i] = max(
-                high[i] - low[i],
-                abs(high[i] - close[i-1]),
-                abs(low[i] - close[i-1])
-            )
-        
-        # Sum of ATR over window
-        atr_sum = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
-        
-        # Highest high and lowest low over window
-        hh = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        ll = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        
-        # Choppiness Index formula
-        chop = np.zeros(len(high))
-        for i in range(len(high)):
-            if atr_sum[i] > 0 and hh[i] != ll[i]:
-                chop[i] = 100 * np.log10(atr_sum[i] / (hh[i] - ll[i])) / np.log10(window)
-            else:
-                chop[i] = 50.0  # Neutral value
-        return chop
-    
-    chop = choppiness_index(high_4h, low_4h, close_4h, window=14)
-    chop_aligned = align_htf_to_ltf(prices, df_4h, chop)  # Already on 4h, but align for consistency
+    # Volume average (20-period) on 6h timeframe
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -124,10 +65,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(H5_aligned[i]) or np.isnan(L5_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -136,21 +75,21 @@ def generate_signals(prices):
         
         price = close[i]
         vol_ma_val = vol_ma[i]
+        wr = williams_r_aligned[i]
+        wr_prev = williams_r_aligned[i-1] if i > 0 else -50
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 AND close > 1d EMA34 AND volume spike AND trending regime (chop < 61.8)
-            if (price > R3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > 2.0 * vol_ma_val and
-                chop_aligned[i] < 61.8):
+            # Long: Williams %R crosses above -80 from oversold AND close > 1d EMA50 AND volume spike
+            if (wr > -80 and wr_prev <= -80 and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume[i] > 1.3 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below Camarilla S3 AND close < 1d EMA34 AND volume spike AND trending regime (chop < 61.8)
-            elif (price < S3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma_val and
-                  chop_aligned[i] < 61.8):
+            # Short: Williams %R crosses below -20 from overbought AND close < 1d EMA50 AND volume spike
+            elif (wr < -20 and wr_prev >= -20 and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume[i] > 1.3 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -159,12 +98,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses below Camarilla H5
-                if price < H5_aligned[i]:
+                # Exit long: Williams %R crosses above -50 (mean reversion) or price < EMA50
+                if wr > -50 or close[i] < ema50_1d_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses above Camarilla L5
-                if price > L5_aligned[i]:
+                # Exit short: Williams %R crosses below -50 (mean reversion) or price > EMA50
+                if wr < -50 or close[i] > ema50_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -176,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R3S3_1dEMA34_VolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "6H_WilliamsR_1dEMA50_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
