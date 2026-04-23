@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1d EMA34 Trend Filter and Volume Confirmation
-- Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend direction and strength
-- Enter long when Lips > Teeth > Jaw (bullish alignment) + price > 1d EMA34 + volume > 1.5x 20-period MA
-- Enter short when Lips < Teeth < Jaw (bearish alignment) + price < 1d EMA34 + volume > 1.5x 20-period MA
-- Exit when Alligator alignment breaks or price crosses 1d EMA34
-- Uses 12h timeframe for lower trade frequency (target: 12-37 trades/year) to minimize fee drag
-- Works in both bull and bear markets via 1d EMA34 trend filter and volume confirmation
+Hypothesis: 4h Williams Alligator with 1d EMA34 Trend Filter and Volume Spike
+- Uses Williams Alligator (JAW/TEETH/LIPS) for trend direction and entry timing
+- 1d EMA34 as higher timeframe trend filter to avoid counter-trend trades
+- Volume confirmation (>1.5x 20-period MA) to ensure strong participation
+- Discrete position sizing (0.25) to minimize fee churn
+- Exits when Alligator lines cross in opposite direction or loses 1d EMA34 trend
+- Designed for 4h timeframe to balance trade frequency and noise reduction
+- Works in both bull and bear markets via trend filter and volume confirmation
 """
 
 import numpy as np
@@ -32,47 +33,37 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Alligator on 12h data
-    jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
-    jaw_shift = 8
-    teeth_shift = 5
-    lips_shift = 3
-    
-    # Median price for Alligator calculation
-    median_price = (high + low) / 2
-    
-    # Calculate smoothed medians (SMMA - smoothed moving average)
+    # Williams Alligator on 4h data
+    # JAW: 13-period SMMA, shifted 8 bars forward
+    # TEETH: 8-period SMMA, shifted 5 bars forward  
+    # LIPS: 5-period SMMA, shifted 3 bars forward
     def smma(data, period):
+        """Smoothed Moving Average"""
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) < period:
             return result
-        # First value is simple SMA
+        # First value is SMA
         result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_DATA) / period
+        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CURRENT_DATA) / PERIOD
         for i in range(period, len(data)):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    smma_jaw = smma(median_price, jaw_period)
-    smma_teeth = smma(median_price, teeth_period)
-    smma_lips = smma(median_price, lips_period)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # Apply shifts (Alligator lines are shifted into the future)
-    jaw = np.roll(smma_jaw, jaw_shift)
-    teeth = np.roll(smma_teeth, teeth_shift)
-    lips = np.roll(smma_lips, lips_shift)
+    # Shift as per Alligator definition
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
     
-    # Invalidate shifted values
-    jaw[:jaw_shift] = np.nan
-    teeth[:teeth_shift] = np.nan
-    lips[:lips_shift] = np.nan
-    
-    # Align Alligator lines to 12h timeframe (data is already 12h)
-    jaw_aligned = jaw  # Already on 12h timeframe
-    teeth_aligned = teeth
-    lips_aligned = lips
+    # First 8 values of jaw_shifted will be from roll - set to nan
+    jaw_shifted[:8] = np.nan
+    # First 5 values of teeth_shifted
+    teeth_shifted[:5] = np.nan
+    # First 3 values of lips_shifted
+    lips_shifted[:3] = np.nan
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -81,40 +72,43 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, jaw_shift, teeth_shift, lips_shift)  # need EMA34_1d, vol MA, Alligator shifts
+    start_idx = max(34, 20, 13)  # need EMA34_1d, vol MA, Alligator
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(lips_shifted[i]) or 
+            np.isnan(teeth_shifted[i]) or np.isnan(jaw_shifted[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA34 (uptrend) AND volume spike
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
+            # Long: Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA34 AND volume spike
+            if (lips_shifted[i] > teeth_shifted[i] and 
+                teeth_shifted[i] > jaw_shifted[i] and
                 close[i] > ema_34_1d_aligned[i] and 
                 volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA34 (downtrend) AND volume spike
-            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
+            # Short: Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA34 AND volume spike
+            elif (lips_shifted[i] < teeth_shifted[i] and 
+                  teeth_shifted[i] < jaw_shifted[i] and
                   close[i] < ema_34_1d_aligned[i] and 
                   volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Alligator alignment breaks OR price crosses 1d EMA34
+            # Exit: Alligator lines cross in opposite direction OR loss of 1d EMA34 trend
             exit_signal = False
             if position == 1:
-                # Exit long when bullish alignment breaks OR price < 1d EMA34
-                if not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]) or close[i] < ema_34_1d_aligned[i]:
+                # Exit long when Lips < Jaw (bullish alignment broken) OR price < 1d EMA34
+                if lips_shifted[i] < jaw_shifted[i] or close[i] < ema_34_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when bearish alignment breaks OR price > 1d EMA34
-                if not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]) or close[i] > ema_34_1d_aligned[i]:
+                # Exit short when Lips > Jaw (bearish alignment broken) OR price > 1d EMA34
+                if lips_shifted[i] > jaw_shifted[i] or close[i] > ema_34_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -125,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Williams_Alligator_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4H_Williams_Alligator_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
