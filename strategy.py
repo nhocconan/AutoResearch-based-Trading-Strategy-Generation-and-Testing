@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation
 - Uses Camarilla pivot levels (R1, S1) from daily timeframe for breakout signals
 - 1d EMA(34) defines trend direction (only long when price > EMA, short when price < EMA)
-- Volume confirmation (> 1.5x 20-period average) filters low-momentum breakouts
-- Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+- Volume confirmation (> 1.8x 20-period average) filters low-momentum breakouts
+- Designed for 4h timeframe targeting 20-50 trades/year (80-200 over 4 years)
 - Works in both bull and bear markets by trading with the 1d trend
 - Volume spike requirement reduces false breakouts during low volatility
+- Discrete position sizing (0.0, ±0.25) to minimize fee churn
 """
 
 import numpy as np
@@ -46,7 +47,7 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume confirmation: > 1.5x 20-period average
+    # Volume confirmation: > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -76,12 +77,12 @@ def generate_signals(prices):
             # Long conditions: price breaks above R1, uptrend, volume spike
             long_signal = (price_above_r1 and 
                           uptrend and
-                          volume[i] > 1.5 * vol_ma[i])
+                          volume[i] > 1.8 * vol_ma[i])
             
             # Short conditions: price breaks below S1, downtrend, volume spike
             short_signal = (price_below_s1 and 
                            downtrend and
-                           volume[i] > 1.5 * vol_ma[i])
+                           volume[i] > 1.8 * vol_ma[i])
             
             if long_signal:
                 signals[i] = 0.25
@@ -112,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
