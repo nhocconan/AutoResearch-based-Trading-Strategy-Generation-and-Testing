@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike confirmation.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike confirmation.
 - Long: Close > Camarilla H3 AND price > 1w EMA50 AND volume > 2.0x 24-period avg
 - Short: Close < Camarilla L3 AND price < 1w EMA50 AND volume > 2.0x 24-period avg
 - Exit: Opposite Camarilla breakout OR price crosses 1w EMA50
 - Uses 1w HTF for EMA50 and Camarilla levels (calculated from prior 1w bar)
-- Designed for low trade frequency (12-37/year) to minimize fee drag
+- Designed for low trade frequency (19-50/year) to minimize fee drag
 - Works in bull (buy breakouts above H3) and bear (sell breakdowns below L3)
 """
 
@@ -41,7 +41,7 @@ def generate_signals(prices):
     camarilla_h3 = close_1w_arr + 1.25 * (high_1w - low_1w)
     camarilla_l3 = close_1w_arr - 1.25 * (high_1w - low_1w)
     
-    # Align Camarilla levels to 12h timeframe (use prior completed 1w bar)
+    # Align Camarilla levels to 4h timeframe (use prior completed 1w bar)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1wEMA50_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1wEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
