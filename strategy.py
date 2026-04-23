@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using 1d Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation, and ATR trailing stop.
+Hypothesis: 4h strategy using 1d Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation, and ATR trailing stop.
 Long when price breaks above 1d Camarilla R3 level AND price > 1d EMA34 AND volume > 1.5x 20-period average.
 Short when price breaks below 1d Camarilla S3 level AND price < 1d EMA34 AND volume > 1.5x 20-period average.
 Exit when price retraces to 1d Camarilla Pivot (midpoint) or ATR trailing stop hit (2.5*ATR from highest/lowest since entry).
 Uses discrete position sizing (0.25) to reduce trade frequency vs previous versions.
-Camarilla R3/S3 from 1d timeframe provides fewer but higher-quality breakouts suitable for 12h entries.
-Designed for 12h timeframe targeting ~12-25 trades/year per symbol (50-100 total over 4 years).
+Camarilla R3/S3 from 1d timeframe provides fewer but higher-quality breakouts suitable for 4h entries.
+Designed for 4h timeframe targeting ~19-50 trades/year per symbol (75-200 total over 4 years).
 Focus on BTC and ETH as primary targets with SOL as secondary confirmation.
 """
 
@@ -41,7 +41,7 @@ def generate_signals(prices):
     camarilla_s3 = c_1d - (h_1d - l_1d) * 1.125 / 4.0
     camarilla_pivot = (h_1d + l_1d + c_1d) / 3.0
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
@@ -53,7 +53,7 @@ def generate_signals(prices):
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Volume average (20-period) on 12h timeframe
+    # Volume average (20-period) on 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for trailing stop calculation
@@ -136,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
-timeframe = "12h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
