@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter, volume confirmation, and ATR-based stoploss.
-Long when price breaks above Donchian(20) high AND price > 12h EMA50 AND volume > 1.5x average.
-Short when price breaks below Donchian(20) low AND price < 12h EMA50 AND volume > 1.5x average.
-Exit when price touches Donchian(10) opposite level OR ATR stoploss triggered (close-based).
-Designed for 4h timeframe targeting 75-200 total trades over 4 years.
-Works in bull markets via breakouts and in bear markets via short breakdowns.
-Volume confirmation avoids low-conviction breakouts.
+Hypothesis: 1h Camarilla Pivot Breakout with 4h EMA200 trend filter and volume spike.
+Long when price breaks above R1 AND close > 4h EMA200 AND volume > 2x average.
+Short when price breaks below S1 AND close < 4h EMA200 AND volume > 2x average.
+Exit when price reverts to pivot point (PP) or volume drops below average.
+Camarilla pivots provide intraday support/resistance levels that work well in ranging markets.
+4h EMA200 filters for higher timeframe trend direction to avoid counter-trend trades.
+Volume spike confirms conviction behind the breakout.
+Designed for 1h timeframe targeting 80-120 total trades over 4 years with moderate frequency.
+Works in both bull and bear markets by only taking trend-aligned breakouts.
 """
 
 import numpy as np
@@ -23,104 +25,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for EMA50 trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate Camarilla pivots for 1h timeframe using previous bar's OHLC
+    # Camarilla levels: PP = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous bar's OHLC to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
+    
+    # Load 4h data for EMA200 trend filter - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 200:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate EMA50 on 12h data
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA200 on 4h data
+    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align 12h EMA50 to 4h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align 4h EMA200 to 1h timeframe
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
     
-    # Calculate Donchian channels on 4h data
-    donchian_len = 20
-    donchian_exit_len = 10
-    
-    # Rolling max/min for Donchian(20)
-    high_roll_max = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
-    low_roll_min = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
-    
-    # Rolling max/min for Donchian(10) exit
-    high_roll_max_exit = pd.Series(high).rolling(window=donchian_exit_len, min_periods=donchian_exit_len).max().values
-    low_roll_min_exit = pd.Series(low).rolling(window=donchian_exit_len, min_periods=donchian_exit_len).min().values
-    
-    # Calculate ATR(14) for stoploss
-    atr_len = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=atr_len, min_periods=atr_len).mean().values
-    
-    # Volume average (20-period) on primary timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (24-period) on primary timeframe
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(high_roll_max[i]) or 
-            np.isnan(low_roll_min[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pp[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or 
+            np.isnan(ema200_4h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_12h_aligned[i]
-        donchian_high = high_roll_max[i]
-        donchian_low = low_roll_min[i]
-        donchian_high_exit = high_roll_max_exit[i]
-        donchian_low_exit = low_roll_min_exit[i]
-        atr_val = atr[i]
+        ema200_val = ema200_4h_aligned[i]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian(20) high AND price > 12h EMA50 AND volume spike
-            if (price > donchian_high and price > ema50_val and vol_current > 1.5 * vol_ma_val):
-                signals[i] = 0.25
+            # Long: price breaks above R1 AND price > 4h EMA200 AND volume spike
+            if (price > r1[i] and price > ema200_val and vol_current > 2.0 * vol_ma_val):
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
-            # Short: Price breaks below Donchian(20) low AND price < 12h EMA50 AND volume spike
-            elif (price < donchian_low and price < ema50_val and vol_current > 1.5 * vol_ma_val):
-                signals[i] = -0.25
+            # Short: price breaks below S1 AND price < 4h EMA200 AND volume spike
+            elif (price < s1[i] and price < ema200_val and vol_current > 2.0 * vol_ma_val):
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price touches Donchian(10) low OR ATR stoploss OR Donchian breakout reverse
-                if (price <= donchian_low_exit or 
-                    price <= entry_price - 2.5 * atr_val or
-                    price < donchian_high):  # Reverse breakout
+                # Exit long: price reverts to pivot point OR volume drops below average
+                if (price <= pp[i] or vol_current < vol_ma_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price touches Donchian(10) high OR ATR stoploss OR Donchian breakout reverse
-                if (price >= donchian_high_exit or 
-                    price >= entry_price + 2.5 * atr_val or
-                    price > donchian_low):  # Reverse breakout
+                # Exit short: price reverts to pivot point OR volume drops below average
+                if (price >= pp[i] or vol_current < vol_ma_val):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4H_Donchian20_12hEMA50_Volume_ATRStop"
-timeframe = "4h"
+name = "1H_Camarilla_R1_S1_Breakout_4hEMA200_Volume"
+timeframe = "1h"
 leverage = 1.0
