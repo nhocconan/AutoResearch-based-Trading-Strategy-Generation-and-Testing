@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and 1d volatility regime.
-- RSI(2) < 10 for long, > 90 for short - extreme short-term reversals
-- 4h EMA50 as trend filter: only long when price > EMA50, short when price < EMA50
-- 1d ATR ratio (ATR5/ATR30) < 0.8 for low volatility regime (mean reversion works better)
-- Volume confirmation: current volume > 1.2x 20-period average
-- Position size: 0.20 discrete level to minimize fee churn
-- Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
-- Works in bull/bear via 4h trend filter and volatility regime filter
+Hypothesis: 6h Bollinger Band Width Regime + Donchian Breakout with Weekly Pivot Filter.
+- Bollinger Band Width (BBW) identifies regime: low BBW = squeeze (range), high BBW = expansion (trend)
+- In range regime (BBW < 30th percentile): mean reversion at Donchian(10) channels
+- In trend regime (BBW > 70th percentile): breakout continuation at Donchian(20) channels
+- Weekly pivot (from 1w data) as directional filter: only long above weekly pivot, short below
+- Volume confirmation: breakout/mean reversion signals require volume > 1.3x average
+- Position size: 0.25 discrete level
+- Works in bull/bear via regime adaptation and weekly pivot filter
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,88 +24,126 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(2) for extreme short-term mean reversion
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Bollinger Bands (20, 2) for Band Width
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean().values
+    dev = close_s.rolling(window=20, min_periods=20).std().values
+    upper_bb = basis + 2.0 * dev
+    lower_bb = basis - 2.0 * dev
+    bb_width = (upper_bb - lower_bb) / basis  # Normalized BB Width
     
-    # Volume confirmation: > 1.2x 20-period average
+    # Percentile lookback for regime (50 periods ~ 6h*50 = ~12.5 days)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_pct = bb_width_series.rolling(window=50, min_periods=30).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
+    
+    # Donchian channels
+    donch_10_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    donch_10_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    donch_20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
     
-    # 1d data for ATR ratio volatility regime
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # ATR5 and ATR30 on 1d
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    
-    atr5 = pd.Series(tr1).rolling(window=5, min_periods=5).mean().values
-    atr30 = pd.Series(tr1).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr5 / atr30  # Low when ATR5 < ATR30 (low volatility regime)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Calculate weekly pivot points (standard: P = (H+L+C)/3)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(2, 20, 50, 30)  # RSI2, volume MA, 4h EMA50, 1d ATR30
+    start_idx = max(20, 50, 20)  # BBands, BBW percentile, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(basis[i]) or np.isnan(dev[i]) or np.isnan(bb_width[i]) or
+            np.isnan(bb_width_pct[i]) or np.isnan(donch_10_high[i]) or np.isnan(donch_10_low[i]) or
+            np.isnan(donch_20_high[i]) or np.isnan(donch_20_low[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(weekly_pivot_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.2x average)
-        volume_confirm = volume[i] > 1.2 * vol_ma[i]
+        # Volume confirmation
+        volume_confirm = volume[i] > 1.3 * vol_ma[i]
         
-        # Low volatility regime (ATR ratio < 0.8)
-        low_vol_regime = atr_ratio_aligned[i] < 0.8
+        # Regime detection
+        is_range = bb_width_pct[i] < 0.30   # Low BBW = squeeze/range
+        is_trend = bb_width_pct[i] > 0.70   # High BBW = expansion/trend
         
         if position == 0:
-            # Long: RSI(2) < 10 AND price > 4h EMA50 AND low vol regime AND volume confirmation
-            if rsi[i] < 10 and close[i] > ema_50_4h_aligned[i] and low_vol_regime and volume_confirm:
-                signals[i] = 0.20
+            # Long conditions
+            long_signal = False
+            if is_range and close[i] <= donch_10_low[i] and volume_confirm:
+                # Mean reversion long at lower Donchian(10) in range
+                long_signal = True
+            elif is_trend and close[i] >= donch_20_high[i] and volume_confirm:
+                # Breakout long at upper Donchian(20) in trend
+                long_signal = True
+            
+            # Short conditions
+            short_signal = False
+            if is_range and close[i] >= donch_10_high[i] and volume_confirm:
+                # Mean reversion short at upper Donchian(10) in range
+                short_signal = True
+            elif is_trend and close[i] <= donch_20_low[i] and volume_confirm:
+                # Breakout short at lower Donchian(20) in trend
+                short_signal = True
+            
+            # Apply weekly pivot filter
+            if long_signal and close[i] > weekly_pivot_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI(2) > 90 AND price < 4h EMA50 AND low vol regime AND volume confirmation
-            elif rsi[i] > 90 and close[i] < ema_50_4h_aligned[i] and low_vol_regime and volume_confirm:
-                signals[i] = -0.20
+            elif short_signal and close[i] < weekly_pivot_aligned[i]:
+                signals[i] = -0.25
                 position = -1
+        
         elif position == 1:
-            # Long exit: RSI(2) > 50 (mean reversion complete) OR volatility increases OR volume dries up
-            if rsi[i] > 50 or atr_ratio_aligned[i] > 1.2 or volume[i] < 0.8 * vol_ma[i]:
+            # Long exit: price crosses Donchian(10) mean OR regime shifts strongly
+            exit_signal = False
+            if is_range and close[i] >= (donch_10_high[i] + donch_10_low[i]) / 2.0:
+                exit_signal = True  # Exit mean reversion at midpoint
+            elif is_trend and close[i] <= donch_20_low[i]:
+                exit_signal = True  # Exit trend breakout if price fails
+            elif bb_width_pct[i] > 0.85:  # Extreme expansion may precede reversal
+                exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
+        
         elif position == -1:
-            # Short exit: RSI(2) < 50 (mean reversion complete) OR volatility increases OR volume dries up
-            if rsi[i] < 50 or atr_ratio_aligned[i] > 1.2 or volume[i] < 0.8 * vol_ma[i]:
+            # Short exit: price crosses Donchian(10) mean OR regime shifts strongly
+            exit_signal = False
+            if is_range and close[i] <= (donch_10_high[i] + donch_10_low[i]) / 2.0:
+                exit_signal = True  # Exit mean reversion at midpoint
+            elif is_trend and close[i] >= donch_20_high[i]:
+                exit_signal = True  # Exit trend breakout if price fails
+            elif bb_width_pct[i] > 0.85:  # Extreme expansion may precede reversal
+                exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI2_MeanReversion_4hEMA50_1dATRRatio_v1"
-timeframe = "1h"
+name = "6h_BBWRegime_DonchianBreakout_WeeklyPivot_v1"
+timeframe = "6h"
 leverage = 1.0
