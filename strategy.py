@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud breakout with 1d TK Cross filter and volume spike confirmation.
-Long when price breaks above 1d Ichimoku Cloud (Senkou Span A/B) AND TK Cross bullish (Tenkan > Kijun) AND volume > 2.0x 20-period MA.
-Short when price breaks below 1d Ichimoku Cloud AND TK Cross bearish (Tenkan < Kijun) AND volume > 2.0x 20-period MA.
-Exit when price returns to opposite cloud boundary or TK Cross reverses.
-Ichimoku Cloud provides dynamic support/resistance; TK Cross confirms momentum alignment.
-Designed for ~15-25 trades/year with structure edge in trending markets.
-Works in both bull (cloud acts as support in uptrend) and bear (cloud acts as resistance in downtrend).
+Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume spike confirmation.
+Long when Williams %R < -80 (oversold) AND close > 1d EMA34 (uptrend) AND volume > 2.0x 20-period MA.
+Short when Williams %R > -20 (overbought) AND close < 1d EMA34 (downtrend) AND volume > 2.0x 20-period MA.
+Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
+Designed for ~20-30 trades/year with mean reversion edge in ranging markets and trend filter to avoid counter-trend trades in strong trends.
+Williams %R identifies exhaustion points; 1d EMA34 ensures higher timeframe alignment to avoid fighting the trend.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,51 +22,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Ichimoku components
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # need at least 52 periods for Ichimoku
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (high_tenkan + low_tenkan) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (high_kijun + low_kijun) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 shifted 26 periods ahead
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((high_senkou_b + low_senkou_b) / 2)
-    
-    # Align Ichimoku components to 6h timeframe (with proper delay for forward-shifted spans)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a, additional_delay_bars=26)  # Leading span A is shifted 26 periods ahead
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b, additional_delay_bars=26)  # Leading span B is shifted 26 periods ahead
-    
-    # Calculate TK Cross: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
-    tk_bullish = tenkan_aligned > kijun_aligned
-    tk_bearish = tenkan_aligned < kijun_aligned
-    
-    # Cloud boundaries: Senkou Span A and B form the cloud
-    # Upper cloud boundary = max(Senkou A, Senkou B)
-    # Lower cloud boundary = min(Senkou A, Senkou B)
-    upper_cloud = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    lower_cloud = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    # Calculate Williams %R (14-period) on 4h data
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
     
     # Calculate volume MA (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,41 +43,46 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(52, 20)  # need Ichimoku (52) and volume MA (20)
+    start_idx = max(34, 14, 20)  # need EMA34, Williams %R14, volume MA20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Ichimoku breakout conditions
-        breakout_above_cloud = close[i] > upper_cloud[i]  # Break above cloud
-        breakout_below_cloud = close[i] < lower_cloud[i]  # Break below cloud
-        return_to_upper_cloud = close[i] < upper_cloud[i]  # Return below upper cloud (exit long)
-        return_to_lower_cloud = close[i] > lower_cloud[i]  # Return above lower cloud (exit short)
-        tk_reverse = (position == 1 and tk_bearish[i]) or (position == -1 and tk_bullish[i])  # TK Cross reverse
+        # Trend filter: close > 1d EMA34 = uptrend, close < 1d EMA34 = downtrend
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
+        
+        # Volume filter: 4h volume > 2.0x 20-period MA
+        vol_filter = volume[i] > 2.0 * vol_ma_20[i]
+        
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        exit_long = williams_r[i] > -50  # Exit long when crosses above -50
+        exit_short = williams_r[i] < -50  # Exit short when crosses below -50
         
         if position == 0:
-            # Long: Break above cloud AND bullish TK Cross AND volume confirmation
-            if breakout_above_cloud and tk_bullish[i] and volume[i] > 2.0 * vol_ma_20[i]:
+            # Long: Oversold AND uptrend AND volume confirmation
+            if oversold and trend_up and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below cloud AND bearish TK Cross AND volume confirmation
-            elif breakout_below_cloud and tk_bearish[i] and volume[i] > 2.0 * vol_ma_20[i]:
+            # Short: Overbought AND downtrend AND volume confirmation
+            elif overbought and trend_down and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to opposite cloud boundary or TK Cross reverse
+            # Exit conditions: Williams %R crosses -50 level
             exit_signal = False
             if position == 1:
-                exit_signal = return_to_upper_cloud or tk_reverse
+                exit_signal = exit_long
             elif position == -1:
-                exit_signal = return_to_lower_cloud or tk_reverse
+                exit_signal = exit_short
             
             if exit_signal:
                 signals[i] = 0.0
@@ -120,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Ichimoku_KumoBreak_1dTKCross_VolumeSpike"
-timeframe = "6h"
+name = "4H_WilliamsR_MeanReversion_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
