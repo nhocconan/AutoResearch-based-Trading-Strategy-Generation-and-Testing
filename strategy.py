@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using 1d ATR-based volatility breakout with 1w EMA34 trend filter and volume confirmation.
-- Volatility breakout: price moves > 1.5x 1d ATR from prior 1d close (captures expansion moves)
-- Trend filter: price > 1w EMA34 for longs, < 1w EMA34 for shorts
-- Volume confirmation: > 1.5x 24-period average volume
-- Session filter: 08-20 UTC to avoid low liquidity
-- Discrete position size: 0.25 to minimize fee churn
-- Target: 12-37 trades/year (50-150 over 4 years)
-- Works in bull/bear via volatility expansion + trend filter
+Hypothesis: 12h timeframe strategy using 1d Camarilla pivot levels (H3/L3) with 1w EMA34 trend filter, volume confirmation (>1.5x average), and session filter (08-20 UTC).
+- Uses 1d for signal direction (Camarilla H3/L3 breakout) and 1w for trend filter (EMA34)
+- Volume confirmation reduces false breakouts
+- Session filter avoids low-liquidity periods
+- Position size: 0.25 (discrete level to minimize fee churn)
+- Target: 12-37 trades/year (50-150 over 4 years) to avoid fee drag
+- Works in bull/bear via trend filter and volume confirmation
 """
 
 import numpy as np
@@ -31,27 +30,27 @@ def generate_signals(prices):
     # Volume confirmation: > 1.5x 24-period average (strict for 12h)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # 1d ATR(14) for volatility breakout
+    # 1d Camarilla pivot levels (H3, L3, H4, L4)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar: use high-low
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate pivot point (PP) = (H + L + C) / 3
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate range
+    range_1d = high_1d - low_1d
+    # Camarilla levels
+    h3_1d = pp_1d + range_1d * 1.1 / 4
+    l3_1d = pp_1d - range_1d * 1.1 / 4
+    h4_1d = pp_1d + range_1d * 1.1 / 2
+    l4_1d = pp_1d - range_1d * 1.1 / 2
     
-    # Prior 1d close for breakout calculation
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # First bar: use its own close
-    
-    # Align 1d indicators to 12h timeframe (use prior completed 1d bar)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    prev_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
+    # Align Camarilla levels to 12h timeframe (use prior completed 1d bar)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
     # 1w EMA34 for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -63,7 +62,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 24, 14)  # EMA34, volume MA, ATR
+    start_idx = max(34, 24)  # EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -75,8 +74,10 @@ def generate_signals(prices):
             
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
-            np.isnan(atr_14_aligned[i]) or
-            np.isnan(prev_close_1d_aligned[i]) or
+            np.isnan(h3_1d_aligned[i]) or
+            np.isnan(l3_1d_aligned[i]) or
+            np.isnan(h4_1d_aligned[i]) or
+            np.isnan(l4_1d_aligned[i]) or
             np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -86,29 +87,29 @@ def generate_signals(prices):
         # Volume confirmation (> 1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Volatility breakout: price move > 1.5x ATR from prior close
-        breakout_up = close[i] > prev_close_1d_aligned[i] + 1.5 * atr_14_aligned[i]
-        breakout_down = close[i] < prev_close_1d_aligned[i] - 1.5 * atr_14_aligned[i]
+        # Camarilla breakout signals (using current close vs prior levels)
+        breakout_up_h3 = close[i] > h3_1d_aligned[i-1]  # Close above prior 1d H3
+        breakout_down_l3 = close[i] < l3_1d_aligned[i-1]  # Close below prior 1d L3
         
         if position == 0:
-            # Long: volatility breakout up AND price > 1w EMA34 AND volume confirmation AND in session
-            if breakout_up and volume_confirm and close[i] > ema_34_1w_aligned[i]:
+            # Long: 1d Camarilla H3 breakout up AND price > 1w EMA34 AND volume confirmation AND in session
+            if breakout_up_h3 and volume_confirm and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: volatility breakout down AND price < 1w EMA34 AND volume confirmation AND in session
-            elif breakout_down and volume_confirm and close[i] < ema_34_1w_aligned[i]:
+            # Short: 1d Camarilla L3 breakout down AND price < 1w EMA34 AND volume confirmation AND in session
+            elif breakout_down_l3 and volume_confirm and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: volatility breakout down OR price < 1w EMA34 (trend flip)
-            if breakout_down or close[i] < ema_34_1w_aligned[i]:
+            # Long exit: 1d Camarilla L4 break down OR price < 1w EMA34 (trend flip)
+            if close[i] < l4_1d_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: volatility breakout up OR price > 1w EMA34 (trend flip)
-            if breakout_up or close[i] > ema_34_1w_aligned[i]:
+            # Short exit: 1d Camarilla H4 break up OR price > 1w EMA34 (trend flip)
+            if close[i] > h4_1d_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolatilityBreakout_ATR14_1wEMA34_VolumeSpike_Session"
+name = "12h_Camarilla_H3L3_Breakout_1wEMA34_VolumeSpike_Session"
 timeframe = "12h"
 leverage = 1.0
