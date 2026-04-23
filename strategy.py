@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Camarilla R1/S1 breakout with 1w EMA34 trend filter and volume confirmation.
-Long when price breaks above 1d Camarilla R1 AND 1w EMA34 rising AND volume > 1.5x 20-period MA.
-Short when price breaks below 1d Camarilla S1 AND 1w EMA34 falling AND volume > 1.5x 20-period MA.
-Exit when price crosses the opposite Camarilla level (S1 for long exit, R1 for short exit).
-Uses 1w HTF for trend filter to avoid counter-trend trades on daily timeframe.
-Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
-Works in both bull and bear markets by following the weekly trend with volume confirmation.
+Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation.
+Long when Williams %R(14) crosses above -80 (oversold) AND 1d close > 1d EMA50 (uptrend) AND volume > 1.3x 20-period MA.
+Short when Williams %R(14) crosses below -20 (overbought) AND 1d close < 1d EMA50 (downtrend) AND volume > 1.3x 20-period MA.
+Exit when Williams %R crosses the opposite threshold (-20 for long, -80 for short) or 1d trend reverses.
+Williams %R identifies exhaustion points in ranging/bear markets; 1d EMA50 filters counter-trend trades; volume confirms momentum.
+Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -23,66 +22,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla levels (based on previous day's range)
-    # Camarilla R1 = close_prev + (high_prev - low_prev) * 1.1/12
-    # Camarilla S1 = close_prev - (high_prev - low_prev) * 1.1/12
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    close_prev = np.roll(close, 1)
-    high_prev[0] = high[0]  # fill first value
-    low_prev[0] = low[0]
-    close_prev[0] = close[0]
+    # Calculate 6h Williams %R(14)
+    williams_period = 14
+    highest_high = pd.Series(high).rolling(window=williams_period, min_periods=williams_period).max().values
+    lowest_low = pd.Series(low).rolling(window=williams_period, min_periods=williams_period).min().values
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    williams_r = np.where(denominator != 0, -100 * (highest_high - close) / denominator, -50)
     
-    range_prev = high_prev - low_prev
-    camarilla_r1 = close_prev + range_prev * 1.1 / 12
-    camarilla_s1 = close_prev - range_prev * 1.1 / 12
-    
-    # Calculate 1w EMA34 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Calculate 1d EMA50 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d volume MA (20-period) for spike filter
+    # Calculate 6h volume MA (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(1, 34, 20)  # need at least 1 for previous day data
+    start_idx = max(williams_period, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate EMA34 slope for trend direction (rising/falling)
-        if i >= start_idx + 1:
-            ema_prev = ema_34_1w_aligned[i-1]
-            ema_rising = ema_34_1w_aligned[i] > ema_prev
-            ema_falling = ema_34_1w_aligned[i] < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
+        # Calculate 1d trend: close > EMA50 = uptrend, close < EMA50 = downtrend
+        # Need 1d close price aligned to 6h bars
+        df_1d = get_htf_data(prices, '1d')  # Reload for close (could optimize but safe)
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
+        trend_up = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        trend_down = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Volume filter: 1d volume > 1.5x 20-period MA
-        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume filter: 6h volume > 1.3x 20-period MA
+        vol_filter = volume[i] > 1.3 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above camarilla R1 AND EMA34 rising AND volume filter
-            if close[i] > camarilla_r1[i] and ema_rising and vol_filter:
+            # Long: Williams %R crosses above -80 (from below) AND uptrend AND volume filter
+            if i > start_idx and williams_r[i-1] <= -80 and williams_r[i] > -80 and trend_up and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below camarilla S1 AND EMA34 falling AND volume filter
-            elif close[i] < camarilla_s1[i] and ema_falling and vol_filter:
+            # Short: Williams %R crosses below -20 (from above) AND downtrend AND volume filter
+            elif i > start_idx and williams_r[i-1] >= -20 and williams_r[i] < -20 and trend_down and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -90,12 +80,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price crosses below camarilla S1
-                if close[i] < camarilla_s1[i]:
+                # Long exit: Williams %R crosses above -20 (overbought) OR 1d trend turns down
+                if williams_r[i] >= -20 or not trend_up:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price crosses above camarilla R1
-                if close[i] > camarilla_r1[i]:
+                # Short exit: Williams %R crosses below -80 (oversold) OR 1d trend turns up
+                if williams_r[i] <= -80 or not trend_down:
                     exit_signal = True
             
             if exit_signal:
@@ -106,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Camarilla_R1S1_Breakout_1wEMA34_Trend_VolumeSpike"
-timeframe = "1d"
+name = "6H_WilliamsR_MeanReversion_1dEMA50_Trend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
