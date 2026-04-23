@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using 1d Donchian(20) breakout with volume confirmation and ATR stoploss.
-Long when price breaks above 1d Donchian upper band AND volume > 1.8x 20-period average.
-Short when price breaks below 1d Donchian lower band AND volume > 1.8x 20-period average.
-Exit when price retouches 1d Donchian midpoint or ATR stoploss hit (2.0*ATR).
-Uses discrete position sizing (0.25) to balance return and drawdown.
-Designed for 12h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
+Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and ATR stoploss.
+Long when price breaks above 12h Donchian upper (20) AND volume > 1.8x 20-period average.
+Short when price breaks below 12h Donchian lower (20) AND volume > 1.8x 20-period average.
+Exit when price retraces to 12h Donchian midpoint or ATR stoploss hit (2.0*ATR).
+Uses discrete position sizing (0.30) to balance return and drawdown.
+Designed for 4h timeframe to target 19-50 trades/year per symbol (75-200 total over 4 years).
 Works in both bull and bear markets by using volume confirmation to filter false breakouts and ATR stops to manage risk.
-1d Donchian levels provide strong institutional support/resistance from higher timeframe.
+12h Donchian levels provide stronger institutional support/resistance from higher timeframe.
 """
 
 import numpy as np
@@ -24,25 +24,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 12h Donchian channels (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
     # Donchian channels (20-period)
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
-    # Align Donchian levels to 12h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    # Align Donchian levels to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
     
-    # Volume average (20-period) on 12h timeframe
+    # Volume average (20-period) on 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss calculation
@@ -77,21 +77,21 @@ def generate_signals(prices):
         mid = donchian_mid_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 1d Donchian upper AND volume spike
+            # Long: Price breaks above 12h Donchian upper AND volume spike
             if (price > upper and volume[i] > 1.8 * vol_ma_val):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = price
-            # Short: Price breaks below 1d Donchian lower AND volume spike
+            # Short: Price breaks below 12h Donchian lower AND volume spike
             elif (price < lower and volume[i] > 1.8 * vol_ma_val):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = price
         else:
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retouches 1d Donchian midpoint
+            # Primary exit: Price retraces to 12h Donchian midpoint
             if position == 1 and price <= mid:
                 exit_signal = True
             elif position == -1 and price >= mid:
@@ -108,10 +108,10 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "12H_Donchian20_VolumeConfirmation_ATRStop"
-timeframe = "12h"
+name = "4H_DonchianBreakout_12h_VolumeConfirmation_ATRStop"
+timeframe = "4h"
 leverage = 1.0
