@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trailing stop.
-Long when price breaks above 20-period Donchian high AND volume > 1.5x 20-period average volume.
-Short when price breaks below 20-period Donchian low AND volume > 1.5x 20-period average volume.
-Exit when price retraces to the midpoint of the Donchian channel or ATR trailing stop (2.5*ATR from extreme).
-Uses discrete position sizing (0.25) to minimize fee drag. Donchian channels provide objective breakout levels
-that work in both bull (breakouts with volume in uptrend) and bear (breakdowns with volume in downtrend) markets.
-Volume confirmation filters out false breakouts. Target trade frequency: 20-50 trades/year per symbol.
+Hypothesis: Daily Donchian(20) breakout with weekly EMA34 trend filter and volume confirmation.
+Long when price breaks above 20-day high AND weekly EMA34 rising AND volume > 1.5x 20-day average.
+Short when price breaks below 20-day low AND weekly EMA34 falling AND volume > 1.5x 20-day average.
+Exit when price retraces to 10-day EMA or ATR trailing stop (2.5*ATR from extreme).
+Uses discrete position sizing (0.25) to minimize fee drag while maintaining profit potential.
+Designed for 1d timeframe to capture medium-term trends in both bull and bear markets.
+Weekly EMA34 filter ensures alignment with longer-term trend, reducing whipsaws.
+Target trade frequency: 7-25 trades/year per symbol (30-100 total over 4 years).
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,14 +24,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channel (20-period)
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Calculate weekly EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Calculate Donchian channels from daily OHLC (20-period)
+    # For daily timeframe, we need to calculate directly from prices
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 10-day EMA for exit
+    ema10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
     
     # ATR(14) for trailing stop calculation
     tr1 = np.abs(high - low)
@@ -42,18 +51,22 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = 0.0  # for long trailing stop
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 20)
+    start_idx = max(34, 20)  # weekly EMA34 needs 34 weeks, Donchian needs 20 days
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema10[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,18 +75,20 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        highest = highest_high[i]
-        lowest = lowest_low[i]
-        midpoint = donchian_mid[i]
+        ema34_val = ema34_1w_aligned[i]
+        ema34_prev = ema34_1w_aligned[i-1] if i > 0 else ema34_val
+        donchian_high = high_max[i]
+        donchian_low = low_min[i]
+        ema10_val = ema10[i]
         
         if position == 0:
-            # Long: Break above Donchian high AND volume spike
-            if close[i] > highest and volume[i] > 1.5 * vol_ma_val:
+            # Long: Break above Donchian high AND weekly EMA34 rising AND volume spike
+            if close[i] > donchian_high and ema34_val > ema34_prev and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Break below Donchian low AND volume spike
-            elif close[i] < lowest and volume[i] > 1.5 * vol_ma_val:
+            # Short: Break below Donchian low AND weekly EMA34 falling AND volume spike
+            elif close[i] < donchian_low and ema34_val < ema34_prev and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -87,10 +102,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to Donchian midpoint
-            if position == 1 and close[i] <= midpoint:
+            # Primary exit: Price retraces to 10-day EMA
+            if position == 1 and close[i] <= ema10_val:
                 exit_signal = True
-            elif position == -1 and close[i] >= midpoint:
+            elif position == -1 and close[i] >= ema10_val:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
@@ -109,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_VolumeConfirmation_MidpointExit_ATRTrailingStop"
-timeframe = "4h"
+name = "1D_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirmation_EMA10Exit_ATRTrailingStop"
+timeframe = "1d"
 leverage = 1.0
