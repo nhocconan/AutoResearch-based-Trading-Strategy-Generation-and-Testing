@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-- Long: price breaks above 20-period Donchian high (1d) + price > 1w EMA50 + volume > 1.8x 20-period avg volume
-- Short: price breaks below 20-period Donchian low (1d) + price < 1w EMA50 + volume > 1.8x 20-period avg volume
-- Exit: ATR trailing stop (2.0x ATR from extreme) OR Donchian breakout in opposite direction
-- Uses 1w EMA50 as trend filter to avoid counter-trend trades and adapt to regime
-- Volume confirmation (1.8x spike) reduces false breakouts
+Hypothesis: 6h Camarilla R3/S3 breakout with 1d Williams Fractal regime filter and volume confirmation.
+- Long: price breaks above Camarilla R3 (1d) + bullish 1d fractal present (uptrend regime) + volume > 1.5x 20-period avg volume
+- Short: price breaks below Camarilla S3 (1d) + bearish 1d fractal present (downtrend regime) + volume > 1.5x 20-period avg volume
+- Exit: trailing stop (2.0x ATR from extreme) OR Camarilla breakout in opposite direction
+- Williams Fractal on 1d identifies regime: bullish fractal = higher low structure, bearish = lower high structure
+- Uses Camarilla R3/S3 (wider bands) for fewer, more significant breakouts vs R1/S1
+- Volume confirmation (1.5x spike) reduces false breakouts
 - ATR trailing stop manages risk without look-ahead
-- Designed for both bull and bear markets: trend filter adapts to regime
-- Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag on 1d timeframe
+- Designed for both bull and bear markets: fractal regime adapts to structure
+- Target: 12-25 trades/year (50-100 total over 4 years) to minimize fee drag on 6h timeframe
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,24 +34,35 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])  # align with close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: > 1.8x 20-period average (spike filter)
+    # Volume confirmation: > 1.5x 20-period average (spike filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Load 1d data ONCE before loop for Donchian channels
+    # Load 1d data ONCE before loop for Camarilla levels and Williams Fractals
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels (20-period) on 1d data
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels (R3, S3) on 1d data
+    # Camarilla: R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4
+    camarilla_r3 = df_1d['close'] + (1.1 * (df_1d['high'] - df_1d['low']) / 4)
+    camarilla_s3 = df_1d['close'] - (1.1 * (df_1d['high'] - df_1d['low']) / 4)
+    camarilla_r3_vals = camarilla_r3.values
+    camarilla_s3_vals = camarilla_s3.values
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Williams Fractals on 1d data for regime filter
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Williams fractal needs 2 extra 1d bars after the center bar for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
-    # Align HTF indicators to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align HTF indicators to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_vals)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_vals)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,15 +70,16 @@ def generate_signals(prices):
     short_extreme = 0.0  # lowest low since short entry
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14, 50)  # Need 20 for Donchian, 14 for ATR, 50 for EMA
+    start_idx = max(20, 14)  # Need 20 for volume MA, 14 for ATR
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,21 +87,25 @@ def generate_signals(prices):
                 short_extreme = 0.0
             continue
         
-        # Donchian breakout conditions (using current bar's close vs previous bar's channels)
-        breakout_up = close[i] > donchian_high_aligned[i]  # Break above Donchian high
-        breakout_down = close[i] < donchian_low_aligned[i]  # Break below Donchian low
+        # Camarilla breakout conditions (using current bar's close vs previous bar's levels)
+        breakout_up = close[i] > camarilla_r3_aligned[i]  # Break above Camarilla R3
+        breakout_down = close[i] < camarilla_s3_aligned[i]  # Break below Camarilla S3
         
-        # Volume spike confirmation (> 1.8x average)
-        volume_spike = volume[i] > 1.8 * vol_ma[i]
+        # Volume spike confirmation (> 1.5x average)
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
+        
+        # Regime filters from Williams Fractals
+        bullish_regime = bullish_fractal_aligned[i]  # Bullish fractal present = uptrend structure
+        bearish_regime = bearish_fractal_aligned[i]  # Bearish fractal present = downtrend structure
         
         if position == 0:
-            # Long: Donchian breakout up + price > 1w EMA50 + volume spike
-            if breakout_up and close[i] > ema_50_aligned[i] and volume_spike:
+            # Long: Camarilla breakout up + bullish regime + volume spike
+            if breakout_up and bullish_regime and volume_spike:
                 signals[i] = 0.25
                 position = 1
                 long_extreme = high[i]
-            # Short: Donchian breakout down + price < 1w EMA50 + volume spike
-            elif breakout_down and close[i] < ema_50_aligned[i] and volume_spike:
+            # Short: Camarilla breakout down + bearish regime + volume spike
+            elif breakout_down and bearish_regime and volume_spike:
                 signals[i] = -0.25
                 position = -1
                 short_extreme = low[i]
@@ -98,9 +115,9 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Price reverses 2.0x ATR from long extreme (trailing stop)
-            # 2. Donchian breakout down (opposite signal)
+            # 2. Camarilla breakout down (opposite signal)
             trailing_stop_long = close[i] < long_extreme - 2.0 * atr[i]
-            breakout_down_exit = close[i] < donchian_low_aligned[i]
+            breakout_down_exit = close[i] < camarilla_s3_aligned[i]
             
             if trailing_stop_long or breakout_down_exit:
                 signals[i] = 0.0
@@ -114,9 +131,9 @@ def generate_signals(prices):
             
             # Exit conditions:
             # 1. Price reverses 2.0x ATR from short extreme (trailing stop)
-            # 2. Donchian breakout up (opposite signal)
+            # 2. Camarilla breakout up (opposite signal)
             trailing_stop_short = close[i] > short_extreme + 2.0 * atr[i]
-            breakout_up_exit = close[i] > donchian_high_aligned[i]
+            breakout_up_exit = close[i] > camarilla_r3_aligned[i]
             
             if trailing_stop_short or breakout_up_exit:
                 signals[i] = 0.0
@@ -127,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_ATRStop"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_1dWilliamsFractal_Regime_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
