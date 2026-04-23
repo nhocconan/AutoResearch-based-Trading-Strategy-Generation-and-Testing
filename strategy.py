@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above Camarilla R1 AND close > 1d EMA34 AND volume > 1.8x average.
-Short when price breaks below Camarilla S1 AND close < 1d EMA34 AND volume > 1.8x average.
-Exit when price reverts to Camarilla pivot point (PP) OR volume drops below average.
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 15-25 trades/year per symbol.
-Camarilla levels derived from prior 1d OHLC provide institutional support/resistance.
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above R1 AND close > 1d EMA34 AND volume > 1.8x average.
+Short when price breaks below S1 AND close < 1d EMA34 AND volume > 1.8x average.
+Exit when price reverses to the Camarilla pivot point (PP) OR volume drops below average.
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 25-40 trades/year per symbol.
 Works in bull markets via breakouts and bear markets via short breakdowns with trend filter.
 """
 
@@ -23,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivot calculation and EMA34 trend filter - ONCE before loop
+    # Load 1d data for EMA34 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -35,19 +34,19 @@ def generate_signals(prices):
     # Calculate EMA34 on 1d data
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Camarilla levels from prior 1d OHLC
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1/12
-    # S1 = C - (H - L) * 1.1/12
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
-    
-    # Align 1d indicators to 12h timeframe
+    # Align 1d EMA34 to 4h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Calculate Camarilla levels from previous 1d bar (using current day's OHLC for today's levels)
+    # Camarilla: PP = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,8 +56,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(pp_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_pp_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,9 +65,9 @@ def generate_signals(prices):
             continue
         
         ema34_val = ema34_1d_aligned[i]
-        pp = pp_1d_aligned[i]
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
+        pp = camarilla_pp_aligned[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
         price = close[i]
         vol_current = volume[i]
         vol_ma_val = vol_ma[i]
@@ -103,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R1S1_1dEMA34_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R1S1_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
