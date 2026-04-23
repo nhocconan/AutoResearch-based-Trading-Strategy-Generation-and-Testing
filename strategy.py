@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation.
 - Camarilla levels: R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4
-- Long: price breaks above R3 + price > 1w EMA34 (uptrend) + volume > 1.8x 24-period avg
-- Short: price breaks below S3 + price < 1w EMA34 (downtrend) + volume > 1.8x 24-period avg
+- Long: price breaks above R3 + price > 1w EMA34 (uptrend) + volume > 2.0x 24-period avg
+- Short: price breaks below S3 + price < 1w EMA34 (downtrend) + volume > 2.0x 24-period avg
 - Exit: price crosses 1w EMA34 (trend-based exit)
-- Uses 12h timeframe to target 50-150 total trades over 4 years (12-37/year)
-- Discrete position sizing: ±0.25 to minimize fee churn
+- Uses weekly EMA34 for stronger trend filter (less whipsaw in bear markets)
 - Volume confirmation ensures breakout validity
-- 1w EMA34 trend filter adapts to both bull and bear markets
+- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
+- Discrete position sizing: ±0.25 to minimize fee churn
 """
 
 import numpy as np
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: > 1.8x 24-period average (volume spike filter)
+    # Volume confirmation: > 2.0x 24-period average (strict spike filter)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     # Load 1w data ONCE before loop for EMA34 trend filter and Camarilla calculation
@@ -43,7 +43,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1w + 1.1 * (high_1w - low_1w) / 4
     camarilla_s3 = close_1w - 1.1 * (high_1w - low_1w) / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
@@ -64,8 +64,8 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike confirmation (> 1.8x average)
-        volume_spike = volume[i] > 1.8 * vol_ma[i]
+        # Volume spike confirmation (> 2.0x average)
+        volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
             # Long: price breaks above R3 + price > 1w EMA34 (uptrend) + volume spike
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1wEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
