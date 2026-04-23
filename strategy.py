@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend + volume spike confirmation.
-Uses Donchian channel breakouts for entry, aligned with 1d EMA34 trend to avoid counter-trend trades.
-Volume spike (>2x 20-bar MA) confirms breakout momentum. Designed for 4h timeframe to achieve
-optimal trade frequency (target: 19-50/year per symbol). Uses discrete position sizing (0.30)
-to balance return and fee drag. Works in bull markets via breakouts and in bear markets via
-short breakdowns when aligned with 1d downtrend.
+Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA50 trend filter and ATR volatility filter.
+Elder Ray measures bull/bear power relative to EMA13 to identify trend strength.
+Only take trades in direction of 1d EMA50 trend when volatility is normal (ATR ratio < 1.5).
+Avoids whipsaws in ranging markets and captures sustained moves in both bull and bear regimes.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -20,86 +20,100 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 4h Donchian(20) channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate 6h EMA13 for Elder Ray
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 13:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    close_6h = df_6h['close'].values
+    ema_13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Donchian upper/lower: 20-period high/low
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_6h - ema_13_6h
+    bear_power = low_6h - ema_13_6h
     
-    # Align Donchian levels to 4h timeframe (previous completed 4h bar)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align Elder Ray to 6h timeframe (previous 6h bar values)
+    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
     
-    # Calculate 1d EMA34 for primary trend filter
+    # Calculate 1d EMA50 for primary trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate volume spike: current volume > 2.0x 20-period MA
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Calculate ATR(14) for volatility filter on 6h
+    atr_period = 14
+    tr1 = high_6h - low_6h
+    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr_14_6h = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    atr_14_6h_aligned = align_htf_to_ltf(prices, df_6h, atr_14_6h)
+    
+    # ATR ratio: current ATR / 50-period MA of ATR (to detect abnormal volatility)
+    atr_ma_50 = pd.Series(atr_14_6h_aligned).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14_6h_aligned / atr_ma_50
+    normal_volatility = atr_ratio < 1.5  # avoid high volatility whipsaws
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # need EMA34 and Donchian20
+    start_idx = max(50, 13)  # need EMA50 and EMA13
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: 1d EMA34
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: 1d EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: Break above Donchian high AND uptrend on 1d AND volume spike
-            if close[i] > donchian_high_aligned[i] and trend_up and volume_spike[i]:
-                signals[i] = 0.30
+            # Long: Bull Power > 0 AND uptrend on 1d AND normal volatility
+            if bull_power_aligned[i] > 0 and trend_up and normal_volatility[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low AND downtrend on 1d AND volume spike
-            elif close[i] < donchian_low_aligned[i] and trend_down and volume_spike[i]:
-                signals[i] = -0.30
+            # Short: Bear Power < 0 AND downtrend on 1d AND normal volatility
+            elif bear_power_aligned[i] < 0 and trend_down and normal_volatility[i]:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: break of opposite Donchian level (low for longs, high for shorts)
+            # Exit: opposite Elder Ray signal OR volatility expansion
             exit_signal = False
             if position == 1:
-                # Exit long on break below Donchian low
-                if close[i] < donchian_low_aligned[i]:
+                # Exit long on Bear Power >= 0 (loss of bullish momentum)
+                if bear_power_aligned[i] >= 0:
                     exit_signal = True
             elif position == -1:
-                # Exit short on break above Donchian high
-                if close[i] > donchian_high_aligned[i]:
+                # Exit short on Bull Power <= 0 (loss of bearish momentum)
+                if bull_power_aligned[i] <= 0:
                     exit_signal = True
+            
+            # Also exit on volatility expansion ( ATR ratio > 2.0 )
+            if atr_ratio[i] > 2.0:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6H_ElderRay_BullBearPower_1dEMA50_Trend_VolFilter"
+timeframe = "6h"
 leverage = 1.0
