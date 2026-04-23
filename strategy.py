@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian(20) breakout with 1-day ADX trend filter and volume confirmation.
-Long when price breaks above Donchian upper band, ADX > 25, and volume > 1.5x average.
-Short when price breaks below Donchian lower band, ADX > 25, and volume > 1.5x average.
-Exit when price reverses to opposite Donchian band or ADX < 20.
-Designed for low trade frequency (~20-40/year) to capture strong trends while minimizing whipsaws.
+Hypothesis: 4-hour Donchian channel breakout (20-period) combined with 1-day ADX trend filter and volume confirmation.
+Long when price breaks above upper Donchian band, ADX > 25 (trending), and volume > 1.5x average.
+Short when price breaks below lower Donchian band, ADX > 25 (trending), and volume > 1.5x average.
+Exit when price returns to middle of Donchian channel or ADX < 20 (trend weakening).
+Designed for moderate trade frequency (~30-60/year) to capture breakouts while minimizing false signals.
 Works in both bull and bear markets by requiring strong trend confirmation (ADX > 25).
 """
 
@@ -61,42 +61,52 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
     adx_values = adx.values
     
-    # Calculate 4-hour Donchian bands (20-period)
-    # We'll use the high/low from prices directly since we're on 4h timeframe
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to lower timeframe
+    # Align ADX to lower timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # Calculate Donchian channels (20-period) on 4h data
+    # Upper band: highest high of last 20 periods
+    # Lower band: lowest low of last 20 periods
+    # Middle band: average of upper and lower
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
+    
+    # Volume average (20-period) on lower timeframe
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         adx_val = adx_aligned[i]
+        current_close = close[i]
+        current_high = high[i]
+        current_low = low[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian upper band, strong trend (ADX > 25), volume confirmation
-            if (close[i] > donchian_high[i] and 
+            # Long: Price breaks above upper Donchian band, strong trend (ADX > 25), volume confirmation
+            if (current_high > donchian_upper[i] and 
                 adx_val > 25 and 
                 vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower band, strong trend (ADX > 25), volume confirmation
-            elif (close[i] < donchian_low[i] and 
+            # Short: Price breaks below lower Donchian band, strong trend (ADX > 25), volume confirmation
+            elif (current_low < donchian_lower[i] and 
                   adx_val > 25 and 
                   vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
@@ -106,12 +116,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price breaks below Donchian lower band OR trend weakening (ADX < 20)
-                if (close[i] < donchian_low[i]) or adx_val < 20:
+                # Exit long: Price returns to middle of Donchian channel OR trend weakening (ADX < 20)
+                if (current_close <= donchian_middle[i]) or adx_val < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price breaks above Donchian upper band OR trend weakening (ADX < 20)
-                if (close[i] > donchian_high[i]) or adx_val < 20:
+                # Exit short: Price returns to middle of Donchian channel OR trend weakening (ADX < 20)
+                if (current_close >= donchian_middle[i]) or adx_val < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -122,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_1dADX_Volume_Trend"
+name = "4H_Donchian20_1dADX_Volume_Breakout"
 timeframe = "4h"
 leverage = 1.0
