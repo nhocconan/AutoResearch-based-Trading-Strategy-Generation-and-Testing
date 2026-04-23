@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-Long when price breaks above Donchian upper band AND 1w EMA34 is rising AND volume > 1.5x 20-period average.
-Short when price breaks below Donchian lower band AND 1w EMA34 is falling AND volume > 1.5x 20-period average.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Donchian upper band AND 1d EMA34 is rising AND volume > 1.5x 20-period average.
+Short when price breaks below Donchian lower band AND 1d EMA34 is falling AND volume > 1.5x 20-period average.
 Exit when price touches the opposite Donchian band or reverses EMA34 direction.
-Uses 1w HTF for EMA34 trend (avoids whipsaws in ranging markets). Target: 30-100 total trades over 4 years (7-25/year).
+Uses 1d HTF for EMA34 trend (avoids whipsaws in ranging markets). Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,16 +21,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA34 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Calculate 1d EMA34 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     lookback = 20
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirmation"
-timeframe = "1d"
+name = "12H_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
