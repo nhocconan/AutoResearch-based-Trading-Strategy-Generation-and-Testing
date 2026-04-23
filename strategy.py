@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 Long when price breaks above Camarilla R3 AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
 Short when price breaks below Camarilla S3 AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
-Exit when price retouches Camarilla pivot point (PP) or ATR stoploss hit (2.0*ATR).
+Exit when price retouches Camarilla pivot point (PP) or ATR stoploss hit (2.5*ATR).
 Uses discrete position sizing (0.25) to balance return and risk. Targets 12-37 trades/year per symbol.
 1d EMA34 trend filter ensures we trade with the higher timeframe momentum, reducing false breakouts.
 """
@@ -36,7 +36,7 @@ def generate_signals(prices):
     camarilla_r3 = camarilla_pp + (high_1d - low_1d) * 1.1 / 4.0
     camarilla_s3 = camarilla_pp - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
@@ -49,10 +49,10 @@ def generate_signals(prices):
     ema_slope = np.zeros_like(ema_1d_34_aligned)
     ema_slope[3:] = ema_1d_34_aligned[3:] - ema_1d_34_aligned[:-3]
     
-    # Volume average (20-period) on 6h timeframe
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for stoploss calculation (using 6h data)
+    # ATR(14) for stoploss calculation (using 12h data)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -110,10 +110,10 @@ def generate_signals(prices):
             elif position == -1 and price >= pp:
                 exit_signal = True
             
-            # ATR-based stoploss: 2.0 * ATR from entry
-            if position == 1 and price < entry_price - 2.0 * atr_val:
+            # ATR-based stoploss: 2.5 * ATR from entry
+            if position == 1 and price < entry_price - 2.5 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > entry_price + 2.0 * atr_val:
+            elif position == -1 and price > entry_price + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -125,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_ATRStop"
-timeframe = "6h"
+name = "12H_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
