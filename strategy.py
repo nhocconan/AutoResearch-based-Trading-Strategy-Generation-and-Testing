@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA34 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R1 AND 4h EMA34 is rising AND volume > 1.5x 20-period average.
-Short when price breaks below Camarilla S1 AND 4h EMA34 is falling AND volume > 1.5x 20-period average.
-Exit when price retouches Camarilla pivot point (PP) or ATR stoploss hit (1.5*ATR).
-Uses discrete position sizing (0.20) to minimize fee churn and control drawdown.
-Targets 15-37 trades/year per symbol (60-150 total over 4 years) by using 4h trend filter to reduce false breakouts.
-Designed to work in both bull and bear markets by trading with the 4h trend and using tight risk control.
-Session filter: 08-20 UTC only to avoid low-volume periods.
+Hypothesis: 6h Bollinger Band squeeze breakout with weekly trend filter and volume confirmation.
+Long when price breaks above upper Bollinger Band during low volatility (squeeze) AND weekly EMA50 is rising AND volume > 1.5x 20-period average.
+Short when price breaks below lower Bollinger Band during low volatility (squeeze) AND weekly EMA50 is falling AND volume > 1.5x 20-period average.
+Exit when price retouches Bollinger middle band (20-period SMA) or ATR stoploss hit (2.0*ATR).
+Uses discrete position sizing (0.25) to minimize fee churn and control drawdown.
+Targets 12-37 trades/year per symbol (50-150 total over 4 years) by requiring Bollinger squeeze (low volatility) before breakout, reducing false signals.
+Designed to work in both bull and bear markets by trading with the weekly trend and using volatility-based entry (squeeze breakouts work in all regimes).
 """
 
 import numpy as np
@@ -28,39 +27,35 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Calculate Camarilla levels from daily data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Calculate Bollinger Bands (20, 2) on 6h timeframe
+    bb_period = 20
+    bb_std = 2.0
+    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_bb + (bb_std * std_bb)
+    lower_bb = sma_bb - (bb_std * std_bb)
+    middle_bb = sma_bb  # 20-period SMA
+    
+    # Bollinger Band Width for squeeze detection (low volatility)
+    bb_width = (upper_bb - lower_bb) / middle_bb
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    # Squeeze condition: current BB width < 80% of 20-period average BB width
+    squeeze_condition = bb_width < (0.8 * bb_width_ma)
+    
+    # Calculate weekly EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema_1w_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
     
-    # Camarilla levels (based on previous day's OHLC)
-    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_r1 = camarilla_pp + (high_1d - low_1d) * 1.1 / 12.0
-    camarilla_s1 = camarilla_pp - (high_1d - low_1d) * 1.1 / 12.0
+    # EMA slope (rising/falling) - compare current vs 3 periods ago
+    ema_slope = np.zeros_like(ema_1w_50_aligned)
+    ema_slope[3:] = ema_1w_50_aligned[3:] - ema_1w_50_aligned[:-3]
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Calculate 4h EMA34 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema_4h_34 = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_4h_34_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_34)
-    
-    # EMA slope (rising/falling) - compare current vs 1 period ago
-    ema_slope = np.zeros_like(ema_4h_34_aligned)
-    ema_slope[1:] = ema_4h_34_aligned[1:] - ema_4h_34_aligned[:-1]
-    
-    # Volume average (20-period) on 1h timeframe
+    # Volume average (20-period) on 6h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss calculation
@@ -76,13 +71,14 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 34, 20, 14, 1)
+    start_idx = max(bb_period, 50, 20, 14, 3)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_4h_34_aligned[i]) or 
-            np.isnan(ema_slope[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(sma_bb[i]) or np.isnan(std_bb[i]) or np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or np.isnan(middle_bb[i]) or np.isnan(squeeze_condition[i]) or
+            np.isnan(ema_1w_50_aligned[i]) or np.isnan(ema_slope[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,40 +94,43 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        pp = camarilla_pp_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
+        upper = upper_bb[i]
+        lower = lower_bb[i]
+        middle = middle_bb[i]
+        squeeze = squeeze_condition[i]
         ema_slope_val = ema_slope[i]
         
         if position == 0:
-            # Long: Price breaks above Camarilla R1 AND 4h EMA34 rising AND volume spike
-            if (price > r1 and 
+            # Long: Price breaks above upper Bollinger Band during squeeze AND weekly EMA50 rising AND volume spike
+            if (price > upper and 
+                squeeze and 
                 ema_slope_val > 0 and 
                 volume[i] > 1.5 * vol_ma_val):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price breaks below Camarilla S1 AND 4h EMA34 falling AND volume spike
-            elif (price < s1 and 
+            # Short: Price breaks below lower Bollinger Band during squeeze AND weekly EMA50 falling AND volume spike
+            elif (price < lower and 
+                  squeeze and 
                   ema_slope_val < 0 and 
                   volume[i] > 1.5 * vol_ma_val):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         else:
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retouches Camarilla pivot point
-            if position == 1 and price <= pp:
+            # Primary exit: Price retouches Bollinger middle band (20-period SMA)
+            if position == 1 and price <= middle:
                 exit_signal = True
-            elif position == -1 and price >= pp:
+            elif position == -1 and price >= middle:
                 exit_signal = True
             
-            # ATR-based stoploss: 1.5 * ATR from entry
-            if position == 1 and price < entry_price - 1.5 * atr_val:
+            # ATR-based stoploss: 2.0 * ATR from entry
+            if position == 1 and price < entry_price - 2.0 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > entry_price + 1.5 * atr_val:
+            elif position == -1 and price > entry_price + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -139,10 +138,10 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R1S1_4hEMA34_Trend_VolumeSpike_ATRStop"
-timeframe = "1h"
+name = "6H_BollingerSqueeze_1wEMA50_Trend_VolumeSpike_ATRStop"
+timeframe = "6h"
 leverage = 1.0
