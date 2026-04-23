@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-Long when price breaks above upper Donchian channel AND close > 1d EMA34 AND volume > 2.0x 20-period average.
-Short when price breaks below lower Donchian channel AND close < 1d EMA34 AND volume > 2.0x 20-period average.
-Exit when price reverts to middle Donchian band (20-period mean) or ATR-based stoploss hits.
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 25-50 trades/year per symbol.
-Donchian channels provide clear structure with proven reliability in both bull and bear markets.
-1d EMA34 provides higher-timeframe trend filter that reduces false breakouts.
+Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA200 trend filter and volume confirmation.
+Long when Bull Power > 0 AND close > 1d EMA200 AND volume > 1.5x 20-period average.
+Short when Bear Power < 0 AND close < 1d EMA200 AND volume > 1.5x 20-period average.
+Exit when Elder Power reverses sign or ATR-based stoploss hits.
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-30 trades/year per symbol.
+Elder Ray measures bull/bear strength relative to EMA13, providing clear momentum signals.
+1d EMA200 provides higher-timeframe trend filter that reduces false signals in choppy markets.
+Works in both bull and bear markets by adapting to the higher-timeframe trend.
 """
 
 import numpy as np
@@ -23,49 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for Donchian calculation - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 6h data for Elder Ray calculation - ONCE before loop
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Calculate Donchian channels for 4h timeframe (using previous bar's data)
-    # Upper = max(high, lookback=20), Lower = min(low, lookback=20), Middle = mean(close, lookback=20)
-    lookback = 20
-    upper_4h = pd.Series(high_4h).rolling(window=lookback, min_periods=lookback).max().values
-    lower_4h = pd.Series(low_4h).rolling(window=lookback, min_periods=lookback).min().values
-    middle_4h = pd.Series(close_4h).rolling(window=lookback, min_periods=lookback).mean().values
+    # Calculate EMA13 for Elder Ray (using previous bar's data)
+    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align 4h Donchian levels to 4h timeframe (no additional delay needed)
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    middle_4h_aligned = align_htf_to_ltf(prices, df_4h, middle_4h)
+    # Calculate Elder Ray components
+    bull_power_6h = high_6h - ema13_6h  # Bull Power = High - EMA13
+    bear_power_6h = low_6h - ema13_6h   # Bear Power = Low - EMA13
     
-    # Load 1d data for EMA34 trend filter - ONCE before loop
+    # Align 6h Elder Ray to 6h timeframe (no additional delay needed)
+    bull_power_6h_aligned = align_htf_to_ltf(prices, df_6h, bull_power_6h)
+    bear_power_6h_aligned = align_htf_to_ltf(prices, df_6h, bear_power_6h)
+    
+    # Load 1d data for EMA200 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1d data
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA200 on 1d data
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1d EMA200 to 6h timeframe
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Volume average (20-period) on 4h timeframe
+    # Volume average (20-period) on 6h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR(14) on 4h data for stoploss
+    # Calculate ATR(14) on 6h data for stoploss
     tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
     tr2 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, tr2)
     tr[0] = high[0] - low[0]  # first bar
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,9 +73,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(middle_4h_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_4h[i])):
+        if (np.isnan(bull_power_6h_aligned[i]) or np.isnan(bear_power_6h_aligned[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,17 +85,17 @@ def generate_signals(prices):
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above upper DONCHIAN AND close > 1d EMA34 AND volume spike
-            if (price > upper_4h_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > 2.0 * vol_ma_val):
+            # Long: Bull Power > 0 AND close > 1d EMA200 AND volume spike
+            if (bull_power_6h_aligned[i] > 0 and 
+                close[i] > ema200_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below lower DONCHIAN AND close < 1d EMA34 AND volume spike
-            elif (price < lower_4h_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma_val):
+            # Short: Bear Power < 0 AND close < 1d EMA200 AND volume spike
+            elif (bear_power_6h_aligned[i] < 0 and 
+                  close[i] < ema200_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -105,16 +104,16 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price reverts to middle band or ATR stoploss
-                if price <= middle_4h_aligned[i]:
+                # Exit long: Bull Power reverses or ATR stoploss
+                if bull_power_6h_aligned[i] <= 0:
                     exit_signal = True
-                elif price < entry_price - 2.5 * atr_4h[i]:
+                elif price < entry_price - 2.5 * atr_6h[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price reverts to middle band or ATR stoploss
-                if price >= middle_4h_aligned[i]:
+                # Exit short: Bear Power reverses or ATR stoploss
+                if bear_power_6h_aligned[i] >= 0:
                     exit_signal = True
-                elif price > entry_price + 2.5 * atr_4h[i]:
+                elif price > entry_price + 2.5 * atr_6h[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -126,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6H_ElderRay_1dEMA200_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
