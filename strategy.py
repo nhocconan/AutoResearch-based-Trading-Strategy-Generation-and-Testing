@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
-- Long: Price breaks above 20-period high + price > 1d EMA34 (uptrend) + volume > 2.0x 20-period average
-- Short: Price breaks below 20-period low + price < 1d EMA34 (downtrend) + volume > 2.0x 20-period average
-- Exit: Opposite Donchian breakout or trend reversal
+Hypothesis: 4h Camarilla Pivot R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
+- Long: Price breaks above Camarilla R3 + price > 1d EMA34 (uptrend) + volume > 2.0x 20-period average
+- Short: Price breaks below Camarilla S3 + price < 1d EMA34 (downtrend) + volume > 2.0x 20-period average
+- Exit: Opposite Camarilla breakout (R4/S4) or trend reversal
 - Uses discrete position sizing (0.25) to minimize fee churn
-- Target: 20-50 trades/year (80-200 over 4 years) to avoid fee drag
-- Works in bull markets via buying breakouts in uptrend, in bear markets via selling breakdowns in downtrend
+- Target: 25-50 trades/year (100-200 over 4 years) to avoid fee drag
+- Camarilla levels provide institutional support/resistance; works in bull (buy R3 breakouts in uptrend) and bear (sell S3 breakdowns in downtrend)
 """
 
 import numpy as np
@@ -23,20 +23,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d EMA34 to 4h timeframe (completed 1d bar only)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Donchian Channel (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous 1d bar
+    # R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), S3 = close - 1.125*(high-low), S4 = close - 1.5*(high-low)
+    camarilla_r3 = df_1d['close'] + 1.125 * (df_1d['high'] - df_1d['low'])
+    camarilla_s3 = df_1d['close'] - 1.125 * (df_1d['high'] - df_1d['low'])
+    camarilla_r4 = df_1d['close'] + 1.5 * (df_1d['high'] - df_1d['low'])
+    camarilla_s4 = df_1d['close'] - 1.5 * (df_1d['high'] - df_1d['low'])
+    
+    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4.values)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4.values)
     
     # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,13 +52,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 20)  # EMA34 needs 34, Donchian 20, volume MA 20
+    start_idx = max(34, 20)  # EMA34 needs 34, volume MA 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema34_aligned[i]) or 
-            np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,14 +71,14 @@ def generate_signals(prices):
         uptrend = close_1d_aligned[i] > ema34_aligned[i]
         downtrend = close_1d_aligned[i] < ema34_aligned[i]
         
-        # Donchian breakout signals with trend filter and volume confirmation
-        # Long: Price > 20-period high + uptrend + volume spike
-        # Short: Price < 20-period low + downtrend + volume spike
-        long_signal = (close[i] > highest_high[i] and 
+        # Camarilla breakout signals with trend filter and volume confirmation
+        # Long: Price > Camarilla R3 + uptrend + volume spike
+        # Short: Price < Camarilla S3 + downtrend + volume spike
+        long_signal = (close[i] > camarilla_r3_aligned[i] and 
                       uptrend and
                       volume[i] > 2.0 * vol_ma[i])
         
-        short_signal = (close[i] < lowest_low[i] and 
+        short_signal = (close[i] < camarilla_s3_aligned[i] and 
                        downtrend and
                        volume[i] > 2.0 * vol_ma[i])
         
@@ -83,17 +90,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Opposite Donchian breakout or trend reversal
+            # Exit conditions: Opposite Camarilla breakout (R4/S4) or trend reversal
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price breaks below 20-period low or trend turns down
-                if (close[i] < lowest_low[i] or 
+                # Exit long: Price breaks above Camarilla R4 or trend turns down
+                if (close[i] > camarilla_r4_aligned[i] or 
                     not uptrend):
                     exit_signal = True
             elif position == -1:
-                # Exit short: Price breaks above 20-period high or trend turns up
-                if (close[i] > highest_high[i] or 
+                # Exit short: Price breaks below Camarilla S4 or trend turns up
+                if (close[i] < camarilla_s4_aligned[i] or 
                     not downtrend):
                     exit_signal = True
             
@@ -105,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
