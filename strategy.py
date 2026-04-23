@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud breakout with 1w trend filter and volume confirmation.
-Long when price breaks above Senkou Span A AND price > Kumo cloud AND Tenkan > Kijun AND close > 1w EMA50 AND volume > 1.5x 20-period average.
-Short when price breaks below Senkou Span B AND price < Kumo cloud AND Tenkan < Kijun AND close < 1w EMA50 AND volume > 1.5x 20-period average.
-Exit when price re-enters Kumo cloud OR ATR trailing stop (2.0*ATR from extreme).
-Ichimoku provides dynamic support/resistance and trend direction, effective in both trending and ranging markets.
-Weekly EMA50 filter ensures alignment with major trend, reducing counter-trend trades in bear markets.
-6h timeframe targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+Hypothesis: 12h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation.
+Long when Williams %R < -80 (oversold) AND close > 1d EMA34 AND volume > 1.5x 20-period average.
+Short when Williams %R > -20 (overbought) AND close < 1d EMA34 AND volume > 1.5x 20-period average.
+Exit when Williams %R crosses -50 (mean reversion) OR ATR trailing stop (2.0*ATR from extreme).
+Uses discrete position sizing (0.25) targeting 12-37 trades/year on 12h timeframe.
+Williams %R captures reversals in bear markets, EMA34 filters trend direction, volume confirms strength.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,47 +22,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Ichimoku components from 6h data (no look-ahead)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (high_tenkan + low_tenkan) / 2.0
+    # Williams %R(14) from 1d timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (high_kijun + low_kijun) / 2.0
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, plotted 26 periods ahead
-    senkou_a = (tenkan + kijun) / 2.0
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, plotted 26 periods ahead
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (high_senkou_b + low_senkou_b) / 2.0
-    
-    # Current Kumo (cloud) boundaries: Senkou Span A and B from 26 periods ago
-    # To avoid look-ahead, we use values that are already plotted (i.e., from 26 periods ago)
-    senkou_a_lagged = np.roll(senkou_a, 26)
-    senkou_b_lagged = np.roll(senkou_b, 26)
-    # Set first 26 values to NaN since we don't have cloud data yet
-    senkou_a_lagged[:26] = np.nan
-    senkou_b_lagged[:26] = np.nan
-    
-    # Kumo top and bottom
-    kumo_top = np.maximum(senkou_a_lagged, senkou_b_lagged)
-    kumo_bottom = np.minimum(senkou_a_lagged, senkou_b_lagged)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -84,13 +64,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 26, 52, 20, 14)  # EMA50 needs 50, Senkou B needs 52, etc.
+    start_idx = max(34, 20, 14)  # EMA34 needs 34, vol MA needs 20, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
-            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(williams_r_aligned[i]) or
             np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -100,26 +79,17 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        ema50_val = ema50_1w_aligned[i]
-        tenkan_val = tenkan[i]
-        kijun_val = kijun[i]
-        kumo_top_val = kumo_top[i]
-        kumo_bottom_val = kumo_bottom[i]
+        ema34_val = ema34_1d_aligned[i]
+        wr_val = williams_r_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above Kumo top AND bullish TK cross AND above weekly EMA AND volume spike
-            if (close[i] > kumo_top_val and 
-                tenkan_val > kijun_val and 
-                close[i] > ema50_val and 
-                volume[i] > 1.5 * vol_ma_val):
+            # Long: Williams %R < -80 (oversold) AND uptrend (price > EMA34) AND volume spike (1.5x avg)
+            if wr_val < -80 and close[i] > ema34_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Price breaks below Kumo bottom AND bearish TK cross AND below weekly EMA AND volume spike
-            elif (close[i] < kumo_bottom_val and 
-                  tenkan_val < kijun_val and 
-                  close[i] < ema50_val and 
-                  volume[i] > 1.5 * vol_ma_val):
+            # Short: Williams %R > -20 (overbought) AND downtrend (price < EMA34) AND volume spike (1.5x avg)
+            elif wr_val > -20 and close[i] < ema34_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -133,10 +103,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price re-enters Kumo cloud (between top and bottom)
-            if position == 1 and close[i] < kumo_top_val:
+            # Primary exit: Williams %R crosses -50 (mean reversion)
+            if position == 1 and wr_val > -50:
                 exit_signal = True
-            elif position == -1 and close[i] > kumo_bottom_val:
+            elif position == -1 and wr_val < -50:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
@@ -155,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Ichimoku_Kumo_Breakout_1wEMA50_Trend_VolumeConfirmation_KumoExit_ATRTrailingStop"
-timeframe = "6h"
+name = "12H_WilliamsR_14_1dEMA34_Trend_VolumeConfirmation_MeanReversionExit_ATRTrailingStop"
+timeframe = "12h"
 leverage = 1.0
