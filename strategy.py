@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 1d EMA50 trend filter, volume confirmation (2.0x average), and ATR(14) stoploss (2.5x).
-Long when price breaks above Donchian(20) upper band AND price > 1d EMA50 AND volume > 2.0x 20-period average.
-Short when price breaks below Donchian(20) lower band AND price < 1d EMA50 AND volume > 2.0x 20-period average.
-Exit when price reverts to Donchian midline (20-period average of high/low) or ATR stoploss hits.
-Uses discrete position sizing (0.30) to balance return and drawdown. Targets 20-50 trades/year per symbol.
-Donchian channels provide clear breakout levels; EMA50 filters for higher-timeframe trend; volume confirms breakout strength.
+Hypothesis: 6h Williams %R with 1d ADX trend filter and volume confirmation.
+Long when Williams %R < -80 (oversold) AND 1d ADX > 25 (trending) AND volume > 1.5x average.
+Short when Williams %R > -20 (overbought) AND 1d ADX > 25 (trending) AND volume > 1.5x average.
+Exit when Williams %R crosses above -50 for long or below -50 for short, or ATR-based stoploss.
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-30 trades/year per symbol.
+Williams %R identifies reversal points in trending markets, effective when combined with ADX trend filter.
 """
 
 import numpy as np
@@ -22,44 +22,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for Donchian calculation - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 6h data for Williams %R calculation - ONCE before loop
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    close_6h = df_6h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    volume_6h = df_6h['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    # Calculate Williams %R(14) on 6h data
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_6h) / (highest_high - lowest_low)
+    # Handle division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate ATR(14) on 4h data for stoploss
-    tr1 = np.maximum(high_4h - low_4h, np.abs(high_4h - np.roll(close_4h, 1)))
-    tr2 = np.abs(low_4h - np.roll(close_4h, 1))
+    # Calculate ATR(14) on 6h data for stoploss
+    tr1 = np.maximum(high_6h - low_6h, np.abs(high_6h - np.roll(close_6h, 1)))
+    tr2 = np.abs(low_6h - np.roll(close_6h, 1))
     tr = np.maximum(tr1, tr2)
-    tr[0] = high_4h[0] - low_4h[0]  # first bar
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = high_6h[0] - low_6h[0]  # first bar
+    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Load 1d data for trend filter - ONCE before loop
+    # Load 1d data for ADX trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1d data
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ADX(14) on 1d data
+    # True Range
+    tr1_1d = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
+    tr2_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, tr2_1d)
+    tr_1d[0] = high_1d[0] - low_1d[0]  # first bar
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d EMA50 to 4h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Volume average (20-period) on 4h timeframe
-    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma)
+    # Smoothed DM and TR
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    tr_smooth = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume average (20-period) on 6h timeframe
+    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,49 +96,46 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or np.isnan(atr_4h[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(atr_6h[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             continue
         
-        # Use 4h close for price comparison
-        price_4h = close_4h[i]
+        # Use 6h close for price comparison
+        price_6h = close_6h[i]
         vol_ma_val = vol_ma_aligned[i]
         
         if position == 0:
-            # Long: break above upper band AND price > 1d EMA50 AND volume confirmation
-            if (price_4h > donchian_upper[i] and 
-                price_4h > ema50_1d_aligned[i] and 
-                volume_4h[i] > 2.0 * vol_ma_val):
-                signals[i] = 0.30
+            # Long: Williams %R < -80 (oversold) AND ADX > 25 (trending) AND volume confirmation
+            if (williams_r[i] < -80 and adx_1d_aligned[i] > 25 and 
+                volume_6h[i] > 1.5 * vol_ma_val):
+                signals[i] = 0.25
                 position = 1
-                entry_price = price_4h
-            # Short: break below lower band AND price < 1d EMA50 AND volume confirmation
-            elif (price_4h < donchian_lower[i] and 
-                  price_4h < ema50_1d_aligned[i] and 
-                  volume_4h[i] > 2.0 * vol_ma_val):
-                signals[i] = -0.30
+                entry_price = price_6h
+            # Short: Williams %R > -20 (overbought) AND ADX > 25 (trending) AND volume confirmation
+            elif (williams_r[i] > -20 and adx_1d_aligned[i] > 25 and 
+                  volume_6h[i] > 1.5 * vol_ma_val):
+                signals[i] = -0.25
                 position = -1
-                entry_price = price_4h
+                entry_price = price_6h
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to midline OR ATR stoploss
-                if price_4h < donchian_middle[i]:
+                # Exit long: Williams %R crosses above -50 OR ATR stoploss
+                if williams_r[i] > -50:
                     exit_signal = True
-                elif price_4h < entry_price - 2.5 * atr_4h[i]:
+                elif price_6h < entry_price - 2.5 * atr_6h[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to midline OR ATR stoploss
-                if price_4h > donchian_middle[i]:
+                # Exit short: Williams %R crosses below -50 OR ATR stoploss
+                if williams_r[i] < -50:
                     exit_signal = True
-                elif price_4h > entry_price + 2.5 * atr_4h[i]:
+                elif price_6h > entry_price + 2.5 * atr_6h[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -117,10 +143,10 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_Donchian20_1dEMA50_Volume_ATRStop"
-timeframe = "4h"
+name = "6H_WilliamsR_1dADX_Volume_ATRStop"
+timeframe = "6h"
 leverage = 1.0
