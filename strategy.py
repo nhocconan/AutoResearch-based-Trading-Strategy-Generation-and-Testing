@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1d ATR filter and weekly pivot direction.
-Long when price breaks above Donchian upper band AND 1d ATR(14) < 1d ATR(50) (low volatility regime) AND price > weekly pivot.
-Short when price breaks below Donchian lower band AND 1d ATR(14) < 1d ATR(50) AND price < weekly pivot.
-Exit when price touches the opposite Donchian band or ATR regime shifts to high volatility.
-Uses 1d HTF for ATR regime filter and 1w HTF for pivot direction (avoids whipsaws in ranging markets).
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) with 1w EMA34 trend filter and volume confirmation.
+Long when Alligator is bullish (Lips > Teeth > Jaw) AND 1w EMA34 rising AND volume > 1.3x 20-period average.
+Short when Alligator is bearish (Lips < Teeth < Jaw) AND 1w EMA34 falling AND volume > 1.3x 20-period average.
+Exit when Alligator convergence (|Lips-Jaw| < 0.1*ATR) or opposite crossover.
+Uses 1w HTF for EMA34 trend to avoid whipsaws. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -22,81 +21,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR(14) and ATR(50) for volatility regime filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
-    
-    # Calculate 1w pivot points (HTF)
+    # Calculate 1w EMA34 for trend filter (HTF)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Weekly pivot: (H + L + C) / 3
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 6h Donchian channels (20-period)
-    lookback = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    # Williams Alligator (12h timeframe)
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
+    jaw_shift = 8
+    teeth_shift = 5
+    lips_shift = 3
     
-    for i in range(lookback - 1, n):
-        upper[i] = np.max(high[i - lookback + 1:i + 1])
-        lower[i] = np.min(low[i - lookback + 1:i + 1])
+    sma_jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().shift(jaw_shift).values
+    sma_teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().shift(teeth_shift).values
+    sma_lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().shift(lips_shift).values
+    
+    # ATR for convergence exit
+    atr_period = 14
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(abs(high - pd.Series(close).shift(1)))
+    tr3 = pd.Series(abs(low - pd.Series(close).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # 20-period volume average for spike filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback - 1, 50, 50)  # Donchian (20), ATR(50) (50)
+    start_idx = max(jaw_period + jaw_shift, teeth_period + teeth_shift, lips_period + lips_shift, 
+                    34, 20, atr_period)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i])):
+        if (np.isnan(sma_jaw[i]) or np.isnan(sma_teeth[i]) or np.isnan(sma_lips[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        atr14 = atr_14_aligned[i]
-        atr50 = atr_50_aligned[i]
-        pivot = pivot_1w_aligned[i]
-        up = upper[i]
-        lo = lower[i]
+        jaw = sma_jaw[i]
+        teeth = sma_teeth[i]
+        lips = sma_lips[i]
+        ema_val = ema_34_1w_aligned[i]
+        vol_ma_val = vol_ma[i]
+        atr_val = atr[i]
         
-        # Low volatility regime: ATR(14) < ATR(50)
-        low_vol_regime = atr14 < atr50
+        # Calculate EMA34 slope for trend direction (rising/falling)
+        if i >= start_idx + 1:
+            ema_prev = ema_34_1w_aligned[i-1]
+            ema_rising = ema_val > ema_prev
+            ema_falling = ema_val < ema_prev
+        else:
+            ema_rising = False
+            ema_falling = False
+        
+        # Alligator conditions
+        alligator_bullish = lips > teeth and teeth > jaw
+        alligator_bearish = lips < teeth and teeth < jaw
+        alligator_convergence = abs(lips - jaw) < 0.1 * atr_val
         
         if position == 0:
-            # Long: Break above Donchian upper AND low vol regime AND price > weekly pivot
-            if price > up and low_vol_regime and price > pivot:
+            # Long: Bullish Alligator AND EMA34 rising AND volume spike
+            if alligator_bullish and ema_rising and volume[i] > 1.3 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian lower AND low vol regime AND price < weekly pivot
-            elif price < lo and low_vol_regime and price < pivot:
+            # Short: Bearish Alligator AND EMA34 falling AND volume spike
+            elif alligator_bearish and ema_falling and volume[i] > 1.3 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -104,12 +104,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches lower band OR high volatility regime
-                if price < lo or not low_vol_regime:
+                # Long exit: Bearish crossover OR Alligator convergence
+                if not alligator_bullish or alligator_convergence:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches upper band OR high volatility regime
-                if price > up or not low_vol_regime:
+                # Short exit: Bullish crossover OR Alligator convergence
+                if not alligator_bearish or alligator_convergence:
                     exit_signal = True
             
             if exit_signal:
@@ -120,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Donchian20_Breakout_1dATR_LowVol_1wPivot_Filter"
-timeframe = "6h"
+name = "12H_WilliamsAlligator_1wEMA34_Trend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
