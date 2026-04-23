@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray + 1d Camarilla Pivot with Volume Confirmation
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (momentum)
-- 1d Camarilla: R3/S3 as mean reversion levels, R4/S4 as breakout levels
-- Long: Bull Power > 0 + price <= S3 + volume > 1.5x 20-period avg (fade at support)
-- Short: Bear Power < 0 + price >= R3 + volume > 1.5x 20-period avg (fade at resistance)
-- Exit: Opposite power crosses zero or price crosses EMA13
-- Uses Elder Ray for momentum, Camarilla for key levels, volume for confirmation
-- Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
+Hypothesis: 4h Donchian breakout with volume spike and 12h EMA trend filter.
+- Long: price breaks above Donchian(20) high + volume > 2.0x 20-period avg + price > 12h EMA50
+- Short: price breaks below Donchian(20) low + volume > 2.0x 20-period avg + price < 12h EMA50
+- Exit: price crosses opposite Donchian band (exit on mean reversion)
+- Uses Donchian for structure, volume for confirmation, 12h EMA for HTF trend alignment
+- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
 - Discrete position sizing: ±0.25 to minimize fee churn
-- Works in ranging markets (fade at R3/S3) and can capture breaks at R4/S4
+- Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by 12h EMA)
 """
 
 import numpy as np
@@ -26,85 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: > 1.5x 20-period average
+    # Volume confirmation: > 2.0x 20-period average (tight to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian channels: 20-period high/low
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: based on previous day's range
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.0 * (high - low)
-    # S3 = close - 1.0 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    range_1d = high_1d - low_1d
-    r3 = close_1d + 1.0 * range_1d
-    s3 = close_1d - 1.0 * range_1d
-    r4 = close_1d + 1.5 * range_1d
-    s4 = close_1d - 1.5 * range_1d
-    
-    # Align Camarilla levels to 6h timeframe (completed 1d bar only)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Elder Ray Power (using 13-period EMA)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 13)  # Need 20 for volume MA, 13 for EMA13
+    start_idx = max(50, 20)  # Need 50 for EMA50, 20 for Donchian/volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i])):
+            np.isnan(donch_high[i]) or
+            np.isnan(donch_low[i]) or
+            np.isnan(ema_50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (> 2.0x average - tight threshold)
+        volume_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Bull Power > 0 + price at or below S3 (fade at support) + volume
-            # Optional: break above R4 for continuation
-            if (bull_power[i] > 0 and 
-                volume_confirm and
-                (close[i] <= s3_aligned[i] or close[i] >= r4_aligned[i])):
+            # Long: Donchian breakout up + volume confirmation + price > 12h EMA50
+            if (close[i] > donch_high[i] and 
+                volume_confirm and 
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 + price at or above R3 (fade at resistance) + volume
-            # Optional: break below S4 for continuation
-            elif (bear_power[i] < 0 and 
-                  volume_confirm and
-                  (close[i] >= r3_aligned[i] or close[i] <= s4_aligned[i])):
+            # Short: Donchian breakout down + volume confirmation + price < 12h EMA50
+            elif (close[i] < donch_low[i] and 
+                  volume_confirm and 
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power <= 0 OR price crosses below EMA13 (momentum loss)
-            if bull_power[i] <= 0 or close[i] < ema13[i]:
+            # Long exit: price crosses below Donchian low (mean reversion)
+            if close[i] < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power >= 0 OR price crosses above EMA13 (momentum loss)
-            if bear_power[i] >= 0 or close[i] > ema13[i]:
+            # Short exit: price crosses above Donchian high (mean reversion)
+            if close[i] > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Camarilla_R3S3_VolumeConfirm"
-timeframe = "6h"
+name = "4h_DonchianBreakout_VolumeSpike_12hEMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
