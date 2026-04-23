@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
-Long when price breaks above R1 AND close > 12h EMA50 AND volume > 1.3x average.
-Short when price breaks below S1 AND close < 12h EMA50 AND volume > 1.3x average.
+Hypothesis: 1h 4-hr Camarilla R1/S1 breakout with volume spike and session filter (08-20 UTC).
+Long when price breaks above R1 with volume > 2x average and in session.
+Short when price breaks below S1 with volume > 2x average and in session.
 Exit when price returns to Camarilla pivot (PP) or volume drops below average.
-Camarilla levels provide precise intraday support/resistance. 12h EMA50 filters counter-trend trades.
-Volume confirmation ensures conviction. Designed for 4h timeframe targeting 75-200 total trades over 4 years.
-Works in bull markets via breakouts and bear markets via mean reversion at extremes.
+Uses 4h Camarilla levels for structure and 1h for precise entry timing.
+Designed to generate 60-150 total trades over 4 years with low frequency to minimize fee drag.
+Works in both bull and bear markets by trading breakouts from key intraday levels.
 """
 
 import numpy as np
@@ -23,98 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for EMA50 trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Precompute session hours (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data for Camarilla levels - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate EMA50 on 12h data
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels for 4h: R1, S1, PP
+    # Camarilla: PP = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    pp_4h = (high_4h + low_4h + close_4h) / 3.0
+    r1_4h = close_4h + (high_4h - low_4h) * 1.1 / 12.0
+    s1_4h = close_4h - (high_4h - low_4h) * 1.1 / 12.0
     
-    # Align 12h EMA50 to 4h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align 4h Camarilla levels to 1h timeframe (wait for completed 4h bar)
+    pp_4h_aligned = align_htf_to_ltf(prices, df_4h, pp_4h)
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
     
-    # Load 1d data for Camarilla pivot calculation (using previous day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar: based on previous day's OHLC
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
-    # PP = (high + low + close)/3
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    PP = (prev_high + prev_low + prev_close) / 3
-    
-    # Align 1d Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
-    
-    # Volume average (20-period) on primary timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (24-period ~1 day) on 1h timeframe
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(PP_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(pp_4h_aligned[i]) or np.isnan(r1_4h_aligned[i]) or 
+            np.isnan(s1_4h_aligned[i]) or np.isnan(vol_ma[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_12h_aligned[i]
-        r1_val = R1_aligned[i]
-        s1_val = S1_aligned[i]
-        pp_val = PP_aligned[i]
+        pp_val = pp_4h_aligned[i]
+        r1_val = r1_4h_aligned[i]
+        s1_val = s1_4h_aligned[i]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above R1 AND price > 12h EMA50 AND volume spike
-            if (price > r1_val and close[i-1] <= r1_val and price > ema50_val and vol_current > 1.3 * vol_ma_val):
-                signals[i] = 0.25
+            # Long: price breaks above R1 with volume spike
+            if price > r1_val and vol_current > 2.0 * vol_ma_val:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 AND price < 12h EMA50 AND volume spike
-            elif (price < s1_val and close[i-1] >= s1_val and price < ema50_val and vol_current > 1.3 * vol_ma_val):
-                signals[i] = -0.25
+            # Short: price breaks below S1 with volume spike
+            elif price < s1_val and vol_current > 2.0 * vol_ma_val:
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to pivot PP OR volume drops below average
-                if (price <= pp_val or vol_current < vol_ma_val):
+                # Exit long: price returns to pivot PP
+                if price <= pp_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to pivot PP OR volume drops below average
-                if (price >= pp_val or vol_current < vol_ma_val):
+                # Exit short: price returns to pivot PP
+                if price >= pp_val:
                     exit_signal = True
+            
+            # Also exit if volume drops below average (loss of momentum)
+            if vol_current < vol_ma_val:
+                exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4H_Camarilla_R1S1_Breakout_12hEMA50_Volume"
-timeframe = "4h"
+name = "1H_Camarilla_R1S1_Breakout_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
