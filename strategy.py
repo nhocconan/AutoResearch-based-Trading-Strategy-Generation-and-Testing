@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA34 trend filter and volume confirmation.
-Long when price >= R1 AND 4h EMA34 rising AND volume > 1.5x 24-period MA.
-Short when price <= S1 AND 4h EMA34 falling AND volume > 1.5x 24-period MA.
-Exit when price crosses the 4h EMA34 or hits the opposite Camarilla level (R3/S3).
-Uses 4h HTF for trend filter and 1d for Camarilla levels to avoid counter-trend trades.
-Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+Hypothesis: 6h Williams %R Reversal with 1w EMA34 trend filter and volume confirmation.
+Long when Williams %R(14) < -80 AND 1w EMA34 rising AND volume > 1.5x 20-period MA.
+Short when Williams %R(14) > -20 AND 1w EMA34 falling AND volume > 1.5x 20-period MA.
+Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+Uses 1w HTF for trend filter to avoid counter-trend trades in bear markets, volume spike for momentum confirmation.
+Williams %R is effective at catching reversals in both bull and bear markets due to its overbought/oversold nature.
+Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -22,73 +23,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA34 for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Calculate 1w EMA34 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1d Camarilla levels (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate Williams %R(14) on 6h timeframe
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_R1 = np.zeros(len(df_1d))
-    camarilla_S1 = np.zeros(len(df_1d))
-    camarilla_R3 = np.zeros(len(df_1d))
-    camarilla_S3 = np.zeros(len(df_1d))
-    camarilla_PP = np.zeros(len(df_1d))
-    
-    for i in range(len(df_1d)):
-        if i == 0:
-            camarilla_R1[i] = np.nan
-            camarilla_S1[i] = np.nan
-            camarilla_R3[i] = np.nan
-            camarilla_S3[i] = np.nan
-            camarilla_PP[i] = np.nan
-            continue
-            
-        # Use previous day's OHLC for today's Camarilla levels
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        
-        camarilla_PP[i] = (prev_high + prev_low + prev_close) / 3
-        range_val = prev_high - prev_low
-        camarilla_R1[i] = camarilla_PP[i] + range_val * 1.1 / 12
-        camarilla_S1[i] = camarilla_PP[i] - range_val * 1.1 / 12
-        camarilla_R3[i] = camarilla_PP[i] + range_val * 1.1 / 4
-        camarilla_S3[i] = camarilla_PP[i] - range_val * 1.1 / 4
-    
-    # Align Camarilla levels to 1h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    camarilla_PP_aligned = align_htf_to_ltf(prices, df_1d, camarilla_PP)
-    
-    # Calculate 1h volume MA (24-period) for spike filter
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate 6h volume MA (20-period) for spike filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 24)  # EMA34, volume MA
+    start_idx = max(34, 20, period)  # EMA34, volume MA, Williams %R
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or 
-            np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or 
-            np.isnan(camarilla_S3_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -96,46 +60,46 @@ def generate_signals(prices):
         
         # Calculate EMA34 slope for trend direction (rising/falling)
         if i >= start_idx + 1:
-            ema_prev = ema_34_4h_aligned[i-1]
-            ema_rising = ema_34_4h_aligned[i] > ema_prev
-            ema_falling = ema_34_4h_aligned[i] < ema_prev
+            ema_prev = ema_34_1w_aligned[i-1]
+            ema_rising = ema_34_1w_aligned[i] > ema_prev
+            ema_falling = ema_34_1w_aligned[i] < ema_prev
         else:
             ema_rising = False
             ema_falling = False
         
-        # Volume filter: 1h volume > 1.5x 24-period MA (moderate threshold to balance frequency)
-        vol_filter = volume[i] > 1.5 * vol_ma_24[i]
+        # Volume filter: 6h volume > 1.5x 20-period MA (higher threshold to reduce frequency)
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price >= R1 AND EMA34 rising AND volume filter
-            if close[i] >= camarilla_R1_aligned[i] and ema_rising and vol_filter:
-                signals[i] = 0.20
+            # Long: Williams %R < -80 (oversold) AND EMA34 rising AND volume filter
+            if williams_r[i] < -80 and ema_rising and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price <= S1 AND EMA34 falling AND volume filter
-            elif close[i] <= camarilla_S1_aligned[i] and ema_falling and vol_filter:
-                signals[i] = -0.20
+            # Short: Williams %R > -20 (overbought) AND EMA34 falling AND volume filter
+            elif williams_r[i] > -20 and ema_falling and vol_filter:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: Williams %R crosses -50 midpoint
             exit_signal = False
             
             if position == 1:
-                # Long exit: price crosses below EMA34 OR hits S3 (opposite Camarilla level)
-                if close[i] < ema_34_4h_aligned[i] or close[i] <= camarilla_S3_aligned[i]:
+                # Long exit: Williams %R crosses above -50
+                if williams_r[i] > -50:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price crosses above EMA34 OR hits R3 (opposite Camarilla level)
-                if close[i] > ema_34_4h_aligned[i] or close[i] >= camarilla_R3_aligned[i]:
+                # Short exit: Williams %R crosses below -50
+                if williams_r[i] < -50:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R1S1_Breakout_4hEMA34_Trend_VolumeSpike"
-timeframe = "1h"
+name = "6H_WilliamsR_Reversal_1wEMA34_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
