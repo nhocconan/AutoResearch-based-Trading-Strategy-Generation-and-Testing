@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-Donchian channels capture volatility-based breakouts. 1d EMA50 filters trend direction.
-Volume spike confirms institutional participation. 12h timeframe targets 12-37 trades/year
-with discrete sizing 0.25 to minimize fee drag. Works in both bull/bear via trend filter.
+Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+Donchian channels identify volatility breakouts. Weekly pivot provides institutional bias.
+Volume confirmation filters false breakouts. 6h timeframe reduces noise while capturing multi-day moves.
+Works in bull (breakouts with trend) and bear (failed breakouts reverse quickly).
+Target: 12-37 trades/year (50-150 over 4 years) with discrete sizing 0.25.
 """
 
 import numpy as np
@@ -20,29 +21,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate Donchian(20) from 6h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Calculate weekly pivot from 1w data (requires 1w HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly pivot: (prev_week_high + prev_week_low + prev_week_close) / 3
+    prev_week_high = np.roll(df_1w['high'].values, 1)
+    prev_week_low = np.roll(df_1w['low'].values, 1)
+    prev_week_close = np.roll(df_1w['close'].values, 1)
+    # Handle first bar
+    prev_week_high[0] = df_1w['high'].iloc[0]
+    prev_week_low[0] = df_1w['low'].iloc[0]
+    prev_week_close[0] = df_1w['close'].iloc[0]
     
-    # Calculate Donchian(20) from 12h data
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Donchian upper/lower bands (20-period)
-    upper_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    upper_20_aligned = align_htf_to_ltf(prices, df_12h, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_12h, lower_20)
+    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,40 +50,40 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # need EMA50_1d, Donchian(20), vol MA
+    start_idx = max(lookback, 20)  # need Donchian, vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_20_aligned[i]) or 
-            np.isnan(lower_20_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close > upper Donchian AND price > 1d EMA50 (uptrend) AND volume spike
-            if (close[i] > upper_20_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Long: Close > Donchian upper AND price > weekly pivot (bullish bias) AND volume spike
+            if (close[i] > highest_high[i] and 
+                close[i] > weekly_pivot_aligned[i] and 
                 volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < lower Donchian AND price < 1d EMA50 (downtrend) AND volume spike
-            elif (close[i] < lower_20_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Short: Close < Donchian lower AND price < weekly pivot (bearish bias) AND volume spike
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < weekly_pivot_aligned[i] and 
                   volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Close back inside Donchian channel OR loss of trend
+            # Exit: Close back inside Donchian channel OR loss of pivot bias
             exit_signal = False
             if position == 1:
-                # Exit long when close < lower Donchian OR price < 1d EMA50
-                if close[i] < lower_20_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+                # Exit long when close < Donchian lower OR price < weekly pivot
+                if close[i] < lowest_low[i] or close[i] < weekly_pivot_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when close > upper Donchian OR price > 1d EMA50
-                if close[i] > upper_20_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+                # Exit short when close > Donchian upper OR price > weekly pivot
+                if close[i] > highest_high[i] or close[i] > weekly_pivot_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -95,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "6H_Donchian20_Breakout_WeeklyPivot_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
