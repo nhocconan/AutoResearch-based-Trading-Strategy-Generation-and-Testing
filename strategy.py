@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike.
-Long when price breaks above 1d Donchian upper AND price > 1w EMA50 AND volume > 2.0x 20-period average.
-Short when price breaks below 1d Donchian lower AND price < 1w EMA50 AND volume > 2.0x 20-period average.
-Exit when price reverts to 1d Donchian midline OR ATR trailing stop (2.5*ATR from extreme).
-Donchian channels provide clear breakout levels; 1w EMA50 filters weekly trend; volume confirms breakout strength.
-Works in bull markets (captures upward breakouts) and bear markets (captures downward breakdowns).
-Target: ~15-25 trades/year on 1d timeframe with discrete sizing 0.25.
+Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation.
+Long when price breaks above upper BB AND 1d EMA50 up AND volume > 1.5x 20-period average.
+Short when price breaks below lower BB AND 1d EMA50 down AND volume > 1.5x 20-period average.
+Exit when price reverts to middle BB (20 SMA) OR ATR trailing stop (2.5*ATR from extreme).
+Bollinger squeeze captures low volatility breakouts; 1d EMA50 filters higher timeframe trend;
+volume confirms institutional participation. Works in both bull and bear markets by
+trading breakouts in direction of higher timeframe trend.
+Target: ~15-25 trades/year on 6h timeframe with discrete sizing 0.25.
 """
 
 import numpy as np
@@ -23,38 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter (using weekly data)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate 1d Donchian channels (20-period) from daily data
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:  # Need enough for EMA
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian(20): upper = max(high,20), lower = min(low,20), midline = (upper+lower)/2
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    midline_20 = (upper_20 + lower_20) / 2.0
+    # Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2.0
+    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_bb + bb_std * std_bb
+    lower_bb = sma_bb - bb_std * std_bb
+    middle_bb = sma_bb  # 20 SMA for exit
     
-    # Align Donchian levels to 1d timeframe (use previous day's levels)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    midline_aligned = align_htf_to_ltf(prices, df_1d, midline_20)
-    
-    # 1d volume average (20-period) for spike filter
+    # 6h volume average (20-period) for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for 1d trailing stop calculation
+    # ATR(14) for 6h trailing stop
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -70,34 +61,43 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50)  # donchian20, ema_50_1w
+    start_idx = max(bb_period, 50)  # BB20, vol_ma20, ema_50_1d
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(midline_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(sma_bb[i]) or np.isnan(std_bb[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or
+            np.isnan(middle_bb[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema_val = ema_50_1w_aligned[i]
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        midline_val = midline_aligned[i]
+        ema_trend = ema_50_1d_aligned[i]
+        upper = upper_bb[i]
+        lower = lower_bb[i]
+        middle = middle_bb[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
         
+        # Determine 1d trend direction (rising/falling EMA50)
+        if i > start_idx:
+            prev_ema = ema_50_1d_aligned[i-1]
+            ema_rising = ema_trend > prev_ema
+            ema_falling = ema_trend < prev_ema
+        else:
+            ema_rising = True  # neutral on first bar
+            ema_falling = False
+        
         if position == 0:
-            # Long: price breaks above upper AND price > 1w EMA50 AND volume spike
-            if price > upper_val and price > ema_val and volume[i] > 2.0 * vol_ma_val:
+            # Long: price breaks above upper BB AND 1d EMA50 rising AND volume confirmation
+            if price > upper and ema_rising and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: price breaks below lower AND price < 1w EMA50 AND volume spike
-            elif price < lower_val and price < ema_val and volume[i] > 2.0 * vol_ma_val:
+            # Short: price breaks below lower BB AND 1d EMA50 falling AND volume confirmation
+            elif price < lower and ema_falling and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -111,10 +111,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: price reverts to midline
-            if position == 1 and price < midline_val:
+            # Primary exit: price reverts to middle BB (20 SMA)
+            if position == 1 and price < middle:
                 exit_signal = True
-            elif position == -1 and price > midline_val:
+            elif position == -1 and price > middle:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
@@ -133,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_MidlineExit_ATRTrailingStop"
-timeframe = "1d"
+name = "6H_Bollinger_Squeeze_Breakout_1dEMA50_Trend_VolumeConfirmation_MiddleExit_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
