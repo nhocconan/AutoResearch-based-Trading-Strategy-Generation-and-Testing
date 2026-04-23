@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour MACD momentum combined with 1-day ADX trend filter and volume confirmation.
-Long when MACD line crosses above signal line, ADX > 25 (trending), and volume > 1.5x average.
-Short when MACD line crosses below signal line, ADX > 25 (trending), and volume > 1.5x average.
-Exit when MACD reverses or ADX < 20 (trend weakening).
-Designed for low trade frequency (~20-40/year) to capture strong trends while minimizing whipsaws.
-Works in both bull and bear markets by requiring strong trend confirmation (ADX > 25).
+Hypothesis: 1-hour Stochastic RSI reversal combined with 4-hour EMA trend filter and volume confirmation.
+Long when StochRSI < 10 (oversold), price > 4h EMA50 (uptrend), and volume > 1.5x average.
+Short when StochRSI > 90 (overbought), price < 4h EMA50 (downtrend), and volume > 1.5x average.
+Exit when StochRSI crosses back through 50 (mean reversion complete) or volume drops.
+Designed for low trade frequency (~15-35/year) to capture mean reversion in ranging markets while avoiding false signals in strong trends.
+Works in both bull and bear markets by requiring trend alignment (price vs 4h EMA50) and volume confirmation.
 """
 
 import numpy as np
@@ -18,126 +18,104 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ADX - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 4-hour data for EMA50 - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Load 12-hour data for MACD - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate 4-hour EMA50
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 1-day ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Stochastic RSI (14,14,3,3) on 1-hour
+    rsi_period = 14
+    stoch_period = 14
+    k_period = 3
+    d_period = 3
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Wilder's smoothing
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
     
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Directional Indicators
-    plus_di = 100 * dm_plus14 / tr14
-    minus_di = 100 * dm_minus14 / tr14
+    # Stochastic of RSI
+    rsi_min = pd.Series(rsi_values).rolling(window=stoch_period, min_periods=stoch_period).min()
+    rsi_max = pd.Series(rsi_values).rolling(window=stoch_period, min_periods=stoch_period).max()
+    stoch_rsi = (rsi_values - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
-    adx_values = adx.values
+    # %K and %D
+    k = pd.Series(stoch_rsi).rolling(window=k_period, min_periods=k_period).mean()
+    d = pd.Series(k).rolling(window=d_period, min_periods=d_period).mean()
+    k_values = k.values
+    d_values = d.values
     
-    # Calculate 12-hour MACD (12,26,9)
-    close_12h = df_12h['close'].values
-    
-    # EMA12 and EMA26
-    ema12 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close_12h).ewm(span=26, adjust=False, min_periods=26).mean().values
-    
-    # MACD line
-    macd_line = ema12 - ema26
-    
-    # Signal line (9-period EMA of MACD)
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # MACD histogram (optional for divergence, not used in entry)
-    # macd_hist = macd_line - signal_line
-    
-    # Align HTF indicators to lower timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    macd_line_aligned = align_htf_to_ltf(prices, df_12h, macd_line)
-    signal_line_aligned = align_htf_to_ltf(prices, df_12h, signal_line)
-    
-    # Volume average (20-period) on lower timeframe
+    # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(macd_line_aligned[i]) or 
-            np.isnan(signal_line_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(k_values[i]) or np.isnan(d_values[i]) or 
+            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
-        macd_line_val = macd_line_aligned[i]
-        signal_line_val = signal_line_aligned[i]
+        k_val = k_values[i]
+        d_val = d_values[i]
+        ema_4h_val = ema_4h_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
+        price = close[i]
         
         if position == 0:
-            # Long: MACD bullish crossover, strong trend (ADX > 25), volume confirmation
-            if (macd_line_val > signal_line_val and macd_line_aligned[i-1] <= signal_line_aligned[i-1] and
-                adx_val > 25 and vol_current > 1.5 * vol_ma_val):
-                signals[i] = 0.25
+            # Long: StochRSI oversold (<10), price above 4h EMA50 (uptrend), volume confirmation
+            if (k_val < 10 and d_val < 10 and k_values[i-1] >= d_values[i-1] and
+                price > ema_4h_val and vol_current > 1.5 * vol_ma_val):
+                signals[i] = 0.20
                 position = 1
-            # Short: MACD bearish crossover, strong trend (ADX > 25), volume confirmation
-            elif (macd_line_val < signal_line_val and macd_line_aligned[i-1] >= signal_line_aligned[i-1] and
-                  adx_val > 25 and vol_current > 1.5 * vol_ma_val):
-                signals[i] = -0.25
+            # Short: StochRSI overbought (>90), price below 4h EMA50 (downtrend), volume confirmation
+            elif (k_val > 90 and d_val > 90 and k_values[i-1] <= d_values[i-1] and
+                  price < ema_4h_val and vol_current > 1.5 * vol_ma_val):
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: MACD bearish crossover OR trend weakening (ADX < 20)
-                if (macd_line_val < signal_line_val and macd_line_aligned[i-1] >= signal_line_aligned[i-1]) or adx_val < 20:
+                # Exit long: StochRSI crosses above 50 (mean reversion) OR volume drops
+                if (k_val > 50 and k_values[i-1] <= 50) or vol_current < vol_ma_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: MACD bullish crossover OR trend weakening (ADX < 20)
-                if (macd_line_val > signal_line_val and macd_line_aligned[i-1] <= signal_line_aligned[i-1]) or adx_val < 20:
+                # Exit short: StochRSI crosses below 50 (mean reversion) OR volume drops
+                if (k_val < 50 and k_values[i-1] >= 50) or vol_current < vol_ma_val:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12H_MACD_1dADX_Volume_Trend"
-timeframe = "12h"
+name = "1H_StochRSI_4hEMA50_Volume_MeanReversion"
+timeframe = "1h"
 leverage = 1.0
