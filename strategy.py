@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter, volume confirmation, and ATR-based stop.
-Long when price breaks above upper Donchian channel, close > 1d EMA34, and volume > 1.5x average.
-Short when price breaks below lower Donchian channel, close < 1d EMA34, and volume > 1.5x average.
-Exit via ATR trailing stop (3x ATR) or opposite Donchian breakout.
-Designed for low trade frequency (~20-40/year) to capture strong trends with volume confirmation,
-avoiding false breakouts in choppy markets. Works in both bull and bear markets by requiring
-trend alignment via 1d EMA34.
+Hypothesis: 12h Williams %R with 1d trend filter (EMA50) and volume confirmation.
+Long when Williams %R < -80 (oversold) and price > EMA50 (uptrend) and volume > 1.3x average.
+Short when Williams %R > -20 (overbought) and price < EMA50 (downtrend) and volume > 1.3x average.
+Exit when Williams %R reverses to > -50 for long or < -50 for short, or trend weakens (price crosses EMA50).
+Designed for low trade frequency (~10-25/year) to capture mean reversions in trending markets.
+Works in both bull and bear markets by requiring trend confirmation (price vs EMA50) for mean reversion entries.
 """
 
 import numpy as np
@@ -23,94 +22,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA34 - ONCE before loop
+    # Load 1d data for Williams %R and EMA50 - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Williams %R (14-period) on 1d
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r = williams_r.values
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate ATR(14) for 4h
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA50 (50-period) on 1d for trend filter
+    ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align HTF indicators to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # Volume average (20-period)
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        wr_val = williams_r_aligned[i]
+        ema50_val = ema50_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
-        atr_val = atr[i]
-        close_val = close[i]
-        ema34_val = ema34_1d_aligned[i]
+        close_price = close[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian, close > 1d EMA34, volume confirmation
-            if (close_val > highest_high[i] and  # breakout above upper channel
-                close_val > ema34_val and        # above 1d EMA34 (uptrend)
-                vol_current > 1.5 * vol_ma_val): # volume confirmation
-                signals[i] = 0.30
+            # Long: Williams %R < -80 (oversold) and price > EMA50 (uptrend) and volume confirmation
+            if (wr_val < -80 and close_price > ema50_val and vol_current > 1.3 * vol_ma_val):
+                signals[i] = 0.25
                 position = 1
-                entry_price = close_val
-                highest_since_entry = close_val
-            # Short: price breaks below lower Donchian, close < 1d EMA34, volume confirmation
-            elif (close_val < lowest_low[i] and   # breakout below lower channel
-                  close_val < ema34_val and       # below 1d EMA34 (downtrend)
-                  vol_current > 1.5 * vol_ma_val): # volume confirmation
-                signals[i] = -0.30
+            # Short: Williams %R > -20 (overbought) and price < EMA50 (downtrend) and volume confirmation
+            elif (wr_val > -20 and close_price < ema50_val and vol_current > 1.3 * vol_ma_val):
+                signals[i] = -0.25
                 position = -1
-                entry_price = close_val
-                lowest_since_entry = close_val
         else:
-            # Update highest/lowest since entry for trailing stop
+            # Exit conditions
+            exit_signal = False
+            
             if position == 1:
-                highest_since_entry = max(highest_since_entry, close_val)
-                # Exit conditions: ATR trailing stop or opposite Donchian breakout
-                if (close_val < highest_since_entry - 3.0 * atr_val or  # ATR stop
-                    close_val < lowest_low[i]):                         # opposite breakout
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.30
+                # Exit long: Williams %R > -50 (reversing from oversold) OR price < EMA50 (trend change)
+                if wr_val > -50 or close_price < ema50_val:
+                    exit_signal = True
             else:  # position == -1
-                lowest_since_entry = min(lowest_since_entry, close_val)
-                # Exit conditions: ATR trailing stop or opposite Donchian breakout
-                if (close_val > lowest_since_entry + 3.0 * atr_val or  # ATR stop
-                    close_val > highest_high[i]):                       # opposite breakout
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.30
+                # Exit short: Williams %R < -50 (reversing from overbought) OR price > EMA50 (trend change)
+                if wr_val < -50 or close_price > ema50_val:
+                    exit_signal = True
+            
+            if exit_signal:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_Donchian20_1dEMA34_Volume_ATRStop"
-timeframe = "4h"
+name = "12H_WilliamsR_1dEMA50_Volume_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
