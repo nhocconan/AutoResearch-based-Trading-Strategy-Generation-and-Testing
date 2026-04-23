@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R with 1d Bollinger Band squeeze and volume spike.
-- Williams %R(14): Oversold < -80, Overbought > -20
-- Bollinger Band squeeze (1d): BB Width < 20th percentile (low volatility regime)
-- Volume spike: Current volume > 2.0x 20-period average
-- Long: Williams %R crosses above -80 from below + BB squeeze + volume spike
-- Short: Williams %R crosses below -20 from above + BB squeeze + volume spike
-- Exit: Williams %R crosses opposite threshold (-20 for long, -80 for short) OR BB squeeze ends
-- Uses Williams %R for mean reversion in squeeze regimes, effective in both bull/bear markets
-- Target: 50-120 total trades over 4 years (12-30/year) to avoid fee drag
-- Discrete position sizing: ±0.25
+Hypothesis: 4h Bollinger Band Squeeze Breakout with 1d EMA50 trend filter and volume confirmation.
+- Bollinger Bands: 20-period SMA, 2 standard deviations
+- Squeeze condition: BB Width < 20-period percentile 20 (low volatility)
+- Breakout: Close > Upper Band (long) or Close < Lower Band (short)
+- Trend filter: Price > 1d EMA50 for longs, Price < 1d EMA50 for shorts
+- Volume confirmation: Volume > 1.5x 20-period average
+- Exit: Opposite band touch or squeeze re-engagement
+- Uses Bollinger Squeeze for low-volatility breakout anticipation, EMA50 for HTF direction
+- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
+- Discrete position sizing: ±0.25 to minimize fee churn
+- Works in ranging markets (squeeze breakouts) and trending markets (continuation breakouts)
 """
 
 import numpy as np
@@ -26,81 +27,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams %R (14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    
-    # Volume confirmation: > 2.0x 20-period average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d Bollinger Bands for squeeze detection
+    # Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
+    bb_width = (upper_band - lower_band) / sma_20  # Normalized width
+    
+    # Bollinger Squeeze: BB Width < 20th percentile of last 50 periods
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile_20 = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20).values
+    squeeze_condition = bb_width < bb_width_percentile_20
+    
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # 1d Bollinger Bands (20, 2)
-    bb_ma = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_ma + 2 * bb_std
-    bb_lower = bb_ma - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_ma  # Normalized width
-    
-    # BB squeeze: width < 20th percentile (low volatility regime)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20).values
-    bb_squeeze = bb_width < bb_width_percentile
-    
-    # Align 1d indicators to 4h
-    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze)
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 14, 50)  # Need sufficient lookback
+    start_idx = max(50, 20, 50)  # Need 50 for EMA50 and percentile, 20 for BB
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i]) or
-            np.isnan(bb_squeeze_aligned[i]) or
-            np.isnan(bb_width_aligned[i]) or
-            np.isnan(bb_width_percentile_aligned[i])):
+        if (np.isnan(vol_ma[i]) or 
+            np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(bb_width_percentile_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Williams %R signals
-        wr_cross_above_80 = (williams_r[i] > -80) and (williams_r[i-1] <= -80) if i > 0 else False
-        wr_cross_below_20 = (williams_r[i] < -20) and (williams_r[i-1] >= -20) if i > 0 else False
+        # Bollinger Squeeze condition
+        is_squeeze = squeeze_condition[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -80 + BB squeeze + volume spike
-            if wr_cross_above_80 and bb_squeeze_aligned[i] and volume_confirm:
+            # Long: Squeeze breakout up + price > 1d EMA50 + volume confirmation
+            if (is_squeeze and 
+                close[i] > upper_band[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 + BB squeeze + volume spike
-            elif wr_cross_below_20 and bb_squeeze_aligned[i] and volume_confirm:
+            # Short: Squeeze breakout down + price < 1d EMA50 + volume confirmation
+            elif (is_squeeze and 
+                  close[i] < lower_band[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Williams %R crosses below -20 OR BB squeeze ends
-            if wr_cross_below_20 or not bb_squeeze_aligned[i]:
+            # Long exit: Price touches lower band OR squeeze re-engagement
+            if close[i] < lower_band[i] or not is_squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R crosses above -80 OR BB squeeze ends
-            if wr_cross_above_80 or not bb_squeeze_aligned[i]:
+            # Short exit: Price touches upper band OR squeeze re-engagement
+            if close[i] > upper_band[i] or not is_squeeze:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_BBSqueeze_VolumeSpike"
+name = "4h_BollingerSqueeze_Breakout_1dEMA50_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
