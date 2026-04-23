@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above Camarilla R3 (1d) AND close > 1d EMA34 AND volume > 2.0x 20-period average.
-Short when price breaks below Camarilla S3 (1d) AND close < 1d EMA34 AND volume > 2.0x 20-period average.
-Exit when price retraces to Camarilla pivot point (PP) OR ATR trailing stop (2.5*ATR from extreme).
-Uses discrete position sizing (0.30) targeting ~25 trades/year on 12h timeframe.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Camarilla R3 (1d) AND close > 1d EMA34 AND volume > 1.8x 20-period average.
+Short when price breaks below Camarilla S3 (1d) AND close < 1d EMA34 AND volume > 1.8x 20-period average.
+Exit when price retraces to Camarilla pivot point (PP) OR ATR trailing stop (2.2*ATR from extreme).
+Uses discrete position sizing (0.25) targeting ~25 trades/year on 4h timeframe.
 Camarilla R3/S3 provides stronger breakout levels than R1/S1 for fewer but higher quality signals.
+Volume threshold reduced from 2.0x to 1.8x to increase signal frequency slightly while maintaining quality.
+ATR multiplier reduced from 2.5 to 2.2 for tighter risk control.
 """
 
 import numpy as np
@@ -42,7 +44,7 @@ def generate_signals(prices):
     r3 = close_1d + (high_1d - low_1d) * 1.1 / 4.0
     s3 = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -87,14 +89,14 @@ def generate_signals(prices):
         s3_val = s3_aligned[i]
         
         if position == 0:
-            # Long: Break above Camarilla R3 AND uptrend (price > EMA34) AND volume spike (2.0x avg)
-            if close[i] > r3_val and close[i] > ema34_val and volume[i] > 2.0 * vol_ma_val:
-                signals[i] = 0.30
+            # Long: Break above Camarilla R3 AND uptrend (price > EMA34) AND volume spike (1.8x avg)
+            if close[i] > r3_val and close[i] > ema34_val and volume[i] > 1.8 * vol_ma_val:
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Break below Camarilla S3 AND downtrend (price < EMA34) AND volume spike (2.0x avg)
-            elif close[i] < s3_val and close[i] < ema34_val and volume[i] > 2.0 * vol_ma_val:
-                signals[i] = -0.30
+            # Short: Break below Camarilla S3 AND downtrend (price < EMA34) AND volume spike (1.8x avg)
+            elif close[i] < s3_val and close[i] < ema34_val and volume[i] > 1.8 * vol_ma_val:
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
         else:
@@ -113,10 +115,10 @@ def generate_signals(prices):
             elif position == -1 and close[i] >= pp_val:
                 exit_signal = True
             
-            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
+            # ATR-based trailing stop: 2.2 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.2 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
+            elif position == -1 and price > lowest_since_entry + 2.2 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -125,10 +127,10 @@ def generate_signals(prices):
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
             else:
-                signals[i] = 0.30 if position == 1 else -0.30
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirmation_PPExit_ATRTrailingStop"
-timeframe = "12h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirmation_PPExit_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
