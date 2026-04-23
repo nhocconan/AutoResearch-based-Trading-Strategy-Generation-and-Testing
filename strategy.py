@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d EMA50 trend filter and volume confirmation.
-Long when Bull Power > 0, price > 1d EMA50, and volume > 1.5x average.
-Short when Bear Power < 0, price < 1d EMA50, and volume > 1.5x average.
-Exit when power reverses or price crosses 1d EMA50.
-Elder Ray measures bull/bear strength relative to EMA13. Combined with 1d EMA50 trend filter,
-it captures strong moves in both bull and bear markets while avoiding chop.
-Designed for 6h timeframe targeting 50-150 total trades over 4 years with volume confirmation
-to reduce false signals and minimize fee drag.
+Hypothesis: 12h Camarilla R3/S3 breakout with 1w ADX trend filter and volume confirmation.
+Long when price breaks above R3 and 1w ADX > 25 with volume > 1.5x average.
+Short when price breaks below S3 and 1w ADX > 25 with volume > 1.5x average.
+Exit on opposite Camarilla level break or ADX < 20 (trend weakening).
+Camarilla levels provide precise support/resistance from prior week's range.
+1w ADX > 25 filters for strong trending weeks to avoid false breakouts in chop.
+Volume confirmation ensures breakout legitimacy.
+Designed for 12h timeframe targeting 50-150 total trades over 4 years with low frequency to minimize fee drag.
+Works in both bull and bear markets by only taking breakouts in direction of strong trend.
 """
 
 import numpy as np
@@ -24,26 +25,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA50 trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data for ADX trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA50 on 1d data
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ADX on 1w data
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            elif plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                minus_dm[i] = 0
+            
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        
+        for i in range(period, len(high)):
+            if atr[i] != 0:
+                plus_di[i] = (np.sum(plus_dm[i-period+1:i+1]) / atr[i]) * 100
+                minus_di[i] = (np.sum(minus_dm[i-period+1:i+1]) / atr[i]) * 100
+                if (plus_di[i] + minus_di[i]) != 0:
+                    dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+        
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Align 1d EMA50 to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w)
     
-    # Calculate Elder Ray Index (requires EMA13 on 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = low - ema_13   # Bear Power = Low - EMA13
+    # Align 1w ADX to 12h timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Calculate Camarilla levels from prior 1w bar
+    def calculate_camarilla(high, low, close):
+        # Typical price for pivot
+        pivot = (high + low + close) / 3
+        range_val = high - low
+        
+        # Camarilla levels
+        r3 = pivot + (range_val * 1.1 / 4)
+        s3 = pivot - (range_val * 1.1 / 4)
+        r4 = pivot + (range_val * 1.1 / 2)
+        s4 = pivot - (range_val * 1.1 / 2)
+        
+        return r3, s3, r4, s4
+    
+    # Calculate Camarilla levels for each 1w bar (using prior bar's data)
+    camarilla_r3 = np.full(len(close_1w), np.nan)
+    camarilla_s3 = np.full(len(close_1w), np.nan)
+    
+    for i in range(1, len(close_1w)):
+        r3, s3, _, _ = calculate_camarilla(high_1w[i-1], low_1w[i-1], close_1w[i-1])
+        camarilla_r3[i] = r3
+        camarilla_s3[i] = s3
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,28 +118,28 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_50_val = ema_50_1d_aligned[i]
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
+        adx_val = adx_1w_aligned[i]
+        r3_val = camarilla_r3_aligned[i]
+        s3_val = camarilla_s3_aligned[i]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: Bull Power > 0 AND price > 1d EMA50 AND volume spike
-            if (bull_val > 0 and price > ema_50_val and vol_current > 1.5 * vol_ma_val):
+            # Long: price breaks above R3 AND 1w ADX > 25 (strong trend) AND volume spike
+            if (price > r3_val and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Bear Power < 0 AND price < 1d EMA50 AND volume spike
-            elif (bear_val < 0 and price < ema_50_val and vol_current > 1.5 * vol_ma_val):
+            # Short: price breaks below S3 AND 1w ADX > 25 (strong trend) AND volume spike
+            elif (price < s3_val and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -84,12 +148,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Bear Power >= 0 OR price <= 1d EMA50
-                if (bull_val <= 0 or price <= ema_50_val):
+                # Exit long: price breaks below S3 OR ADX < 20 (trend weakening)
+                if (price < s3_val or adx_val < 20):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Bull Power <= 0 OR price >= 1d EMA50
-                if (bear_val >= 0 or price >= ema_50_val):
+                # Exit short: price breaks above R3 OR ADX < 20 (trend weakening)
+                if (price > r3_val or adx_val < 20):
                     exit_signal = True
             
             if exit_signal:
@@ -101,6 +165,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ElderRay_1dEMA50_Volume"
-timeframe = "6h"
+name = "12H_Camarilla_R3_S3_Breakout_1wADX_Volume"
+timeframe = "12h"
 leverage = 1.0
