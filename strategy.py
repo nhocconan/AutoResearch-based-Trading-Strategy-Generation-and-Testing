@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R1/S1 breakout with 1w EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R1 AND 1w EMA50 rising AND 6h volume > 2.0x 20-period MA.
-Short when price breaks below Camarilla S1 AND 1w EMA50 falling AND 6h volume > 2.0x 20-period MA.
-Exit when price touches opposite Camarilla level (S1 for long, R1 for short) or 1w EMA50 reverses.
-Uses 1w HTF for trend filter to avoid counter-trend trades in bear markets, volume spike for momentum confirmation.
-Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-Camarilla levels provide tight structure in ranging markets, 1w EMA50 filters major trend.
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume spike confirmation.
+Long when price breaks above Camarilla R1 AND 1d EMA50 rising AND 12h volume > 2.0x 20-period MA.
+Short when price breaks below Camarilla S1 AND 1d EMA50 falling AND 12h volume > 2.0x 20-period MA.
+Exit when price touches opposite Camarilla level (S1 for long, R1 for short) or 1d EMA50 reverses.
+Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
+Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+Camarilla levels provide tighter structure than Donchian in ranging markets, 1d EMA50 filters major trend.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Camarilla levels (based on previous bar's OHLC)
+    # Calculate 12h Camarilla levels (based on previous bar's OHLC)
     camarilla_r1 = np.full(n, np.nan)
     camarilla_s1 = np.full(n, np.nan)
     camarilla_r3 = np.full(n, np.nan)  # for exit
@@ -41,16 +41,16 @@ def generate_signals(prices):
         camarilla_r3[i] = pc + range_ * 1.1 / 4
         camarilla_s3[i] = pc - range_ * 1.1 / 4
     
-    # Calculate 1w EMA50 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d EMA50 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 6h volume MA (20-period) for spike filter
+    # Calculate 12h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -85,7 +85,7 @@ def generate_signals(prices):
             ema_rising = False
             ema_falling = False
         
-        # Volume filter: 6h volume > 2.0x 20-period MA (adaptive to volatility)
+        # Volume filter: 12h volume > 2.0x 20-period MA (adaptive to volatility)
         vol_filter = volume[i] > 2.0 * vol_ma_val
         
         if position == 0:
@@ -102,12 +102,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches Camarilla S3 (strong reversal) OR EMA50 starts falling
-                if price < s3 or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
+                # Long exit: price touches Camarilla S1 (opposite) OR EMA50 starts falling
+                if price < s1 or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches Camarilla R3 (strong reversal) OR EMA50 starts rising
-                if price > r3 or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
+                # Short exit: price touches Camarilla R1 (opposite) OR EMA50 starts rising
+                if price > r1 or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R1S1_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12H_Camarilla_R1S1_Breakout_1dEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
