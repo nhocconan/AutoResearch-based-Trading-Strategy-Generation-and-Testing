@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R4/S4 breakout with 12h EMA trend filter and volume confirmation.
-Long when price breaks above R4 and 12h EMA50 > EMA200 with volume > 1.5x average.
-Short when price breaks below S4 and 12h EMA50 < EMA200 with volume > 1.5x average.
-Exit on opposite Camarilla level break or EMA crossover reversal.
-Uses 12h EMA for trend filter (more responsive than 1d ADX) and R4/S4 for stronger breakouts.
-Designed for 6h timeframe targeting 75-200 total trades over 4 years with volume confirmation to reduce false signals.
-Works in both bull and bear markets by only taking breakouts in direction of 12h EMA trend.
+Hypothesis: 4h Donchian(20) breakout with 1d ATR ratio filter and volume confirmation.
+Long when price breaks above Donchian upper band and 1d ATR(7)/ATR(30) > 1.2 with volume > 1.5x average.
+Short when price breaks below Donchian lower band and 1d ATR(7)/ATR(30) > 1.2 with volume > 1.5x average.
+Exit on opposite Donchian break or ATR ratio < 0.8 (volatility contraction).
+ATR ratio filter identifies expanding volatility environments conducive to breakouts.
+Designed for 4h timeframe targeting 75-200 total trades over 4 years with controlled frequency to minimize fee drag.
+Works in both bull and bear markets by trading breakouts in expanding volatility regimes.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,47 +23,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for EMA trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 200:
+    # Load 1d data for ATR ratio filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMAs on 12h data
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align 12h EMAs to 6h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
-    ema_200_aligned = align_htf_to_ltf(prices, df_12h, ema_200)
-    
-    # Calculate Camarilla levels from prior 12h bar
-    def calculate_camarilla(high, low, close):
-        # Typical price for pivot
-        pivot = (high + low + close) / 3
-        range_val = high - low
+    # Calculate ATR on 1d data
+    def calculate_atr(high, low, close, period):
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        # Camarilla levels
-        r3 = pivot + (range_val * 1.1 / 4)
-        s3 = pivot - (range_val * 1.1 / 4)
-        r4 = pivot + (range_val * 1.1 / 2)
-        s4 = pivot - (range_val * 1.1 / 2)
-        
-        return r3, s3, r4, s4
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    # Calculate Camarilla levels for each 12h bar (using prior bar's data)
-    camarilla_r4 = np.full(len(close_12h), np.nan)
-    camarilla_s4 = np.full(len(close_12h), np.nan)
+    atr_7 = calculate_atr(high_1d, low_1d, close_1d, 7)
+    atr_30 = calculate_atr(high_1d, low_1d, close_1d, 30)
     
-    for i in range(1, len(close_12h)):
-        _, _, r4, s4 = calculate_camarilla(df_12h['high'].values[i-1], df_12h['low'].values[i-1], close_12h[i-1])
-        camarilla_r4[i] = r4
-        camarilla_s4[i] = s4
+    # Avoid division by zero
+    atr_ratio = np.zeros_like(atr_7)
+    mask = atr_30 != 0
+    atr_ratio[mask] = atr_7[mask] / atr_30[mask]
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    # Align 1d ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Calculate Donchian channels (20-period) on primary timeframe
+    def donchian_channel(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
+    
+    donch_upper, donch_lower = donchian_channel(high, low, 20)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,32 +73,30 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(donch_upper[i]) or 
+            np.isnan(donch_lower[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_50_val = ema_50_aligned[i]
-        ema_200_val = ema_200_aligned[i]
-        r4_val = camarilla_r4_aligned[i]
-        s4_val = camarilla_s4_aligned[i]
+        atr_ratio_val = atr_ratio_aligned[i]
+        upper_val = donch_upper[i]
+        lower_val = donch_lower[i]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above R4 AND 12h EMA50 > EMA200 (uptrend) AND volume spike
-            if (price > r4_val and ema_50_val > ema_200_val and vol_current > 1.5 * vol_ma_val):
+            # Long: price breaks above upper band AND ATR ratio > 1.2 (expanding vol) AND volume spike
+            if (price > upper_val and atr_ratio_val > 1.2 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S4 AND 12h EMA50 < EMA200 (downtrend) AND volume spike
-            elif (price < s4_val and ema_50_val < ema_200_val and vol_current > 1.5 * vol_ma_val):
+            # Short: price breaks below lower band AND ATR ratio > 1.2 (expanding vol) AND volume spike
+            elif (price < lower_val and atr_ratio_val > 1.2 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -106,12 +105,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below S4 OR EMA50 < EMA200 (trend reversal)
-                if (price < s4_val or ema_50_val < ema_200_val):
+                # Exit long: price breaks below lower band OR ATR ratio < 0.8 (vol contraction)
+                if (price < lower_val or atr_ratio_val < 0.8):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above R4 OR EMA50 > EMA200 (trend reversal)
-                if (price > r4_val or ema_50_val > ema_200_val):
+                # Exit short: price breaks above upper band OR ATR ratio < 0.8 (vol contraction)
+                if (price > upper_val or atr_ratio_val < 0.8):
                     exit_signal = True
             
             if exit_signal:
@@ -123,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R4_S4_Breakout_12hEMA_Volume"
-timeframe = "6h"
+name = "4H_Donchian20_1dATR_Ratio_Volume"
+timeframe = "4h"
 leverage = 1.0
