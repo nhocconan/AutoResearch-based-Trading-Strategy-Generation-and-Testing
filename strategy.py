@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using 1d Williams %R extremes with volume confirmation and ATR trailing stop.
-Long when 1d Williams %R < -80 (oversold) AND volume > 1.5x 20-period average.
-Short when 1d Williams %R > -20 (overbought) AND volume > 1.5x 20-period average.
-Exit when price retraces to 1d Williams %R midpoint (-50) or ATR trailing stop hit (2.5*ATR from highest/lowest since entry).
+Hypothesis: 4h strategy using 12h Donchian channel breakout with volume confirmation and ATR trailing stop.
+Long when price breaks above 12h Donchian upper channel (20-period) AND volume > 1.5x 20-period average.
+Short when price breaks below 12h Donchian lower channel (20-period) AND volume > 1.5x 20-period average.
+Exit when price retraces to the 12h Donchian midpoint or ATR trailing stop hit (2.5*ATR from highest/lowest since entry).
 Uses discrete position sizing (0.25) to control drawdown and fee churn.
-Designed for 12h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
-Williams %R provides mean-reversion signals in ranging markets while volume confirmation filters false signals.
-ATR trailing stop manages risk during trending periods. Works in both bull and bear markets by adapting to market conditions.
+Designed for 4h timeframe to target 20-50 trades/year per symbol (80-200 total over 4 years).
+Donchian breakouts capture strong momentum moves while volume confirmation filters false breakouts.
+ATR trailing stop manages risk during trending periods. Works in both bull and bear markets by capturing
+strong directional moves while avoiding choppy periods through volume confirmation.
 """
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,30 +25,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Williams %R
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Calculate 12h Donchian channels (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Williams %R calculation: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Donchian channels: highest high and lowest low over 20 periods
+    highest_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Williams %R midpoint (-50) for mean reversion exit
-    williams_mid = -50 * np.ones_like(williams_r)
+    # Align Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, highest_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, lowest_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
     
-    # Align Williams %R levels to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    williams_mid_aligned = align_htf_to_ltf(prices, df_1d, williams_mid)
-    
-    # Volume average (20-period) on 12h timeframe
+    # Volume average (20-period) on 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for trailing stop calculation
@@ -65,12 +62,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14)
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(williams_mid_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,18 +76,19 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        wr_val = williams_r_aligned[i]
-        mid_val = williams_mid_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        mid = donchian_mid_aligned[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) AND volume spike
-            if (wr_val < -80 and volume[i] > 1.5 * vol_ma_val):
+            # Long: Price breaks above 12h Donchian upper channel AND volume spike
+            if (price > upper and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
-            # Short: Williams %R overbought (> -20) AND volume spike
-            elif (wr_val > -20 and volume[i] > 1.5 * vol_ma_val):
+            # Short: Price breaks below 12h Donchian lower channel AND volume spike
+            elif (price < lower and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -105,12 +103,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to Williams %R midpoint (-50) equivalent price level
-            # We approximate this as a mean reversion to the recent average price
-            # Using the midpoint as a dynamic level based on recent price action
-            if position == 1 and price <= mid_val:
+            # Primary exit: Price retraces to 12h Donchian midpoint
+            if position == 1 and price <= mid:
                 exit_signal = True
-            elif position == -1 and price >= mid_val:
+            elif position == -1 and price >= mid:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
@@ -130,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_Extremes_VolumeConfirmation_ATRTrailingStop"
-timeframe = "12h"
+name = "4H_DonchianBreakout_12h_VolumeConfirmation_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
