@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) Breakout with 1w EMA50 Trend Filter and Volume Spike
-- Uses Donchian(20) from 12h for breakout signals (primary timeframe)
+Hypothesis: 1d Donchian(20) Breakout with 1w EMA50 Trend Filter and Volume Spike
+- Uses Donchian(20) from 1d for breakout signals
 - 1w EMA50 defines long-term trend: only long when price > EMA50, short when price < EMA50
-- Volume confirmation (> 1.8x 30-period average) filters weak breakouts
-- Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+- Volume confirmation (> 2.0x 20-period average) filters weak breakouts
+- Designed for 1d timeframe targeting 7-25 trades/year (30-100 over 4 years)
 - Works in both bull and bear markets by following the 1w EMA50 trend filter
 """
 
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,14 +31,14 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: > 1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 30)  # need 1w EMA50, volume MA
+    start_idx = max(50, 20)  # need 1w EMA50, Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -48,7 +48,7 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Calculate Donchian(20) on 12h data up to current bar
+        # Calculate Donchian(20) on 1d data up to current bar
         if i >= 20:
             donchian_high = np.max(high[i-20:i])
             donchian_low = np.min(low[i-20:i])
@@ -63,13 +63,13 @@ def generate_signals(prices):
             # Long: price breaks above Donchian high AND above 1w EMA50 AND volume spike
             if (close[i] > donchian_high and 
                 close[i] > ema_50_1w_aligned[i] and 
-                volume[i] > 1.8 * vol_ma[i]):
+                volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below Donchian low AND below 1w EMA50 AND volume spike
             elif (close[i] < donchian_low and 
                   close[i] < ema_50_1w_aligned[i] and 
-                  volume[i] > 1.8 * vol_ma[i]):
+                  volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
