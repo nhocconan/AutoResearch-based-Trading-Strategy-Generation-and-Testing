@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume confirmation.
-Long when price breaks above Donchian upper (20) AND 1d ATR(14) > 1.5x 50-period MA(ATR) AND volume > 2.0x 20-period MA.
-Short when price breaks below Donchian lower (20) AND 1d ATR(14) > 1.5x 50-period MA(ATR) AND volume > 2.0x 20-period MA.
-Exit when price returns to Donchian midpoint or opposite breakout occurs.
-Designed for ~20-30 trades/year with volatility-based edge that works in both trending and ranging markets.
-ATR filter ensures we only trade during sufficient volatility regimes, avoiding choppy low-vol periods.
+Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d ADX regime filter and volume spike confirmation.
+Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND 1d ADX > 25 (trending) AND volume > 2.0x 20-period MA.
+Short when Bull Power < 0 AND Bear Power > 0 (bearish momentum) AND 1d ADX > 25 (trending) AND volume > 2.0x 20-period MA.
+Exit when momentum weakens (Bull Power and Bear Power same sign) or volume filter fails.
+Elder Ray measures bull/bear power via EMA13; ADX filters for trending markets to avoid whipsaws.
+Designed for ~15-25 trades/year with strong trend-following edge in both bull and bear regimes.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,36 +22,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR(14) for volatility filter
+    # Calculate 1d ADX for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # ADX calculation (Wilder's smoothing)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0) if high[i] - high[i-1] > low[i-1] - low[i] else 0
+            minus_dm[i] = max(low[i-1] - low[i], 0) if low[i-1] - low[i] > high[i] - high[i-1] else 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_dm_smooth = np.zeros_like(plus_dm)
+        minus_dm_smooth = np.zeros_like(minus_dm)
+        
+        atr[period-1] = np.mean(tr[:period])
+        plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+        minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+        
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+        minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        
+        adx = np.zeros_like(dx)
+        adx[2*period-1] = np.mean(dx[period-1:2*period-1])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # ATR(14)
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
-    atr_filter = atr_14_1d > 1.5 * atr_ma_50_1d
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Align ATR filter to 4h timeframe
-    atr_filter_aligned = align_htf_to_ltf(prices, df_1d, atr_filter)
-    
-    # Calculate Donchian channels (20-period) on 4h data
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # Calculate Elder Ray Index (Bull Power/Bear Power) on 6h
+    ema_period = 13
+    ema_close = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    bull_power = high - ema_close  # Bull Power = High - EMA
+    bear_power = low - ema_close   # Bear Power = Low - EMA
     
     # Calculate volume MA (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,47 +83,42 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # need ATR MA50, Donchian20, volume MA20
+    start_idx = max(ema_period, 20, 28)  # EMA13, volume MA20, ADX needs 2*period
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_filter_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
+        if (np.isnan(ema_close[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(adx_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility filter: 1d ATR > 1.5x 50-period MA(ATR)
-        vol_filter = atr_filter_aligned[i]
+        # Regime filter: 1d ADX > 25 = trending market
+        trending = adx_1d_aligned[i] > 25
         
-        # Volume filter: 4h volume > 2.0x 20-period MA
-        vol_confirm = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume filter: 6h volume > 2.0x 20-period MA
+        vol_filter = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_upper[i]  # Break above upper band
-        breakout_down = close[i] < donchian_lower[i]  # Break below lower band
-        return_to_middle = abs(close[i] - donchian_middle[i]) < 0.1 * abs(donchian_upper[i] - donchian_lower[i])
-        opposite_breakout = (position == 1 and breakout_down) or \
-                            (position == -1 and breakout_up)
+        # Elder Ray conditions
+        bullish_momentum = bull_power[i] > 0 and bear_power[i] < 0  # Bull Power > 0 AND Bear Power < 0
+        bearish_momentum = bull_power[i] < 0 and bear_power[i] > 0  # Bull Power < 0 AND Bear Power > 0
+        momentum_weakening = (bull_power[i] > 0 and bear_power[i] > 0) or \
+                             (bull_power[i] < 0 and bear_power[i] < 0)  # Same sign = weakening
         
         if position == 0:
-            # Long: Break above upper band AND volatility filter AND volume confirmation
-            if breakout_up and vol_filter and vol_confirm:
+            # Long: Bullish momentum AND trending AND volume confirmation
+            if bullish_momentum and trending and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower band AND volatility filter AND volume confirmation
-            elif breakout_down and vol_filter and vol_confirm:
+            # Short: Bearish momentum AND trending AND volume confirmation
+            elif bearish_momentum and trending and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to middle or opposite breakout
-            exit_signal = False
-            if position == 1:
-                exit_signal = return_to_middle or opposite_breakout
-            elif position == -1:
-                exit_signal = return_to_middle or opposite_breakout
+            # Exit conditions: momentum weakening or volume filter fails
+            exit_signal = momentum_weakening or not vol_filter
             
             if exit_signal:
                 signals[i] = 0.0
@@ -110,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dATRFilter_VolumeConfirm"
-timeframe = "4h"
+name = "6H_ElderRay_ADXRegime_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
