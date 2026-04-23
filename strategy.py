@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation.
-- Long: Close > Camarilla R3 AND price > 12h EMA50 AND volume > 2.0x 20-period avg
-- Short: Close < Camarilla S3 AND price < 12h EMA50 AND volume > 2.0x 20-period avg
-- Exit: Opposite Camarilla breakout OR price crosses 12h EMA50
-- Uses 12h HTF for EMA50 and 1d HTF for Camarilla levels (calculated from prior completed bars)
-- Designed for low trade frequency (19-50/year) to minimize fee drag on 4h timeframe
-- Camarilla levels provide structure in ranging markets, EMA50 filters trend direction
-- Volume confirmation reduces false breakouts in choppy conditions
+Hypothesis: 1h EMA(21) pullback strategy with 4h EMA(50) trend filter and 1d RSI(14) regime filter.
+- Long: 4h EMA50 up (EMA50 > EMA50_prev) AND 1d RSI < 60 (not overbought) AND price pulls back to 1h EMA21 from above
+- Short: 4h EMA50 down (EMA50 < EMA50_prev) AND 1d RSI > 40 (not oversold) AND price pulls back to 1h EMA21 from below
+- Entry: Long when low <= EMA21 AND close > EMA21 (bullish bounce); Short when high >= EMA21 AND close < EMA21 (bearish rejection)
+- Exit: Opposite pullback condition OR 4h EMA50 flips
+- Uses 4h for trend direction and 1d for regime to avoid counter-trend trades in extreme conditions
+- Designed for low trade frequency (15-35/year) to minimize fee drag on 1h timeframe
+- Pullback entries provide better risk-reward than breakouts in ranging markets
 """
 
 import numpy as np
@@ -22,88 +22,82 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Volume confirmation: > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1h EMA21 for pullback entries
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 12h EMA50 for trend filter (HTF = 12h)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Camarilla levels from prior 1d bar (HTF = 1d)
+    # 1d RSI14 for regime filter (avoid overbought/oversold extremes)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Camarilla levels: based on previous day's range
-    # R4 = close + 1.5*(high-low), R3 = close + 1.0*(high-low)
-    # S3 = close - 1.0*(high-low), S4 = close - 1.5*(high-low)
-    # But standard Camarilla uses: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # Using common formula: R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
-    # Actually, Camarilla R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # Let's use the standard: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    range_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.1 * range_1d / 2
-    camarilla_s3 = close_1d - 1.1 * range_1d / 2
-    
-    # Align Camarilla levels to 4h timeframe (use prior completed 1d bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 50 for EMA, 20 for volume MA
+    start_idx = max(21, 50, 14)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i])):
+        if (np.isnan(ema_21[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(rsi_14_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        # 4h EMA50 trend direction (using prior bar to avoid look-ahead)
+        ema50_up = ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]
+        ema50_down = ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]
         
-        # Camarilla breakout signals (using current close vs prior levels)
-        breakout_up = close[i] > camarilla_r3_aligned[i-1]  # Close above prior R3
-        breakout_down = close[i] < camarilla_s3_aligned[i-1]  # Close below prior S3
+        # 1d RSI regime filter
+        rsi_not_overbought = rsi_14_aligned[i] < 60
+        rsi_not_oversold = rsi_14_aligned[i] > 40
+        
+        # 1h EMA21 pullback signals
+        pullback_long = low[i] <= ema_21[i] and close[i] > ema_21[i]  # Bullish bounce off EMA21
+        pullback_short = high[i] >= ema_21[i] and close[i] < ema_21[i]  # Bearish rejection at EMA21
         
         if position == 0:
-            # Long: Camarilla R3 breakout up AND price > 12h EMA50 AND volume confirmation
-            if breakout_up and volume_confirm and close[i] > ema_50_12h_aligned[i]:
-                signals[i] = 0.25
+            # Long: 4h EMA50 up AND RSI not overbought AND bullish pullback to EMA21
+            if ema50_up and rsi_not_overbought and pullback_long:
+                signals[i] = 0.20
                 position = 1
-            # Short: Camarilla S3 breakout down AND price < 12h EMA50 AND volume confirmation
-            elif breakout_down and volume_confirm and close[i] < ema_50_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: 4h EMA50 down AND RSI not oversold AND bearish pullback to EMA21
+            elif ema50_down and rsi_not_oversold and pullback_short:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Camarilla S3 breakout down OR price < 12h EMA50 (trend flip)
-            if breakout_down or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: Bearish pullback at EMA21 OR 4h EMA50 flips down
+            if pullback_short or ema50_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Camarilla R3 breakout up OR price > 12h EMA50 (trend flip)
-            if breakout_up or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: Bullish bounce at EMA21 OR 4h EMA50 flips up
+            if pullback_long or ema50_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1h_EMA21_Pullback_4hEMA50_Trend_1dRSI_Regime"
+timeframe = "1h"
 leverage = 1.0
