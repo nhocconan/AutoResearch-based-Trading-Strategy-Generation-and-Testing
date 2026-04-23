@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-6h Williams Alligator + Elder Ray + Weekly Pivot Direction
-- Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs on median price
-  Trend up: Lips > Teeth > Jaw; Trend down: Lips < Teeth < Jaw
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-  Long when Bull Power > 0 and rising; Short when Bear Power < 0 and falling
-- Weekly Pivot: PP = (Prior week High + Low + Close)/3
-  Bias: Long bias if price > PP, Short bias if price < PP
-- Entry: Alligator trend + Elder Ray agreement + Weekly pivot bias
-- Exit: Alligator trend reversal OR Elder Ray divergence
-- Uses discrete sizing ±0.25 to minimize fee churn
-- Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
+Hypothesis: 12h Williams Alligator breakout with 1w EMA50 trend filter and volume confirmation.
+- Williams Alligator: Jaw (13-period smoothed median), Teeth (8-period smoothed median), Lips (5-period smoothed median)
+- Long: Lips > Teeth > Jaw (bullish alignment) + Close > Lips + volume > 1.5x 20-period avg + price > 1w EMA50
+- Short: Lips < Teeth < Jaw (bearish alignment) + Close < Lips + volume > 1.5x 20-period avg + price < 1w EMA50
+- Exit: Opposite Alligator alignment or EMA50 trend flip
+- Uses Alligator for trend structure, volume for conviction, 1w EMA50 for HTF trend filter
+- Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+- Discrete position sizing: ±0.25 to minimize fee churn
+- Works in bull markets (trend alignment with price above/below Alligator) and bear markets (trend filtered by 1w EMA50)
 """
 
 import numpy as np
@@ -22,93 +20,88 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Median price for Alligator
-    median_price = (high + low) / 2.0
-    
-    # Williams Alligator SMAs
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # 13, 8 shift
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # 8, 5 shift
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values     # 5, 3 shift
-    
-    # Elder Ray: Bull/Bear Power vs EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Volume confirmation: > 1.5x 20-period average
+    # Volume confirmation: > 1.5x 20-period average (tighter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * vol_ma
     
-    # Get weekly HTF data for pivot calculation
+    # Calculate 1w EMA50 for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Weekly OHLC for pivot points
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate Williams Alligator components (using median price)
+    median_price = (high + low) / 2
     
-    # Weekly Pivot Point: PP = (H + L + C)/3
-    weekly_pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Jaw: 13-period smoothed median (8 periods offset)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.rolling(window=8, min_periods=8).mean().shift(8)
+    jaw_values = jaw.values
     
-    # Align weekly pivot to 6h timeframe (using prior week close for look-ahead safety)
-    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    # Teeth: 8-period smoothed median (5 periods offset)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.rolling(window=5, min_periods=5).mean().shift(5)
+    teeth_values = teeth.values
+    
+    # Lips: 5-period smoothed median (3 periods offset)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
+    lips = lips.rolling(window=3, min_periods=3).mean().shift(3)
+    lips_values = lips.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 20)  # Need 13 for EMA13/Alligator, 20 for volume MA
+    start_idx = max(50, 20, 13+8, 8+5, 5+3)  # Need 50 for EMA, 20 for volume, Alligator offsets
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(weekly_pp_aligned[i])):
+        if (np.isnan(vol_ma[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(jaw_values[i]) or
+            np.isnan(teeth_values[i]) or
+            np.isnan(lips_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator trend detection
-        alligator_up = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        alligator_down = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Elder Ray strength and momentum
-        bull_rising = bull_power[i] > bull_power[i-1] if i > 0 else False
-        bear_falling = bear_power[i] < bear_power[i-1] if i > 0 else False
+        # Alligator alignment
+        bullish_alignment = lips_values[i] > teeth_values[i] and teeth_values[i] > jaw_values[i]
+        bearish_alignment = lips_values[i] < teeth_values[i] and teeth_values[i] < jaw_values[i]
         
         if position == 0:
-            # Long: Alligator up + Bull Power > 0 and rising + price > Weekly PP
-            if (alligator_up and 
-                bull_power[i] > 0 and bull_rising and 
-                close[i] > weekly_pp_aligned[i] and
-                volume_confirm[i]):
+            # Long: Bullish alignment + Close > Lips + volume confirmation + price > 1w EMA50
+            if (bullish_alignment and 
+                close[i] > lips_values[i] and 
+                volume_confirm and 
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator down + Bear Power < 0 and falling + price < Weekly PP
-            elif (alligator_down and 
-                  bear_power[i] < 0 and bear_falling and 
-                  close[i] < weekly_pp_aligned[i] and
-                  volume_confirm[i]):
+            # Short: Bearish alignment + Close < Lips + volume confirmation + price < 1w EMA50
+            elif (bearish_alignment and 
+                  close[i] < lips_values[i] and 
+                  volume_confirm and 
+                  close[i] < ema_50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Alligator down OR Bear Power >= 0 (loss of bullish momentum)
-            if alligator_down or bear_power[i] >= 0:
+            # Long exit: Bearish alignment OR price < 1w EMA50 (trend flip)
+            if bearish_alignment or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator up OR Bull Power <= 0 (loss of bearish momentum)
-            if alligator_up or bull_power[i] <= 0:
+            # Short exit: Bullish alignment OR price > 1w EMA50 (trend flip)
+            if bullish_alignment or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_ElderRay_WeeklyPivot"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMA50_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
