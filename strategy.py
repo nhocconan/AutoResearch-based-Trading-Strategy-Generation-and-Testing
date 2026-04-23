@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume confirmation.
+Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume spike.
 Long when price breaks above R4 (1d Camarilla) AND price > 1d EMA34 (uptrend) AND volume > 2.0x average.
 Short when price breaks below S4 (1d Camarilla) AND price < 1d EMA34 (downtrend) AND volume > 2.0x average.
 Exit when price reverts to Camarilla pivot point (PP) or trend reverses (price crosses 1d EMA34).
-Uses tighter R4/S4 levels to reduce false breakouts and overtrading. Target: 20-40 trades/year.
-Includes ATR-based stoploss for risk management. Works in bull/bear via trend filter + volume confirmation.
+Uses tighter R4/S4 levels (vs R3/S3) to reduce false breakouts and target 75-200 trades over 4 years.
+1d EMA34 provides stable trend filter less prone to whipsaw than shorter EMAs.
+Volume confirmation at 2.0x average ensures high-conviction breakouts.
+Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
 """
 
 import numpy as np
@@ -22,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivot levels and EMA34 - ONCE before loop
+    # Load 1d data for Camarilla pivot levels and EMA34 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -49,23 +51,13 @@ def generate_signals(prices):
     # Volume average (20-period) on 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for stoploss (14-period)
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
-    atr[0] = np.nan  # First value undefined
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_pp_aligned[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,30 +70,27 @@ def generate_signals(prices):
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         price = close[i]
-        atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above R4 AND price > 1d EMA34 (uptrend) AND volume > 2.0x average
+            # Long: price breaks above R4 AND price > 1d EMA34 (uptrend) AND volume spike
             if (price > r4_val and price > ema34_val and vol_current > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-                entry_price = price
-            # Short: price breaks below S4 AND price < 1d EMA34 (downtrend) AND volume > 2.0x average
+            # Short: price breaks below S4 AND price < 1d EMA34 (downtrend) AND volume spike
             elif (price < s4_val and price < ema34_val and vol_current > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
-                entry_price = price
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price reverts to pivot point OR price breaks below 1d EMA34 (trend reversal) OR stoploss hit
-                if price <= pp_val or price < ema34_val or price < entry_price - 2.0 * atr_val:
+                # Exit long: price reverts to pivot point OR price breaks below 1d EMA34 (trend reversal)
+                if price <= pp_val or price < ema34_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price reverts to pivot point OR price breaks above 1d EMA34 (trend reversal) OR stoploss hit
-                if price >= pp_val or price > ema34_val or price > entry_price + 2.0 * atr_val:
+                # Exit short: price reverts to pivot point OR price breaks above 1d EMA34 (trend reversal)
+                if price >= pp_val or price > ema34_val:
                     exit_signal = True
             
             if exit_signal:
@@ -112,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R4_S4_Breakout_1dEMA34_Volume_ATR"
+name = "4H_Camarilla_R4_S4_Breakout_1dEMA34_Volume"
 timeframe = "4h"
 leverage = 1.0
