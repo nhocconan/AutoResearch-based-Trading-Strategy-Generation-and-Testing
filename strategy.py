@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R3 AND 1w EMA50 rising AND volume > 2.0x 24-period MA.
-Short when price breaks below Camarilla S3 AND 1w EMA50 falling AND volume > 2.0x 24-period MA.
-Exit when price touches opposite Camarilla level (S3 for long, R3 for short) or 1w EMA50 reverses.
-Uses 1w HTF for major trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
-Camarilla levels provide precise intraday structure that works well on 12h timeframe.
-Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+Hypothesis: 4h Williams %R reversal with 1d Elder Ray Power filter and volume spike.
+Long when Williams %R crosses above -80 (oversold) AND 1d Elder Bull Power > 0 AND volume > 2.0x 20-period MA.
+Short when Williams %R crosses below -20 (overbought) AND 1d Elder Bear Power < 0 AND volume > 2.0x 20-period MA.
+Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) or Elder Power reverses.
+Uses 1d HTF for Elder Power trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
+Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Williams %R provides mean reversal signals, Elder Power filters major trend, volume confirms reversal strength.
+Works in both bull and bear markets by following the higher timeframe trend via Elder Power.
 """
 
 import numpy as np
@@ -23,78 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla levels (based on previous bar's OHLC)
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
-    camarilla_r4 = np.full(n, np.nan)  # for stop loss reference
-    camarilla_s4 = np.full(n, np.nan)  # for stop loss reference
+    # Calculate 4h Williams %R (14-period)
+    williams_r = np.full(n, np.nan)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    for i in range(1, n):
-        # Use previous bar's OHLC to avoid look-ahead
-        prev_close = close[i-1]
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        rang = prev_high - prev_low
-        
-        camarilla_r3[i] = prev_close + rang * 1.1/2.0
-        camarilla_s3[i] = prev_close - rang * 1.1/2.0
-        camarilla_r4[i] = prev_close + rang * 1.1
-        camarilla_s4[i] = prev_close - rang * 1.1
+    for i in range(13, n):  # 14-period lookback
+        highest_high[i] = np.max(high[i-13:i+1])
+        lowest_low[i] = np.min(low[i-13:i+1])
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
     
-    # Calculate 1w EMA50 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d Elder Ray Power (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h volume MA (24-period) for spike filter
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate 13-period EMA for Elder Ray
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Bull Power = High - EMA13
+    # Elder Bear Power = Low - EMA13
+    bull_power_1d = high_1d - ema_13_1d
+    bear_power_1d = low_1d - ema_13_1d
+    
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Calculate 4h volume MA (20-period) for spike filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(1, 50, 24)  # Camarilla (needs 1), EMA50, volume MA
+    start_idx = max(13, 13, 20)  # Williams %R, Elder Ray, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r3 = camarilla_r3[i]
-        s3 = camarilla_s3[i]
-        r4 = camarilla_r4[i]
-        s4 = camarilla_s4[i]
-        ema_val = ema_50_aligned[i]
-        vol_ma_val = vol_ma_24[i]
+        wr = williams_r[i]
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
+        vol_ma_val = vol_ma_20[i]
         
-        # Calculate EMA50 slope for trend direction (rising/falling)
+        # Williams %R crossover signals
+        wr_cross_up_80 = False
+        wr_cross_down_20 = False
+        wr_cross_up_50 = False
+        wr_cross_down_50 = False
+        
         if i >= start_idx + 1:
-            ema_prev = ema_50_aligned[i-1]
-            ema_rising = ema_val > ema_prev
-            ema_falling = ema_val < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
+            wr_prev = williams_r[i-1]
+            wr_cross_up_80 = wr_prev <= -80 and wr > -80
+            wr_cross_down_20 = wr_prev >= -20 and wr < -20
+            wr_cross_up_50 = wr_prev <= -50 and wr > -50
+            wr_cross_down_50 = wr_prev >= -50 and wr < -50
         
-        # Volume filter: 12h volume > 2.0x 24-period MA (adaptive to volatility)
+        # Volume filter: 4h volume > 2.0x 20-period MA (adaptive to volatility)
         vol_filter = volume[i] > 2.0 * vol_ma_val
         
         if position == 0:
-            # Long: Break above Camarilla R3 AND EMA50 rising AND volume filter
-            if price > r3 and ema_rising and vol_filter:
+            # Long: Williams %R crosses above -80 AND Bull Power > 0 AND volume filter
+            if wr_cross_up_80 and bull_power > 0 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S3 AND EMA50 falling AND volume filter
-            elif price < s3 and ema_falling and vol_filter:
+            # Short: Williams %R crosses below -20 AND Bear Power < 0 AND volume filter
+            elif wr_cross_down_20 and bear_power < 0 and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -102,12 +109,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches Camarilla S3 (opposite) OR EMA50 starts falling
-                if price < s3 or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
+                # Long exit: Williams %R crosses above -50 OR Bull Power becomes <= 0
+                if wr_cross_up_50 or bull_power <= 0:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches Camarilla R3 (opposite) OR EMA50 starts rising
-                if price > r3 or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
+                # Short exit: Williams %R crosses below -50 OR Bear Power becomes >= 0
+                if wr_cross_down_50 or bear_power >= 0:
                     exit_signal = True
             
             if exit_signal:
@@ -118,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4H_WilliamsR_Reversal_1dElderRay_Power_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
