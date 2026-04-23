@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Elder Ray Index (Bull/Bear Power) with 1-day ADX regime filter and volume confirmation.
-Long when Bull Power > 0, Bear Power < 0, ADX > 25 (trending), and volume > 1.5x average.
-Short when Bull Power < 0, Bear Power > 0, ADX > 25 (trending), and volume > 1.5x average.
-Exit when trend weakens (ADX < 20) or Elder Ray signals reverse.
-Designed for low trade frequency (~15-30/year) to capture strong trends while minimizing whipsaws.
+Hypothesis: 6-hour Donchian(20) breakout with 1-day ADX trend filter and volume confirmation.
+Long when price breaks above Donchian upper band, ADX > 25 (trending), and volume > 1.5x average.
+Short when price breaks below Donchian lower band, ADX > 25 (trending), and volume > 1.5x average.
+Exit when price returns to Donchian middle (mean of 20-period high/low) or ADX < 20.
+Designed for moderate trade frequency (~20-40/year) to capture strong trends while minimizing whipsaws.
 Works in both bull and bear markets by requiring strong trend confirmation (ADX > 25).
 """
 
@@ -18,20 +18,19 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for EMA13 and ADX - ONCE before loop
+    # Load 1-day data for ADX - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day EMA13 for Elder Ray
-    close_1d = df_1d['close'].values
-    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
     # Calculate 1-day ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
     tr1 = high_1d - low_1d
@@ -62,8 +61,17 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
     adx_values = adx.values
     
+    # Calculate Donchian channels (20-period) on 6h timeframe
+    # Upper band: highest high of last 20 periods
+    # Lower band: lowest low of last 20 periods
+    # Middle band: average of upper and lower
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
+    
     # Align HTF indicators to lower timeframe
-    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
     
     # Volume average (20-period) on lower timeframe
@@ -72,33 +80,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(20, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(ema13_aligned[i]) or np.isnan(adx_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema13_val = ema13_aligned[i]
         adx_val = adx_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        middle = donchian_middle[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
-        # Calculate Elder Ray components
-        bull_power = close[i] - ema13_val
-        bear_power = ema13_val - close[i]
-        
         if position == 0:
-            # Long: Bull Power > 0, Bear Power < 0, strong trend (ADX > 25), volume confirmation
-            if (bull_power > 0 and bear_power < 0 and
-                adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+            # Long: price breaks above upper band, strong trend (ADX > 25), volume confirmation
+            if (close[i] > upper and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull Power < 0, Bear Power > 0, strong trend (ADX > 25), volume confirmation
-            elif (bull_power < 0 and bear_power > 0 and
-                  adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+            # Short: price breaks below lower band, strong trend (ADX > 25), volume confirmation
+            elif (close[i] < lower and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -106,12 +111,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Elder Ray turns bearish OR trend weakening (ADX < 20)
-                if (bull_power <= 0 or bear_power >= 0) or adx_val < 20:
+                # Exit long: price returns to middle OR trend weakening (ADX < 20)
+                if close[i] <= middle or adx_val < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Elder Ray turns bullish OR trend weakening (ADX < 20)
-                if (bull_power >= 0 or bear_power <= 0) or adx_val < 20:
+                # Exit short: price returns to middle OR trend weakening (ADX < 20)
+                if close[i] >= middle or adx_val < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -122,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ElderRay_1dADX_Volume_Trend"
+name = "6H_Donchian20_1dADX_Volume_Trend"
 timeframe = "6h"
 leverage = 1.0
