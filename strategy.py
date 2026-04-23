@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
-- Uses 6h Donchian channel (20-bar) for breakout detection
-- Weekly EMA50 defines higher timeframe trend: only trade breakouts in trend direction
-- Volume confirmation (> 2.0x 20-period average) filters false breakouts
-- Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years)
-- Weekly trend filter reduces whipsaws in sideways markets
-- Works in both bull and bear markets by trading with the weekly trend
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+- Uses 12h Donchian channel breakouts for precise entry points
+- 1d EMA50 defines higher timeframe trend: only trade breakouts in trend direction
+- Volume confirmation (> 1.6x 20-period average) filters false breakouts
+- Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+- Works in both bull and bear markets by trading with the 1d trend
+- Donchian breakouts capture momentum with proven edge in crypto markets
 """
 
 import numpy as np
@@ -23,20 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Donchian channel (20-bar)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 12h Donchian channel (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Volume confirmation: > 2.0x 20-period average
+    # Donchian upper/lower bands: highest high/lowest low of last 20 periods
+    donchian_upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper_12h)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower_12h)
+    
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: > 1.6x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -47,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,15 +67,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Donchian upper with weekly uptrend and volume
-            long_breakout = (close[i] > high_20[i] and 
-                           close[i] > ema_50_1w_aligned[i] and
-                           volume[i] > 2.0 * vol_ma[i])
+            # Long conditions: price breaks above Donchian upper with 1d uptrend and volume
+            long_breakout = (close[i] > donchian_upper_aligned[i] and 
+                           close[i] > ema_50_1d_aligned[i] and
+                           volume[i] > 1.6 * vol_ma[i])
             
-            # Short conditions: price breaks below Donchian lower with weekly downtrend and volume
-            short_breakout = (close[i] < low_20[i] and 
-                            close[i] < ema_50_1w_aligned[i] and
-                            volume[i] > 2.0 * vol_ma[i])
+            # Short conditions: price breaks below Donchian lower with 1d downtrend and volume
+            short_breakout = (close[i] < donchian_lower_aligned[i] and 
+                            close[i] < ema_50_1d_aligned[i] and
+                            volume[i] > 1.6 * vol_ma[i])
             
             if long_breakout:
                 signals[i] = 0.25
@@ -77,14 +88,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below Donchian lower or weekly trend turns bearish
-                if (close[i] < low_20[i] or 
-                    close[i] < ema_50_1w_aligned[i]):
+                # Exit long: price breaks below Donchian lower or 1d trend turns bearish
+                if (close[i] < donchian_lower_aligned[i] or 
+                    close[i] < ema_50_1d_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: price breaks above Donchian upper or weekly trend turns bullish
-                if (close[i] > high_20[i] or 
-                    close[i] > ema_50_1w_aligned[i]):
+                # Exit short: price breaks above Donchian upper or 1d trend turns bullish
+                if (close[i] > donchian_upper_aligned[i] or 
+                    close[i] > ema_50_1d_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -95,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA50_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
