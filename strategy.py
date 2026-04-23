@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
-Long when price breaks above Kumo (cloud) AND Tenkan > Kijun AND 1d close > 1d EMA50 AND volume > 1.5x 20-period MA.
-Short when price breaks below Kumo (cloud) AND Tenkan < Kijun AND 1d close < 1d EMA50 AND volume > 1.5x 20-period MA.
-Exit when price re-enters Kumo or Tenkan/Kijun cross reverses.
-Uses 1d HTF for trend filter to avoid counter-trend trades, Ichimoku for dynamic support/resistance.
-Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-Ichimoku works in both bull and bear markets by adapting to volatility and trend strength.
+Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume spike confirmation.
+Long when price breaks above Donchian upper AND 1d ADX > 25 (trending) AND 1h volume > 1.8x 20-period MA.
+Short when price breaks below Donchian lower AND 1d ADX > 25 (trending) AND 1h volume > 1.8x 20-period MA.
+Exit when price touches opposite Donchian level or 1d ADX < 20 (range regime).
+Uses 1d HTF for regime filter to avoid whipsaws in ranging markets, volume spike for momentum confirmation.
+Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Donchian provides clear structure, ADX regime filter improves bear market performance.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,102 +23,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Calculate 4h Donchian channels (20-period)
+    donchian_upper = np.full(n, np.nan)
+    donchian_lower = np.full(n, np.nan)
+    donchian_middle = np.full(n, np.nan)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    for i in range(20, n):  # Need 20 periods for calculation
+        donchian_upper[i] = np.max(high[i-20:i])
+        donchian_lower[i] = np.min(low[i-20:i])
+        donchian_middle[i] = (donchian_upper[i] + donchian_lower[i]) / 2
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Kumo (Cloud) boundaries: Senkou Span A and B shifted 26 periods ahead
-    # For look-ahead safety, we use the cloud values from 26 periods ago
-    senkou_a_lag26 = np.roll(senkou_a, 26)
-    senkou_b_lag26 = np.roll(senkou_b, 26)
-    senkou_a_lag26[:26] = np.nan
-    senkou_b_lag26[:26] = np.nan
-    
-    # Kumo top and bottom
-    kumo_top = np.maximum(senkou_a_lag26, senkou_b_lag26)
-    kumo_bottom = np.minimum(senkou_a_lag26, senkou_b_lag26)
-    
-    # Calculate 1d EMA50 for trend filter (HTF)
+    # Calculate 1d ADX for regime filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:  # Need sufficient data for ADX calculation
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate volume MA (20-period) for spike filter
+    # Calculate True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    
+    # Calculate Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smooth TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+            else:
+                result[i] = np.nan
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # Calculate DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 1h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(52, 26, 50, 20)  # Ichimoku needs 52, EMA50 needs 50, volume MA needs 20
+    start_idx = max(20, 30, 20)  # Donchian (20), ADX (30), volume MA (20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        tenkan_val = tenkan[i]
-        kijun_val = kijun[i]
-        kumo_top_val = kumo_top[i]
-        kumo_bottom_val = kumo_bottom[i]
-        ema_val = ema_50_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        adx_val = adx_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
-        # Calculate Tenkan/Kijun cross for momentum
-        if i >= start_idx + 1:
-            tenkan_prev = tenkan[i-1]
-            kijun_prev = kijun[i-1]
-            tenkan_above_kijun = tenkan_val > kijun_val
-            tenkan_below_kijun = tenkan_val < kijun_val
-            tenkan_crossing_up = tenkan_prev <= kijun_prev and tenkan_val > kijun_val
-            tenkan_crossing_down = tenkan_prev >= kijun_prev and tenkan_val < kijun_val
-        else:
-            tenkan_above_kijun = tenkan_val > kijun_val
-            tenkan_below_kijun = tenkan_val < kijun_val
-            tenkan_crossing_up = False
-            tenkan_crossing_down = False
+        # Volume filter: 1h volume > 1.8x 20-period MA
+        vol_filter = volume[i] > 1.8 * vol_ma_val
         
-        # Volume filter: 6h volume > 1.5x 20-period MA
-        vol_filter = volume[i] > 1.5 * vol_ma_val
+        # Regime filter: 1d ADX > 25 indicates trending market
+        trending_regime = adx_val > 25
+        ranging_regime = adx_val < 20  # Exit when ranging
         
         if position == 0:
-            # Long: Price above Kumo AND Tenkan > Kijun AND 1d EMA50 rising AND volume filter
-            if (price > kumo_top_val and 
-                tenkan_above_kijun and 
-                ema_val > ema_50_aligned[max(0, i-1)] and 
-                vol_filter):
+            # Long: Break above Donchian upper AND trending regime AND volume filter
+            if price > upper and trending_regime and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below Kumo AND Tenkan < Kijun AND 1d EMA50 falling AND volume filter
-            elif (price < kumo_bottom_val and 
-                  tenkan_below_kijun and 
-                  ema_val < ema_50_aligned[max(0, i-1)] and 
-                  vol_filter):
+            # Short: Break below Donchian lower AND trending regime AND volume filter
+            elif price < lower and trending_regime and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -126,12 +132,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price re-enters Kumo OR Tenkan crosses below Kijun
-                if (price < kumo_top_val or tenkan_crossing_down):
+                # Long exit: price touches Donchian lower OR ADX drops below 20 (ranging)
+                if price < lower or ranging_regime:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price re-enters Kumo OR Tenkan crosses above Kijun
-                if (price > kumo_bottom_val or tenkan_crossing_up):
+                # Short exit: price touches Donchian upper OR ADX drops below 20 (ranging)
+                if price > upper or ranging_regime:
                     exit_signal = True
             
             if exit_signal:
@@ -142,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Ichimoku_Cloud_Breakout_1dEMA50_Trend_VolumeFilter"
-timeframe = "6h"
+name = "4H_Donchian20_Breakout_1dADX_Regime_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
