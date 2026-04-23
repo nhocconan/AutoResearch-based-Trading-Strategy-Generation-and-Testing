@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Index with 1d trend filter and volume confirmation.
-Long when Elder Bull Power > 0 AND 1d close > 1d EMA34 AND 6h volume > 1.5x 20-period average volume.
-Short when Elder Bear Power < 0 AND 1d close < 1d EMA34 AND 6h volume > 1.5x 20-period average volume.
-Exit when Elder Bull/Bear Power crosses zero OR ATR trailing stop (2.5*ATR from extreme).
-Uses discrete position sizing (0.25) targeting ~12-30 trades/year on 6h timeframe.
-Elder Ray measures bull/bear power via EMA13, effective in both trending and ranging markets.
+Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume confirmation.
+Long when Williams %R < -80 (oversold) AND 1d close > 1d EMA34 AND 12h volume > 1.8x 20-period average volume.
+Short when Williams %R > -20 (overbought) AND 1d close < 1d EMA34 AND 12h volume > 1.8x 20-period average volume.
+Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) OR ATR trailing stop (2.0*ATR from extreme).
+Williams %R identifies overextended moves; mean reversion works in both trending and ranging markets when filtered by 1d trend and volume spikes.
+Target: 12-30 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -31,15 +31,15 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Elder Ray Index: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Williams %R(14) = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
     
-    # 6h volume average (20-period) for spike filter
+    # 12h volume average (20-period) for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for 6h trailing stop calculation
+    # ATR(14) for 12h trailing stop calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -55,12 +55,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 13, 34)  # vol_ma20, ema13, ema34_1d
+    start_idx = max(20, 14, 34)  # vol_ma20, williams_r14, ema34_1d
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(williams_r[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,17 +70,16 @@ def generate_signals(prices):
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
         ema_val = ema_34_1d_aligned[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
+        wr = williams_r[i]
         
         if position == 0:
-            # Long: Bull Power > 0 AND bullish trend (1d close > EMA34) AND volume spike
-            if bull > 0 and close[i] > ema_val and volume[i] > 1.5 * vol_ma_val:
+            # Long: Williams %R < -80 (oversold) AND bullish trend (1d close > EMA34) AND volume spike
+            if wr < -80 and close[i] > ema_val and volume[i] > 1.8 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Bear Power < 0 AND bearish trend (1d close < EMA34) AND volume spike
-            elif bear < 0 and close[i] < ema_val and volume[i] > 1.5 * vol_ma_val:
+            # Short: Williams %R > -20 (overbought) AND bearish trend (1d close < EMA34) AND volume spike
+            elif wr > -20 and close[i] < ema_val and volume[i] > 1.8 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -94,16 +93,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Elder Power crosses zero
-            if position == 1 and bull <= 0:
+            # Primary exit: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+            if position == 1 and wr > -50:
                 exit_signal = True
-            elif position == -1 and bear >= 0:
+            elif position == -1 and wr < -50:
                 exit_signal = True
             
-            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
+            # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.0 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
+            elif position == -1 and price > lowest_since_entry + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -116,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ElderRay_1dEMA34_Trend_VolumeSpike_ZeroCross_ATRTrailingStop"
-timeframe = "6h"
+name = "12H_WilliamsR_MeanReversion_1dEMA34_Trend_VolumeSpike_WR50Exit_ATRTrailingStop"
+timeframe = "12h"
 leverage = 1.0
