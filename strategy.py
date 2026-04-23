@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R reversal with 1d Elder Ray power regime filter and volume confirmation.
-Long when Williams %R < -80 (oversold) AND Elder Bull Power > 0 (bullish regime) AND 6h volume > 1.5x 20-period MA.
-Short when Williams %R > -20 (overbought) AND Elder Bear Power < 0 (bearish regime) AND 6h volume > 1.5x 20-period MA.
-Exit when Williams %R crosses above -50 (for long) or below -50 (for short) OR regime changes.
-Uses 1d HTF for Elder Ray regime to avoid counter-trend trades, volume spike for momentum confirmation.
-Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-Williams %R captures mean reversals in bear markets, Elder Ray filters regime alignment.
+Hypothesis: 12h Williams %R reversal with 1d Elder Ray power filter and volume spike confirmation.
+Long when Williams %R(14) crosses above -80 (oversold bounce) AND 1d Elder Ray power > 0 (bullish power) AND 12h volume > 1.8x 20-period MA.
+Short when Williams %R(14) crosses below -20 (overbought rejection) AND 1d Elder Ray power < 0 (bearish power) AND 12h volume > 1.8x 20-period MA.
+Exit when Williams %R crosses above -20 (for long) or below -80 (for short) or Elder Ray power reverses.
+Uses 1d HTF for power filter to align with major trend, volume spike for momentum confirmation.
+Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+Williams %R captures mean reversions in bear markets, Elder Ray filters trend alignment.
 """
 
 import numpy as np
@@ -23,66 +23,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R (14-period) on 6h
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Williams %R(14) - momentum oscillator
     williams_r = np.full(n, np.nan)
-    for i in range(n):
-        if highest_high[i] == lowest_low[i]:
-            williams_r[i] = -50.0  # avoid division by zero
+    for i in range(13, n):  # min_periods=14
+        highest_high = np.max(high[i-13:i+1])
+        lowest_low = np.min(low[i-13:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
         else:
-            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+            williams_r[i] = -50  # neutral when no range
     
-    # Calculate 1d Elder Ray Power (HTF)
+    # Calculate 1d Elder Ray Power (EMA13 close - EMA13 high) for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:  # EMA13 for Elder Ray
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    high_1d = df_1d['high'].values
+    ema13_close = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_high = pd.Series(high_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    elder_power = ema13_close - ema13_high  # positive = bullish power, negative = bearish power
+    elder_power_aligned = align_htf_to_ltf(prices, df_1d, elder_power)
     
-    bull_power = high_1d - ema_13_1d  # Bull Power = High - EMA13
-    bear_power = low_1d - ema_13_1d   # Bear Power = Low - EMA13
-    
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Calculate 6h volume MA (20-period) for spike filter
+    # Calculate 12h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 13, 20)  # Williams %R, Elder Ray EMA13, volume MA
+    start_idx = max(13, 13, 20)  # Williams %R, Elder Ray, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(elder_power_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        wr = williams_r[i]
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
-        vol_ma_val = vol_ma_20[i]
+        # Williams %R crossover signals
+        wr_cross_above_80 = williams_r[i] > -80 and williams_r[i-1] <= -80
+        wr_cross_below_20 = williams_r[i] < -20 and williams_r[i-1] >= -20
         
-        # Volume filter: 6h volume > 1.5x 20-period MA
-        vol_filter = volume[i] > 1.5 * vol_ma_val
+        # Elder Ray power direction
+        power_bullish = elder_power_aligned[i] > 0
+        power_bearish = elder_power_aligned[i] < 0
+        
+        # Volume filter: 12h volume > 1.8x 20-period MA
+        vol_filter = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) AND Bull Power > 0 (bullish regime) AND volume filter
-            if wr < -80.0 and bull_power_val > 0 and vol_filter:
+            # Long: Williams %R crosses above -80 AND bullish power AND volume filter
+            if wr_cross_above_80 and power_bullish and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) AND Bear Power < 0 (bearish regime) AND volume filter
-            elif wr > -20.0 and bear_power_val < 0 and vol_filter:
+            # Short: Williams %R crosses below -20 AND bearish power AND volume filter
+            elif wr_cross_below_20 and power_bearish and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -90,12 +88,16 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: Williams %R crosses above -50 OR Bull Power <= 0 (regime change)
-                if wr > -50.0 or bull_power_val <= 0:
+                # Long exit: Williams %R crosses above -20 (overbought) OR power turns bearish
+                if williams_r[i] > -20 and williams_r[i-1] <= -20:
+                    exit_signal = True
+                elif elder_power_aligned[i] < 0:  # power turned bearish
                     exit_signal = True
             elif position == -1:
-                # Short exit: Williams %R crosses below -50 OR Bear Power >= 0 (regime change)
-                if wr < -50.0 or bear_power_val >= 0:
+                # Short exit: Williams %R crosses below -80 (oversold) OR power turns bullish
+                if williams_r[i] < -80 and williams_r[i-1] >= -80:
+                    exit_signal = True
+                elif elder_power_aligned[i] > 0:  # power turned bullish
                     exit_signal = True
             
             if exit_signal:
@@ -106,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsR_Reversal_1dElderRay_Regime_VolumeFilter"
-timeframe = "6h"
+name = "12H_WilliamsR_Reversal_1dElderRay_Power_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
