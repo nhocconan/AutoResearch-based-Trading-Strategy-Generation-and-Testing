@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Volume-Weighted Average Price (VWAP) deviation with 1w trend filter.
-Long when price > 6h VWAP AND 1w EMA50 rising AND volume > 1.5x average.
-Short when price < 6h VWAP AND 1w EMA50 falling AND volume > 1.5x average.
-Exit when price crosses VWAP or volume drops below average.
-VWAP acts as dynamic support/resistance. Volume confirmation ensures conviction.
-1w EMA50 filter ensures trading with weekly trend, reducing whipsaws in ranging markets.
-Designed for 6h timeframe targeting 50-150 total trades over 4 years with low frequency.
-Works in both bull and bear markets by only taking trades aligned with weekly trend.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+Long when price breaks above 20-period Donchian high AND price > 1d EMA50 AND volume > 1.5x average.
+Short when price breaks below 20-period Donchian low AND price < 1d EMA50 AND volume > 1.5x average.
+Exit when price returns to Donchian midpoint (10-period average of high/low) OR volume drops below average.
+Donchian channels provide clear breakout levels, 1d EMA50 ensures higher timeframe trend alignment,
+volume confirmation filters weak breakouts. Designed for 12h timeframe targeting 50-150 total trades over 4 years.
+Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
 """
 
 import numpy as np
@@ -24,24 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for EMA50 trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data for EMA50 trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1w data
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA50 on 1d data
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 6h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1d EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate VWAP on 6h data (typical price * volume)
-    typical_price = (high + low + close) / 3.0
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    tp_vol_sum = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
-    vwap = tp_vol_sum / vol_sum
+    # Calculate Donchian channels (20-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,35 +49,25 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_1w_aligned[i]
-        vwap_val = vwap[i]
-        vol_ma_val = vol_ma[i]
+        ema50_val = ema50_1d_aligned[i]
         price = close[i]
         vol_current = volume[i]
-        
-        # Calculate 1w EMA50 slope (rising/falling)
-        if i >= 101:
-            ema50_prev = ema50_1w_aligned[i-1]
-            ema50_rising = ema50_val > ema50_prev
-            ema50_falling = ema50_val < ema50_prev
-        else:
-            ema50_rising = False
-            ema50_falling = False
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: Price > VWAP AND 1w EMA50 rising AND volume spike
-            if (price > vwap_val and ema50_rising and vol_current > 1.5 * vol_ma_val):
+            # Long: Donchian breakout above upper band AND price > 1d EMA50 AND volume spike
+            if (price > highest_high[i] and price > ema50_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < VWAP AND 1w EMA50 falling AND volume spike
-            elif (price < vwap_val and ema50_falling and vol_current > 1.5 * vol_ma_val):
+            # Short: Donchian breakdown below lower band AND price < 1d EMA50 AND volume spike
+            elif (price < lowest_low[i] and price < ema50_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -87,12 +75,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses below VWAP OR volume drops below average
-                if (price < vwap_val or vol_current < vol_ma_val):
+                # Exit long: price returns to Donchian midpoint OR volume drops below average
+                if (price <= donchian_mid[i] or vol_current < vol_ma_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price crosses above VWAP OR volume drops below average
-                if (price > vwap_val or vol_current < vol_ma_val):
+                # Exit short: price returns to Donchian midpoint OR volume drops below average
+                if (price >= donchian_mid[i] or vol_current < vol_ma_val):
                     exit_signal = True
             
             if exit_signal:
@@ -103,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_VWAP_1wEMA50_Volume"
-timeframe = "6h"
+name = "12H_Donchian20_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
