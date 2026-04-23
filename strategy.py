@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Bull/Bear Power with 1d ADX regime filter and volume confirmation.
-Long when Bull Power > 0 AND ADX > 25 AND volume > 1.5x 20-period MA.
-Short when Bear Power < 0 AND ADX > 25 AND volume > 1.5x 20-period MA.
-Exit when Bull/Bear Power crosses zero OR ADX < 20 (regime shift to ranging).
-Uses 1d HTF for ADX regime filter to avoid whipsaws in low trend strength environments.
-Elder Ray identifies bull/bear strength relative to EMA13, providing early momentum signals.
-Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-Works in both bull (strong Bear Power reversals) and bear (strong Bull Power reversals) markets.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price > upper Donchian(20) AND 1d EMA34 rising AND volume > 1.5x 20-period MA.
+Short when price < lower Donchian(20) AND 1d EMA34 falling AND volume > 1.5x 20-period MA.
+Exit on opposite Donchian touch or EMA34 reversal.
+Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
+Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -24,99 +22,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA13 for Elder Ray (HTF)
+    # Calculate Donchian channels (20-period) on 4h
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power_1d = high_1d - ema_13_1d
-    bear_power_1d = low_1d - ema_13_1d
-    
-    # Calculate 1d ADX for regime filter (HTF)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        if len(data) < period:
-            return np.full(len(data), np.nan)
-        result = np.full(len(data), np.nan)
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Wilder smoothing: today = (yesterday * (period-1) + today) / period
-        alpha = 1 / period
-        for i in range(period, len(data)):
-            if not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-            else:
-                result[i] = result[i-1]
-        return result
-    
-    tr_smoothed = wilders_smoothing(tr, 14)
-    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
-    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed != 0, (dm_plus_smoothed / tr_smoothed) * 100, 0)
-    di_minus = np.where(tr_smoothed != 0, (dm_minus_smoothed / tr_smoothed) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx_1d = wilders_smoothing(dx, 14)
-    
-    # Align HTF indicators to 6h timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 6h volume MA (20-period) for spike filter
+    # Calculate 4h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # ADX smoothing, volume MA
+    start_idx = max(20, 34, 20)  # Donchian, EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: 6h volume > 1.5x 20-period MA (moderate threshold)
+        # Calculate EMA34 slope for trend direction (rising/falling)
+        if i >= start_idx + 1:
+            ema_prev = ema_34_1d_aligned[i-1]
+            ema_rising = ema_34_1d_aligned[i] > ema_prev
+            ema_falling = ema_34_1d_aligned[i] < ema_prev
+        else:
+            ema_rising = False
+            ema_falling = False
+        
+        # Volume filter: 4h volume > 1.5x 20-period MA (tight threshold to reduce trades)
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Bull Power > 0 AND ADX > 25 AND volume filter
-            if bull_power_1d_aligned[i] > 0 and adx_1d_aligned[i] > 25 and vol_filter:
+            # Long: price > upper Donchian AND EMA34 rising AND volume filter
+            if close[i] > high_max_20[i] and ema_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND ADX > 25 AND volume filter
-            elif bear_power_1d_aligned[i] < 0 and adx_1d_aligned[i] > 25 and vol_filter:
+            # Short: price < lower Donchian AND EMA34 falling AND volume filter
+            elif close[i] < low_min_20[i] and ema_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -124,12 +79,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: Bull Power crosses below zero OR ADX < 20 (regime shift)
-                if bull_power_1d_aligned[i] <= 0 or adx_1d_aligned[i] < 20:
+                # Long exit: price touches lower Donchian OR EMA34 starts falling
+                if close[i] < low_min_20[i] or (i >= start_idx + 1 and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: Bear Power crosses above zero OR ADX < 20 (regime shift)
-                if bear_power_1d_aligned[i] >= 0 or adx_1d_aligned[i] < 20:
+                # Short exit: price touches upper Donchian OR EMA34 starts rising
+                if close[i] > high_max_20[i] or (i >= start_idx + 1 and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -140,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ElderRay_BullBearPower_1dADX_Regime_VolumeSpike"
-timeframe = "6h"
+name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
