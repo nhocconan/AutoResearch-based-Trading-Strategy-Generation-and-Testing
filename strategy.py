@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation
-Donchian channel breakouts capture sustained momentum. 1w EMA50 ensures alignment with the weekly trend.
-Volume confirmation filters false breakouts. Designed for low trade frequency (target 7-25/year) to minimize fee drag.
-Works in both bull (breakouts with trend) and bear (failed breaks reverse) markets.
+Hypothesis: 6h Williams %R Extreme Reversion + 12h EMA50 Trend + Volume Spike
+Williams %R identifies overbought/oversold conditions. In strong trends (12h EMA50), 
+extreme readings (%R < -90 for longs, %R > -10 for shorts) with volume confirmation 
+provide high-probability mean reversion entries. 6h timeframe balances signal quality 
+and trade frequency (~15-25 trades/year). Works in both bull/bear markets by 
+aligning with higher timeframe trend.
 """
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,61 +22,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian(20)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume confirmation: > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Williams %R (14 period) on 6h data
+    if len(high) < 14:
+        return np.zeros(n)
+    
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * ((highest_high - close) / (highest_high - lowest_low))
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Volume confirmation: > 1.8x 24-period average (4 days on 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 50, 20)
+    start_idx = max(50, 24)  # need EMA50_12h, vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close > Donchian upper (breakout) AND price > 1w EMA50 (uptrend) AND volume spike
-            if (close[i] > highest_high[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i]):
+            # Long: Williams %R deeply oversold (< -90) AND price > 12h EMA50 (uptrend) AND volume spike
+            if (williams_r[i] < -90 and 
+                close[i] > ema_50_12h_aligned[i] and 
+                volume[i] > 1.8 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Donchian lower (breakdown) AND price < 1w EMA50 (downtrend) AND volume spike
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i]):
+            # Short: Williams %R deeply overbought (> -10) AND price < 12h EMA50 (downtrend) AND volume spike
+            elif (williams_r[i] > -10 and 
+                  close[i] < ema_50_12h_aligned[i] and 
+                  volume[i] > 1.8 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Close back inside Donchian channel OR loss of trend
+            # Exit: Williams %R returns to neutral range (-50) OR loss of trend alignment
             exit_signal = False
             if position == 1:
-                # Exit long when close < Donchian lower OR price < 1w EMA50
-                if close[i] < lowest_low[i] or close[i] < ema_50_1w_aligned[i]:
+                # Exit long when Williams %R > -50 (returns from oversold) OR price < 12h EMA50
+                if williams_r[i] > -50 or close[i] < ema_50_12h_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when close > Donchian upper OR price > 1w EMA50
-                if close[i] > highest_high[i] or close[i] > ema_50_1w_aligned[i]:
+                # Exit short when Williams %R < -50 (returns from overbought) OR price > 12h EMA50
+                if williams_r[i] < -50 or close[i] > ema_50_12h_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -85,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirmation"
-timeframe = "1d"
+name = "6H_WilliamsR_Extreme_12hEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
