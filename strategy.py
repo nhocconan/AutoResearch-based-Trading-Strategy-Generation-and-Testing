@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above Camarilla R3 AND 1d EMA50 is rising AND volume > 1.8x 20-period average.
-Short when price breaks below Camarilla S3 AND 1d EMA50 is falling AND volume > 1.8x 20-period average.
-Exit when price touches opposite Camarilla level (S3 for longs, R3 for shorts) or EMA50 reverses direction.
-Uses 1d HTF for EMA50 trend to avoid whipsaws. Target: 50-150 total trades over 4 years (12-37/year).
-Camarilla R3/S3 levels are wider than R1/S1, reducing trade frequency and fee drag for 12h timeframe.
-Volume spike filter (1.8x) ensures momentum confirmation. Designed to work in both bull and bear markets
-by following HTF trend with precise entries only during volume expansion.
+Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation.
+Long when price breaks above Camarilla R3 AND 4h EMA50 is rising AND volume > 1.3x 20-period average.
+Short when price breaks below Camarilla S3 AND 4h EMA50 is falling AND volume > 1.3x 20-period average.
+Exit when price touches the opposite Camarilla level (S3 for longs, R3 for shorts) or reverses EMA50 direction.
+Uses 4h HTF for EMA50 trend to avoid whipsaws in ranging markets. Session filter (08-20 UTC) reduces noise.
+Target: 80-150 total trades over 4 years (20-38/year) for 1h timeframe.
+Camarilla R3/S3 levels provide wider breakouts than R1/S1, reducing false signals while maintaining structure.
 """
 
 import numpy as np
@@ -24,16 +23,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 4h EMA50 for trend filter (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate 1d Camarilla levels from previous 1d OHLC
+    df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
@@ -43,10 +43,10 @@ def generate_signals(prices):
     
     # Calculate Camarilla levels for each 1d bar (using that day's OHLC)
     rang = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.1 * (rang / 12) * 6  # R3 = C + 1.1*(H-L)/12*6
-    camarilla_s3 = close_1d - 1.1 * (rang / 12) * 6  # S3 = C - 1.1*(H-L)/12*6
+    camarilla_r3 = close_1d + 1.1 * (rang / 12) * 4  # R3 = C + 1.1*(H-L)/6
+    camarilla_s3 = close_1d - 1.1 * (rang / 12) * 4  # S3 = C - 1.1*(H-L)/6
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels for current day)
+    # Align Camarilla levels to 1h timeframe (use previous day's levels for current day)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3, additional_delay_bars=1)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3, additional_delay_bars=1)
     
@@ -56,6 +56,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Precompute session hours for 08-20 UTC filter
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     # Start from index where all indicators are ready
     start_idx = max(50, 20)  # EMA50 (50), volume MA (20)
     
@@ -63,6 +66,14 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(ema_50_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
             np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,12 +96,12 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Break above Camarilla R3 AND EMA50 rising AND volume spike
-            if price > r3 and ema_rising and volume[i] > 1.8 * vol_ma_val:
-                signals[i] = 0.25
+            if price > r3 and ema_rising and volume[i] > 1.3 * vol_ma_val:
+                signals[i] = 0.20
                 position = 1
             # Short: Break below Camarilla S3 AND EMA50 falling AND volume spike
-            elif price < s3 and ema_falling and volume[i] > 1.8 * vol_ma_val:
-                signals[i] = -0.25
+            elif price < s3 and ema_falling and volume[i] > 1.3 * vol_ma_val:
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit conditions
@@ -109,10 +120,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12H_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeConfirmation_LevelExit"
-timeframe = "12h"
+name = "1H_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeConfirmation_SessionFilter"
+timeframe = "1h"
 leverage = 1.0
