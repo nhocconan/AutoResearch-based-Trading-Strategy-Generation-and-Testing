@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation.
-Long when price breaks above Camarilla R3 level, 1-day ADX > 25, and volume > 1.5x average.
-Short when price breaks below Camarilla S3 level, 1-day ADX > 25, and volume > 1.5x average.
-Exit when price returns to Camarilla H4/L4 levels or ADX < 20.
-Camarilla levels provide tighter, more precise breakout points than Donchian in ranging markets.
-Designed for low trade frequency (~20-40/year) with higher win rate in both bull and bear markets.
+Hypothesis: 1-day Williams %R mean reversion with 1-week trend filter and volume confirmation.
+Long when Williams %R(14) < -80 (oversold), 1-week ADX > 25 (strong trend), and volume > 1.3x average.
+Short when Williams %R(14) > -20 (overbought), 1-week ADX > 25, and volume > 1.3x average.
+Exit when Williams %R returns to -50 (mean reversion) or trend weakens (ADX < 20).
+Designed for low trade frequency (~10-25/year) to capture mean reversion in trending markets.
+Works in both bull and bear markets by requiring trend confirmation (ADX > 25) for mean-reversion entries.
 """
 
 import numpy as np
@@ -22,28 +22,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ADX - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1-week data for ADX - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1-week ADX (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
     # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -61,47 +61,25 @@ def generate_signals(prices):
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
     adx_values = adx.values
     
-    # Calculate Camarilla levels on 4h timeframe - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate Williams %R on 1-day timeframe - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels (based on previous day's range)
-    # R4 = Close + ((High - Low) * 1.1/2)
-    # R3 = Close + ((High - Low) * 1.1/4)
-    # R2 = Close + ((High - Low) * 1.1/6)
-    # R1 = Close + ((High - Low) * 1.1/12)
-    # PP = (High + Low + Close) / 3
-    # S1 = Close - ((High - Low) * 1.1/12)
-    # S2 = Close - ((High - Low) * 1.1/6)
-    # S3 = Close - ((High - Low) * 1.1/4)
-    # S4 = Close - ((High - Low) * 1.1/2)
-    
-    # Use previous bar's high/low/close for today's levels (no look-ahead)
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
-    prev_high[0] = high_4h[0]  # First value
-    prev_low[0] = low_4h[0]
-    prev_close[0] = close_4h[0]
-    
-    range_hl = prev_high - prev_low
-    
-    camarilla_r3 = prev_close + (range_hl * 1.1 / 4)
-    camarilla_s3 = prev_close - (range_hl * 1.1 / 4)
-    camarilla_h4 = prev_close + (range_hl * 1.1 / 2)
-    camarilla_l4 = prev_close - (range_hl * 1.1 / 2)
+    # Williams %R (14-period): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Align HTF indicators to lower timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l4)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_values)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Volume average (20-period) on lower timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -111,32 +89,28 @@ def generate_signals(prices):
     
     for i in range(30, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         adx_val = adx_aligned[i]
-        camarilla_r3_val = camarilla_r3_aligned[i]
-        camarilla_s3_val = camarilla_s3_aligned[i]
-        camarilla_h4_val = camarilla_h4_aligned[i]
-        camarilla_l4_val = camarilla_l4_aligned[i]
+        williams_r_val = williams_r_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         close_val = close[i]
         
         if position == 0:
-            # Long: Price breaks above Camarilla R3, strong trend (ADX > 25), volume confirmation
-            if (close_val > camarilla_r3_val and
-                adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+            # Long: Williams %R oversold (< -80), strong trend (ADX > 25), volume confirmation
+            if (williams_r_val < -80 and
+                adx_val > 25 and vol_current > 1.3 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S3, strong trend (ADX > 25), volume confirmation
-            elif (close_val < camarilla_s3_val and
-                  adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+            # Short: Williams %R overbought (> -20), strong trend (ADX > 25), volume confirmation
+            elif (williams_r_val > -20 and
+                  adx_val > 25 and vol_current > 1.3 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -144,12 +118,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price returns to Camarilla H4 OR trend weakening (ADX < 20)
-                if close_val >= camarilla_h4_val or adx_val < 20:
+                # Exit long: Williams %R returns to -50 (mean reversion) OR trend weakening (ADX < 20)
+                if williams_r_val >= -50 or adx_val < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price returns to Camarilla L4 OR trend weakening (ADX < 20)
-                if close_val <= camarilla_l4_val or adx_val < 20:
+                # Exit short: Williams %R returns to -50 (mean reversion) OR trend weakening (ADX < 20)
+                if williams_r_val <= -50 or adx_val < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -160,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R3_S3_1dADX_Volume_Breakout"
-timeframe = "4h"
+name = "1D_WilliamsR_1wADX_Volume_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
