@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
-Long when price breaks above 4h Donchian upper band AND 1d ATR(14) < 30-day median ATR (low volatility regime) AND volume > 1.5x average.
-Short when price breaks below 4h Donchian lower band AND 1d ATR(14) < 30-day median ATR AND volume > 1.5x average.
-Exit when price reverts to 4h Donchian middle band (20-period average of high/low).
-Uses 4h timeframe with volatility regime filter to avoid whipsaws in high volatility periods.
-Target: 100-180 trades over 4 years (25-45/year) to stay within proven working range.
+Hypothesis: 6h strategy using Williams Alligator (Jaw/Teeth/Lips) with 1d trend filter and volume confirmation.
+Long when Alligator is bullish (Lips > Teeth > Jaw) AND price > 1d EMA50 (uptrend) AND volume > 1.5x average.
+Short when Alligator is bearish (Lips < Teeth < Jaw) AND price < 1d EMA50 (downtrend) AND volume > 1.5x average.
+Exit when Alligator becomes neutral (teeth between jaw and lips) OR trend reverses (price crosses 1d EMA50).
+Uses 6h timeframe with Alligator's natural smoothing to reduce whipsaw. 1d EMA50 provides higher-timeframe trend filter.
+Volume spike ensures breakout conviction. Target: 60-120 trades over 4 years (15-30/year).
 """
 
 import numpy as np
@@ -22,61 +22,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period) - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate Williams Alligator on 6h (primary timeframe)
+    # Jaw: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars  
+    # Lips: 5-period SMMA shifted 3 bars
+    def smma(src, length):
+        if length < 1:
+            return np.full_like(src, np.nan)
+        result = np.full_like(src, np.nan)
+        for i in range(len(src)):
+            if i < length - 1:
+                continue
+            if i == length - 1:
+                result[i] = np.nanmean(src[i-length+1:i+1])
+            else:
+                prev = result[i-1]
+                if np.isnan(prev):
+                    result[i] = np.nanmean(src[i-length+1:i+1])
+                else:
+                    result[i] = (prev * (length - 1) + src[i]) / length
+        return result
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    jaw_raw = smma(close, 13)
+    teeth_raw = smma(close, 8)
+    lips_raw = smma(close, 5)
     
-    # Donchian channels on 4h (based on previous 20 periods)
-    def rolling_max(arr, window):
-        return np.convolve(arr, np.ones(window), 'valid')[:len(arr)-window+1] if len(arr) >= window else np.full(len(arr), np.nan)
-    def rolling_min(arr, window):
-        return np.convolve(arr, np.ones(window), 'valid')[:len(arr)-window+1] if len(arr) >= window else np.full(len(arr), np.nan)
+    # Apply shifts (Jaw: +8, Teeth: +5, Lips: +3)
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
+    # NaN out the rolled values
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
-    # Simpler approach using pandas rolling
-    high_max_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_upper = np.full(len(high_4h), np.nan)
-    donchian_lower = np.full(len(high_4h), np.nan)
-    donchian_middle = np.full(len(high_4h), np.nan)
-    
-    if len(high_max_20) >= 20:
-        donchian_upper[19:] = high_max_20[:len(high_max_20)]
-        donchian_lower[19:] = low_min_20[:len(low_min_20)]
-        donchian_middle[19:] = (high_max_20[:len(high_max_20)] + low_min_20[:len(low_min_20)]) / 2.0
-    
-    # Load 1d data for ATR regime filter - ONCE before loop
+    # Load 1d data for EMA50 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 30-day median ATR for regime filter
-    atr_median_30 = pd.Series(atr_14).rolling(window=30, min_periods=30).median().values
-    
-    # Align HTF indicators to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_median_30_aligned = align_htf_to_ltf(prices, df_1d, atr_median_30)
+    # Align HTF indicators to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume average (20-period) on primary timeframe
     vol_ma_primary = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -86,34 +75,34 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(donchian_middle_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_median_30_aligned[i]) or np.isnan(vol_ma_primary[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_primary[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper_val = donchian_upper_aligned[i]
-        lower_val = donchian_lower_aligned[i]
-        middle_val = donchian_middle_aligned[i]
-        atr_val = atr_14_aligned[i]
-        atr_med_val = atr_median_30_aligned[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        ema50_val = ema50_1d_aligned[i]
         vol_ma_val = vol_ma_primary[i]
         
         # Get current price and volume
         price = close[i]
         vol_current = volume[i]
         
-        # Regime filter: only trade in low volatility (ATR < median ATR)
-        low_volatility_regime = atr_val < atr_med_val
+        # Alligator conditions
+        bullish_alligator = lips_val > teeth_val and teeth_val > jaw_val
+        bearish_alligator = lips_val < teeth_val and teeth_val < jaw_val
         
         if position == 0:
-            # Long: price breaks above Donchian upper AND low volatility regime AND volume spike
-            if price > upper_val and low_volatility_regime and vol_current > 1.5 * vol_ma_val:
+            # Long: Alligator bullish AND price > 1d EMA50 (uptrend) AND volume spike
+            if bullish_alligator and price > ema50_val and vol_current > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower AND low volatility regime AND volume spike
-            elif price < lower_val and low_volatility_regime and vol_current > 1.5 * vol_ma_val:
+            # Short: Alligator bearish AND price < 1d EMA50 (downtrend) AND volume spike
+            elif bearish_alligator and price < ema50_val and vol_current > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -121,12 +110,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price reverts to Donchian middle band
-                if price <= middle_val:
+                # Exit long: Alligator becomes neutral OR price breaks below 1d EMA50 (trend reversal)
+                if not bullish_alligator or price < ema50_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price reverts to Donchian middle band
-                if price >= middle_val:
+                # Exit short: Alligator becomes neutral OR price breaks above 1d EMA50 (trend reversal)
+                if not bearish_alligator or price > ema50_val:
                     exit_signal = True
             
             if exit_signal:
@@ -137,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_ATRRegime_VolumeBreakout"
-timeframe = "4h"
+name = "6H_WilliamsAlligator_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
