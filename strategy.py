@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-Long when price breaks above Donchian upper band AND 1w EMA50 rising AND volume > 1.5x 20-period MA.
-Short when price breaks below Donchian lower band AND 1w EMA50 falling AND volume > 1.5x 20-period MA.
-Exit when price touches opposite Donchian band or 1w EMA50 reverses.
-Uses 1w HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
-Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
-Donchian provides clear structure, 1w EMA50 filters major trend, volume confirms breakout strength.
+Hypothesis: 6h Williams %R reversal with 1d Elder Ray Power filter and volume spike confirmation.
+Long when Williams %R < -80 (oversold) AND 1d Bear Power < 0 (bearish momentum weakening) AND volume > 2.0x 20-period MA.
+Short when Williams %R > -20 (overbought) AND 1d Bull Power > 0 (bullish momentum weakening) AND volume > 2.0x 20-period MA.
+Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) or volume drops below 1.5x MA.
+Uses 1d HTF for Elder Ray to filter counter-trend moves in ranging markets, Williams %R for precise 6h timing.
+Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+Williams %R identifies exhaustion points, Elder Ray confirms underlying momentum shift, volume validates conviction.
 """
 
 import numpy as np
@@ -23,67 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_upper = np.full(n, np.nan)
-    donchian_lower = np.full(n, np.nan)
+    # Calculate 6h Williams %R (14-period)
+    williams_r = np.full(n, np.nan)
+    for i in range(14, n):
+        highest_high = np.max(high[i-14:i+1])  # include current bar
+        lowest_low = np.min(low[i-14:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
+        else:
+            williams_r[i] = -50  # avoid division by zero
     
-    for i in range(20, n):
-        # Use lookback of 20 periods (excluding current bar to avoid look-ahead)
-        donchian_upper[i] = np.max(high[i-20:i])
-        donchian_lower[i] = np.min(low[i-20:i])
-    
-    # Calculate 1w EMA50 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d Elder Ray Power (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema_13_1d  # Bull Power
+    bear_power_1d = low_1d - ema_13_1d   # Bear Power
     
-    # Calculate 1d volume MA (20-period) for spike filter
+    # Align 1d Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Calculate 6h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 20)  # Donchian (needs 20), EMA50, volume MA
+    start_idx = max(14, 13, 20)  # Williams %R (needs 14), Elder Ray (needs 13), volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        ema_val = ema_50_aligned[i]
+        wr = williams_r[i]
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
-        # Calculate EMA50 slope for trend direction (rising/falling)
-        if i >= start_idx + 1:
-            ema_prev = ema_50_aligned[i-1]
-            ema_rising = ema_val > ema_prev
-            ema_falling = ema_val < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
-        
-        # Volume filter: 1d volume > 1.5x 20-period MA (adaptive to volatility)
-        vol_filter = volume[i] > 1.5 * vol_ma_val
+        # Volume filters
+        vol_spike = volume[i] > 2.0 * vol_ma_val  # strong conviction
+        vol_decay = volume[i] < 1.5 * vol_ma_val   # losing momentum
         
         if position == 0:
-            # Long: Break above Donchian upper AND EMA50 rising AND volume filter
-            if price > upper and ema_rising and vol_filter:
+            # Long: Williams %R oversold (< -80) AND Bear Power weakening (< 0) AND volume spike
+            if wr < -80 and bear_power < 0 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian lower AND EMA50 falling AND volume filter
-            elif price < lower and ema_falling and vol_filter:
+            # Short: Williams %R overbought (> -20) AND Bull Power weakening (> 0) AND volume spike
+            elif wr > -20 and bull_power > 0 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -91,12 +91,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches Donchian lower (opposite) OR EMA50 starts falling
-                if price < lower or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
+                # Long exit: Williams %R crosses above -50 (momentum returning) OR volume decay
+                if wr > -50 or vol_decay:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches Donchian upper (opposite) OR EMA50 starts rising
-                if price > upper or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
+                # Short exit: Williams %R crosses below -50 (momentum returning) OR volume decay
+                if wr < -50 or vol_decay:
                     exit_signal = True
             
             if exit_signal:
@@ -107,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "6H_WilliamsR_Reversal_1dElderRay_Power_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
