@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Bollinger Band Squeeze Breakout with 12h Volume Regime Filter
-- Bollinger Bands (20, 2.0) on 6h: squeeze when bandwidth < 20th percentile of last 50 bars
-- Breakout long when price closes above upper band during squeeze release + 12h volume > 1.5x 20-period average
-- Breakout short when price closes below lower band during squeeze release + 12h volume > 1.5x 20-period average
-- Uses 6h timeframe targeting 12-30 trades/year (50-120 over 4 years)
-- Works in bull markets via breakout continuation, in bear markets via breakdown continuations
-- Volume regime filter prevents false breakouts in low-volume environments
+Hypothesis: 4h Williams %R Extreme + 1d EMA34 Trend Filter + Volume Spike
+- Williams %R(14): Long when < -80 (oversold) and price > 1d EMA34 (uptrend filter)
+                    Short when > -20 (overbought) and price < 1d EMA34 (downtrend filter)
+- Volume confirmation: > 2.0x 20-period average to avoid false reversals
+- Uses 4h timeframe targeting 20-50 trades/year (80-200 over 4 years)
+- Works in bull markets via buying dips in uptrend, in bear markets via selling rallies in downtrend
+- Williams %R provides mean-reversion edge while EMA34 filters for trend alignment
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,77 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for volume regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h average volume for regime filter
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Bollinger Bands on 6h (20, 2.0)
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean().values
-    dev = close_s.rolling(window=20, min_periods=20).std().values
-    upper_band = basis + 2.0 * dev
-    lower_band = basis - 2.0 * dev
+    # Align 1d EMA34 to 4h timeframe (completed 1d bar only)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Bollinger Band Width (normalized)
-    bb_width = (upper_band - lower_band) / basis
-    # Squeeze condition: bandwidth < 20th percentile of last 50 bars
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20).values
-    squeeze_condition = bb_width < bb_width_percentile
+    # Williams %R(14) on 4h data
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Squeeze release: previous bar was in squeeze, current bar is not
-    squeeze_release = np.zeros(n, dtype=bool)
-    squeeze_release[1:] = (squeeze_condition[:-1] == True) & (squeeze_condition[1:] == False)
+    # Volume confirmation: > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # BB needs 20, percentile needs 50
+    start_idx = max(34, 20, 14)  # EMA34 needs 34, volume MA 20, Williams %R 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(basis[i]) or 
-            np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or 
-            np.isnan(bb_width_percentile[i]) or 
-            np.isnan(vol_ma_12h_aligned[i])):
+        if (np.isnan(ema34_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume regime filter: 12h volume > 1.5x 20-period average
-        volume_regime = volume[i] > 1.5 * vol_ma_12h_aligned[i]
+        # Determine trend from 1d EMA34
+        close_1d = df_1d['close'].values
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        uptrend = close_1d_aligned[i] > ema34_aligned[i]
+        downtrend = close_1d_aligned[i] < ema34_aligned[i]
         
-        # Breakout conditions during squeeze release
-        long_breakout = squeeze_release[i] and (close[i] > upper_band[i]) and volume_regime
-        short_breakout = squeeze_release[i] and (close[i] < lower_band[i]) and volume_regime
+        # Williams %R signals with trend filter and volume confirmation
+        # Long: Oversold (%R < -80) + uptrend + volume spike
+        # Short: Overbought (%R > -20) + downtrend + volume spike
+        long_signal = (williams_r[i] < -80 and 
+                      uptrend and
+                      volume[i] > 2.0 * vol_ma[i])
+        
+        short_signal = (williams_r[i] > -20 and 
+                       downtrend and
+                       volume[i] > 2.0 * vol_ma[i])
         
         if position == 0:
-            if long_breakout:
+            if long_signal:
                 signals[i] = 0.25
                 position = 1
-            elif short_breakout:
+            elif short_signal:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: mean reversion to middle band or opposite squeeze breakout
+            # Exit conditions: Williams %R reverts to midpoint or trend reversal
             exit_signal = False
             
             if position == 1:
-                # Exit long: price closes below middle band (mean reversion)
-                if close[i] < basis[i]:
+                # Exit long: %R rises above -50 (momentum fading) or trend turns down
+                if (williams_r[i] > -50 or 
+                    not uptrend):
                     exit_signal = True
             elif position == -1:
-                # Exit short: price closes above middle band (mean reversion)
-                if close[i] > basis[i]:
+                # Exit short: %R falls below -50 (momentum fading) or trend turns up
+                if (williams_r[i] < -50 or 
+                    not downtrend):
                     exit_signal = True
             
             if exit_signal:
@@ -104,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BollingerSqueeze_Breakout_12hVolumeRegime"
-timeframe = "6h"
+name = "4h_WilliamsR_Extreme_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
