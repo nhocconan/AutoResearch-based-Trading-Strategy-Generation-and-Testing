@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Williams Alligator + Volume Spike + Chop Regime Filter
-Long when Alligator jaws < teeth < lips (bullish alignment) + volume > 2x avg + chop > 61.8 (range)
-Short when Alligator jaws > teeth > lips (bearish alignment) + volume > 2x avg + chop > 61.8
-Exit when alignment breaks or chop < 38.2 (trend)
-Designed for choppy markets (2025) with low trade frequency to avoid fee drag.
+Hypothesis: 12-hour Williams Alligator with daily trend filter and volume confirmation.
+Long when price > Alligator teeth (Jaw) + daily close > daily EMA50 + volume > 1.5x average volume.
+Short when price < Alligator teeth (Jaw) + daily close < daily EMA50 + volume > 1.5x average volume.
+Exit when price crosses Alligator lips (Lips) or daily trend changes.
+Williams Alligator acts as a dynamic trend filter, reducing whipsaws in choppy markets.
+Designed for low trade frequency (~15-30/year) to minimize fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -21,74 +22,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator (13,8,5) smoothed with SMMA
-    jaw_len, teeth_len, lips_len = 13, 8, 5
-    jaw_offset, teeth_offset, lips_offset = 8, 5, 3
+    # Calculate Williams Alligator (13,8,5 smoothed with 8,5,3)
+    # Jaw (13-period SMMA, smoothed 8)
+    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw_raw.rolling(window=8, min_periods=8).mean()
     
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        sma = np.nansum(arr[:period]) / period
-        result[period-1] = sma
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Teeth (8-period SMMA, smoothed 5)
+    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth_raw.rolling(window=5, min_periods=5).mean()
     
-    jaw = smma(smma(close, jaw_len), jaw_offset)
-    teeth = smma(smma(close, teeth_len), teeth_offset)
-    lips = smma(smma(close, lips_len), lips_offset)
+    # Lips (5-period SMMA, smoothed 3)
+    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips_raw.rolling(window=3, min_periods=3).mean()
     
-    # Chopiness Index (14-period)
-    def chop(high, low, close, period=14):
-        atr = np.zeros_like(close)
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        atr = smma(tr, period)
-        
-        highest_high = np.maximum.accumulate(high)
-        lowest_low = np.minimum.accumulate(low)
-        hh_ll = highest_high - lowest_low
-        
-        chop_val = np.full_like(close, np.nan, dtype=float)
-        for i in range(len(close)):
-            if atr[i] > 0 and hh_ll[i] > 0:
-                chop_val[i] = 100 * np.log10(atr[i] * period / hh_ll[i]) / np.log10(period)
-        return chop_val
+    # Load daily data for trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    chop_val = chop(high, low, close, 14)
+    # Calculate daily EMA50 for trend filter
+    daily_close = df_1d['close'].values
+    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
     
-    # Average volume for spike detection
+    # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(13, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(chop_val[i]) or np.isnan(avg_volume[i]) or volume[i] == 0):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(daily_ema50_aligned[i]) or np.isnan(avg_volume[i]) or volume[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bullish_align = jaw[i] < teeth[i] < lips[i]
-        bearish_align = jaw[i] > teeth[i] > lips[i]
-        chop_high = chop_val[i] > 61.8  # ranging market
-        chop_low = chop_val[i] < 38.2   # trending market
-        volume_spike = volume[i] > 2.0 * avg_volume[i]
+        daily_close_val = None
+        daily_ema50_val = None
+        if i < len(daily_ema50_aligned):
+            daily_close_val = df_1d['close'].values[-1] if len(df_1d) > 0 else np.nan
+            daily_ema50_val = daily_ema50_aligned[i]
+        else:
+            daily_close_val = np.nan
+            daily_ema50_val = np.nan
+            
+        if np.isnan(daily_close_val) or np.isnan(daily_ema50_val):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        daily_trend_up = daily_close_val > daily_ema50_val
+        daily_trend_down = daily_close_val < daily_ema50_val
+        
+        volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 0:
-            # Enter long/short only in ranging markets with volume spike
-            if bullish_align and chop_high and volume_spike:
+            # Long: price > teeth (Alligator jaw) + daily uptrend + volume confirmation
+            if (close[i] > teeth[i] and 
+                daily_trend_up and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            elif bearish_align and chop_high and volume_spike:
+            # Short: price < teeth (Alligator jaw) + daily downtrend + volume confirmation
+            elif (close[i] < teeth[i] and 
+                  daily_trend_down and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -96,12 +96,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: alignment breaks or market trends
-                if not bullish_align or chop_low:
+                # Exit long: price < lips (Alligator lips) or daily trend changes to down
+                if close[i] < lips[i] or not daily_trend_up:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: alignment breaks or market trends
-                if not bearish_align or chop_low:
+                # Exit short: price > lips (Alligator lips) or daily trend changes to up
+                if close[i] > lips[i] or not daily_trend_down:
                     exit_signal = True
             
             if exit_signal:
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_WilliamsAlligator_Chop_VolumeSpike"
-timeframe = "4h"
+name = "12H_WilliamsAlligator_DailyTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
