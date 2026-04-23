@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-Long when price breaks above 20-period Donchian high AND close > 1d EMA34 AND volume > 2.0x 20-period average.
-Short when price breaks below 20-period Donchian low AND close < 1d EMA34 AND volume > 2.0x 20-period average.
-Exit when price touches the opposite Donchian level.
-Uses 1d HTF for trend direction (avoids whipsaws). Target: 75-200 total trades over 4 years (19-50/year).
-Donchian breakouts capture strong momentum moves; 1d EMA filter ensures we trade with the higher timeframe trend.
+Hypothesis: 6h Donchian(20) breakout with 1d RSI trend filter and volume confirmation.
+Long when price breaks above 20-period Donchian high AND 1d RSI > 50 (uptrend) AND volume > 1.5x 20-period average.
+Short when price breaks below 20-period Donchian low AND 1d RSI < 50 (downtrend) AND volume > 1.5x 20-period average.
+Exit when price touches the opposite Donchian level (Donchian low for longs, Donchian high for shorts).
+Uses 1d HTF for RSI trend bias (avoids whipsaws in counter-trend markets). Target: 50-150 total trades over 4 years (12-37/year).
+Donchian breakouts capture strong momentum moves; RSI filter ensures we only trade with the higher-timeframe trend bias.
 """
 
 import numpy as np
@@ -22,18 +22,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (HTF)
+    # Calculate 1d RSI for trend bias (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 4h Donchian channels (20-period)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    # Avoid division by zero
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Align 1d RSI to 6h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate 6h Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -44,11 +55,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34)  # donchian (20), ema calculation (34)
+    start_idx = max(20, 14 + 13)  # donchian (20), rsi calculation (14+13)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,18 +67,18 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_trend = ema_34_1d_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
         upper = donchian_high[i]
         lower = donchian_low[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: Break above Donchian high AND price > 1d EMA34 AND volume spike
-            if price > upper and close[i] > ema_trend and volume[i] > 2.0 * vol_ma_val:
+            # Long: Break above Donchian high AND RSI > 50 (uptrend bias) AND volume spike
+            if price > upper and rsi_val > 50 and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low AND price < 1d EMA34 AND volume spike
-            elif price < lower and close[i] < ema_trend and volume[i] > 2.0 * vol_ma_val:
+            # Short: Break below Donchian low AND RSI < 50 (downtrend bias) AND volume spike
+            elif price < lower and rsi_val < 50 and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -87,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_LevelExit"
-timeframe = "4h"
+name = "6H_Donchian20_Breakout_1dRSI50_TrendBias_VolumeConfirmation_LevelExit"
+timeframe = "6h"
 leverage = 1.0
