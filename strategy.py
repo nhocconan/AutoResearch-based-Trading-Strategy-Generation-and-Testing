@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R3 AND 1d EMA50 rising AND 12h volume > 2.0x 20-period MA.
-Short when price breaks below Camarilla S3 AND 1d EMA50 falling AND 12h volume > 2.0x 20-period MA.
-Exit when price touches opposite Camarilla level (R3/S3) or 1d EMA50 reverses.
-Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
-Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-Camarilla levels provide structure, 1d EMA50 filters major trend, volume spike avoids low-momentum breakouts.
-Works in bull (trend filters) and bear (volume spikes on breakdowns).
+Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility filter and volume spike confirmation.
+Long when price breaks above Donchian upper(20) AND 1d ATR(14) > 1.5x 50-period MA AND volume > 2.0x 20-period MA.
+Short when price breaks below Donchian lower(20) AND 1d ATR(14) > 1.5x 50-period MA AND volume > 2.0x 20-period MA.
+Exit when price touches opposite Donchian level or 1d ATR(14) falls below 1.0x 50-period MA.
+Uses 1d HTF for volatility regime filter to avoid low-volatility false breakouts, volume spike for momentum confirmation.
+Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Donchian channels provide structure, 1d ATR filter ensures breakouts occur in sufficient volatility,
+volume spike avoids low-momentum breakouts. Works in bull (breakouts with volume) and bear (volatile breakdowns).
 """
 
 import numpy as np
@@ -24,73 +24,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla levels (R3, S3) from previous 12h bar
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
-    pivot = np.full(n, np.nan)
+    # Calculate 4h Donchian channels (20-period)
+    lookback = 20
+    donchian_upper = np.full(n, np.nan)
+    donchian_lower = np.full(n, np.nan)
     
-    for i in range(1, n):
-        # Use previous bar's OHLC to calculate today's levels (no look-ahead)
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        prev_close = close[i-1]
-        pivot[i] = (prev_high + prev_low + prev_close) / 3.0
-        range_val = prev_high - prev_low
-        camarilla_r3[i] = pivot[i] + range_val * 1.1 / 4.0
-        camarilla_s3[i] = pivot[i] - range_val * 1.1 / 4.0
+    for i in range(lookback - 1, n):
+        donchian_upper[i] = np.max(high[i-lookback+1:i+1])
+        donchian_lower[i] = np.min(low[i-lookback+1:i+1])
     
-    # Calculate 1d EMA50 for trend filter (HTF)
+    # Calculate 1d ATR(14) for volatility regime filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h volume MA (20-period) for spike filter
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First TR is undefined
+    
+    # ATR(14) - Welles Wilder's smoothing
+    atr_14 = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr_14[i] = np.nanmean(tr[1:15])  # First ATR is average of first 14 TR
+        else:
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    
+    # 50-period MA of ATR(14)
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)
+    
+    # Calculate 1h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(1, 50, 20)  # Camarilla, EMA50, volume MA
+    start_idx = max(lookback - 1, 50 + 14, 20)  # Donchian, ATR(14)+MA50, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(pivot[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_ma_50_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        r3 = camarilla_r3[i]
-        s3 = camarilla_s3[i]
-        ema_val = ema_50_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        atr_val = atr_14_aligned[i]
+        atr_ma_val = atr_ma_50_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
-        # Calculate EMA50 slope for trend direction (rising/falling)
-        if i >= start_idx + 1:
-            ema_prev = ema_50_aligned[i-1]
-            ema_rising = ema_val > ema_prev
-            ema_falling = ema_val < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
+        # Volatility filter: ATR(14) > 1.5x 50-period MA (ensures sufficient volatility)
+        vol_regime = atr_val > 1.5 * atr_ma_val
         
-        # Volume filter: 12h volume > 2.0x 20-period MA (adaptive to volatility)
+        # Volume filter: 1h volume > 2.0x 20-period MA
         vol_filter = volume[i] > 2.0 * vol_ma_val
         
         if position == 0:
-            # Long: Break above Camarilla R3 AND EMA50 rising AND volume filter
-            if price > r3 and ema_rising and vol_filter:
+            # Long: Break above Donchian upper AND volatility regime AND volume filter
+            if price > upper and vol_regime and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S3 AND EMA50 falling AND volume filter
-            elif price < s3 and ema_falling and vol_filter:
+            # Short: Break below Donchian lower AND volatility regime AND volume filter
+            elif price < lower and vol_regime and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -98,12 +108,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches S3 OR EMA50 starts falling
-                if price < s3 or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
+                # Long exit: price touches lower Donchian OR volatility regime ends (ATR < 1.0x MA)
+                if price < lower or atr_val < 1.0 * atr_ma_val:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches R3 OR EMA50 starts rising
-                if price > r3 or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
+                # Short exit: price touches upper Donchian OR volatility regime ends (ATR < 1.0x MA)
+                if price > upper or atr_val < 1.0 * atr_ma_val:
                     exit_signal = True
             
             if exit_signal:
@@ -114,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_1dATR_VolRegime_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
