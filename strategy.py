@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above Donchian upper band AND 1d EMA34 rising AND volume > 2.0x 20-period MA.
-Short when price breaks below Donchian lower band AND 1d EMA34 falling AND volume > 2.0x 20-period MA.
+Long when price breaks above Donchian upper band AND 1d EMA34 rising AND volume > 1.5x 20-period MA.
+Short when price breaks below Donchian lower band AND 1d EMA34 falling AND volume > 1.5x 20-period MA.
 Exit when price touches opposite Donchian band or 1d EMA34 reverses.
 Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
 Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
@@ -75,8 +75,8 @@ def generate_signals(prices):
             ema_rising = False
             ema_falling = False
         
-        # Volume filter: 4h volume > 2.0x 20-period MA (adaptive to volatility)
-        vol_filter = volume[i] > 2.0 * vol_ma_val
+        # Volume filter: 4h volume > 1.5x 20-period MA (adaptive to volatility)
+        vol_filter = volume[i] > 1.5 * vol_ma_val
         
         if position == 0:
             # Long: Break above Donchian upper AND EMA34 rising AND volume filter
