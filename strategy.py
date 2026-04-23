@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
-Long when price breaks above Ichimoku cloud (Senkou Span A/B) AND 1d EMA50 rising AND volume > 1.5x 20-period MA.
-Short when price breaks below Ichimoku cloud AND 1d EMA50 falling AND volume > 1.5x 20-period MA.
-Exit when price re-enters the cloud or 1d EMA50 reverses.
-Ichimoku provides dynamic support/resistance, 1d EMA50 filters major trend, volume confirms momentum.
-Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-Works in bull (trend-aligned breakouts) and bear (volume spikes on breakdowns).
+Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
+Long when price breaks above Camarilla R3 AND 1w EMA50 rising AND 12h volume > 2.0x 20-period MA.
+Short when price breaks below Camarilla S3 AND 1w EMA50 falling AND 12h volume > 2.0x 20-period MA.
+Exit when price touches opposite Camarilla level (S3 for long, R3 for short) or 1w EMA50 reverses.
+Uses 1w HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
+Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+Camarilla levels provide structure, 1w EMA50 filters major trend, volume spike avoids low-momentum breakouts.
+Designed for lower frequency to minimize fee drag and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,58 +24,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    tenkan_sen = np.full(n, np.nan)
-    for i in range(period_tenkan - 1, n):
-        tenkan_sen[i] = (np.max(high[i-period_tenkan+1:i+1]) + np.min(low[i-period_tenkan+1:i+1])) / 2
+    # Calculate 12h Camarilla levels (R3, S3) based on previous bar
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    camarilla_r4 = np.full(n, np.nan)  # for stop loss
+    camarilla_s4 = np.full(n, np.nan)  # for stop loss
+    camarilla_r3_prev = np.full(n, np.nan)
+    camarilla_s3_prev = np.full(n, np.nan)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    kijun_sen = np.full(n, np.nan)
-    for i in range(period_kijun - 1, n):
-        kijun_sen[i] = (np.max(high[i-period_kijun+1:i+1]) + np.min(low[i-period_kijun+1:i+1])) / 2
+    for i in range(1, n):
+        # Use previous bar's high, low, close to calculate current bar's levels
+        phigh = high[i-1]
+        plow = low[i-1]
+        pclose = close[i-1]
+        range_val = phigh - plow
+        
+        camarilla_r3[i] = pclose + range_val * 1.1 / 4
+        camarilla_s3[i] = pclose - range_val * 1.1 / 4
+        camarilla_r4[i] = pclose + range_val * 1.1 / 2
+        camarilla_s4[i] = pclose - range_val * 1.1 / 2
+        camarilla_r3_prev[i] = camarilla_r3[i-1] if i > 1 else np.nan
+        camarilla_s3_prev[i] = camarilla_s3[i-1] if i > 1 else np.nan
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2, shifted 26 periods ahead
-    senkou_span_a = np.full(n, np.nan)
-    for i in range(n):
-        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
-            idx = i + period_kijun  # shift 26 periods ahead
-            if idx < n:
-                senkou_span_a[idx] = (tenkan_sen[i] + kijun_sen[i]) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, shifted 26 periods ahead
-    period_senkou_b = 52
-    senkou_span_b = np.full(n, np.nan)
-    for i in range(period_senkou_b - 1, n):
-        span_b_val = (np.max(high[i-period_senkou_b+1:i+1]) + np.min(low[i-period_senkou_b+1:i+1])) / 2
-        idx = i + period_kijun  # shift 26 periods ahead
-        if idx < n:
-            senkou_span_b[idx] = span_b_val
-    
-    # Calculate 1d EMA50 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 1w EMA50 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate volume MA (20-period) for spike filter
+    # Calculate 12h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    # Need: Senkou Span B (52-period) + 26 shift + EMA50 + volume MA
-    start_idx = max(52 + 26 - 1, 50, 20)  # Senkou B calculation + shift, EMA50, volume MA
+    start_idx = max(1, 50, 20)  # Camarilla needs 1 bar, EMA50, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or 
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -82,8 +74,12 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        upper_cloud = max(senkou_span_a[i], senkou_span_b[i])
-        lower_cloud = min(senkou_span_a[i], senkou_span_b[i])
+        r3 = camarilla_r3[i]
+        s3 = camarilla_s3[i]
+        r4 = camarilla_r4[i]
+        s4 = camarilla_s4[i]
+        r3_prev = camarilla_r3_prev[i]
+        s3_prev = camarilla_s3_prev[i]
         ema_val = ema_50_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
@@ -96,16 +92,16 @@ def generate_signals(prices):
             ema_rising = False
             ema_falling = False
         
-        # Volume filter: 6h volume > 1.5x 20-period MA
-        vol_filter = volume[i] > 1.5 * vol_ma_val
+        # Volume filter: 12h volume > 2.0x 20-period MA (adaptive to volatility)
+        vol_filter = volume[i] > 2.0 * vol_ma_val
         
         if position == 0:
-            # Long: Break above cloud AND EMA50 rising AND volume filter
-            if price > upper_cloud and ema_rising and vol_filter:
+            # Long: Break above Camarilla R3 AND EMA50 rising AND volume filter
+            if price > r3 and ema_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below cloud AND EMA50 falling AND volume filter
-            elif price < lower_cloud and ema_falling and vol_filter:
+            # Short: Break below Camarilla S3 AND EMA50 falling AND volume filter
+            elif price < s3 and ema_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -113,12 +109,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price re-enters cloud (below upper cloud) OR EMA50 starts falling
-                if price < upper_cloud or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
+                # Long exit: price touches S3 (or S4 for stop) OR EMA50 starts falling
+                if price <= s3 or price <= s4 or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price re-enters cloud (above lower cloud) OR EMA50 starts rising
-                if price > lower_cloud or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
+                # Short exit: price touches R3 (or R4 for stop) OR EMA50 starts rising
+                if price >= r3 or price >= r4 or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -129,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Ichimoku_Cloud_Breakout_1dEMA50_Trend_VolumeFilter"
-timeframe = "6h"
+name = "12H_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
