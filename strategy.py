@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above Donchian upper band AND close > 1d EMA34 AND volume > 2.0x 20-period average.
-Short when price breaks below Donchian lower band AND close < 1d EMA34 AND volume > 2.0x 20-period average.
-Exit when price retraces to Donchian midpoint or ATR trailing stop (2.0*ATR from extreme).
-Uses discrete position sizing (0.25) to target 20-50 trades/year on 4h timeframe.
-Donchian channels provide proven structure for BTC/ETH trends with volume confirmation reducing false breakouts.
+Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Donchian upper band AND close > 1d EMA34 AND volume > 1.8x 20-period average.
+Short when price breaks below Donchian lower band AND close < 1d EMA34 AND volume > 1.8x 20-period average.
+Exit when price retraces to Donchian midpoint or ATR trailing stop (2.5*ATR from extreme).
+Uses discrete position sizing (0.25) to target 12-37 trades/year on 6h timeframe.
+Donchian channels provide robust structure proven on BTC/ETH across regimes.
+6h timeframe balances noise reduction and trade frequency to avoid fee drag.
 """
 
 import numpy as np
@@ -32,9 +33,9 @@ def generate_signals(prices):
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Donchian(20) channels
-    donchian_window = 20
-    upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    donchian_len = 20
+    upper = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
+    lower = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
     midpoint = (upper + lower) / 2.0
     
     # Volume average (20-period)
@@ -56,7 +57,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 34, 20)  # Donchian20, EMA34, vol MA20
+    start_idx = max(donchian_len, 34, 20)  # Donchian20, EMA34, vol MA20
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -77,13 +78,13 @@ def generate_signals(prices):
         midpoint_val = midpoint[i]
         
         if position == 0:
-            # Long: Break above Donchian upper AND uptrend (price > EMA34) AND volume spike (2.0x avg)
-            if close[i] > upper_val and close[i] > ema34_val and volume[i] > 2.0 * vol_ma_val:
+            # Long: Break above Donchian upper band AND uptrend (price > EMA34) AND volume spike (1.8x avg)
+            if close[i] > upper_val and close[i] > ema34_val and volume[i] > 1.8 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Break below Donchian lower AND downtrend (price < EMA34) AND volume spike (2.0x avg)
-            elif close[i] < lower_val and close[i] < ema34_val and volume[i] > 2.0 * vol_ma_val:
+            # Short: Break below Donchian lower band AND downtrend (price < EMA34) AND volume spike (1.8x avg)
+            elif close[i] < lower_val and close[i] < ema34_val and volume[i] > 1.8 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -103,10 +104,10 @@ def generate_signals(prices):
             elif position == -1 and close[i] >= midpoint_val:
                 exit_signal = True
             
-            # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 2.0 * atr_val:
+            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 2.0 * atr_val:
+            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -119,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirmation_MidpointExit_ATRTrailingStop"
-timeframe = "4h"
+name = "6H_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirmation_MidpointExit_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
