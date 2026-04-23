@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above Donchian upper band AND 1d EMA50 is rising AND volume > 1.5x 20-period average.
-Short when price breaks below Donchian lower band AND 1d EMA50 is falling AND volume > 1.5x 20-period average.
-Exit when price touches the opposite Donchian band or reverses EMA50 direction.
-Uses 1d HTF for EMA50 trend to reduce whipsaws. Target: 50-150 total trades over 4 years (12-37/year).
-Donchian bands from 20-period high/low on primary timeframe (12h).
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+Long when price breaks above Donchian upper(20) AND 12h EMA50 is rising AND volume > 2.0x 20-period average.
+Short when price breaks below Donchian lower(20) AND 12h EMA50 is falling AND volume > 2.0x 20-period average.
+Exit when price touches the opposite Donchian level or EMA50 reverses direction.
+Uses 12h HTF for EMA50 trend to reduce whipsaws. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -22,16 +21,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 12h EMA50 for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # 20-period Donchian bands on primary timeframe (12h)
+    # Calculate 4h Donchian channels (20-period)
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -55,8 +54,8 @@ def generate_signals(prices):
         
         price = close[i]
         ema_val = ema_50_aligned[i]
-        upper_band = high_roll[i]
-        lower_band = low_roll[i]
+        upper = high_roll[i]
+        lower = low_roll[i]
         vol_ma_val = vol_ma[i]
         
         # Calculate EMA50 slope for trend direction (rising/falling)
@@ -69,13 +68,13 @@ def generate_signals(prices):
             ema_falling = False
         
         if position == 0:
-            # Long: Break above Donchian upper band AND EMA50 rising AND volume spike
-            if price > upper_band and ema_rising and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = 0.25
+            # Long: Break above Donchian upper AND EMA50 rising AND volume spike
+            if price > upper and ema_rising and volume[i] > 2.0 * vol_ma_val:
+                signals[i] = 0.30
                 position = 1
-            # Short: Break below Donchian lower band AND EMA50 falling AND volume spike
-            elif price < lower_band and ema_falling and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = -0.25
+            # Short: Break below Donchian lower AND EMA50 falling AND volume spike
+            elif price < lower and ema_falling and volume[i] > 2.0 * vol_ma_val:
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit conditions
@@ -83,21 +82,21 @@ def generate_signals(prices):
             
             if position == 1:
                 # Long exit: price touches lower band OR EMA50 starts falling
-                if price < lower_band or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
+                if price < lower or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
                 # Short exit: price touches upper band OR EMA50 starts rising
-                if price > upper_band or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
+                if price > upper or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "12H_Donchian20_Breakout_1dEMA50_Trend_VolumeConfirmation"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_12hEMA50_Trend_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
