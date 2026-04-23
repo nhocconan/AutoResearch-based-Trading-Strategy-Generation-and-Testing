@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day Bollinger Band squeeze with 1-week trend filter and volume confirmation.
-Long when price breaks above upper BB during low volatility (BB width < 20th percentile) and weekly uptrend.
-Short when price breaks below lower BB during low volatility and weekly downtrend.
-Uses Bollinger Bands to identify low-volatility breakouts, which often precede strong moves in both bull and bear markets.
-Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
-Target: 10-25 trades/year to minimize fee drag.
+Hypothesis: 6-hour Bollinger Band width regime filter combined with 12-hour Donchian breakout and volume confirmation.
+Long when price breaks above Donchian(20) high, BB width < 30th percentile (low volatility squeeze), and volume > 1.5x average.
+Short when price breaks below Donchian(20) low, BB width < 30th percentile, and volume > 1.5x average.
+Exit when price returns to Donchian middle or BB width > 70th percentile (high volatility).
+Designed to catch breakouts from low volatility contractions in both bull and bear markets.
 """
 
 import numpy as np
@@ -22,94 +21,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Bollinger Bands - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12-hour data for Donchian and BB width - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Load 1-week data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1-day Bollinger Bands (20, 2)
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    # Calculate 12-hour Bollinger Bands (20, 2)
+    close_12h = df_12h['close'].values
+    sma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
     upper_bb = sma_20 + 2 * std_20
     lower_bb = sma_20 - 2 * std_20
     bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
     
-    # Calculate BB width percentile (20-period lookback for regime)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Calculate 1-week EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_uptrend = close_1w > ema_50_1w
-    weekly_downtrend = close_1w < ema_50_1w
+    # Calculate 12-hour Donchian channels (20)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
     # Align HTF indicators to lower timeframe
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    bb_width_aligned = align_htf_to_ltf(prices, df_12h, bb_width)
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_12h, donch_mid)
     
     # Volume average (20-period) on lower timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Percentile thresholds for BB width (pre-compute to avoid look-ahead)
+    bb_width_series = pd.Series(bb_width_aligned)
+    bb_width_lower_thresh = bb_width_series.rolling(window=100, min_periods=100).quantile(0.30).values
+    bb_width_upper_thresh = bb_width_series.rolling(window=100, min_periods=100).quantile(0.70).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(bb_width_percentile_aligned[i]) or np.isnan(weekly_uptrend_aligned[i]) or
-            np.isnan(weekly_downtrend_aligned[i]) or np.isnan(upper_bb_aligned[i]) or
-            np.isnan(lower_bb_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bb_width_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(donch_mid_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(bb_width_lower_thresh[i]) or 
+            np.isnan(bb_width_upper_thresh[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bb_width_pct = bb_width_percentile_aligned[i]
-        is_uptrend = weekly_uptrend_aligned[i] > 0.5
-        is_downtrend = weekly_downtrend_aligned[i] > 0.5
+        bb_width_val = bb_width_aligned[i]
+        donch_high_val = donch_high_aligned[i]
+        donch_low_val = donch_low_aligned[i]
+        donch_mid_val = donch_mid_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
-        price_close = close[i]
-        upper_bb_val = upper_bb_aligned[i]
-        lower_bb_val = lower_bb_aligned[i]
+        close_val = close[i]
+        bb_width_lower_thresh_val = bb_width_lower_thresh[i]
+        bb_width_upper_thresh_val = bb_width_upper_thresh[i]
         
         if position == 0:
-            # Long: BB squeeze breakout above upper BB, weekly uptrend, volume confirmation
-            if (bb_width_pct < 20 and  # Low volatility (squeeze)
-                price_close > upper_bb_val and
-                is_uptrend and
+            # Long: Donchian breakout up, low volatility squeeze, volume confirmation
+            if (close_val > donch_high_val and 
+                bb_width_val < bb_width_lower_thresh_val and 
                 vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: BB squeeze breakout below lower BB, weekly downtrend, volume confirmation
-            elif (bb_width_pct < 20 and  # Low volatility (squeeze)
-                  price_close < lower_bb_val and
-                  is_downtrend and
+            # Short: Donchian breakout down, low volatility squeeze, volume confirmation
+            elif (close_val < donch_low_val and 
+                  bb_width_val < bb_width_lower_thresh_val and 
                   vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: volatility expansion or mean reversion
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to middle of BB or volatility expands
-                if (price_close < sma_20[-1] if len(sma_20) > 0 else False) or bb_width_pct > 50:
+                # Exit long: price returns to Donchian mid OR high volatility (BB width > 70th percentile)
+                if (close_val < donch_mid_val or bb_width_val > bb_width_upper_thresh_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to middle of BB or volatility expands
-                if (price_close > sma_20[-1] if len(sma_20) > 0 else False) or bb_width_pct > 50:
+                # Exit short: price returns to Donchian mid OR high volatility
+                if (close_val > donch_mid_val or bb_width_val > bb_width_upper_thresh_val):
                     exit_signal = True
             
             if exit_signal:
@@ -120,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_BollingerSqueeze_1wTrend_Volume"
-timeframe = "1d"
+name = "6H_BBWidth_DonchianBreakout_Volume"
+timeframe = "6h"
 leverage = 1.0
