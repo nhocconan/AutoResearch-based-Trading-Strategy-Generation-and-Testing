@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above Donchian upper channel (20) AND price > 1d EMA50 (uptrend) AND volume > 1.5x average.
-Short when price breaks below Donchian lower channel (20) AND price < 1d EMA50 (downtrend) AND volume > 1.5x average.
-Exit when price reverts to Donchian middle (20-period midpoint) or trend reverses (price crosses 1d EMA50).
-Uses 4h timeframe to target ~20-35 trades/year, avoiding fee drag while capturing strong breakouts.
-Works in both bull and bear markets by requiring trend confirmation via 1d EMA50 for breakout entries.
+Hypothesis: 4h Williams %R (14) extreme reversal with 1d EMA50 trend filter and volume confirmation.
+Long when Williams %R crosses above -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume > 1.5x average.
+Short when Williams %R crosses below -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume > 1.5x average.
+Exit when Williams %R returns to neutral zone (-50) or trend reverses (price crosses 1d EMA50).
+Williams %R is effective in ranging markets and captures reversals; EMA50 filter ensures we only trade with the higher timeframe trend.
+Targets 20-40 trades/year to minimize fee drag while maintaining edge in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,12 +31,17 @@ def generate_signals(prices):
     
     # Calculate EMA50 for 1d trend filter
     ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align HTF EMA50 to 4h timeframe
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # Calculate Donchian channels on 4h timeframe
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    middle_20 = (highest_20 + lowest_20) / 2
+    # Williams %R (14) on 4h timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume average (20-period) on 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,30 +49,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(60, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(ema50_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(middle_20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema50_val = ema50_aligned[i]
-        upper = highest_20[i]
-        lower = lowest_20[i]
-        middle = middle_20[i]
+        wr = williams_r[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above upper channel AND price > 1d EMA50 (uptrend) AND volume spike
-            if (price > upper and price > ema50_val and vol_current > 1.5 * vol_ma_val):
+            # Long: Williams %R crosses above -80 (from below) AND price > 1d EMA50 (uptrend) AND volume spike
+            if (wr > -80 and williams_r[i-1] <= -80 and price > ema50_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower channel AND price < 1d EMA50 (downtrend) AND volume spike
-            elif (price < lower and price < ema50_val and vol_current > 1.5 * vol_ma_val):
+            # Short: Williams %R crosses below -20 (from above) AND price < 1d EMA50 (downtrend) AND volume spike
+            elif (wr < -20 and williams_r[i-1] >= -20 and price < ema50_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -75,12 +77,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price reverts to middle channel OR price breaks below 1d EMA50 (trend reversal)
-                if price <= middle or price < ema50_val:
+                # Exit long: Williams %R returns to neutral zone (-50) OR price breaks below 1d EMA50 (trend reversal)
+                if wr >= -50 or price < ema50_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price reverts to middle channel OR price breaks above 1d EMA50 (trend reversal)
-                if price >= middle or price > ema50_val:
+                # Exit short: Williams %R returns to neutral zone (-50) OR price breaks above 1d EMA50 (trend reversal)
+                if wr <= -50 or price > ema50_val:
                     exit_signal = True
             
             if exit_signal:
@@ -91,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_1dEMA50_Volume_Breakout"
+name = "4H_WilliamsR_1dEMA50_Volume_Reversal"
 timeframe = "4h"
 leverage = 1.0
