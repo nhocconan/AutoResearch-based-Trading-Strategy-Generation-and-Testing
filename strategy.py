@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Bollinger Band squeeze breakout with 1d ADX trend filter and volume confirmation.
-Long when price breaks above upper BB AND ADX > 25 (trending) AND volume > 1.5x average.
-Short when price breaks below lower BB AND ADX > 25 (trending) AND volume > 1.5x average.
-Exit when price returns to middle BB (20-period SMA) or volume drops below average.
-Bollinger Band squeeze identifies low volatility periods primed for breakout.
-1d ADX > 25 ensures trading only in strong trending regimes (works in bull/bear markets).
-Volume confirmation avoids false breakouts.
-Designed for 4h timeframe targeting 75-200 total trades over 4 years to minimize fee drag.
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above R1 AND close > 1d EMA34 AND volume > 1.5x average.
+Short when price breaks below S1 AND close < 1d EMA34 AND volume > 1.5x average.
+Exit when price returns to Camarilla pivot (PP) or volume drops below average.
+Camarilla levels provide precise intraday support/resistance from prior 1d range.
+1d EMA34 ensures trading with higher timeframe trend to avoid counter-trend whipsaws.
+Volume confirmation filters low-conviction breakouts.
+Designed for 12h timeframe targeting 50-150 total trades over 4 years with low frequency to minimize fee drag.
+Works in both bull and bear markets by only taking trades aligned with 1d trend.
 """
 
 import numpy as np
@@ -24,97 +25,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for ADX trend filter - ONCE before loop
+    # Load 1d data for HTF indicators - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX on 1d data (14-period)
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([np.array([np.nan]), tr])  # align with 1d indices
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([np.array([0.0]), dm_plus])
-    dm_minus = np.concatenate([np.array([0.0]), dm_minus])
+    # Calculate Camarilla pivot levels from prior 1d bar
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # PP = (high + low + close)/3
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3
     
-    # Smooth TR, DM+ (14-period Wilder's smoothing = EMA with alpha=1/14)
-    def wilders_smooth(data, period):
-        alpha = 1.0 / period
-        smoothed = np.zeros_like(data)
-        smoothed[period-1] = np.nanmean(data[:period])  # seed with simple average
-        for i in range(period, len(data)):
-            smoothed[i] = alpha * data[i] + (1 - alpha) * smoothed[i-1]
-        return smoothed
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     
-    tr_smooth = wilders_smooth(tr, 14)
-    dm_plus_smooth = wilders_smooth(dm_plus, 14)
-    dm_minus_smooth = wilders_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / np.where(tr_smooth == 0, np.nan, tr_smooth)
-    di_minus = 100 * dm_minus_smooth / np.where(tr_smooth == 0, np.nan, tr_smooth)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, np.nan, (di_plus + di_minus))
-    adx_14 = np.zeros_like(dx)
-    adx_14[27:] = np.nanmean(dx[14:28])  # seed ADX with first 14-period average of DX
-    for i in range(28, len(dx)):
-        adx_14[i] = (1/14) * dx[i] + (13/14) * adx_14[i-1]
-    
-    # Align 1d ADX to 4h timeframe
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # Bollinger Bands on 4h data (20-period, 2 std dev)
-    bb_period = 20
-    bb_std = 2.0
-    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_bb + (bb_std_dev * bb_std)
-    lower_band = sma_bb - (bb_std_dev * bb_std)
-    middle_band = sma_bb  # 20-period SMA
-    
-    # Volume average (20-period) on primary timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (24-period) on primary timeframe (approx 12d for 12h TF)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_14_aligned[i]) or np.isnan(sma_bb[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(camarilla_pp_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_14_aligned[i]
-        sma_val = sma_bb[i]
-        upper_val = upper_band[i]
-        lower_val = lower_band[i]
+        ema34_val = ema34_1d_aligned[i]
+        r1_val = camarilla_r1_aligned[i]
+        s1_val = camarilla_s1_aligned[i]
+        pp_val = camarilla_pp_aligned[i]
         price = close[i]
-        vol_current = volume[i]
         vol_ma_val = vol_ma[i]
+        vol_current = volume[i]
         
         if position == 0:
-            # Long: Price breaks above upper BB AND ADX > 25 (trending) AND volume spike
-            if (price > upper_val and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+            # Long: price breaks above R1 AND price > 1d EMA34 AND volume spike
+            if (price > r1_val and close[i-1] <= r1_val and price > ema34_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower BB AND ADX > 25 (trending) AND volume spike
-            elif (price < lower_val and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+            # Short: price breaks below S1 AND price < 1d EMA34 AND volume spike
+            elif (price < s1_val and close[i-1] >= s1_val and price < ema34_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -122,12 +89,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price returns to middle BB OR volume drops below average
-                if (price <= sma_val or vol_current < vol_ma_val):
+                # Exit long: price returns to pivot (PP) OR volume drops below average
+                if (price <= pp_val or vol_current < vol_ma_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price returns to middle BB OR volume drops below average
-                if (price >= sma_val or vol_current < vol_ma_val):
+                # Exit short: price returns to pivot (PP) OR volume drops below average
+                if (price >= pp_val or vol_current < vol_ma_val):
                     exit_signal = True
             
             if exit_signal:
@@ -138,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_BB_Squeeze_ADX25_Volume"
-timeframe = "4h"
+name = "12H_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
