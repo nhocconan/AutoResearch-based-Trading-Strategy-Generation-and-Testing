@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Bollinger Band squeeze breakout with 1d ADX trend filter and volume confirmation.
-Long when price breaks above upper Bollinger Band AND 1d ADX > 25 AND volume > 1.5x 20-period average.
-Short when price breaks below lower Bollinger Band AND 1d ADX > 25 AND volume > 1.5x 20-period average.
-Exit when price retouches Bollinger middle band (20-period SMA) or ATR stoploss hit (2.0*ATR).
+Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+Long when price breaks above 20-period Donchian high AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
+Short when price breaks below 20-period Donchian low AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
+Exit when price retouches the Donchian midpoint or ATR stoploss hit (2.0*ATR).
 Uses discrete position sizing (0.25) to minimize fee churn and control drawdown.
-Bollinger Band squeeze (low volatility) precedes breakouts in both bull and bear markets.
-ADX > 25 ensures we only trade breakouts in trending conditions, reducing false signals.
-Targets 12-37 trades/year per symbol (50-150 total over 4 years) by requiring volatility contraction before expansion.
+Designed for 12h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -28,73 +26,42 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Calculate Bollinger Bands (20, 2) on 6h timeframe
-    bb_period = 20
-    bb_std = 2.0
-    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma_bb + (bb_std * bb_stddev)
-    lower_bb = sma_bb - (bb_std * bb_stddev)
-    middle_bb = sma_bb  # 20-period SMA for exit
-    
-    # Calculate 1d ADX for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    # Calculate Donchian channels from 12h data
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Align Donchian levels to 12h timeframe (already aligned via get_htf_data)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
+    ema_1d_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
-    # Calculate True Range for ADX
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]  # first bar
+    # EMA slope (rising/falling) - compare current vs 3 periods ago
+    ema_slope = np.zeros_like(ema_1d_34_aligned)
+    ema_slope[3:] = ema_1d_34_aligned[3:] - ema_1d_34_aligned[:-3]
     
-    # Calculate +DM and -DM
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    adx_period = 14
-    alpha = 1.0 / adx_period
-    
-    atr_1d = np.zeros_like(tr_1d)
-    atr_1d[0] = tr_1d[0]
-    for i in range(1, len(tr_1d)):
-        atr_1d[i] = alpha * tr_1d[i] + (1 - alpha) * atr_1d[i-1]
-    
-    plus_di_1d = np.zeros_like(plus_dm)
-    minus_di_1d = np.zeros_like(minus_dm)
-    plus_di_1d[0] = 100 * plus_dm[0] / atr_1d[0] if atr_1d[0] != 0 else 0
-    minus_di_1d[0] = 100 * minus_dm[0] / atr_1d[0] if atr_1d[0] != 0 else 0
-    
-    for i in range(1, len(plus_dm)):
-        plus_di_1d[i] = alpha * (100 * plus_dm[i] / atr_1d[i] if atr_1d[i] != 0 else 0) + (1 - alpha) * plus_di_1d[i-1]
-        minus_di_1d[i] = alpha * (100 * minus_dm[i] / atr_1d[i] if atr_1d[i] != 0 else 0) + (1 - alpha) * minus_di_1d[i-1]
-    
-    # Calculate DX and ADX
-    dx_1d = np.zeros_like(plus_di_1d)
-    for i in range(len(dx_1d)):
-        di_sum = plus_di_1d[i] + minus_di_1d[i]
-        dx_1d[i] = 100 * np.abs(plus_di_1d[i] - minus_di_1d[i]) / di_sum if di_sum != 0 else 0
-    
-    adx_1d = np.zeros_like(dx_1d)
-    adx_1d[adx_period-1] = np.mean(dx_1d[:adx_period])  # First ADX value
-    for i in range(adx_period, len(dx_1d)):
-        adx_1d[i] = alpha * dx_1d[i] + (1 - alpha) * adx_1d[i-1]
-    
-    # Align 1d ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Volume average (20-period) on 6h timeframe
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for stoploss calculation on 6h timeframe
+    # ATR(14) for stoploss calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -107,12 +74,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(bb_period, 20, adx_period*2, 14)
+    start_idx = max(100, 20, 34, 20, 14, 3)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(sma_bb[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(ema_1d_34_aligned[i]) or 
+            np.isnan(ema_slope[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -128,23 +96,23 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        upper = upper_bb[i]
-        lower = lower_bb[i]
-        middle = middle_bb[i]
-        adx_val = adx_1d_aligned[i]
+        high_dc = donchian_high_aligned[i]
+        low_dc = donchian_low_aligned[i]
+        mid_dc = donchian_mid_aligned[i]
+        ema_slope_val = ema_slope[i]
         
         if position == 0:
-            # Long: Price breaks above upper BB AND ADX > 25 AND volume spike
-            if (price > upper and 
-                adx_val > 25 and 
-                volume[i] > 1.5 * vol_ma_val):
+            # Long: Price breaks above Donchian high AND 1d EMA34 rising AND volume spike
+            if (price > high_dc and 
+                ema_slope_val > 0 and 
+                volume[i] > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price breaks below lower BB AND ADX > 25 AND volume spike
-            elif (price < lower and 
-                  adx_val > 25 and 
-                  volume[i] > 1.5 * vol_ma_val):
+            # Short: Price breaks below Donchian low AND 1d EMA34 falling AND volume spike
+            elif (price < low_dc and 
+                  ema_slope_val < 0 and 
+                  volume[i] > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -152,10 +120,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retouches Bollinger middle band (20-period SMA)
-            if position == 1 and price <= middle:
+            # Primary exit: Price retouches Donchian midpoint
+            if position == 1 and price <= mid_dc:
                 exit_signal = True
-            elif position == -1 and price >= middle:
+            elif position == -1 and price >= mid_dc:
                 exit_signal = True
             
             # ATR-based stoploss: 2.0 * ATR from entry
@@ -173,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_BollingerSqueeze_ADXTrend_VolumeSpike_ATRStop"
-timeframe = "6h"
+name = "12H_Donchian20_1dEMA34_Trend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
