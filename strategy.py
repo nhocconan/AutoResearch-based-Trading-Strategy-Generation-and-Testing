@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Camarilla levels: R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4 (wider breakout levels than R1/S1)
-- Long: price breaks above R3 + price > 1d EMA34 (uptrend) + volume > 2.5x 20-period avg
-- Short: price breaks below S3 + price < 1d EMA34 (downtrend) + volume > 2.5x 20-period avg
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+- Camarilla levels: R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4 (wider breakout levels for fewer false signals)
+- Long: price breaks above R3 + price > 1d EMA34 (uptrend) + volume > 2.0x 24-period avg
+- Short: price breaks below S3 + price < 1d EMA34 (downtrend) + volume > 2.0x 24-period avg
 - Exit: price crosses 1d EMA34 (trend-based exit)
-- Uses wider Camarilla levels (R3/S3) to reduce false breakouts and lower trade frequency
-- Volume confirmation threshold increased to 2.5x to filter weaker spikes
-- Target: 75-150 total trades over 4 years (19-37/year) on 4h timeframe
+- Uses wider Camarilla levels (R3/S3) to reduce whipsaws and false breakouts vs R1/S1
+- Volume confirmation ensures breakout validity
+- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
 - Discrete position sizing: ±0.25 to minimize fee churn
 """
 
@@ -25,8 +25,8 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: > 2.5x 20-period average (stricter spike filter)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: > 2.0x 24-period average (strict spike filter)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     # Load 1d data ONCE before loop for EMA34 trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
@@ -51,7 +51,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34)  # Need 20 for volume MA, 34 for 1d EMA34
+    start_idx = max(24, 34)  # Need 24 for volume MA, 34 for 1d EMA34
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -64,8 +64,8 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike confirmation (> 2.5x average)
-        volume_spike = volume[i] > 2.5 * vol_ma[i]
+        # Volume spike confirmation (> 2.0x average)
+        volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
             # Long: price breaks above R3 + price > 1d EMA34 (uptrend) + volume spike
