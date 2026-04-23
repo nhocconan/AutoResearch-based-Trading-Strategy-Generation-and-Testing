@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian breakout with 12-hour trend filter (HMA) and volume confirmation.
-Long when price breaks above Donchian upper band, 12h HMA trending up, and volume > 1.3x average.
-Short when price breaks below Donchian lower band, 12h HMA trending down, and volume > 1.3x average.
-Exit when price returns to Donchian middle band or trend reverses.
-Designed for moderate trade frequency (~30-50/year) to capture breakouts in trending markets.
-Works in bull markets via upward breakouts and bear markets via downward breakouts.
+Hypothesis: 12-hour Williams %R combined with 1-day Bollinger Band squeeze breakout and volume confirmation.
+Long when Williams %R crosses above -20 (bullish), price breaks above upper Bollinger Band (20,2), and volume > 1.5x average.
+Short when Williams %R crosses below -80 (bearish), price breaks below lower Bollinger Band (20,2), and volume > 1.5x average.
+Exit when Williams %R crosses back through -50 or Bollinger Band width expands beyond 1.5x average width.
+Williams %R identifies momentum extremes, Bollinger Bands identify volatility breakouts, volume confirms strength.
+Designed for low trade frequency (~15-25/year) to capture strong momentum breaks while minimizing false signals.
+Works in both bull and bear markets by requiring volatility expansion (Bollinger Band breakout) with momentum confirmation.
 """
 
 import numpy as np
@@ -22,73 +23,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    middle_channel = (highest_high + lowest_low) / 2
-    
-    # Load 12-hour data for HMA trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1-day data for Bollinger Bands - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12-hour HMA (21-period)
+    # Load 12-hour data for Williams %R - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
+        return np.zeros(n)
+    
+    # Calculate 1-day Bollinger Bands (20,2)
+    close_1d = df_1d['close'].values
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    
+    # Bollinger Band width (for exit condition)
+    bb_width = upper_bb - lower_bb
+    bb_width_avg = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 12-hour Williams %R (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
-    # HMA formula: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    n_hma = 21
-    half_n = n_hma // 2
-    sqrt_n = int(np.sqrt(n_hma))
     
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights/weights.sum(), mode='valid')
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Pad arrays for WMA calculation
-    wma_half = np.full_like(close_12h, np.nan)
-    wma_full = np.full_like(close_12h, np.nan)
+    # Align HTF indicators to lower timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    bb_width_avg_aligned = align_htf_to_ltf(prices, df_1d, bb_width_avg)
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
     
-    for i in range(half_n, len(close_12h)):
-        wma_half[i] = np.dot(close_12h[i-half_n+1:i+1], np.arange(1, half_n+1)) / (half_n*(half_n+1)/2)
-    
-    for i in range(n_hma, len(close_12h)):
-        wma_full[i] = np.dot(close_12h[i-n_hma+1:i+1], np.arange(1, n_hma+1)) / (n_hma*(n_hma+1)/2)
-    
-    # HMA = WMA(2*WMA(half) - WMA(full))
-    wma_diff = 2 * wma_half - wma_full
-    hma_12h = np.full_like(close_12h, np.nan)
-    for i in range(sqrt_n-1, len(wma_diff)):
-        if not np.isnan(wma_diff[i]):
-            start_idx = i - sqrt_n + 1
-            hma_12h[i] = np.dot(wma_diff[start_idx:i+1], np.arange(1, sqrt_n+1)) / (sqrt_n*(sqrt_n+1)/2)
-    
-    # HMA slope for trend direction
-    hma_slope = np.diff(hma_12h, prepend=np.nan)
-    
-    # Load volume average (20-period) on 4h
+    # Volume average (20-period) on lower timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(30, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(hma_slope[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(bb_width_avg_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        williams_r_val = williams_r_aligned[i]
+        williams_r_prev = williams_r_aligned[i-1]
+        close_price = close[i]
+        upper_bb_val = upper_bb_aligned[i]
+        lower_bb_val = lower_bb_aligned[i]
+        bb_width_avg_val = bb_width_avg_aligned[i]
+        vol_ma_val = vol_ma[i]
+        vol_current = volume[i]
+        
         if position == 0:
-            # Long: price breaks above upper band, HMA trending up, volume confirmation
-            if (close[i] > highest_high[i] and hma_slope[i] > 0 and 
-                volume[i] > 1.3 * vol_ma[i]):
+            # Long: Williams %R crosses above -20, price breaks above upper BB, volume confirmation
+            if (williams_r_val > -20 and williams_r_prev <= -20 and
+                close_price > upper_bb_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band, HMA trending down, volume confirmation
-            elif (close[i] < lowest_low[i] and hma_slope[i] < 0 and 
-                  volume[i] > 1.3 * vol_ma[i]):
+            # Short: Williams %R crosses below -80, price breaks below lower BB, volume confirmation
+            elif (williams_r_val < -80 and williams_r_prev >= -80 and
+                  close_price < lower_bb_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -96,12 +103,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to middle band OR HMA trend turns down
-                if close[i] <= middle_channel[i] or hma_slope[i] < 0:
+                # Exit long: Williams %R crosses below -50 OR Bollinger Band width expands significantly
+                if (williams_r_val < -50 and williams_r_prev >= -50) or bb_width_avg_val > 1.5 * bb_width_avg[i-20] if i >= 20 else False:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to middle band OR HMA trend turns up
-                if close[i] >= middle_channel[i] or hma_slope[i] > 0:
+                # Exit short: Williams %R crosses above -50 OR Bollinger Band width expands significantly
+                if (williams_r_val > -50 and williams_r_prev <= -50) or bb_width_avg_val > 1.5 * bb_width_avg[i-20] if i >= 20 else False:
                     exit_signal = True
             
             if exit_signal:
@@ -112,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian_12hHMA_Volume_Breakout"
-timeframe = "4h"
+name = "12H_WilliamsR_1dBB_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
