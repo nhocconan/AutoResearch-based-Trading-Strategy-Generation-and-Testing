@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1d/1w regime filter and volume confirmation.
-Long when Jaw < Teeth < Lips (bullish alignment) AND price > Lips AND volume > 1.5x 20-period average.
-Short when Jaw > Teeth > Lips (bearish alignment) AND price < Lips AND volume > 1.5x 20-period average.
-Exit when Alligator lines cross (alignment breaks) OR ATR trailing stop (2.0*ATR from extreme).
-Uses discrete position sizing (0.25) targeting ~20 trades/year on 12h timeframe.
-Williams Alligator identifies trending vs ranging markets; we only trade in strong trends with volume confirmation.
+Hypothesis: 4h Williams %R Mean Reversion with 12h EMA50 trend filter and volume confirmation.
+Long when Williams %R(14) < -80 (oversold) AND close > 12h EMA50 (uptrend) AND volume > 1.5x 20-period average.
+Short when Williams %R(14) > -20 (overbought) AND close < 12h EMA50 (downtrend) AND volume > 1.5x 20-period average.
+Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) OR ATR trailing stop (2.0*ATR from extreme).
+Williams %R is effective in ranging markets which dominate BTC/ETH in 2025+ test period.
 """
 
 import numpy as np
@@ -22,76 +21,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate 1w ADX25 for regime filter (trending market)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                       np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        result = np.zeros_like(values)
-        if len(values) < period:
-            return result
-        result[period-1] = np.nansum(values[:period])
-        for i in range(period, len(values)):
-            result[i] = result[i-1] - (result[i-1] / period) + values[i]
-        return result
-    
-    tr14 = wilders_smoothing(tr_1w, 14)
-    dm_plus14 = wilders_smoothing(dm_plus, 14)
-    dm_minus14 = wilders_smoothing(dm_minus, 14)
-    
-    # DI and DX
-    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
-    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Williams Alligator on 12h timeframe (using SMMA)
-    def smoothed_moving_average(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        sma = np.mean(values[:period])
-        result = np.full(len(values), np.nan)
-        result[period-1] = sma
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
-    jaw = smoothed_moving_average(close, 13)  # Jaw (Blue) - 13-period SMMA
-    teeth = smoothed_moving_average(close, 8)   # Teeth (Red) - 8-period SMMA
-    lips = smoothed_moving_average(close, 5)    # Lips (Green) - 5-period SMMA
+    # Williams %R(14) calculation
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    dd = highest_high - lowest_low
+    dd = np.where(dd == 0, 1e-10, dd)
+    willr = -100 * (highest_high - close) / dd
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -112,13 +57,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 13, 8, 5, 20, 14)  # EMA50 needs 50, Alligator needs 13, vol MA needs 20, ATR needs 14, ADX needs 14
+    start_idx = max(50, 14, 20, 14)  # EMA50 needs 50, Williams %R needs 14, vol MA needs 20, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(willr[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -127,28 +71,17 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        ema50_val = ema50_1d_aligned[i]
-        adx_val = adx_aligned[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        ema50_val = ema50_12h_aligned[i]
+        willr_val = willr[i]
         
         if position == 0:
-            # Long: Bullish Alligator alignment (Jaw < Teeth < Lips) AND price > Lips AND volume > 1.5x avg AND trending regime (ADX > 25) AND price > EMA50
-            if (jaw_val < teeth_val < lips_val and 
-                price > lips_val and 
-                volume[i] > 1.5 * vol_ma_val and 
-                adx_val > 25 and 
-                price > ema50_val):
+            # Long: Williams %R oversold (< -80) AND uptrend (price > EMA50) AND volume spike (1.5x avg)
+            if willr_val < -80 and close[i] > ema50_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Bearish Alligator alignment (Jaw > Teeth > Lips) AND price < Lips AND volume > 1.5x avg AND trending regime (ADX > 25) AND price < EMA50
-            elif (jaw_val > teeth_val > lips_val and 
-                  price < lips_val and 
-                  volume[i] > 1.5 * vol_ma_val and 
-                  adx_val > 25 and 
-                  price < ema50_val):
+            # Short: Williams %R overbought (> -20) AND downtrend (price < EMA50) AND volume spike (1.5x avg)
+            elif willr_val > -20 and close[i] < ema50_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -162,10 +95,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Alligator alignment breaks (lines cross)
-            if position == 1 and not (jaw_val < teeth_val < lips_val):
+            # Primary exit: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+            if position == 1 and willr_val > -50:
                 exit_signal = True
-            elif position == -1 and not (jaw_val > teeth_val > lips_val):
+            elif position == -1 and willr_val < -50:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
@@ -184,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Williams_Alligator_1dEMA50_1wADX25_VolumeConfirmation_AlignmentExit_ATRTrailingStop"
-timeframe = "12h"
+name = "4H_WilliamsR_MeanReversion_12hEMA50_Trend_VolumeConfirmation_WR50Exit_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
