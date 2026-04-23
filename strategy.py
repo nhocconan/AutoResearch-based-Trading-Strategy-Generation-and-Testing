@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 12h Supertrend trend filter and volume spike confirmation.
-- Long: Close > Camarilla H3 AND Supertrend bullish AND volume > 2.0x 20-period avg
-- Short: Close < Camarilla L3 AND Supertrend bearish AND volume > 2.0x 20-period avg
-- Exit: Opposite Camarilla breakout OR Supertrend flip
-- Uses 12h HTF for Supertrend (more responsive than 1d, fewer whipsaws in bear markets)
-- Camarilla H3/L3 provide tighter structure than H4/L4, increasing win rate while maintaining low trade frequency
+Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
+- Long: Close > Donchian Upper(20) AND price > 1w EMA50 AND volume > 2.0x 20-period avg
+- Short: Close < Donchian Lower(20) AND price < 1w EMA50 AND volume > 2.0x 20-period avg
+- Exit: Opposite Donchian breakout OR price crosses 1w EMA50
+- Uses 1w HTF for EMA50 and 1d HTF for Donchian levels (calculated from prior completed bars)
+- Designed for low trade frequency (7-25/year) to minimize fee drag on 1d timeframe
+- Donchian provides strong structure, reducing false breakouts
 - Volume confirmation filters low-conviction moves
-- Designed for 25-50 trades/year to minimize fee drag on 4h timeframe
+- Works in both bull (trend filter) and bear (mean reversion via breakout failures)
 """
 
 import numpy as np
@@ -27,84 +28,37 @@ def generate_signals(prices):
     # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h Supertrend for trend filter (HTF = 12h)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1w EMA50 for trend filter (HTF = 1w)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Supertrend parameters
-    atr_period = 10
-    multiplier = 3.0
+    # Calculate Donchian levels from prior 20 1d bars (HTF = 1d)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate ATR
-    tr1 = pd.Series(high_12h).rolling(2).apply(lambda x: x[1] - x[0], raw=True)
-    tr2 = pd.Series(high_12h).rolling(2).apply(lambda x: abs(x[1] - x[0]), raw=True)
-    tr3 = pd.Series(low_12h).rolling(2).apply(lambda x: abs(x[1] - x[0]), raw=True)
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Donchian(20): Upper = max(high, 20), Lower = min(low, 20)
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Basic Upper and Lower Bands
-    hl2 = (high_12h + low_12h) / 2
-    upper_band = hl2 + (multiplier * atr)
-    lower_band = hl2 - (multiplier * atr)
-    
-    # Supertrend calculation
-    supertrend = np.full(len(close_12h), np.nan)
-    direction = np.full(len(close_12h), np.nan)  # 1 for up, -1 for down
-    
-    # Initialize
-    supertrend[atr_period-1] = upper_band[atr_period-1]
-    direction[atr_period-1] = 1
-    
-    for i in range(atr_period, len(close_12h)):
-        if close_12h[i] > supertrend[i-1]:
-            direction[i] = 1
-        elif close_12h[i] < supertrend[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        if direction[i] == 1 and direction[i-1] == -1:
-            supertrend[i] = upper_band[i]
-        elif direction[i] == -1 and direction[i-1] == 1:
-            supertrend[i] = lower_band[i]
-        elif direction[i] == 1:
-            supertrend[i] = max(upper_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(lower_band[i], supertrend[i-1])
-    
-    # Align Supertrend to 4h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
-    
-    # Calculate Camarilla levels from prior 12h bar (HTF = 12h)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Standard Camarilla: H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
-    range_12h = high_12h - low_12h
-    camarilla_h3 = close_12h + 1.125 * range_12h
-    camarilla_l3 = close_12h - 1.125 * range_12h
-    
-    # Align Camarilla levels to 4h timeframe (use prior completed 12h bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    # Align Donchian levels to 1d timeframe (use prior completed 1d bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(atr_period, 20)  # Need ATR period for Supertrend, 20 for volume MA
+    start_idx = max(50, 20)  # Need 50 for 1w EMA, 20 for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
-            np.isnan(supertrend_aligned[i]) or
-            np.isnan(direction_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or
-            np.isnan(camarilla_l3_aligned[i])):
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(donchian_upper_aligned[i]) or
+            np.isnan(donchian_lower_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -113,33 +67,29 @@ def generate_signals(prices):
         # Volume confirmation (> 2.0x average)
         volume_confirm = volume[i] > 2.0 * vol_ma[i]
         
-        # Supertrend trend filter
-        trend_up = direction_aligned[i] == 1
-        trend_down = direction_aligned[i] == -1
-        
-        # Camarilla breakout signals (using current close vs prior levels)
-        breakout_up = close[i] > camarilla_h3_aligned[i-1]  # Close above prior H3
-        breakout_down = close[i] < camarilla_l3_aligned[i-1]  # Close below prior L3
+        # Donchian breakout signals (using current close vs prior levels)
+        breakout_up = close[i] > donchian_upper_aligned[i-1]  # Close above prior upper
+        breakout_down = close[i] < donchian_lower_aligned[i-1]  # Close below prior lower
         
         if position == 0:
-            # Long: Camarilla H3 breakout up AND Supertrend bullish AND volume confirmation
-            if breakout_up and trend_up and volume_confirm:
+            # Long: Donchian Upper breakout up AND price > 1w EMA50 AND volume confirmation
+            if breakout_up and volume_confirm and close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Camarilla L3 breakout down AND Supertrend bearish AND volume confirmation
-            elif breakout_down and trend_down and volume_confirm:
+            # Short: Donchian Lower breakout down AND price < 1w EMA50 AND volume confirmation
+            elif breakout_down and volume_confirm and close[i] < ema_50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Camarilla L3 breakout down OR Supertrend bearish (trend flip)
-            if breakout_down or not trend_up:
+            # Long exit: Donchian Lower breakout down OR price < 1w EMA50 (trend flip)
+            if breakout_down or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Camarilla H3 breakout up OR Supertrend bullish (trend flip)
-            if breakout_up or trend_up:
+            # Short exit: Donchian Upper breakout up OR price > 1w EMA50 (trend flip)
+            if breakout_up or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -147,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_12hSupertrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
