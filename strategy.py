@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Index with 12h EMA trend filter and volume confirmation.
-- Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-- Long: Bull Power > 0 AND Bear Power rising (improving) AND price > 12h EMA(34) AND volume > 1.5x 20-period avg
-- Short: Bear Power < 0 AND Bull Power falling (deteriorating) AND price < 12h EMA(34) AND volume > 1.5x 20-period avg
-- Exit: Opposite Elder Ray signal OR volume drops below average
-- Uses Elder Ray to measure bull/bear power relative to EMA, 12h EMA for trend filter, volume for confirmation
-- Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+- Long: Close breaks above Donchian upper (20) + price > 1d EMA34 + volume > 1.5x 20-period avg
+- Short: Close breaks below Donchian lower (20) + price < 1d EMA34 + volume > 1.5x 20-period avg
+- Exit: Close crosses Donchian opposite channel (mean reversion)
+- Uses Donchian channels for structure, 1d EMA34 for trend filter, volume confirmation for strength
+- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
 - Discrete position sizing: ±0.25 to balance return and minimize fee churn
-- Works in bull markets (strong bull power with uptrend) and bear markets (strong bear power with downtrend)
+- Works in bull markets (breakouts with trend alignment) and bear markets (mean reversion at channel extremes)
 """
 
 import numpy as np
@@ -25,40 +24,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA(13) for Elder Ray calculation
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, min_periods=13, adjust=False).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Rate of change for Elder Ray to detect improvement/deterioration
-    bull_power_change = np.diff(bull_power, prepend=bull_power[0])
-    bear_power_change = np.diff(bear_power, prepend=bear_power[0])
-    
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 12h HTF data for EMA(34) trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 20, 34)  # Need 13 for EMA13, 20 for volume MA, 34 for EMA34
+    start_idx = max(34, 20)  # Need 34 for EMA, 20 for Donchian/volume
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_12h_aligned[i])):
+        if (np.isnan(vol_ma[i]) or 
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,32 +58,28 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Bull Power > 0 AND improving AND price > 12h EMA34 AND volume confirmation
-            if (bull_power[i] > 0 and 
-                bull_power_change[i] > 0 and  # Bull power improving
-                close[i] > ema_34_12h_aligned[i] and
+            # Long: Close breaks above Donchian upper + price > 1d EMA34 + volume confirmation
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND deteriorating AND price < 12h EMA34 AND volume confirmation
-            elif (bear_power[i] < 0 and 
-                  bear_power_change[i] < 0 and  # Bear power deteriorating (more negative)
-                  close[i] < ema_34_12h_aligned[i] and
+            # Short: Close breaks below Donchian lower + price < 1d EMA34 + volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power turns negative OR volume drops below average
-            if (bull_power[i] <= 0 or 
-                volume[i] < vol_ma[i]):
+            # Long exit: Close crosses below Donchian lower (mean reversion)
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power turns positive OR volume drops below average
-            if (bear_power[i] >= 0 or 
-                volume[i] < vol_ma[i]):
+            # Short exit: Close crosses above Donchian upper (mean reversion)
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_EMA13_12hEMA34_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA34_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
