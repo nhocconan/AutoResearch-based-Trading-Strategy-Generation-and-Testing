@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray + Williams Alligator with volume confirmation and 1d trend filter.
-- Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures trend strength
-- Williams Alligator (Jaw/Teeth/Lips SMAs) identifies trend vs ranging markets
-- Long when Bull Power > 0, Lips > Teeth > Jaw (bullish alignment), and volume > 1.5x average
-- Short when Bear Power > 0, Lips < Teeth < Jaw (bearish alignment), and volume > 1.5x average
-- 1d EMA50 as higher timeframe trend filter (avoid counter-trend trades)
+Hypothesis: 12h Williams %R Reversal with 1d Trend Filter and Volume Confirmation
+- Williams %R measures overbought/oversold conditions (-20 to 0 = overbought, -80 to -100 = oversold)
+- Long when %R crosses above -80 from below (oversold bounce) with 1d uptrend and volume confirmation
+- Short when %R crosses below -20 from above (overbought rejection) with 1d downtrend and volume confirmation
+- 1d EMA50 as higher timeframe trend filter to avoid counter-trend trades
 - Position size: 0.25 discrete level to minimize fee churn
-- Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+- Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 - Works in both bull/bear via 1d trend filter and volatility-adjusted signals
 """
 
@@ -20,21 +19,16 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray components: EMA13 for Bull/Bear Power
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # High - EMA13
-    bear_power = ema13 - low   # EMA13 - Low
-    
-    # Williams Alligator: SMAs of median price
-    median_price = (high + low) / 2.0
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # SMA13
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values   # SMA8
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values    # SMA5
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Volume confirmation: > 1.5x 30-period average
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
@@ -49,12 +43,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 30, 50)  # Elder Ray, volume MA, 1d EMA
+    start_idx = max(period, 30, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+        if (np.isnan(williams_r[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,29 +57,27 @@ def generate_signals(prices):
         # Volume confirmation (> 1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Williams Alligator alignment
-        alligator_bull = lips[i] > teeth[i] and teeth[i] > jaw[i]  # Lips > Teeth > Jaw
-        alligator_bear = lips[i] < teeth[i] and teeth[i] < jaw[i]  # Lips < Teeth < Jaw
-        
         if position == 0:
-            # Long: Bull Power > 0 AND alligator bullish AND price above 1d EMA50 AND volume confirmation
-            if bull_power[i] > 0 and alligator_bull and close[i] > ema_50_1d_aligned[i] and volume_confirm:
+            # Long: Williams %R crosses above -80 (oversold bounce) with 1d uptrend and volume
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                close[i] > ema_50_1d_aligned[i] and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power > 0 AND alligator bearish AND price below 1d EMA50 AND volume confirmation
-            elif bear_power[i] > 0 and alligator_bear and close[i] < ema_50_1d_aligned[i] and volume_confirm:
+            # Short: Williams %R crosses below -20 (overbought rejection) with 1d downtrend and volume
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                  close[i] < ema_50_1d_aligned[i] and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power <= 0 OR alligator alignment breaks OR price crosses below 1d EMA50
-            if bull_power[i] <= 0 or not alligator_bull or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: Williams %R crosses above -20 (overbought) or trend breaks
+            if williams_r[i] >= -20 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power <= 0 OR alligator alignment breaks OR price crosses above 1d EMA50
-            if bear_power[i] <= 0 or not alligator_bear or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: Williams %R crosses below -80 (oversold) or trend breaks
+            if williams_r[i] <= -80 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Alligator_VolumeConfirm_1dEMA50_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Reversal_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
