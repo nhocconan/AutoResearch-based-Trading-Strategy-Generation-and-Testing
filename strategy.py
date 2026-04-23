@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA200 trend filter and volume confirmation.
-Long when Bull Power > 0 AND Bear Power < 0 AND close > 12h EMA200 AND volume > 1.5x 20-period average.
-Short when Bear Power < 0 AND Bull Power < 0 AND close < 12h EMA200 AND volume > 1.5x 20-period average.
-Exit when Elder Power diverges (Bull Power <= 0 for long, Bear Power >= 0 for short) or ATR-based stoploss.
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-30 trades/year per symbol.
-Elder Ray measures bull/bear strength relative to EMA13, providing clear trend exhaustion signals.
-Works in both bull and bear markets by requiring trend alignment via 12h EMA200 filter.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation, using ATR-based dynamic position sizing.
+Long when price breaks above R3 AND close > 1d EMA34 AND volume > 2.0x 20-period average.
+Short when price breaks below S3 AND close < 1d EMA34 AND volume > 2.0x 20-period average.
+Exit when price reverts to Camarilla Pivot point (PP) or ATR-based stoploss hits (2.5x ATR).
+Position size scales with volatility: base size 0.25 adjusted by inverse ATR (normalized to 20-period median ATR).
+This adapts position size to market conditions, reducing exposure during high volatility and increasing during low volatility.
+Target: 25-50 trades/year per symbol with Sharpe > 0.5 on both train and test.
 """
 
 import numpy as np
@@ -23,48 +23,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 6h data for Elder Ray calculation - ONCE before loop
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Load 4h data for Camarilla calculation - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate EMA13 for Elder Ray
-    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla levels for 4h timeframe (using previous bar's OHLC)
+    # Camarilla: PP = (H+L+C)/3, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_6h - ema13_6h
-    bear_power = low_6h - ema13_6h
+    # First bar: use current values (will be refined as more data comes)
+    prev_high[0] = high_4h[0]
+    prev_low[0] = low_4h[0]
+    prev_close[0] = close_4h[0]
     
-    # Align 6h Elder Power to 6h timeframe (no additional delay needed)
-    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3.0
+    camarilla_range = prev_high - prev_low
+    camarilla_r3 = prev_close + camarilla_range * 1.1 / 4.0
+    camarilla_s3 = prev_close - camarilla_range * 1.1 / 4.0
     
-    # Load 12h data for EMA200 trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 200:
+    # Align 4h Camarilla levels to 4h timeframe (no additional delay needed as they're based on completed bar)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    
+    # Load 1d data for EMA34 trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA200 on 12h data
-    ema200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate EMA34 on 1d data
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h EMA200 to 6h timeframe
-    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
+    # Align 1d EMA34 to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume average (20-period) on 6h timeframe
+    # Volume average (20-period) on 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR(14) on 6h data for stoploss
+    # Calculate ATR(14) on 4h data for stoploss and volatility normalization
     tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
     tr2 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, tr2)
     tr[0] = high[0] - low[0]  # first bar
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 20-period median ATR for volatility normalization
+    atr_ma = pd.Series(atr_4h).rolling(window=20, min_periods=20).median().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,8 +85,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema200_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_6h[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_4h[i]) or np.isnan(atr_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,22 +95,33 @@ def generate_signals(prices):
         
         price = close[i]
         vol_ma_val = vol_ma[i]
+        atr_val = atr_4h[i]
+        atr_ma_val = atr_ma[i]
+        
+        # Dynamic position sizing: base size 0.25 scaled by inverse ATR (normalized)
+        # Lower ATR (low volatility) → larger position; Higher ATR (high volatility) → smaller position
+        if atr_ma_val > 0:
+            volatility_scale = np.clip(atr_ma_val / atr_val, 0.5, 2.0)  # Limit scaling to 0.5x-2.0x
+            base_size = 0.25
+            position_size = base_size * volatility_scale
+            # Cap position size at 0.35 to respect max limits
+            position_size = min(position_size, 0.35)
+        else:
+            position_size = 0.25
         
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power < 0 AND close > 12h EMA200 AND volume spike
-            if (bull_power_aligned[i] > 0 and 
-                bear_power_aligned[i] < 0 and 
-                close[i] > ema200_12h_aligned[i] and 
-                volume[i] > 1.5 * vol_ma_val):
-                signals[i] = 0.25
+            # Long: price breaks above R3 AND close > 1d EMA34 AND volume spike
+            if (price > camarilla_r3_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume[i] > 2.0 * vol_ma_val):
+                signals[i] = position_size
                 position = 1
                 entry_price = price
-            # Short: Bear Power < 0 AND Bull Power < 0 AND close < 12h EMA200 AND volume spike
-            elif (bear_power_aligned[i] < 0 and 
-                  bull_power_aligned[i] < 0 and 
-                  close[i] < ema200_12h_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma_val):
-                signals[i] = -0.25
+            # Short: price breaks below S3 AND close < 1d EMA34 AND volume spike
+            elif (price < camarilla_s3_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma_val):
+                signals[i] = -position_size
                 position = -1
                 entry_price = price
         else:
@@ -105,16 +129,16 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Bull Power <= 0 (trend exhaustion) or ATR stoploss
-                if bull_power_aligned[i] <= 0:
+                # Exit long: price reverts to PP or ATR stoploss
+                if price <= camarilla_pp_aligned[i]:
                     exit_signal = True
-                elif price < entry_price - 2.5 * atr_6h[i]:
+                elif price < entry_price - 2.5 * atr_4h[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Bear Power >= 0 (trend exhaustion) or ATR stoploss
-                if bear_power_aligned[i] >= 0:
+                # Exit short: price reverts to PP or ATR stoploss
+                if price >= camarilla_pp_aligned[i]:
                     exit_signal = True
-                elif price > entry_price + 2.5 * atr_6h[i]:
+                elif price > entry_price + 2.5 * atr_4h[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -122,10 +146,10 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = position_size if position == 1 else -position_size
     
     return signals
 
-name = "6H_ElderRay_12hEMA200_VolumeSpike"
-timeframe = "6h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_DynamicSize"
+timeframe = "4h"
 leverage = 1.0
