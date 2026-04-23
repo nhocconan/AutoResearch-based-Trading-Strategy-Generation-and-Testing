@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
-- Camarilla R3/S3 levels provide institutional support/resistance on 1h
-- 4h EMA(34) ensures alignment with higher timeframe trend to reduce counter-trend trades
-- Volume spike (>2.0x 20-period average) confirms strong participation
-- Session filter (08-20 UTC) reduces noise trades
-- Target: 15-30 trades/year (60-120 over 4 years) to minimize fee drag
-- Works in both bull and bear markets by trading with the 4h trend when price breaks Camarilla levels with volume
+Hypothesis: 6h Williams Alligator + 1w Camarilla Pivot Breakout
+- Williams Alligator (Jaw/Teeth/Lips) identifies trend absence (alligator sleeping) vs presence (awake)
+- 1w Camarilla levels provide institutional support/resistance from weekly structure
+- Long when price breaks above weekly R3 with alligator awake (Lips > Teeth > Jaw)
+- Short when price breaks below weekly S3 with alligator awake (Lips < Teeth < Jaw)
+- Volume confirmation > 2.0x 24-period average ensures institutional participation
+- Designed for low-frequency, high-conviction trades: target 12-37/year (50-150 over 4 years)
+- Works in bull/bear markets by trading breakouts of weekly structure with trend confirmation
 """
 
 import numpy as np
@@ -23,104 +24,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for weekly Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    # Calculate weekly Camarilla levels (based on prior week OHLC)
+    # Using typical Camarilla formula: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # where C = (H+L+O)/3 (typical price)
+    typical_1w = (df_1w['high'] + df_1w['low'] + df_1w['open']) / 3
+    range_1w = df_1w['high'] - df_1w['low']
     
-    # Calculate 4h EMA(34) for trend filter
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Weekly Camarilla levels
+    camarilla_r3_1w = typical_1w + (range_1w * 1.1 / 4)
+    camarilla_s3_1w = typical_1w - (range_1w * 1.1 / 4)
+    camarilla_r4_1w = typical_1w + (range_1w * 1.1 / 2)
+    camarilla_s4_1w = typical_1w - (range_1w * 1.1 / 2)
     
-    # Calculate 1h EMA(20) for Camarilla base (previous bar's close)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w.values)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w.values)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4_1w.values)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4_1w.values)
     
-    # Volume confirmation: > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Williams Alligator on 6h timeframe
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    # Teeth: 8-period SMMA, shifted 5 bars forward  
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    def smma(series, period):
+        """Smoothed Moving Average"""
+        if len(series) < period:
+            return np.full_like(series, np.nan)
+        result = np.full_like(series, np.nan)
+        sma = pd.Series(series).rolling(window=period, min_periods=period).mean().values
+        result[period-1] = sma[period-1]
+        for i in range(period, len(series)):
+            result[i] = (result[i-1] * (period-1) + series[i]) / period
+        return result
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Shift jaws forward (Alligator lines are plotted forward)
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    # Set initial shifted values to NaN
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
+    
+    # Volume confirmation: > 2.0x 24-period average (6h * 24 = 6 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 20)  # EMA4h, EMA20, volume MA
+    start_idx = max(50, 24, 13, 8, 5) + 8  # Account for Alligator shifts
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(ema_20[i]) or 
+        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
+            np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Alligator awake condition: Lips > Teeth > Jaw (uptrend) or Lips < Teeth < Jaw (downtrend)
+        alligator_awake_up = (lips_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > jaw_shifted[i])
+        alligator_awake_down = (lips_shifted[i] < teeth_shifted[i] and teeth_shifted[i] < jaw_shifted[i])
         
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Breakout signals with volume confirmation
+        long_breakout = (close[i] > r3_1w_aligned[i] and volume[i] > 2.0 * vol_ma[i])
+        short_breakout = (close[i] < s3_1w_aligned[i] and volume[i] > 2.0 * vol_ma[i])
         
-        # Calculate Camarilla levels using previous bar's OHLC
-        # Camarilla uses previous day's range, but we'll use previous bar for 1h timeframe
-        prev_close = close[i-1]
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        
-        # Camarilla R3 and S3 levels
-        rang = prev_high - prev_low
-        r3 = prev_close + rang * 1.1/4
-        s3 = prev_close - rang * 1.1/4
-        
-        # Breakout signals with trend filter and volume confirmation
-        # Long: price breaks above R3 + uptrend + volume spike
-        # Short: price breaks below S3 + downtrend + volume spike
-        long_signal = (close[i] > r3 and 
-                      close[i] > ema_34_4h_aligned[i] and
-                      volume[i] > 2.0 * vol_ma[i])
-        
-        short_signal = (close[i] < s3 and 
-                       close[i] < ema_34_4h_aligned[i] and
-                       volume[i] > 2.0 * vol_ma[i])
+        # Strong breakout confirmation (beyond R4/S4 adds momentum)
+        strong_long = long_breakout and (close[i] > r4_1w_aligned[i])
+        strong_short = short_breakout and (close[i] < s4_1w_aligned[i])
         
         if position == 0:
-            if long_signal:
-                signals[i] = 0.20
+            # Enter only when alligator is awake and breakout occurs
+            if alligator_awake_up and strong_long:
+                signals[i] = 0.25
                 position = 1
-            elif short_signal:
-                signals[i] = -0.20
+            elif alligator_awake_down and strong_short:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to EMA20 or opposite Camarilla level
+            # Exit conditions: Alligator sleeping (trend weakening) or opposite breakout
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns below EMA20 or breaks below S3
-                if (close[i] < ema_20[i] or 
-                    close[i] < s3):
+                # Exit long: alligator goes to sleep or short breakout
+                if not alligator_awake_up or (close[i] < s3_1w_aligned[i] and volume[i] > 2.0 * vol_ma[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: price returns above EMA20 or breaks above R3
-                if (close[i] > ema_20[i] or 
-                    close[i] > r3):
+                # Exit short: alligator goes to sleep or long breakout
+                if not alligator_awake_down or (close[i] > r3_1w_aligned[i] and volume[i] > 2.0 * vol_ma[i]):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA34_Trend_Volume_SessionFilter"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1wCamarillaR3S3_Breakout_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
