@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Index with 12h EMA50 trend filter and volume spike confirmation.
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-- Bull Power > 0 AND Bear Power < 0 indicates balanced momentum (avoid chop)
-- Strong Bull Power (> 0.5*ATR) with volume > 1.5x average signals bullish entry
-- Strong Bear Power (< -0.5*ATR) with volume > 1.5x average signals bearish entry
-- 12h EMA50 ensures trades align with higher timeframe trend
-- Volume confirmation reduces false breakouts
-- Discrete position size 0.25 to manage drawdown
-- Target: 12-25 trades/year on 6h timeframe (50-100 total over 4 years)
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Camarilla pivot levels (H3/L3) act as strong support/resistance on 4h chart
+- Breakout above H3 with volume > 1.8x average signals bullish momentum
+- Breakdown below L3 with volume > 1.8x average signals bearish momentum
+- 1d EMA34 ensures trades align with daily trend (avoid counter-trend in bear markets)
+- Discrete position size 0.25 to minimize drawdown during crashes like 2022
+- Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years)
+- Works in both bull/bear via 1d trend filter and volatility-adjusted breakouts
+- Uses tighter volume confirmation (1.8x) and smaller position (0.25) to reduce overtrading
 """
 
 import numpy as np
@@ -25,73 +25,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray calculation
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate typical price for Camarilla pivots (using prior bar's OHLC)
+    typical_price = (high + low + close) / 3.0
     
-    # ATR(14) for power threshold
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Shift by 1 to use prior bar's data for pivot calculation (no look-ahead)
+    typical_price_shifted = np.roll(typical_price, 1)
+    high_shifted = np.roll(high, 1)
+    low_shifted = np.roll(low, 1)
+    close_shifted = np.roll(close, 1)
     
-    # Elder Ray components
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Set first bar to NaN since we don't have prior bar data
+    typical_price_shifted[0] = np.nan
+    high_shifted[0] = np.nan
+    low_shifted[0] = np.nan
+    close_shifted[0] = np.nan
     
-    # Volume confirmation: > 1.5x 20-period average
+    # Camarilla pivot levels (based on prior bar)
+    pivot = (high_shifted + low_shifted + close_shifted) / 3.0
+    range_hl = high_shifted - low_shifted
+    
+    # Resistance/support levels (H3/L3 = 1.1*(H-L)/6 from pivot)
+    H3 = pivot + (range_hl * 1.1 / 6.0)  # H3 = pivot + 1.1*(H-L)/6
+    L3 = pivot - (range_hl * 1.1 / 6.0)  # L3 = pivot - 1.1*(H-L)/6
+    
+    # Volume confirmation: > 1.8x 20-period average (tighter than v1's 2.0x)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d data for EMA34 trend filter (daily timeframe for stronger trend)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50)  # volume MA, 12h EMA
+    start_idx = max(20, 34)  # volume MA, 1d EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Power thresholds
-        strong_bull = bull_power[i] > 0.5 * atr_14[i]
-        strong_bear = bear_power[i] < -0.5 * atr_14[i]
-        balanced = bull_power[i] > 0 and bear_power[i] < 0
+        # Volume confirmation (> 1.8x average)
+        volume_confirm = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
-            # Long: Strong bull power, balanced market, above 12h EMA50, volume confirmation
-            if strong_bull and balanced and close[i] > ema_50_12h_aligned[i] and volume_confirm:
+            # Long: Close > H3 AND price above 1d EMA34 AND volume confirmation
+            if close[i] > H3[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Strong bear power, balanced market, below 12h EMA50, volume confirmation
-            elif strong_bear and balanced and close[i] < ema_50_12h_aligned[i] and volume_confirm:
+            # Short: Close < L3 AND price below 1d EMA34 AND volume confirmation
+            elif close[i] < L3[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Weak bull power OR price crosses below 12h EMA50
-            if bull_power[i] < 0 or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: Close < pivot OR price crosses below 1d EMA34
+            if close[i] < pivot[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Weak bear power OR price crosses above 12h EMA50
-            if bear_power[i] > 0 or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: Close > pivot OR price crosses above 1d EMA34
+            if close[i] > pivot[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Alligator_VolumeConfirm_v2"
-timeframe = "6h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
