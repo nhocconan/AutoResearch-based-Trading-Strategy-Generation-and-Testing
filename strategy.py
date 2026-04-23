@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams %R + 1d EMA50 Trend + Volume Spike
-Williams %R identifies overbought/oversold conditions. In trending markets with volume confirmation,
-mean reversion from extremes captures profitable swings. 12h timeframe reduces noise and overtrading.
-Uses 1d EMA50 for trend filter and volume spike (>2x 20-period average) for confirmation.
-Target: 12-37 trades/year (50-150 over 4 years) with discrete sizing 0.25.
+Hypothesis: 4h Camarilla R3/S3 Breakout + 1d EMA34 Trend + Volume Spike
+Camarilla pivot levels (R3/S3) act as strong intraday support/resistance. 
+Breakout above R3 or below S3 with 1d EMA34 trend alignment and volume confirmation
+captures sustained momentum moves. 4h timeframe balances noise reduction and trade frequency.
+Target: 20-50 trades/year (80-200 over 4 years) with discrete sizing 0.25.
 """
 
 import numpy as np
@@ -21,60 +21,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Calculate Camarilla levels from previous day (using 1d data)
+    # Camarilla: R3 = close + 1.1*(high-low)*1.1/4, S3 = close - 1.1*(high-low)*1.1/4
+    # Actually standard Camarilla: R3 = close + 1.1*(high-low)*1.1/4? Let me check.
+    # Standard Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
+    # But we want R3/S3 from previous day
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(df_1d['high'].values, 1)
+    prev_low_1d = np.roll(df_1d['low'].values, 1)
+    prev_close_1d[0] = close_1d[0]  # first bar
+    prev_high_1d[0] = df_1d['high'].iloc[0]
+    prev_low_1d[0] = df_1d['low'].iloc[0]
     
-    # Volume confirmation: > 2x 20-period average
+    camarilla_range = prev_high_1d - prev_low_1d
+    r3 = prev_close_1d + 1.1 * camarilla_range * 1.1 / 4
+    s3 = prev_close_1d - 1.1 * camarilla_range * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(14, 20, 50)  # need Williams %R, vol MA, EMA50_1d
+    start_idx = max(34, 20)  # need EMA34_1d, vol MA (Camarilla uses 1d data which is already aligned)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) AND price > 1d EMA50 (uptrend) AND volume spike
-            if (williams_r[i] < -80 and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > 2.0 * vol_ma[i]):
+            # Long: Close > R3 (breakout resistance) AND price > 1d EMA34 (uptrend) AND volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) AND price < 1d EMA50 (downtrend) AND volume spike
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma[i]):
+            # Short: Close < S3 (breakdown support) AND price < 1d EMA34 (downtrend) AND volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Williams %R returns to neutral range OR loss of trend
+            # Exit: Close back inside Camarilla H-L range OR loss of trend
             exit_signal = False
+            # Recalculate today's Camarilla H-L range for exit condition
+            today_high_1d = df_1d['high'].values
+            today_low_1d = df_1d['low'].values
+            today_high_aligned = align_htf_to_ltf(prices, df_1d, today_high_1d)
+            today_low_aligned = align_htf_to_ltf(prices, df_1d, today_low_1d)
+            
             if position == 1:
-                # Exit long when Williams %R > -50 (returning from oversold) OR price < 1d EMA50
-                if williams_r[i] > -50 or close[i] < ema_50_1d_aligned[i]:
+                # Exit long when close < today's low OR price < 1d EMA34
+                if close[i] < today_low_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when Williams %R < -50 (returning from overbought) OR price > 1d EMA50
-                if williams_r[i] < -50 or close[i] > ema_50_1d_aligned[i]:
+                # Exit short when close > today's high OR price > 1d EMA34
+                if close[i] > today_high_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -85,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_1dEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
