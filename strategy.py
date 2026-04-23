@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d ATR regime filter and volume confirmation.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d ATR regime filter and volume confirmation.
 - Long: Close breaks above Camarilla R3 + ATR(14) > ATR(50) (high volatility regime) + volume > 1.5x 20-period avg
 - Short: Close breaks below Camarilla S3 + ATR(14) > ATR(50) (high volatility regime) + volume > 1.5x 20-period avg
 - Exit: Close crosses Camarilla H6/L6 levels (extreme mean reversion)
 - Uses Camarilla pivot levels from daily HTF for structure, volatility regime filter to avoid choppy markets,
   and volume confirmation to ensure breakout strength
-- Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
 - Discrete position sizing: ±0.25 to balance return and minimize fee churn
 - Works in bull markets (breakouts with volatility expansion) and bear markets (mean reversion at extreme pivots)
 """
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dATR_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dATR_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
