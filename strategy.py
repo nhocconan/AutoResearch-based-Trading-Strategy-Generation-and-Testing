@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla pivot breakout with 4h EMA trend filter and volume confirmation.
-Long when price breaks above Camarilla R3 AND 4h EMA50 > EMA200 (uptrend) AND volume > 1.5x 20-period average.
-Short when price breaks below Camarilla S3 AND 4h EMA50 < EMA200 (downtrend) AND volume > 1.5x 20-period average.
-Exit when price retraces to Camarilla PP (pivot point) or ATR trailing stop (2.0*ATR from extreme).
-Uses discrete position sizing (0.20) to minimize fee drag. Targets 15-35 trades/year per symbol.
-Camarilla provides intraday support/resistance levels; 4h EMA filter ensures alignment with higher timeframe trend; volume confirms breakout strength.
-Works in bull (breakouts with volume in uptrend) and bear (breakdowns with volume in downtrend) markets by capturing expansion phases after consolidation.
+Hypothesis: 6h Williams %R extreme reversals with 1d EMA50 trend filter and volume confirmation.
+Long when Williams %R(14) < -80 (oversold) AND price > EMA50(1d) (uptrend) AND volume > 1.5x 20-period average.
+Short when Williams %R(14) > -20 (overbought) AND price < EMA50(1d) (downtrend) AND volume > 1.5x 20-period average.
+Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts) OR ATR trailing stop (2.0*ATR from extreme).
+Uses discrete position sizing (0.25) to minimize fee drag. Targets 20-40 trades/year per symbol.
+Williams %R captures mean reversals in overextended moves; EMA50 filter ensures trend alignment; volume confirms conviction.
+Works in bull (buy oversold dips in uptrend) and bear (sell overbought rallies in downtrend) markets by fading extremes with trend.
 """
 
 import numpy as np
@@ -23,47 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivots from 1d OHLC (using previous day's data)
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate pivot point (PP) and Camarilla levels using previous day's OHLC
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + range_1d * 1.1 / 4
-    s3_1d = close_1d - range_1d * 1.1 / 4
-    r4_1d = close_1d + range_1d * 1.1 / 2
-    s4_1d = close_1d - range_1d * 1.1 / 2
+    # Calculate Williams %R(14) from 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    hh_ll = highest_high - lowest_low
+    hh_ll[hh_ll == 0] = 1e-10
+    williams_r = -100 * ((highest_high - close) / hh_ll)
     
-    # Align Camarilla levels to 1h timeframe (using previous day's values)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Calculate 4h EMA50 and EMA200 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align 4h EMA arrays to 1h timeframe
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR(14) for trailing stop calculation (using 1h data)
+    # ATR(14) for trailing stop calculation (using 6h data)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -73,20 +50,21 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = 0.0  # for long trailing stop
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(200, 20, 20)  # EMA200 needs 200, vol MA needs 20
+    start_idx = max(50, 14, 20)  # EMA50 needs 50, Williams needs 14, vol MA needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,27 +73,18 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        pp = pp_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
-        r4 = r4_aligned[i]
-        s4 = s4_aligned[i]
-        ema50 = ema50_4h_aligned[i]
-        ema200 = ema200_4h_aligned[i]
-        
-        # Trend filter: uptrend if EMA50 > EMA200, downtrend if EMA50 < EMA200
-        uptrend = ema50 > ema200
-        downtrend = ema50 < ema200
+        ema50 = ema50_1d_aligned[i]
+        wr = williams_r[i]
         
         if position == 0:
-            # Long: Break above Camarilla R3 AND uptrend AND volume spike
-            if close[i] > r3 and uptrend and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = 0.20
+            # Long: Oversold AND uptrend AND volume spike
+            if wr < -80 and price > ema50 and volume[i] > 1.5 * vol_ma_val:
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Break below Camarilla S3 AND downtrend AND volume spike
-            elif close[i] < s3 and downtrend and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = -0.20
+            # Short: Overbought AND downtrend AND volume spike
+            elif wr > -20 and price < ema50 and volume[i] > 1.5 * vol_ma_val:
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
         else:
@@ -128,10 +97,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to Camarilla PP (pivot point)
-            if position == 1 and close[i] <= pp:
+            # Primary exit: Williams %R crosses -50 (mean reversion)
+            if position == 1 and wr > -50:
                 exit_signal = True
-            elif position == -1 and close[i] >= pp:
+            elif position == -1 and wr < -50:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
@@ -146,10 +115,10 @@ def generate_signals(prices):
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R3S3_Breakout_4hEMA50_200_Trend_VolumeSpike_PPExit_ATRTrailingStop"
-timeframe = "1h"
+name = "6H_WilliamsR_Extremes_1dEMA50_Trend_VolumeConfirmation_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
