@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily RSI with weekly VWAP filter and volume confirmation.
-Long when RSI crosses above 30 (oversold bounce) + price above weekly VWAP + volume > 1.5x average.
-Short when RSI crosses below 70 (overbought rejection) + price below weekly VWAP + volume > 1.5x average.
-Exit when RSI crosses 50 (mean reversion) or price crosses weekly VWAP.
-Designed for low trade frequency (~10-20/year) to minimize fee drag in both bull and bear markets.
+Hypothesis: 12-hour Williams %R with 1-day ATR-based volatility filter and volume confirmation.
+Long when Williams %R crosses above -20 (oversold recovery) + ATR(14) > 1.5 * ATR(50) + volume > 1.5x average.
+Short when Williams %R crosses below -80 (overbought breakdown) + ATR(14) > 1.5 * ATR(50) + volume > 1.5x average.
+Exit when Williams %R crosses -50 (mean reversion) or volatility drops (ATR(14) < ATR(50)).
+Designed for low trade frequency (~15-30/year) to minimize fee drift in both bull and bear markets.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,25 +21,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-week data for VWAP filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Load 1-day data for volatility filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate weekly VWAP
-    weekly_tp = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    weekly_vwap = (weekly_tp * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
-    weekly_vwap_values = weekly_vwap.values
-    weekly_vwap_aligned = align_htf_to_ltf(prices, df_1w, weekly_vwap_values)
+    # Calculate ATR(14) and ATR(50) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
+    # True Range components
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
+    # Align ATR values to 12h timeframe
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
+    
+    # Calculate Williams %R (14-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -47,27 +58,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(weekly_vwap_aligned[i]) or 
+        if (np.isnan(wr[i]) or np.isnan(atr14_aligned[i]) or np.isnan(atr50_aligned[i]) or 
             np.isnan(avg_volume[i]) or volume[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_vs_vwap = close[i] > weekly_vwap_aligned[i]
+        volatility_expanding = atr14_aligned[i] > 1.5 * atr50_aligned[i]
         volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 0:
-            # Long: RSI crosses above 30 + price above weekly VWAP + volume confirmation
-            if (rsi[i] > 30 and rsi[i-1] <= 30 and 
-                price_vs_vwap and volume_confirm):
+            # Long: Williams %R crosses above -20 + volatility expanding + volume confirmation
+            if (wr[i] > -20 and wr[i-1] <= -20 and 
+                volatility_expanding and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI crosses below 70 + price below weekly VWAP + volume confirmation
-            elif (rsi[i] < 70 and rsi[i-1] >= 70 and 
-                  not price_vs_vwap and volume_confirm):
+            # Short: Williams %R crosses below -80 + volatility expanding + volume confirmation
+            elif (wr[i] < -80 and wr[i-1] >= -80 and 
+                  volatility_expanding and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -75,12 +86,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: RSI crosses above 50 or price below weekly VWAP
-                if rsi[i] >= 50 or not price_vs_vwap:
+                # Exit long: Williams %R crosses below -50 or volatility contracts
+                if wr[i] < -50 or not volatility_expanding:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: RSI crosses below 50 or price above weekly VWAP
-                if rsi[i] <= 50 or price_vs_vwap:
+                # Exit short: Williams %R crosses above -50 or volatility contracts
+                if wr[i] > -50 or not volatility_expanding:
                     exit_signal = True
             
             if exit_signal:
@@ -91,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_RSI_WeeklyVWAP_VolumeFilter"
-timeframe = "1d"
+name = "12H_WilliamsR_VolatilityFilter_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
