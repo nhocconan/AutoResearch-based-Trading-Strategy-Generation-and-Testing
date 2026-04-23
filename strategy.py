@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
-Uses Donchian channel breakouts on 6h timeframe, filtered by weekly Camarilla pivot
-direction (R3/S3 levels) to align with higher timeframe structure. Volume spike
-confirms breakout momentum. Designed for 6h timeframe to capture medium-term moves
-with controlled trade frequency (target: 12-37 trades/year per symbol).
-Uses discrete position sizing (0.25) to manage drawdown and fee drag.
+Hypothesis: 12h Williams %R mean reversion with 1d ADX regime filter and volume spike confirmation.
+In ranging markets (ADX < 25), Williams %R identifies oversold/overbought conditions for mean reversion trades.
+Volume spike confirms momentum behind the reversal. Designed for 12h timeframe to capture intermediate-term reversals
+with lower trade frequency in both bull and bear markets. Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+Uses discrete position sizing (0.25) to balance return and fee drag.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,39 +21,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Donchian channel (20-period)
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Williams %R (14-period) for mean reversion signals
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
+        return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter (secondary confirmation)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    
+    # Calculate 1d ADX (14-period) for regime filter - ranging market when ADX < 25
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1w Camarilla pivot levels (R3, S3) for weekly direction filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Typical price for Camarilla calculation
-    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
+    # Smoothed TR, DM+, DM- using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Camarilla levels: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
-    camarilla_r3_1w = close_1w + (range_1w * 1.1 / 4)
-    camarilla_s3_1w = close_1w - (range_1w * 1.1 / 4)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    # Align weekly Camarilla levels to 6h timeframe (previous weekly bar values)
-    camarilla_r3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
-    camarilla_s3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Calculate volume spike: current volume > 2.0x 20-period MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,49 +82,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50)  # need Donchian20 and EMA50
+    start_idx = max(14, 20)  # need Williams %R, ADX, and volume MA20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3_1w_aligned[i]) or 
-            np.isnan(camarilla_s3_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Donchian breakout conditions
-        donchian_breakout_up = close[i] > high_ma_20[i-1]  # break above previous period high
-        donchian_breakout_down = close[i] < low_ma_20[i-1]  # break below previous period low
+        # Regime filter: only trade in ranging markets (ADX < 25)
+        ranging_market = adx_aligned[i] < 25
         
-        # Trend filters: price above/below 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
-        
-        # Weekly direction filter: price relative to weekly Camarilla R3/S3
-        weekly_bias_up = close[i] > camarilla_r3_1w_aligned[i]  # above weekly R3 = bullish bias
-        weekly_bias_down = close[i] < camarilla_s3_1w_aligned[i]  # below weekly S3 = bearish bias
-        
-        if position == 0:
-            # Long: Donchian breakout up AND uptrend AND weekly bullish bias AND volume spike
-            if donchian_breakout_up and trend_up and weekly_bias_up and volume_spike[i]:
+        if position == 0 and ranging_market:
+            # Long: Williams %R oversold (< -80) AND volume spike
+            if williams_r_aligned[i] < -80 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down AND downtrend AND weekly bearish bias AND volume spike
-            elif donchian_breakout_down and trend_down and weekly_bias_down and volume_spike[i]:
+            # Short: Williams %R overbought (> -20) AND volume spike
+            elif williams_r_aligned[i] > -20 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Donchian breakout in opposite direction
+            # Exit conditions
             exit_signal = False
             if position == 1:
-                # Exit long on Donchian breakout down
-                if donchian_breakout_down:
+                # Exit long when Williams %R returns above -50 (mean reversion complete)
+                if williams_r_aligned[i] > -50:
                     exit_signal = True
             elif position == -1:
-                # Exit short on Donchian breakout up
-                if donchian_breakout_up:
+                # Exit short when Williams %R returns below -50 (mean reversion complete)
+                if williams_r_aligned[i] < -50:
                     exit_signal = True
             
             if exit_signal:
@@ -117,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Donchian20_Breakout_1wCamarillaR3S3_Direction_VolumeSpike"
-timeframe = "6h"
+name = "12H_WilliamsR_MeanReversion_1dADXRegime_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
