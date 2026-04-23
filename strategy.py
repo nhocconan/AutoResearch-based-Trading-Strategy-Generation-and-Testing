@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Volume-Weighted Average Price (VWAP) Deviation with 1d ATR Regime Filter
-- Uses intraday mean reversion to VWAP during high volatility regimes (1d ATR > 20-period MA)
-- Long when price < VWAP - 0.5*ATR(20) in high vol regime, short when price > VWAP + 0.5*ATR(20)
-- Volatility regime filter prevents trading in low volatility choppy markets
-- Designed for 4h timeframe targeting 20-50 trades/year (80-200 over 4 years)
-- Works in bull markets via mean reversion during pullbacks, in bear markets via bounces in downtrends
+Hypothesis: 6h Williams %R Extreme with 1d EMA50 Trend and Volume Spike Filter
+- Williams %R identifies overbought/oversold conditions: long when %R crosses above -80 from below, short when crosses below -20 from above
+- 1d EMA(50) ensures alignment with higher timeframe trend for multi-timeframe confirmation
+- Volume > 2.0x 20-period average confirms strong momentum and reduces false signals
+- Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years) to minimize fee drag
+- Works in bull markets via trend-following breakouts, in bear markets via mean reversion from extremes
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,58 +22,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR regime filter
+    # Get 1d data for EMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d ATR(20) and its 20-period moving average for regime filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_20 = tr.rolling(window=20, min_periods=20).mean().values
-    atr_ma = pd.Series(atr_20).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align ATR regime to 4h timeframe (completed 1d bar only)
-    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
-    atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+    # Williams %R (14 period) on 6h data
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
-    # Calculate 4h VWAP (typical price * volume cumulative / volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.nancumsum(pv)
-    cum_vol = np.nancumsum(volume)
-    # Avoid division by zero
-    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
+    # Volume confirmation: > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(40, 20)  # ATR regime needs 40 bars (20+20), VWAP needs volume history
+    start_idx = max(lookback, 50, 20)  # Williams %R, EMA1d, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_20_aligned[i]) or 
-            np.isnan(atr_ma_aligned[i]) or 
-            np.isnan(vwap[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # High volatility regime: current ATR > ATR moving average
-        high_vol_regime = atr_20_aligned[i] > atr_ma_aligned[i]
+        # Williams %R signals with trend filter and volume spike
+        # Long: %R crosses above -80 from below + uptrend + volume spike
+        # Short: %R crosses below -20 from above + downtrend + volume spike
+        williams_r_prev = williams_r[i-1] if i > 0 else -100
         
-        # VWAP deviation bands
-        upper_band = vwap[i] + 0.5 * atr_20_aligned[i]
-        lower_band = vwap[i] - 0.5 * atr_20_aligned[i]
+        long_cross = williams_r_prev <= -80 and williams_r[i] > -80
+        short_cross = williams_r_prev >= -20 and williams_r[i] < -20
         
-        # Mean reversion signals in high volatility regime
-        # Long: price below lower band, Short: price above upper band
-        long_signal = high_vol_regime and (close[i] < lower_band)
-        short_signal = high_vol_regime and (close[i] > upper_band)
+        long_signal = long_cross and (close[i] > ema_50_1d_aligned[i]) and (volume[i] > 2.0 * vol_ma[i])
+        short_signal = short_cross and (close[i] < ema_50_1d_aligned[i]) and (volume[i] > 2.0 * vol_ma[i])
         
         if position == 0:
             if long_signal:
@@ -83,16 +76,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to VWAP or volatility regime ends
+            # Exit conditions: opposite Williams %R extreme or trend reversal
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses above VWAP or volatility regime ends
-                if (close[i] > vwap[i]) or (not high_vol_regime):
+                # Exit long: %R crosses above -20 (overbought) or trend reversal
+                if (williams_r_prev >= -20 and williams_r[i] < -20) or (close[i] < ema_50_1d_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: price crosses below VWAP or volatility regime ends
-                if (close[i] < vwap[i]) or (not high_vol_regime):
+                # Exit short: %R crosses below -80 (oversold) or trend reversal
+                if (williams_r_prev <= -80 and williams_r[i] > -80) or (close[i] > ema_50_1d_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -103,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_Deviation_MeanReversion_1dATR_Regime"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
