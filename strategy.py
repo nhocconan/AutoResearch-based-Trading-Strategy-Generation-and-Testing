@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-Camarilla pivots from daily timeframe provide key intraday support/resistance. Breakouts above R1 or below S1
-with higher timeframe trend alignment and volume confirmation capture sustained moves while filtering noise.
-Target: 20-50 trades/year per symbol (80-200 total over 4 years) to balance edge with fee drag.
+Hypothesis: 4h Camarilla pivot breakout (R1/S1) with 1d EMA34 trend filter and volume spike confirmation.
+Uses tight Camarilla levels (R1/S1) for higher probability entries, aligned with 1d trend and volume confirmation.
+Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag while capturing edge.
 Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear via 1d trend filter.
 """
 
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,8 +35,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla levels: based on previous day's range
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
+    # R1 = close + (high-low)*1.1/12
+    # S1 = close - (high-low)*1.1/12
     rng = (high_1d - low_1d) * 1.1
     camarilla_r1 = close_1d + rng / 12
     camarilla_s1 = close_1d - rng / 12
