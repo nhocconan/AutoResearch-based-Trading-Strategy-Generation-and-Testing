@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above Donchian upper band AND 1d EMA34 rising AND volume > 2.0x 20-period MA.
-Short when price breaks below Donchian lower band AND 1d EMA34 falling AND volume > 2.0x 20-period MA.
-Exit when price touches Donchian opposite band (middle band) or 1d EMA34 reverses.
-Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
-Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-Donchian channels provide clear structure, effective in both trending and ranging markets.
+Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation.
+Long when close breaks above Donchian upper band AND 1w HMA rising AND volume > 2.0x 20-period MA.
+Short when close breaks below Donchian lower band AND 1w HMA falling AND volume > 2.0x 20-period MA.
+Exit when price crosses Donchian middle band (20-period SMA) or trend reverses.
+Uses 1w HTF for trend filter to avoid counter-trend trades in bear markets like 2025.
+Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+Donchian channels provide structural breakouts, HMA reduces lag, volume confirms conviction.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,54 +27,76 @@ def generate_signals(prices):
     donchian_window = 20
     upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    middle_band = (upper_band + lower_band) / 2.0
+    middle_band = (upper_band + lower_band) / 2.0  # 20-period SMA of midpoint
     
-    # Calculate 1d EMA34 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1w HMA(21) for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
+    # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # Calculate 4h volume MA (20-period) for spike filter
+    def wma(values, window):
+        if len(values) < window:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights / weights.sum(), mode='valid')
+    
+    wma_half = wma(close_1w, half_len)
+    wma_full = wma(close_1w, 21)
+    wma_2x_sub = 2 * wma_half - wma_full[-len(wma_half):] if len(wma_half) > 0 else np.array([])
+    hma_21 = wma(wma_2x_sub, sqrt_len) if len(wma_2x_sub) >= sqrt_len else np.array([])
+    
+    # Pad HMA to match close_1w length
+    hma_21_padded = np.full_like(close_1w, np.nan)
+    if len(hma_21) > 0:
+        start_idx = 21 - len(hma_21)  # Adjust for WMA padding
+        end_idx = start_idx + len(hma_21)
+        if start_idx >= 0 and end_idx <= len(close_1w):
+            hma_21_padded[start_idx:end_idx] = hma_21
+    
+    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21_padded)
+    
+    # Calculate 1d volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 34, 20)  # Donchian (needs 20), EMA34, volume MA
+    start_idx = max(donchian_window, 20, 20)  # Donchian (20), HMA (needs 21+), volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(middle_band[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate EMA34 slope for trend direction (rising/falling)
+        # Calculate HMA slope for trend direction (rising/falling)
         if i >= start_idx + 1:
-            ema_prev = ema_34_aligned[i-1]
-            ema_rising = ema_34_aligned[i] > ema_prev
-            ema_falling = ema_34_aligned[i] < ema_prev
+            hma_prev = hma_21_aligned[i-1]
+            hma_rising = hma_21_aligned[i] > hma_prev
+            hma_falling = hma_21_aligned[i] < hma_prev
         else:
-            ema_rising = False
-            ema_falling = False
+            hma_rising = False
+            hma_falling = False
         
-        # Volume filter: 4h volume > 2.0x 20-period MA (high threshold to reduce trades)
+        # Volume filter: 1d volume > 2.0x 20-period MA (high threshold to reduce trades)
         vol_filter = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above upper band AND EMA34 rising AND volume filter
-            if close[i] > upper_band[i] and ema_rising and vol_filter:
+            # Long: close breaks above upper band AND HMA rising AND volume filter
+            if close[i] > upper_band[i] and hma_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band AND EMA34 falling AND volume filter
-            elif close[i] < lower_band[i] and ema_falling and vol_filter:
+            # Short: close breaks below lower band AND HMA falling AND volume filter
+            elif close[i] < lower_band[i] and hma_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -82,12 +104,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches middle band OR EMA34 starts falling
-                if close[i] <= middle_band[i] or (i >= start_idx + 1 and ema_34_aligned[i] < ema_34_aligned[i-1]):
+                # Long exit: price crosses below middle band OR HMA starts falling
+                if close[i] < middle_band[i] or (i >= start_idx + 1 and hma_21_aligned[i] < hma_21_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches middle band OR EMA34 starts rising
-                if close[i] >= middle_band[i] or (i >= start_idx + 1 and ema_34_aligned[i] > ema_34_aligned[i-1]):
+                # Short exit: price crosses above middle band OR HMA starts rising
+                if close[i] > middle_band[i] or (i >= start_idx + 1 and hma_21_aligned[i] > hma_21_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -98,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1D_Donchian20_Breakout_1wHMA21_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
