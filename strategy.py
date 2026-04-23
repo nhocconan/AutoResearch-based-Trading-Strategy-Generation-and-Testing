@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 1d Williams %R with volume confirmation and ATR trailing stop.
-Long when 1d Williams %R crosses above -80 (oversold reversal) AND volume > 1.5x 20-period average.
-Short when 1d Williams %R crosses below -20 (overbought reversal) AND volume > 1.5x 20-period average.
-Exit when price retraces 50% of the move from entry OR ATR trailing stop (3.0*ATR) is hit.
+Hypothesis: 4h strategy using 1d Williams Alligator (Jaw/Teeth/Lips) with volume confirmation and ATR stoploss.
+Long when price > Alligator Lips AND Lips > Teeth > Jaw (bullish alignment) AND volume > 1.5x 20-period average.
+Short when price < Alligator Lips AND Lips < Teeth < Jaw (bearish alignment) AND volume > 1.5x 20-period average.
+Exit when price crosses Alligator Teeth or ATR stoploss hit (2.0*ATR).
 Uses discrete position sizing (0.25) to balance return and drawdown.
 Designed for 4h timeframe to target 19-50 trades/year per symbol (75-200 total over 4 years).
-Williams %R on 1d timeframe provides institutional-grade reversal signals with less noise than RSI.
-Volume confirmation filters false reversals in choppy markets.
-ATR trailing stop allows profits to run while limiting downside in both bull and bear markets.
+Works in both bull and bear markets by using volume confirmation to filter false signals and ATR stops to manage risk.
+Alligator alignment provides trend-following edge with built-in trend strength filter.
 """
 
 import numpy as np
@@ -25,29 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Williams %R (14-period)
+    # Calculate 1d Williams Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    median_1d = (high_1d + low_1d) / 2.0
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    # Avoid division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3) - all SMMA of median price
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        sma = np.mean(arr[:period])
+        result[period-1] = sma
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Align Williams %R to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    jaw = smma(median_1d, 13)
+    teeth = smma(median_1d, 8)
+    lips = smma(median_1d, 5)
+    
+    # Align Alligator lines to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
     # Volume average (20-period) on 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for trailing stop calculation
+    # ATR(14) for stoploss calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -58,15 +68,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14)
+    start_idx = max(20, 14, 13)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,58 +84,48 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        wr = williams_r_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -80 (oversold reversal) AND volume spike
-            if i > start_idx and williams_r_aligned[i-1] <= -80 and wr > -80 and volume[i] > 1.5 * vol_ma_val:
+            # Bullish alignment: Lips > Teeth > Jaw AND price > Lips AND volume spike
+            if (lips_val > teeth_val and teeth_val > jaw_val and 
+                price > lips_val and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-                highest_since_entry = price
-            # Short: Williams %R crosses below -20 (overbought reversal) AND volume spike
-            elif i > start_idx and williams_r_aligned[i-1] >= -20 and wr < -20 and volume[i] > 1.5 * vol_ma_val:
+            # Bearish alignment: Lips < Teeth < Jaw AND price < Lips AND volume spike
+            elif (lips_val < teeth_val and teeth_val < jaw_val and 
+                  price < lips_val and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
-                lowest_since_entry = price
         else:
-            # Update highest/lowest since entry for trailing stop
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, price)
-            else:
-                lowest_since_entry = min(lowest_since_entry, price)
-            
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces 50% of the move from entry
-            if position == 1:
-                retrace_level = entry_price + 0.5 * (highest_since_entry - entry_price)
-                if price <= retrace_level:
-                    exit_signal = True
-            else:  # position == -1
-                retrace_level = entry_price - 0.5 * (entry_price - lowest_since_entry)
-                if price >= retrace_level:
-                    exit_signal = True
-            
-            # ATR trailing stop: 3.0 * ATR from extreme point
-            if position == 1 and price < highest_since_entry - 3.0 * atr_val:
+            # Primary exit: Price crosses Alligator Teeth (trend weakening)
+            if position == 1 and price < teeth_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 3.0 * atr_val:
+            elif position == -1 and price > teeth_val:
+                exit_signal = True
+            
+            # ATR-based stoploss: 2.0 * ATR from entry
+            if position == 1 and price < entry_price - 2.0 * atr_val:
+                exit_signal = True
+            elif position == -1 and price > entry_price + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_WilliamsR_VolumeConfirmation_ATRTrailingStop"
+name = "4H_WilliamsAlligator_VolumeConfirmation_ATRStop"
 timeframe = "4h"
 leverage = 1.0
