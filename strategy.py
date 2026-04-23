@@ -31,29 +31,21 @@ def generate_signals(prices):
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 4h Camarilla levels (based on previous day's OHLC)
-    # We need to map 4h bars to the prior 1d bar for Camarilla calculation
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
-    camarilla_r4 = np.full(n, np.nan)  # for exit
-    camarilla_s4 = np.full(n, np.nan)  # for exit
+    # We need to align daily OHLC to 4h bars
+    df_1d_ohlc = get_htf_data(prices, '1d')[['open', 'high', 'low', 'close']]
+    if len(df_1d_ohlc) < 1:
+        return np.zeros(n)
     
-    # Get 1d OHLC for Camarilla calculation
-    if len(df_1d) >= 1:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d_vals = df_1d['close'].values
-        
-        # Calculate Camarilla levels for each 1d bar
-        camarilla_r3_1d = high_1d + 1.1 * (high_1d - low_1d) / 2
-        camarilla_s3_1d = low_1d - 1.1 * (high_1d - low_1d) / 2
-        camarilla_r4_1d = high_1d + 1.1 * (high_1d - low_1d)
-        camarilla_s4_1d = low_1d - 1.1 * (high_1d - low_1d)
-        
-        # Align 1d Camarilla levels to 4h timeframe
-        camarilla_r3 = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-        camarilla_s3 = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-        camarilla_r4 = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
-        camarilla_s4 = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
+    # Align daily OHLC to 4h timeframe
+    daily_open = align_htf_to_ltf(prices, df_1d_ohlc, df_1d_ohlc['open'].values)
+    daily_high = align_htf_to_ltf(prices, df_1d_ohlc, df_1d_ohlc['high'].values)
+    daily_low = align_htf_to_ltf(prices, df_1d_ohlc, df_1d_ohlc['low'].values)
+    daily_close = align_htf_to_ltf(prices, df_1d_ohlc, df_1d_ohlc['close'].values)
+    
+    # Camarilla levels: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    rang = daily_high - daily_low
+    camarilla_r3 = daily_close + rang * 1.1 / 2
+    camarilla_s3 = daily_close - rang * 1.1 / 2
     
     # 20-period volume average for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -77,8 +69,6 @@ def generate_signals(prices):
         ema_val = ema_34_aligned[i]
         r3 = camarilla_r3[i]
         s3 = camarilla_s3[i]
-        r4 = camarilla_r4[i]
-        s4 = camarilla_s4[i]
         vol_ma_val = vol_ma[i]
         
         # Calculate EMA34 slope for trend direction (rising/falling)
@@ -104,11 +94,11 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches S3 (opposite level) OR EMA34 starts falling
+                # Long exit: price touches S3 level OR EMA34 starts falling
                 if price < s3 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches R3 (opposite level) OR EMA34 starts rising
+                # Short exit: price touches R3 level OR EMA34 starts rising
                 if price > r3 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
