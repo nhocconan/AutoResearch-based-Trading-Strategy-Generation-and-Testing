@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation
-- Long when price breaks above Camarilla R3 AND close > 1d EMA50 AND volume > 2.0x 20-period average
-- Short when price breaks below Camarilla S3 AND close < 1d EMA50 AND volume > 2.0x 20-period average
-- Exit when price crosses Camarilla H4/L4 levels (mean reversion)
+Hypothesis: 12h Williams %R with 1d EMA50 trend filter and volume confirmation
+- Long when Williams %R(14) < -80 (oversold) AND close > 1d EMA50 AND volume > 2.0x 20-period average
+- Short when Williams %R(14) > -20 (overbought) AND close < 1d EMA50 AND volume > 2.0x 20-period average
+- Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
 - Uses 1d EMA50 for HTF trend alignment to avoid counter-trend entries
-- Camarilla levels calculated from prior 1d OHLC for structure-based entries
-- Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
-- Works in both bull/bear markets: trend filter prevents counter-trend entries, structure provides clear levels
+- Volume spike threshold set to 2.0x to reduce false signals and trade frequency
+- Williams %R is a momentum oscillator that works well in ranging markets (2025+ bear/range)
+- Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years)
+- Prior experiments show WilliamsR strategies can work when properly filtered (see #80620: 0.401 Sharpe on 4h)
 """
 
 import numpy as np
@@ -24,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter and Camarilla calculation (HTF)
+    # Get 1d data for EMA50 trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
@@ -33,26 +34,13 @@ def generate_signals(prices):
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels from prior 1d OHLC
-    # Camarilla: based on prior day's range
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
-    # R3 = Close + 1.1*(High-Low)/2, S3 = Close - 1.1*(High-Low)/2
-    # H4 = Close + 1.1*(High-Low), L4 = Close - 1.1*(High-Low)
-    range_1d = prev_high - prev_low
-    camarilla_h4 = prev_close + 1.1 * range_1d
-    camarilla_l4 = prev_close - 1.1 * range_1d
-    camarilla_h3 = prev_close + 1.1 * range_1d / 2
-    camarilla_l3 = prev_close - 1.1 * range_1d / 2
-    
-    # Align Camarilla levels to 6h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Calculate Williams %R(14) on 12h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.values
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,12 +49,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 20)  # Need 20 for volume MA, 50 for EMA50
+    start_idx = max(14, 50, 20)  # Need 14 for WilliamsR, 50 for EMA50, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or 
             np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -74,37 +61,39 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Camarilla breakout conditions
-        breakout_up = close[i] > camarilla_h3_aligned[i-1]  # Break above prior period's H3 (R3)
-        breakout_down = close[i] < camarilla_l3_aligned[i-1]  # Break below prior period's L3 (S3)
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        exit_long = williams_r[i] > -50  # Exit long when crosses above -50
+        exit_short = williams_r[i] < -50  # Exit short when crosses below -50
         
         # Trend filter (using 1d EMA50)
         uptrend = close[i] > ema50_1d_aligned[i]
         downtrend = close[i] < ema50_1d_aligned[i]
         
-        # Volume confirmation (stricter threshold)
+        # Volume confirmation
         volume_ok = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Camarilla breakout up + uptrend + volume confirmation
-            if breakout_up and uptrend and volume_ok:
+            # Long: Oversold + uptrend + volume confirmation
+            if oversold and uptrend and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Camarilla breakout down + downtrend + volume confirmation
-            elif breakout_down and downtrend and volume_ok:
+            # Short: Overbought + downtrend + volume confirmation
+            elif overbought and downtrend and volume_ok:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses Camarilla H4/L4 levels (mean reversion to mean)
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses below H4 (or reaches L4 for deeper mean reversion)
-                if close[i] < camarilla_h4_aligned[i]:
+                # Exit long: Williams %R crosses above -50
+                if exit_long:
                     exit_signal = True
             elif position == -1:
-                # Exit short: Price crosses above L4 (or reaches H4 for deeper mean reversion)
-                if close[i] > camarilla_l4_aligned[i]:
+                # Exit short: Williams %R crosses below -50
+                if exit_short:
                     exit_signal = True
             
             if exit_signal:
@@ -115,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_1dEMA50_Trend_VolumeConfirmation"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA50_Trend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
