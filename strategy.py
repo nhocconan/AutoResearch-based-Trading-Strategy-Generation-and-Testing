@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume confirmation.
-Long when price breaks above Camarilla R1 AND 4h EMA50 is rising AND volume > 1.5x 20-period average.
-Short when price breaks below Camarilla S1 AND 4h EMA50 is falling AND volume > 1.5x 20-period average.
-Exit when price touches opposite Camarilla level (S1 for longs, R1 for shorts).
-Uses 4h HTF for EMA50 trend (avoids whipsaws in ranging markets). Target: 60-150 total trades over 4 years (15-37/year).
-Camarilla R1/S1 levels provide tighter structure than R3/S3 for more precise entries.
+Hypothesis: 6h Williams %R Extreme Reversal with 1d EMA50 trend filter and volume confirmation.
+Long when Williams %R < -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume > 1.5x 20-period average.
+Short when Williams %R > -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume > 1.5x 20-period average.
+Exit when Williams %R returns to -50 (mean reversion) or trend reverses.
+Uses 1d HTF for EMA50 trend (avoids whipsaws in ranging markets). Target: 50-150 total trades over 4 years (12-37/year).
+Williams %R is effective at catching reversals in both bull and bear markets when combined with trend filter.
 """
 
 import numpy as np
@@ -22,32 +22,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA50 for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 1d Camarilla levels from previous 1d OHLC
+    # Calculate 1d EMA50 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels for each 1d bar (using that day's OHLC)
-    rang = high_1d - low_1d
-    camarilla_r1 = close_1d + 1.1 * (rang / 12) * 2  # R1 = C + 1.1*(H-L)/12*2
-    camarilla_s1 = close_1d - 1.1 * (rang / 12) * 2  # S1 = C - 1.1*(H-L)/12*2
-    
-    # Align Camarilla levels to 1h timeframe (use previous day's levels for current day)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1, additional_delay_bars=1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1, additional_delay_bars=1)
+    # Calculate Williams %R (14-period) on 6h data
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # 20-period volume average for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,62 +46,52 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # EMA50 (50), volume MA (20)
+    start_idx = max(lookback, 20, 50)  # Williams %R (14), volume MA (20), EMA50 (50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
+        wr = williams_r[i]
         ema_val = ema_50_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
         vol_ma_val = vol_ma[i]
         
-        # Calculate EMA50 slope for trend direction (rising/falling)
-        if i >= start_idx + 1:
-            ema_prev = ema_50_aligned[i-1]
-            ema_rising = ema_val > ema_prev
-            ema_falling = ema_val < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
-        
         if position == 0:
-            # Long: Break above Camarilla R1 AND EMA50 rising AND volume spike
-            if price > r1 and ema_rising and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = 0.20
+            # Long: Williams %R oversold (< -80) AND price > 1d EMA50 (uptrend) AND volume spike
+            if wr < -80 and price > ema_val and volume[i] > 1.5 * vol_ma_val:
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S1 AND EMA50 falling AND volume spike
-            elif price < s1 and ema_falling and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = -0.20
+            # Short: Williams %R overbought (> -20) AND price < 1d EMA50 (downtrend) AND volume spike
+            elif wr > -20 and price < ema_val and volume[i] > 1.5 * vol_ma_val:
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches S1
-                if price < s1:
+                # Long exit: Williams %R returns to -50 (mean reversion) OR price < 1d EMA50 (trend reversal)
+                if wr >= -50 or price < ema_val:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches R1
-                if price > r1:
+                # Short exit: Williams %R returns to -50 (mean reversion) OR price > 1d EMA50 (trend reversal)
+                if wr <= -50 or price > ema_val:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R1S1_Breakout_4hEMA50_Trend_VolumeConfirmation_LevelExit"
-timeframe = "1h"
+name = "6H_WilliamsR_Extreme_Reversal_1dEMA50_Trend_VolumeConfirmation_WR50Exit"
+timeframe = "6h"
 leverage = 1.0
