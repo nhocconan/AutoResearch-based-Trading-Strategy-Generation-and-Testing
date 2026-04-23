@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA200 trend filter and 1d ATR volatility filter.
-Long when price breaks above 1h Camarilla R1 level AND price > 4h EMA200 (uptrend) AND 1d ATR(14) > 0.5 * 1h ATR(14) (high volatility regime).
-Short when price breaks below 1h Camarilla S1 level AND price < 4h EMA200 (downtrend) AND 1d ATR(14) > 0.5 * 1h ATR(14).
-Exit when price reverts to 1h Camarilla pivot point (PP) or 4h EMA200 trend reverses.
-Uses 1h timeframe with tight entry conditions (Camarilla R1/S1 are strong resistance/support) to limit trades.
-4h EMA200 provides strong trend filter. 1d ATR regime filter ensures trading only in sufficient volatility.
-Target: 60-150 trades over 4 years (15-37/year) to stay within proven working range for 1h.
+Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
+Long when price breaks above 6h Donchian upper band AND weekly pivot shows bullish bias (price > weekly pivot) AND volume > 1.5x average.
+Short when price breaks below 6h Donchian lower band AND weekly pivot shows bearish bias (price < weekly pivot) AND volume > 1.5x average.
+Exit when price reverts to 6h Donchian middle band (20-period midpoint) or weekly pivot bias reverses.
+Uses 6h timeframe to reduce trade frequency vs lower timeframes, with weekly pivot providing structural bias from higher timeframe.
+Target: 50-150 total trades over 4 years (12-37/year) to stay within proven working range for 6h strategies.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,127 +22,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1h Camarilla levels (R1, S1, PP) - ONCE before loop
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 10:
+    # Calculate 6h Donchian channels (20-period) - ONCE before loop
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_ma
+    donchian_lower = low_ma
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    
+    # Load weekly data for pivot point - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    # Calculate weekly pivot point (standard: (H+L+C)/3)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Camarilla levels on 1h (based on previous 1h bar's OHLC)
-    prev_high_1h = np.roll(high_1h, 1)
-    prev_low_1h = np.roll(low_1h, 1)
-    prev_close_1h = np.roll(close_1h, 1)
-    # Set first value to NaN (no previous bar)
-    prev_high_1h[0] = np.nan
-    prev_low_1h[0] = np.nan
-    prev_close_1h[0] = np.nan
+    # Align HTF indicators to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    camarilla_pp = (prev_high_1h + prev_low_1h + prev_close_1h) / 3.0
-    camarilla_r1 = prev_close_1h + (prev_high_1h - prev_low_1h) * 1.1 / 12.0
-    camarilla_s1 = prev_close_1h - (prev_high_1h - prev_low_1h) * 1.1 / 12.0
-    
-    # Load 4h data for EMA200 trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Load 1d data for ATR(14) volatility filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range for 1d
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # True Range for 1h (for volatility comparison)
-    tr1_h = high - low
-    tr2_h = np.abs(high - np.roll(close, 1))
-    tr3_h = np.abs(low - np.roll(close, 1))
-    tr1_h[0] = np.nan
-    tr2_h[0] = np.nan
-    tr3_h[0] = np.nan
-    tr_1h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
-    atr_1h = pd.Series(tr_1h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align HTF indicators to 1h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1h, camarilla_pp)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1h, camarilla_s1)
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Volume average (20-period) on primary timeframe
+    vol_ma_primary = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup period
+    for i in range(60, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema200_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(atr_1h[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma_primary[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pp_val = camarilla_pp_aligned[i]
-        r1_val = camarilla_r1_aligned[i]
-        s1_val = camarilla_s1_aligned[i]
-        ema200_val = ema200_4h_aligned[i]
-        atr_1d_val = atr_1d_aligned[i]
-        atr_1h_val = atr_1h[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        middle = donchian_middle[i]
+        weekly_pivot_val = weekly_pivot_aligned[i]
+        vol_ma_val = vol_ma_primary[i]
         
-        # Get current price
+        # Get current price and volume
         price = close[i]
-        
-        # Volatility filter: 1d ATR > 0.5 * 1h ATR (ensures sufficient volatility)
-        vol_filter = atr_1d_val > 0.5 * atr_1h_val
+        vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above 1h Camarilla R1 AND price > 4h EMA200 (uptrend) AND volatility filter
-            if (price > r1_val and price > ema200_val and vol_filter):
-                signals[i] = 0.20
+            # Long: price breaks above 6h Donchian upper AND price > weekly pivot (bullish bias) AND volume > 1.5x average
+            if (price > upper and price > weekly_pivot_val and vol_current > 1.5 * vol_ma_val):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 1h Camarilla S1 AND price < 4h EMA200 (downtrend) AND volatility filter
-            elif (price < s1_val and price < ema200_val and vol_filter):
-                signals[i] = -0.20
+            # Short: price breaks below 6h Donchian lower AND price < weekly pivot (bearish bias) AND volume > 1.5x average
+            elif (price < lower and price < weekly_pivot_val and vol_current > 1.5 * vol_ma_val):
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price reverts to Camarilla PP OR price breaks below 4h EMA200 (trend reversal)
-                if price <= pp_val or price < ema200_val:
+                # Exit long: price reverts to 6h Donchian middle OR price < weekly pivot (bias reversal)
+                if price <= middle or price < weekly_pivot_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price reverts to Camarilla PP OR price breaks above 4h EMA200 (trend reversal)
-                if price >= pp_val or price > ema200_val:
+                # Exit short: price reverts to 6h Donchian middle OR price > weekly pivot (bias reversal)
+                if price >= middle or price > weekly_pivot_val:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R1_S1_Breakout_4hEMA200_1dATR_VolFilter"
-timeframe = "1h"
+name = "6H_Donchian20_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
