@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation, using ATR-based dynamic position sizing.
-Long when price breaks above R3 AND close > 1d EMA34 AND volume > 2.0x 20-period average.
-Short when price breaks below S3 AND close < 1d EMA34 AND volume > 2.0x 20-period average.
-Exit when price reverts to Camarilla Pivot point (PP) or ATR-based stoploss hits (2.5x ATR).
-Position size scales with volatility: base size 0.25 adjusted by inverse ATR (normalized to 20-period median ATR).
-This adapts position size to market conditions, reducing exposure during high volatility and increasing during low volatility.
-Target: 25-50 trades/year per symbol with Sharpe > 0.5 on both train and test.
+Hypothesis: 4h Williams %R reversal with 1d EMA50 trend filter and volume confirmation.
+Long when %R crosses above -80 from below AND close > 1d EMA50 AND volume > 1.5x 20-period average.
+Short when %R crosses below -20 from above AND close < 1d EMA50 AND volume > 1.5x 20-period average.
+Exit when %R crosses opposite extreme (-20 for long, -80 for short) or ATR-based stoploss.
+Williams %R identifies overbought/oversold conditions; EMA50 filters trend direction; volume confirms conviction.
+Designed for low trade frequency (<40/year) to minimize fee drag while capturing mean reversals in ranging markets.
 """
 
 import numpy as np
@@ -23,61 +22,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for Camarilla calculation - ONCE before loop
+    # Load 4h data for Williams %R calculation - ONCE before loop
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 14:
         return np.zeros(n)
     
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Calculate Camarilla levels for 4h timeframe (using previous bar's OHLC)
-    # Camarilla: PP = (H+L+C)/3, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
+    # Calculate Williams %R on 4h data: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_4h) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # First bar: use current values (will be refined as more data comes)
-    prev_high[0] = high_4h[0]
-    prev_low[0] = low_4h[0]
-    prev_close[0] = close_4h[0]
+    # Align 4h Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
     
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_range = prev_high - prev_low
-    camarilla_r3 = prev_close + camarilla_range * 1.1 / 4.0
-    camarilla_s3 = prev_close - camarilla_range * 1.1 / 4.0
-    
-    # Align 4h Camarilla levels to 4h timeframe (no additional delay needed as they're based on completed bar)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pp)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    
-    # Load 1d data for EMA34 trend filter - ONCE before loop
+    # Load 1d data for EMA50 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1d data
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA50 on 1d data
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1d EMA50 to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume average (20-period) on 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR(14) on 4h data for stoploss and volatility normalization
+    # Calculate ATR(14) on 4h data for stoploss
     tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
     tr2 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, tr2)
     tr[0] = high[0] - low[0]  # first bar
     atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 20-period median ATR for volatility normalization
-    atr_ma = pd.Series(atr_4h).rolling(window=20, min_periods=20).median().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,8 +70,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_4h[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,33 +80,22 @@ def generate_signals(prices):
         
         price = close[i]
         vol_ma_val = vol_ma[i]
-        atr_val = atr_4h[i]
-        atr_ma_val = atr_ma[i]
-        
-        # Dynamic position sizing: base size 0.25 scaled by inverse ATR (normalized)
-        # Lower ATR (low volatility) → larger position; Higher ATR (high volatility) → smaller position
-        if atr_ma_val > 0:
-            volatility_scale = np.clip(atr_ma_val / atr_val, 0.5, 2.0)  # Limit scaling to 0.5x-2.0x
-            base_size = 0.25
-            position_size = base_size * volatility_scale
-            # Cap position size at 0.35 to respect max limits
-            position_size = min(position_size, 0.35)
-        else:
-            position_size = 0.25
+        williams_r_val = williams_r_aligned[i]
+        williams_r_prev = williams_r_aligned[i-1] if i > 0 else williams_r_val
         
         if position == 0:
-            # Long: price breaks above R3 AND close > 1d EMA34 AND volume spike
-            if (price > camarilla_r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > 2.0 * vol_ma_val):
-                signals[i] = position_size
+            # Long: %R crosses above -80 from below AND close > 1d EMA50 AND volume spike
+            if (williams_r_prev <= -80 and williams_r_val > -80 and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_ma_val):
+                signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below S3 AND close < 1d EMA34 AND volume spike
-            elif (price < camarilla_s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma_val):
-                signals[i] = -position_size
+            # Short: %R crosses below -20 from above AND close < 1d EMA50 AND volume spike
+            elif (williams_r_prev >= -20 and williams_r_val < -20 and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma_val):
+                signals[i] = -0.25
                 position = -1
                 entry_price = price
         else:
@@ -129,14 +103,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price reverts to PP or ATR stoploss
-                if price <= camarilla_pp_aligned[i]:
+                # Exit long: %R crosses above -20 (overbought) or ATR stoploss
+                if williams_r_prev < -20 and williams_r_val >= -20:
                     exit_signal = True
                 elif price < entry_price - 2.5 * atr_4h[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price reverts to PP or ATR stoploss
-                if price >= camarilla_pp_aligned[i]:
+                # Exit short: %R crosses below -80 (oversold) or ATR stoploss
+                if williams_r_prev > -80 and williams_r_val <= -80:
                     exit_signal = True
                 elif price > entry_price + 2.5 * atr_4h[i]:
                     exit_signal = True
@@ -146,10 +120,10 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = position_size if position == 1 else -position_size
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_DynamicSize"
+name = "4H_WilliamsR_Reversal_1dEMA50_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
