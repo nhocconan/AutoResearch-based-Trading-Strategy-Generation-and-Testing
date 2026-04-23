@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
-Uses Donchian channels for breakout detection, 1d ATR ratio for regime filtering (trending vs choppy),
-and volume confirmation to avoid false breakouts. Designed for 12h timeframe to capture
-medium-term swings in both bull and bear markets. Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+Uses Donchian channel breakouts for trend capture combined with 12h EMA trend filter to avoid counter-trend trades.
+Volume confirmation ensures breakout validity. Designed for 4h timeframe to capture medium-term moves
+in both bull/bear markets via trend filter. Target: 19-50 trades/year per symbol (75-200 total over 4 years).
 Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
@@ -21,48 +21,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR(14) and ATR(50) for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # ATR ratio: short-term / long-term ATR
-    # High ratio (>1.2) = expanding volatility (trending)
-    # Low ratio (<0.8) = contracting volatility (choppy)
-    atr_ratio = atr_14 / atr_50
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 12h EMA50 for trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Donchian channels: upper = max(high, 20), lower = min(low, 20)
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe (previous bar values)
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    # Calculate Donchian(20) channels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate volume MA (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,42 +41,43 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # need ATR50 and vol MA20
+    start_idx = max(50, 20)  # need EMA50 and Donchian20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: ATR ratio > 1.0 = trending market (favor breakouts)
-        regime_filter = atr_ratio_aligned[i] > 1.0
+        # Trend filter: close > 12h EMA50 = uptrend, close < 12h EMA50 = downtrend
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
-        # Volume filter: current volume > 1.3x 20-period MA
-        vol_filter = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume filter: current volume > 1.5x 20-period MA
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: Break above Donchian upper AND trending regime AND volume confirmation
-            if close[i] > donch_high_aligned[i] and regime_filter and vol_filter:
+            # Long: Break above Donchian upper AND uptrend AND volume confirmation
+            if close[i] > highest_20[i] and trend_up and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian lower AND trending regime AND volume confirmation
-            elif close[i] < donch_low_aligned[i] and regime_filter and vol_filter:
+            # Short: Break below Donchian lower AND downtrend AND volume confirmation
+            elif close[i] < lowest_20[i] and trend_down and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: break of opposite Donchian level
+            # Exit: break of opposite Donchian level (lower for longs, upper for shorts)
             exit_signal = False
             if position == 1:
                 # Exit long on break below Donchian lower
-                if close[i] < donch_low_aligned[i]:
+                if close[i] < lowest_20[i]:
                     exit_signal = True
             elif position == -1:
                 # Exit short on break above Donchian upper
-                if close[i] > donch_high_aligned[i]:
+                if close[i] > highest_20[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -117,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_Breakout_1dATRRegime_VolumeConfirmation"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_12hEMA50_Trend_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
