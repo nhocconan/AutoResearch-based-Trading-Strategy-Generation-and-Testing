@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h strategy using 4h RSI(14) for momentum direction and 1d volume regime filter.
-Long when 4h RSI > 55 AND 1d volume > 1.5x 20-day average volume (high volume regime).
-Short when 4h RSI < 45 AND 1d volume > 1.5x 20-day average volume.
-Exit when 4h RSI crosses back to neutral (45-55) OR ATR trailing stop (2.0*ATR).
-Uses discrete position sizing 0.20 targeting ~20-40 trades/year on 1h timeframe.
-Volume regime filter ensures trades only occur during institutional participation,
-reducing false signals in low-volume choppy markets. Works in both bull/bear as
-it follows momentum with volume confirmation.
+Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation.
+Long when Williams %R < -80 (oversold) AND 1d close > 1d EMA50 AND 6h volume > 1.8x 20-period average volume.
+Short when Williams %R > -20 (overbought) AND 1d close < 1d EMA50 AND 6h volume > 1.8x 20-period average volume.
+Exit when Williams %R crosses -50 (mean reversion target) OR ATR trailing stop (2.0*ATR from extreme).
+Uses discrete position sizing (0.25) targeting ~15-35 trades/year on 6h timeframe.
+Williams %R is effective at identifying reversal points in both trending and ranging markets.
 """
 
 import numpy as np
@@ -24,32 +22,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h RSI(14) for momentum direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:  # Need enough for RSI
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    
-    # Calculate 1d volume regime filter
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for volume average
+    if len(df_1d) < 50:  # Need enough for EMA50
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # ATR(14) for 1h trailing stop
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # 6h volume average (20-period) for spike filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR(10) for 6h trailing stop calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -57,7 +49,7 @@ def generate_signals(prices):
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,31 +57,32 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(14, 20, 14)  # rsi4h, vol_ma20_1d, atr14
+    start_idx = max(20, 14, 50, 10)  # vol_ma20, williams_r14, ema50_1d, atr10
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi_4h_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        rsi_val = rsi_4h_aligned[i]
-        vol_ma_val = vol_ma_20_1d_aligned[i]
+        vol_ma_val = vol_ma[i]
         atr_val = atr[i]
+        ema_val = ema_50_1d_aligned[i]
+        wr = williams_r[i]
         
         if position == 0:
-            # Long: 4h RSI > 55 AND high volume regime (1d volume > 1.5x 20-day avg)
-            if rsi_val > 55 and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = 0.20
+            # Long: Williams %R < -80 (oversold) AND bullish trend (1d close > EMA50) AND volume spike
+            if wr < -80 and close[i] > ema_val and volume[i] > 1.8 * vol_ma_val:
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: 4h RSI < 45 AND high volume regime
-            elif rsi_val < 45 and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = -0.20
+            # Short: Williams %R > -20 (overbought) AND bearish trend (1d close < EMA50) AND volume spike
+            elif wr > -20 and close[i] < ema_val and volume[i] > 1.8 * vol_ma_val:
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
         else:
@@ -102,10 +95,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: 4h RSI crosses back to neutral zone (45-55)
-            if position == 1 and rsi_val < 55:
+            # Primary exit: Williams %R crosses -50 (mean reversion target)
+            if position == 1 and wr >= -50:
                 exit_signal = True
-            elif position == -1 and rsi_val > 45:
+            elif position == -1 and wr <= -50:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
@@ -120,10 +113,10 @@ def generate_signals(prices):
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_4hRSI_VolumeRegime_ATRTrailingStop"
-timeframe = "1h"
+name = "6H_WilliamsR_1dEMA50_Trend_VolumeSpike_WR50Exit_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
