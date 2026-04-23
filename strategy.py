@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and 1d volume spike filter.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and 1d volume spike confirmation.
 Long when price breaks above Donchian upper(20) AND 1d EMA34 rising AND 1d volume > 2.0x 20-period MA.
 Short when price breaks below Donchian lower(20) AND 1d EMA34 falling AND 1d volume > 2.0x 20-period MA.
-Exit when price touches opposite Donchian level or 1d EMA34 reverses.
+Exit when price touches opposite Donchian level.
 Uses 1d HTF for trend and volume filters to reduce false breakouts in ranging markets.
 Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-Donchian channels provide structure, EMA34 filters major trend, volume spike confirms momentum.
-Works in bull (trend filters) and bear (volume spikes on breakdowns).
 """
 
 import numpy as np
@@ -93,12 +91,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches lower Donchian OR EMA34 starts falling
-                if price < lower or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
+                # Long exit: price touches lower Donchian
+                if price < lower:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches upper Donchian OR EMA34 starts rising
-                if price > upper or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
+                # Short exit: price touches upper Donchian
+                if price > upper:
                     exit_signal = True
             
             if exit_signal:
