@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction and volume confirmation
-- Long: Price breaks above Donchian(20) high + price > 1d weekly pivot R1 + volume > 2x 20-period average
-- Short: Price breaks below Donchian(20) low + price < 1d weekly pivot S1 + volume > 2x 20-period average
-- Exit: Price crosses Donchian(20) midpoint (mean reversion to avoid whipsaws)
-- Uses weekly pivot levels from 1d timeframe for institutional reference points
+Hypothesis: 12h Donchian(20) breakout with 1d weekly pivot R1/S1 filter and volume confirmation
+- Long: Price breaks above Donchian(20) high + price > weekly pivot R1 + volume > 1.5x 20-period average
+- Short: Price breaks below Donchian(20) low + price < weekly pivot S1 + volume > 1.5x 20-period average
+- Exit: Price crosses Donchian(20) midpoint (mean reversion)
+- Uses weekly pivot levels from 1d timeframe for institutional reference
 - Volume confirmation ensures institutional participation
 - Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
 - Works in both bull and bear markets by trading breakouts with institutional level filters
+- Uses discrete position sizing (0.25) to minimize churn
 """
 
 import numpy as np
@@ -38,7 +39,6 @@ def generate_signals(prices):
     # Weekly pivot: (Prior Week High + Prior Week Low + Prior Week Close) / 3
     # R1 = (2 * Pivot) - Prior Week Low
     # S1 = (2 * Pivot) - Prior Week High
-    # We need to shift by 1 week to avoid look-ahead
     weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values  # Prior week high
     weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values      # Prior week low
     weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(1).values  # Prior week close
@@ -52,7 +52,7 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: > 2x 20-period average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -83,7 +83,7 @@ def generate_signals(prices):
         below_s1 = close[i] < s1_aligned[i]
         
         # Volume confirmation
-        volume_spike = volume[i] > 2.0 * vol_ma[i]
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
             # Long: Donchian breakout up + above weekly R1 + volume spike
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dWeeklyPivot_R1S1_Breakout_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Donchian20_1dWeeklyPivot_R1S1_Breakout_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
