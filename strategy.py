@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend and volume confirmation
-- Donchian(20) breakouts capture strong momentum moves in both bull and bear markets
-- 1d EMA(34) ensures alignment with higher timeframe trend for multi-timeframe confirmation
-- Volume > 1.8x 20-period average confirms breakout strength and reduces false signals
-- Designed for 4h timeframe targeting 20-50 trades/year (80-200 over 4 years) to minimize fee drag
-- Works in bull markets via breakouts with trend, in bear markets via fade of overextended moves
+Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+- Donchian(20) provides clear structure-based breakout levels from 20-day high/low
+- 1w EMA(50) ensures alignment with higher timeframe weekly trend for multi-timeframe confirmation
+- Volume > 2.0x 20-period average confirms breakout strength and reduces false signals
+- Designed for 1d timeframe targeting 20-50 trades/year (80-200 over 4 years) to minimize fee drag
+- Works in bull markets via breakouts with trend, in bear markets via mean reversion at channel extremes
 """
 
 import numpy as np
@@ -22,56 +22,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Donchian(20) channels: 20-day high and low
+    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: > 1.8x 20-period average
+    # Align Donchian levels to 1d timeframe (completed 1d bar only)
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34, 20)  # Donchian, EMA1d, volume MA
+    start_idx = max(50, 20)  # EMA1w, Donchian, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate Donchian channels from lookback period (completed candles only)
-        lookback_start = max(0, i - 20)
-        lookback_end = i  # exclude current bar
-        if lookback_end - lookback_start < 20:
-            # Not enough data for Donchian calculation
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        highest_high = np.max(high[lookback_start:lookback_end])
-        lowest_low = np.min(low[lookback_start:lookback_end])
-        
         # Donchian breakout signals with trend filter and volume confirmation
-        # Long: price breaks above Donchian upper + uptrend + volume spike
-        # Short: price breaks below Donchian lower + downtrend + volume spike
-        long_signal = (close[i] > highest_high and 
-                      close[i] > ema_34_1d_aligned[i] and
-                      volume[i] > 1.8 * vol_ma[i])
+        # Long: price breaks above 20-day high + uptrend + volume spike
+        # Short: price breaks below 20-day low + downtrend + volume spike
+        long_signal = (close[i] > high_20_aligned[i] and 
+                      close[i] > ema_50_1w_aligned[i] and
+                      volume[i] > 2.0 * vol_ma[i])
         
-        short_signal = (close[i] < lowest_low and 
-                       close[i] < ema_34_1d_aligned[i] and
-                       volume[i] > 1.8 * vol_ma[i])
+        short_signal = (close[i] < low_20_aligned[i] and 
+                       close[i] < ema_50_1w_aligned[i] and
+                       volume[i] > 2.0 * vol_ma[i])
         
         if position == 0:
             if long_signal:
@@ -85,14 +87,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: trend reversal or price breaks below Donchian lower
-                if (close[i] < ema_34_1d_aligned[i] or 
-                    close[i] < lowest_low):
+                # Exit long: trend reversal or price breaks below 20-day low
+                if (close[i] < ema_50_1w_aligned[i] or 
+                    close[i] < low_20_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short: trend reversal or price breaks above Donchian upper
-                if (close[i] > ema_34_1d_aligned[i] or 
-                    close[i] > highest_high):
+                # Exit short: trend reversal or price breaks above 20-day high
+                if (close[i] > ema_50_1w_aligned[i] or 
+                    close[i] > high_20_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -103,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeConfirm"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
