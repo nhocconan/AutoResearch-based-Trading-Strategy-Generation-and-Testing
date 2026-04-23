@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter, volume spike confirmation, and ATR-based stoploss.
-Long when price breaks above Donchian upper band AND close > 1d EMA50 AND volume > 2.0x 20-period average.
-Short when price breaks below Donchian lower band AND close < 1d EMA50 AND volume > 2.0x 20-period average.
-Exit on Donchian middle band (mean) crossover or ATR trailing stop (2.5x ATR from extreme).
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 19-50 trades/year per symbol.
-Designed for BTC/ETH robustness in both bull and bear markets via HTF trend filter and volatility-adjusted exits.
+Hypothesis: 4h Bollinger Band squeeze breakout with 1d EMA50 trend and volume confirmation.
+Long when price closes above upper Bollinger Band AND 1d EMA50 rising AND volume > 1.5x 20-period average.
+Short when price closes below lower Bollinger Band AND 1d EMA50 falling AND volume > 1.5x 20-period average.
+Exit when price crosses the middle Bollinger Band (20-period SMA).
+Uses Bollinger Band width percentile regime filter: only trade when BBW < 30th percentile (low volatility squeeze).
+Position size: 0.25. Target: 20-50 trades/year per symbol.
+Designed to capture explosive moves after low volatility periods, working in both bull and bear markets by using HTF trend filter.
 """
 
 import numpy as np
@@ -33,94 +34,77 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Donchian channels (20-period) on primary timeframe
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    # Bollinger Bands (20, 2) on primary timeframe
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
     
-    # ATR for volatility and stoploss (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Bollinger Band Width (normalized) for regime filter
+    bb_width = (bb_upper - bb_lower) / bb_middle
     
-    # Volume average (20-period)
+    # Calculate 50-period percentile rank of BB width for regime filter
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    
+    # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    long_extreme = 0.0  # highest high since long entry
-    short_extreme = 0.0  # lowest low since short entry
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 50, 20, 14)  # warmup for EMA50, Donchian, ATR
+    start_idx = max(100, 50)  # Ensure warmup for BB and EMA50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(bb_width_percentile[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
-                short_extreme = 0.0
             continue
         
         price = close[i]
         vol_ma_val = vol_ma[i]
-        atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper AND close > 1d EMA50 AND volume spike
-            if (price > donchian_upper[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume[i] > 2.0 * vol_ma_val):
+            # Long: price closes above upper BB AND 1d EMA50 rising AND volume spike AND low volatility regime
+            if (close[i] > bb_upper[i] and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # EMA50 rising
+                volume[i] > 1.5 * vol_ma_val and
+                bb_width_percentile[i] < 0.30):  # BB width < 30th percentile (squeeze)
                 signals[i] = 0.25
                 position = 1
-                long_extreme = high[i]  # initialize extreme
-            # Short: price breaks below Donchian lower AND close < 1d EMA50 AND volume spike
-            elif (price < donchian_lower[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma_val):
+            # Short: price closes below lower BB AND 1d EMA50 falling AND volume spike AND low volatility regime
+            elif (close[i] < bb_lower[i] and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # EMA50 falling
+                  volume[i] > 1.5 * vol_ma_val and
+                  bb_width_percentile[i] < 0.30):  # BB width < 30th percentile (squeeze)
                 signals[i] = -0.25
                 position = -1
-                short_extreme = low[i]  # initialize extreme
         else:
-            # Update extremes for trailing stop
-            if position == 1:
-                long_extreme = max(long_extreme, high[i])
-            else:  # position == -1
-                short_extreme = min(short_extreme, low[i])
-            
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: price crosses Donchian middle band (mean reversion)
-            if position == 1 and price < donchian_middle[i]:
+            # Primary exit: price crosses middle Bollinger Band (mean reversion)
+            if position == 1 and close[i] < bb_middle[i]:
                 exit_signal = True
-            elif position == -1 and price > donchian_middle[i]:
+            elif position == -1 and close[i] > bb_middle[i]:
                 exit_signal = True
-            
-            # Secondary exit: ATR trailing stop (2.5x ATR from extreme)
-            if not exit_signal:
-                if position == 1 and price < long_extreme - 2.5 * atr_val:
-                    exit_signal = True
-                elif position == -1 and price > short_extreme + 2.5 * atr_val:
-                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
-                long_extreme = 0.0
-                short_extreme = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_Donchian20_1dEMA50_VolumeSpike_ATRStop"
+name = "4H_BB_Squeeze_EMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
