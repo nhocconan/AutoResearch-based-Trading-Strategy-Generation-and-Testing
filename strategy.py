@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R4/S4 breakout with 1d EMA50 trend filter and 1.5x volume spike.
-- Long: price breaks above Camarilla R4 (1d) + price > 1d EMA50 + volume > 1.5x 20-period avg volume
-- Short: price breaks below Camarilla S4 (1d) + price < 1d EMA50 + volume > 1.5x 20-period avg volume
-- Exit: trailing stop (1.5x ATR from extreme) OR Camarilla breakout in opposite direction
-- Uses Camarilla R4/S4 (wider bands) for fewer, higher-quality breakouts vs R3/S3
-- 1d EMA50 trend filter adapts to bull/bear regimes
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+- Long: price breaks above Donchian upper (20-period) + price > 12h EMA50 + volume > 1.5x 20-period avg volume
+- Short: price breaks below Donchian lower (20-period) + price < 12h EMA50 + volume > 1.5x 20-period avg volume
+- Exit: trailing stop (2.5x ATR from extreme) OR Donchian breakout in opposite direction
+- Uses 12h EMA50 as trend filter to avoid counter-trend trades and adapt to regime
 - Volume confirmation reduces false breakouts
 - ATR trailing stop manages risk without look-ahead
-- Target: 12-37 trades/year (50-150 total over 4 years) on 12h timeframe to minimize fee drag
+- Designed for both bull and bear markets: trend filter adapts to regime
+- Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee drag on 4h timeframe
 """
 
 import numpy as np
@@ -33,25 +33,22 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])  # align with close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: > 1.5x 20-period average (moderate spike filter)
+    # Volume confirmation: > 1.5x 20-period average (spike filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Load 1d data ONCE before loop for Camarilla and EMA
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla pivot levels (R4, S4) from previous 1d bar
-    # R4 = close + 1.1 * (high - low)
-    # S4 = close - 1.1 * (high - low)
-    camarilla_r4 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low'])
-    camarilla_s4 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low'])
+    # Calculate EMA50 on 12h close
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate EMA50 on 1d close
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align HTF indicators to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4.values)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4.values)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Donchian channels (20-period) on 4h data
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,15 +56,15 @@ def generate_signals(prices):
     short_extreme = 0.0  # lowest low since short entry
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14, 50)  # Need 20 for volume MA, 14 for ATR, 50 for EMA
+    start_idx = max(20, 14, 50)  # Need 20 for Donchian, 14 for ATR, 50 for EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,21 +72,21 @@ def generate_signals(prices):
                 short_extreme = 0.0
             continue
         
-        # Camarilla breakout conditions (using current bar's close vs previous day's levels)
-        breakout_up = close[i] > camarilla_r4_aligned[i]  # Break above Camarilla R4
-        breakout_down = close[i] < camarilla_s4_aligned[i]  # Break below Camarilla S4
+        # Donchian breakout conditions (using current bar's close)
+        breakout_up = close[i] > donchian_upper[i]  # Break above Donchian upper
+        breakout_down = close[i] < donchian_lower[i]  # Break below Donchian lower
         
         # Volume spike confirmation (> 1.5x average)
         volume_spike = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Camarilla R4 breakout up + price > 1d EMA50 + volume spike
-            if breakout_up and close[i] > ema_50_aligned[i] and volume_spike:
+            # Long: Donchian upper breakout up + price > 12h EMA50 + volume spike
+            if breakout_up and close[i] > ema_50_12h_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
                 long_extreme = high[i]
-            # Short: Camarilla S4 breakout down + price < 1d EMA50 + volume spike
-            elif breakout_down and close[i] < ema_50_aligned[i] and volume_spike:
+            # Short: Donchian lower breakout down + price < 12h EMA50 + volume spike
+            elif breakout_down and close[i] < ema_50_12h_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
                 short_extreme = low[i]
@@ -98,10 +95,10 @@ def generate_signals(prices):
             long_extreme = max(long_extreme, high[i])
             
             # Exit conditions:
-            # 1. Price reverses 1.5x ATR from long extreme (trailing stop)
-            # 2. Camarilla breakout down (opposite signal)
-            trailing_stop_long = close[i] < long_extreme - 1.5 * atr[i]
-            breakout_down_exit = close[i] < camarilla_s4_aligned[i]
+            # 1. Price reverses 2.5x ATR from long extreme (trailing stop)
+            # 2. Donchian breakout down (opposite signal)
+            trailing_stop_long = close[i] < long_extreme - 2.5 * atr[i]
+            breakout_down_exit = close[i] < donchian_lower[i]
             
             if trailing_stop_long or breakout_down_exit:
                 signals[i] = 0.0
@@ -114,10 +111,10 @@ def generate_signals(prices):
             short_extreme = min(short_extreme, low[i])
             
             # Exit conditions:
-            # 1. Price reverses 1.5x ATR from short extreme (trailing stop)
-            # 2. Camarilla breakout up (opposite signal)
-            trailing_stop_short = close[i] > short_extreme + 1.5 * atr[i]
-            breakout_up_exit = close[i] > camarilla_r4_aligned[i]
+            # 1. Price reverses 2.5x ATR from short extreme (trailing stop)
+            # 2. Donchian breakout up (opposite signal)
+            trailing_stop_short = close[i] > short_extreme + 2.5 * atr[i]
+            breakout_up_exit = close[i] > donchian_upper[i]
             
             if trailing_stop_short or breakout_up_exit:
                 signals[i] = 0.0
@@ -128,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R4S4_1dEMA50_VolumeSpike_ATRStop"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_ATRStop"
+timeframe = "4h"
 leverage = 1.0
