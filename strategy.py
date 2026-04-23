@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA20 trend filter and volume confirmation
-- Long when price breaks above Camarilla R1 level AND close > 4h EMA20 AND volume > 1.5x 20-period average
-- Short when price breaks below Camarilla S1 level AND close < 4h EMA20 AND volume > 1.5x 20-period average
-- Exit when price crosses Camarilla pivot point (mean reversion to center)
-- Uses 4h EMA20 for HTF trend alignment to avoid counter-trend entries
-- Target: 60-150 total trades over 4 years = 15-37/year for 1h to minimize fee drag
-- Session filter: 08-20 UTC to reduce noise trades
-- Position size: 0.20 (discrete level to reduce churn)
+Hypothesis: 6h Donchian(20) breakout with 1w ADX trend filter and volume confirmation
+- Long when price breaks above Donchian upper band AND 1w ADX > 25 AND volume > 2.0x 20-period average
+- Short when price breaks below Donchian lower band AND 1w ADX > 25 AND volume > 2.0x 20-period average
+- Exit when price crosses Donchian middle band (mean reversion to center)
+- Uses 1w ADX for HTF trend strength to ensure we only trade in strong trends (avoids chop)
+- Volume confirmation reduces false breakouts
+- Designed for both bull and bear markets: ADX > 25 filters for trending markets only
+- Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
 """
 
 import numpy as np
@@ -24,108 +24,126 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA20 trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Get 1w data for ADX trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA20
-    ema20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Calculate 1w ADX (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels from previous day (using 1d data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate Camarilla levels
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12, PP = (H+L+C)/3
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan, dtype=float)
+        if len(values) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(values[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(values)):
+            result[i] = result[i-1] - (result[i-1] / period) + values[i]
+        return result
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    period = 14
+    atr = wilders_smoothing(tr, period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, period)
     
-    # Volume confirmation: > 1.5x 20-period average
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, period)
+    
+    # Align 1w ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate Donchian channels (20-period) on 6h data
+    donchian_window = 20
+    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    middle_band = (upper_band + lower_band) / 2
+    
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20)  # Need 20 for EMA20, 20 for volume MA
+    start_idx = max(donchian_window, 20, 2*period)  # Need enough for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_pp_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or 
+            np.isnan(middle_band[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
+        # Donchian breakout conditions
+        breakout_up = close[i] > upper_band[i]  # Break above upper band
+        breakout_down = close[i] < lower_band[i]  # Break below lower band
         
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Camarilla breakout conditions
-        breakout_up = close[i] > camarilla_r1_aligned[i]  # Break above R1
-        breakout_down = close[i] < camarilla_s1_aligned[i]  # Break below S1
-        
-        # Trend filter (using 4h EMA20)
-        uptrend = close[i] > ema20_4h_aligned[i]
-        downtrend = close[i] < ema20_4h_aligned[i]
+        # Trend filter (using 1w ADX > 25 for strong trend)
+        strong_trend = adx_aligned[i] > 25
         
         # Volume confirmation
-        volume_ok = volume[i] > 1.5 * vol_ma[i]
+        volume_ok = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Camarilla breakout up + uptrend + volume confirmation
-            if breakout_up and uptrend and volume_ok:
-                signals[i] = 0.20
+            # Long: Donchian breakout up + strong trend + volume confirmation
+            if breakout_up and strong_trend and volume_ok:
+                signals[i] = 0.25
                 position = 1
-            # Short: Camarilla breakout down + downtrend + volume confirmation
-            elif breakout_down and downtrend and volume_ok:
-                signals[i] = -0.20
+            # Short: Donchian breakout down + strong trend + volume confirmation
+            elif breakout_down and strong_trend and volume_ok:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: Price crosses Camarilla pivot point (mean reversion)
+            # Exit: Price crosses Donchian middle band (mean reversion)
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses below pivot point
-                if close[i] < camarilla_pp_aligned[i]:
+                # Exit long: Price crosses below middle band
+                if close[i] < middle_band[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short: Price crosses above pivot point
-                if close[i] > camarilla_pp_aligned[i]:
+                # Exit short: Price crosses above middle band
+                if close[i] > middle_band[i]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_4hEMA20_Trend_VolumeConfirmation_Session"
-timeframe = "1h"
+name = "6h_Donchian20_1wADX_Trend_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
