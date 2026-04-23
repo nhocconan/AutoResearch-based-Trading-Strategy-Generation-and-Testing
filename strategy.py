@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Donchian(20) breakout with 4h EMA(50) trend filter and volume confirmation.
-Long when price breaks above 1h Donchian upper AND 4h EMA(50) upward AND volume > 1.5x average.
-Short when price breaks below 1h Donchian lower AND 4h EMA(50) downward AND volume > 1.5x average.
-Exit on opposite Donchian break or EMA trend reversal.
-Uses 4h for signal direction, 1h only for entry timing precision. Session filter 08-20 UTC.
-Target: 15-37 trades/year (60-150 over 4 years) to minimize fee drag. Works in bull/bear by only taking breakouts in direction of 4h trend.
+Hypothesis: 6h Elder Ray Index with 1d EMA50 trend filter and volume confirmation.
+Long when Bull Power > 0, Bear Power < 0, price > 1d EMA50, and volume > 1.5x average.
+Short when Bull Power < 0, Bear Power > 0, price < 1d EMA50, and volume > 1.5x average.
+Exit when Elder Ray signals reverse or volume drops below average.
+Elder Ray measures bull/bear power relative to EMA13, providing dynamic support/resistance.
+1d EMA50 filter ensures trading only in direction of higher timeframe trend.
+Designed for 6h timeframe targeting 50-150 total trades over 4 years with low frequency to minimize fee drag.
+Works in both bull and bear markets by only taking trades aligned with 1d trend.
 """
 
 import numpy as np
@@ -22,31 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC) - prices.index is DatetimeIndex
-    hours = prices.index.hour
-    
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 1d data for EMA50 trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMA(50) for trend direction
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate EMA50 on 1d data
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 4h EMA(50) slope (trend strength)
-    ema_slope_4h = np.zeros_like(ema_50_4h_aligned)
-    ema_slope_4h[1:] = (ema_50_4h_aligned[1:] - ema_50_4h_aligned[:-1]) / ema_50_4h_aligned[:-1]
+    # Align 1d EMA50 to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 1h Donchian channels (20-period)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Elder Ray Index (Bull Power and Bear Power) on primary timeframe
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
-    # Volume average (20-period) on 1h
+    # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -54,61 +52,50 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        ema_val = ema_50_4h_aligned[i]
-        ema_slope = ema_slope_4h[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
+        ema50_val = ema50_1d_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper AND 4h EMA upward AND volume spike
-            if (price > upper and ema_slope > 0 and vol_current > 1.5 * vol_ma_val):
-                signals[i] = 0.20
+            # Long: Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA50 AND volume spike
+            if (bull_val > 0 and bear_val < 0 and price > ema50_val and vol_current > 1.5 * vol_ma_val):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower AND 4h EMA downward AND volume spike
-            elif (price < lower and ema_slope < 0 and vol_current > 1.5 * vol_ma_val):
-                signals[i] = -0.20
+            # Short: Bull Power < 0 AND Bear Power > 0 AND price < 1d EMA50 AND volume spike
+            elif (bull_val < 0 and bear_val > 0 and price < ema50_val and vol_current > 1.5 * vol_ma_val):
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below Donchian lower OR 4h EMA slope turns down
-                if (price < lower or ema_slope < 0):
+                # Exit long: Elder Ray reverses OR volume drops below average
+                if (bull_val <= 0 or bear_val >= 0 or vol_current < vol_ma_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above Donchian upper OR 4h EMA slope turns up
-                if (price > upper or ema_slope > 0):
+                # Exit short: Elder Ray reverses OR volume drops below average
+                if (bull_val >= 0 or bear_val <= 0 or vol_current < vol_ma_val):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Donchian20_4hEMA50_Volume_Session"
-timeframe = "1h"
+name = "6H_ElderRay_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
