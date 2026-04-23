@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
-- Uses 1d Donchian channel breakout for entry signals
-- 1w EMA50 defines higher timeframe trend: only trade in direction of weekly trend
-- Volume confirmation (> 1.5x 20-period average) filters weak signals
-- Exit when price returns to Donchian midpoint or weekly trend reverses
-- Designed for 1d timeframe targeting 7-25 trades/year (30-100 over 4 years)
-- Works in both bull and bear markets by filtering breakouts with weekly trend
+Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d Volume Regime Filter
+- Bollinger Bands (20, 2) on 6h identify low volatility squeezes (BB Width < 20th percentile)
+- Breakout occurs when price closes outside BB AND volume > 1.5x 20-period average
+- 1d volume regime filter: only trade when 1d volume is above its 50-period median (high volume regime)
+- Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+- Works in both bull and bear markets by capturing volatility expansion after contraction
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,62 +22,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian(20) - upper and lower bands
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Calculate 6h Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean().values
+    dev = close_s.rolling(window=20, min_periods=20).std().values
+    upper_band = basis + 2 * dev
+    lower_band = basis - 2 * dev
+    bb_width = (upper_band - lower_band) / basis  # Normalized width
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate BB Width percentile (20-period lookback for regime)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).rank(pct=True).values * 100
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1d data for volume regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    vol_1d = df_1d['volume'].values
+    vol_1d_median = pd.Series(vol_1d).rolling(window=50, min_periods=50).median().values
+    vol_1d_median_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_median)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # for EMA50 and Donchian
+    start_idx = max(50, 20)  # for BB Width percentile and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(basis[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(bb_width_percentile[i]) or np.isnan(vol_ma[i]) or np.isnan(vol_1d_median_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper AND price above 1w EMA50 AND volume spike
-            if (close[i] > highest_high[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i]):
+            # Entry conditions: BB squeeze breakout with volume confirmation and 1d volume regime
+            bb_squeeze = bb_width_percentile[i] < 20  # Low volatility regime
+            breakout_up = close[i] > upper_band[i]
+            breakout_down = close[i] < lower_band[i]
+            volume_spike = volume[i] > 1.5 * vol_ma[i]
+            high_volume_regime = volume[i] > vol_1d_median_aligned[i]  # Current 6h volume > 1d median
+            
+            if bb_squeeze and breakout_up and volume_spike and high_volume_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower AND price below 1w EMA50 AND volume spike
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i]):
+            elif bb_squeeze and breakout_down and volume_spike and high_volume_regime:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to Donchian midpoint OR weekly trend reverses
+            # Exit: BB width expands back above 50th percentile (volatility expansion ending)
+            # OR opposite breakout occurs
             exit_signal = False
             
             if position == 1:
-                # Exit long when price <= Donchian midpoint OR price closes below 1w EMA50
-                if (close[i] <= donchian_mid[i] or close[i] < ema_50_1w_aligned[i]):
+                # Exit long when BB width > 50th percentile OR downside breakout
+                if (bb_width_percentile[i] > 50 or close[i] < lower_band[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short when price >= Donchian midpoint OR price closes above 1w EMA50
-                if (close[i] >= donchian_mid[i] or close[i] > ema_50_1w_aligned[i]):
+                # Exit short when BB width > 50th percentile OR upside breakout
+                if (bb_width_percentile[i] > 50 or close[i] > upper_band[i]):
                     exit_signal = True
             
             if exit_signal:
@@ -89,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_BollingerSqueeze_Breakout_1dVolumeRegime"
+timeframe = "6h"
 leverage = 1.0
