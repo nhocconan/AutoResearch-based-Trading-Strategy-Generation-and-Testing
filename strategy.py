@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-- Donchian breakouts capture momentum in trending markets; 1d EMA34 ensures alignment with longer-term trend.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+- Donchian breakouts capture momentum in trending markets; 1d EMA34 ensures alignment with long-term trend.
 - Volume > 1.5x 20-period average confirms breakout validity.
 - Discrete position size 0.25 limits drawdown during crashes.
-- Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
+- Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years).
 - Designed to work in both bull and bear regimes via trend filter and volume confirmation.
 """
 
@@ -86,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
