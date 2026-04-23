@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Donchian upper band and close > 1w EMA50 (uptrend) with volume > 2.0x average.
-Short when price breaks below Donchian lower band and close < 1w EMA50 (downtrend) with volume > 2.0x average.
-Exit on opposite band break or trend reversal. Uses 1d timeframe targeting 30-100 total trades over 4 years.
-Donchian provides dynamic support/resistance, EMA50 filters long-term trend, volume spike confirms breakout strength.
-Designed to capture strong momentum moves while avoiding whipsaws in choppy markets. Works in both bull (trend following) and bear (mean reversion via tight stops) regimes.
+Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation.
+Long when Bull Power > 0, ADX > 25 (trending), and volume > 1.5x average.
+Short when Bear Power < 0, ADX > 25 (trending), and volume > 1.5x average.
+Exit when power reverses or ADX < 20 (range regime). Uses 6h timeframe targeting 50-150 total trades over 4 years.
+Elder Ray measures bull/bear strength relative to EMA13, ADX filters for trending markets only, volume confirms conviction.
+Designed to capture strong trending moves while avoiding whipsaws in ranging markets.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,33 +22,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Donchian calculation - ONCE before loop
+    # Calculate EMA13 for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Bull Power and Bear Power
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Load 1d data for ADX regime filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels from previous 1d bar (avoid look-ahead)
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    upper_1d = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    lower_1d = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate ADX on 1d
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        
+        for i in range(period, len(high)):
+            if atr[i] > 0:
+                plus_di[i] = 100 * (np.mean(plus_dm[i-period+1:i+1]) / atr[i])
+                minus_di[i] = 100 * (np.mean(minus_dm[i-period+1:i+1]) / atr[i])
+                if plus_di[i] + minus_di[i] > 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Load 1w data for EMA50 trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align HTF indicators to 1d timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align HTF indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,30 +92,30 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        ema50_val = ema50_1w_aligned[i]
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
+        adx_val = adx_1d_aligned[i]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper band AND price > 1w EMA50 (uptrend) AND volume spike
-            if (price > upper_val and price > ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Long: Bull Power > 0, ADX > 25 (trending), volume spike
+            if (bull_val > 0 and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below Donchian lower band AND price < 1w EMA50 (downtrend) AND volume spike
-            elif (price < lower_val and price < ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Short: Bear Power < 0, ADX > 25 (trending), volume spike
+            elif (bear_val < 0 and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -89,12 +124,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below Donchian lower band OR trend reversal
-                if (price < lower_val or price < ema50_val):
+                # Exit long: Bear Power >= 0 OR ADX < 20 (range regime)
+                if (bear_val >= 0 or adx_val < 20):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above Donchian upper band OR trend reversal
-                if (price > upper_val or price > ema50_val):
+                # Exit short: Bull Power <= 0 OR ADX < 20 (range regime)
+                if (bull_val <= 0 or adx_val < 20):
                     exit_signal = True
             
             if exit_signal:
@@ -106,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6H_ElderRay_1dADX_Volume"
+timeframe = "6h"
 leverage = 1.0
