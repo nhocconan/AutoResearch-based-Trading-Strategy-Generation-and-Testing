@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
-Long when price breaks above Camarilla R3 (1d) AND price > 1w EMA50 (uptrend) AND volume > 2.0x average.
-Short when price breaks below Camarilla S3 (1d) AND price < 1w EMA50 (downtrend) AND volume > 2.0x average.
-Exit when price reverts to Camarilla pivot point (PP) or trend reverses (price crosses 1w EMA50).
-Uses 1d timeframe to target ~10-25 trades/year, avoiding fee drag while capturing strong breakouts.
-Works in both bull and bear markets by requiring trend confirmation via 1w EMA50 for breakout entries.
+Hypothesis: 6h Bollinger Band breakout with 12h trend filter and volume confirmation.
+Long when price breaks above upper BB (20,2) AND price > 12h EMA50 (uptrend) AND volume > 2x average.
+Short when price breaks below lower BB (20,2) AND price < 12h EMA50 (downtrend) AND volume > 2x average.
+Exit when price reverts to middle BB or trend reverses (price crosses 12h EMA50).
+Uses 6h timeframe to target ~15-30 trades/year, avoiding fee drag while capturing strong breakouts.
+Works in both bull and bear markets by requiring trend confirmation via 12h EMA50 for breakout entries.
 """
 
 import numpy as np
@@ -22,41 +22,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivot - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data for EMA50 trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla pivot levels for 1d timeframe
-    # Camarilla: PP = (H+L+C)/3, Range = H-L
-    # R3 = PP + (H-L)*1.1/2, S3 = PP - (H-L)*1.1/2
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    price_range = high_1d - low_1d
-    camarilla_pp = typical_price
-    camarilla_r3 = camarilla_pp + price_range * 1.1 / 2
-    camarilla_s3 = camarilla_pp - price_range * 1.1 / 2
+    # Calculate EMA50 for 12h trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Load 1w data for EMA50 trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Bollinger Bands on 6h timeframe
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    close_1w = df_1w['close'].values
-    
-    # Calculate EMA50 for 1w trend filter
-    ema50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align HTF indicators to 1d timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50)
-    
-    # Volume average (20-period) on 1d timeframe
+    # Volume average (20-period) on 6h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -64,28 +48,28 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(ema50_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(bb_middle[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pp_val = camarilla_pp_aligned[i]
-        r3_val = camarilla_r3_aligned[i]
-        s3_val = camarilla_s3_aligned[i]
-        ema50_val = ema50_aligned[i]
+        ema50_val = ema50_12h_aligned[i]
+        bb_middle_val = bb_middle[i]
+        bb_upper_val = bb_upper[i]
+        bb_lower_val = bb_lower[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above R3 AND price > 1w EMA50 (uptrend) AND volume spike
-            if (price > r3_val and price > ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Long: price breaks above upper BB AND price > 12h EMA50 (uptrend) AND volume spike
+            if (price > bb_upper_val and price > ema50_val and vol_current > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND price < 1w EMA50 (downtrend) AND volume spike
-            elif (price < s3_val and price < ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Short: price breaks below lower BB AND price < 12h EMA50 (downtrend) AND volume spike
+            elif (price < bb_lower_val and price < ema50_val and vol_current > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -93,12 +77,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price reverts to pivot point OR price breaks below 1w EMA50 (trend reversal)
-                if price <= pp_val or price < ema50_val:
+                # Exit long: price reverts to middle BB OR price breaks below 12h EMA50 (trend reversal)
+                if price <= bb_middle_val or price < ema50_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price reverts to pivot point OR price breaks above 1w EMA50 (trend reversal)
-                if price >= pp_val or price > ema50_val:
+                # Exit short: price reverts to middle BB OR price breaks above 12h EMA50 (trend reversal)
+                if price >= bb_middle_val or price > ema50_val:
                     exit_signal = True
             
             if exit_signal:
@@ -109,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Camarilla_R3_S3_1wEMA50_Volume_Breakout"
-timeframe = "1d"
+name = "6H_Bollinger_Breakout_12hEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
