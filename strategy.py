@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above 20-period Donchian high AND 1d EMA34 is rising AND volume > 1.8x 20-period average.
-Short when price breaks below 20-period Donchian low AND 1d EMA34 is falling AND volume > 1.8x 20-period average.
-Exit when price touches the opposite Donchian level or reverses EMA34 direction.
-Uses 12h primary timeframe with 1d HTF for trend filter to reduce whipsaws. Target: 50-150 total trades over 4 years (12-37/year).
-Donchian channels provide clear structure, EMA34 filters trend direction, volume confirms breakout strength.
+Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation + ATR stoploss.
+Long when price breaks above Donchian upper band (20-period high) AND 1d EMA34 is rising AND volume > 1.5x 20-period average.
+Short when price breaks below Donchian lower band (20-period low) AND 1d EMA34 is falling AND volume > 1.5x 20-period average.
+Exit when price touches the opposite Donchian band or reverses EMA34 direction.
+Uses 1d HTF for EMA34 trend to reduce whipsaws. Target: 75-200 total trades over 4 years (19-50/year).
+Donchian channels provide clear structure; EMA34 filter ensures trend alignment; volume confirms conviction.
 """
 
 import numpy as np
@@ -31,13 +31,10 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 20-period Donchian channels (primary timeframe)
-    # Upper channel = highest high over last 20 periods
-    # Lower channel = lowest low over last 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on 4h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # 20-period volume average for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,12 +43,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # EMA34 (34), Donchian (20), volume MA (20)
+    start_idx = max(lookback, 34, 20)  # Donchian (20), EMA34 (34), volume MA (20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,8 +56,8 @@ def generate_signals(prices):
         
         price = close[i]
         ema_val = ema_34_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
+        upper = highest_high[i]
+        lower = lowest_low[i]
         vol_ma_val = vol_ma[i]
         
         # Calculate EMA34 slope for trend direction (rising/falling)
@@ -74,11 +71,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Break above Donchian upper AND EMA34 rising AND volume spike
-            if price > upper and ema_rising and volume[i] > 1.8 * vol_ma_val:
+            if price > upper and ema_rising and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
             # Short: Break below Donchian lower AND EMA34 falling AND volume spike
-            elif price < lower and ema_falling and volume[i] > 1.8 * vol_ma_val:
+            elif price < lower and ema_falling and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -86,11 +83,11 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches lower Donchian band OR EMA34 starts falling
+                # Long exit: price touches lower band OR EMA34 starts falling
                 if price < lower or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches upper Donchian band OR EMA34 starts rising
+                # Short exit: price touches upper band OR EMA34 starts rising
                 if price > upper or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
@@ -102,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirmation"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
