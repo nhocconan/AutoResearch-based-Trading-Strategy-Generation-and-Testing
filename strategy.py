@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
-- Donchian levels: Upper = 20-period high, Lower = 20-period low (using prior 1d candle)
-- Long: Close > Upper + volume > 2.0x 20-period avg + price > 1w EMA50
-- Short: Close < Lower + volume > 2.0x 20-period avg + price < 1w EMA50
-- Exit: Opposite breakout (Close < Upper for long, Close > Lower for short) or EMA50 trend flip
-- Uses Donchian for structure, volume for conviction, 1w EMA50 for HTF trend filter
-- Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
+Hypothesis: 6h Williams %R Extreme + 1d Weekly Pivot Confluence
+- Williams %R(14) on 6h: Long when < -90 (oversold), Short when > -10 (overbought)
+- 1d Weekly Pivot: Weekly PP, R1, S1 from prior week's OHLC
+- Long: Williams %R < -90 AND price > Weekly PP AND price < Weekly R1 (mean reversion in uptrend)
+- Short: Williams %R > -10 AND price < Weekly PP AND price > Weekly S1 (mean reversion in downtrend)
+- Exit: Williams %R returns to > -50 (for long) or < -50 (for short) OR weekly pivot flip
+- Uses extreme momentum exhaustion for mean reversion entries, filtered by weekly pivot structure
+- Target: 75-150 total trades over 4 years (19-38/year) on 6h timeframe
 - Discrete position sizing: ±0.25 to minimize fee churn
-- Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by EMA50)
+- Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend)
 """
 
 import numpy as np
@@ -17,83 +18,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Volume confirmation: > 2.0x 20-period average (tighter to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Williams %R(14) on 6h: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate prior 1d Donchian(20) levels
-    # Need prior 1d OHLC for each 1d bar
+    # Calculate 1d Weekly Pivot from prior week's OHLC
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Resample 1d to weekly using actual weekly boundaries (no look-ahead)
+    # We'll compute weekly pivot using prior week's data for each 1d bar
+    # For simplicity, we use prior 5 trading days (1 week) OHLC
+    window = 5  # 5 trading days = 1 week
+    weekly_high = pd.Series(df_1d['high'].values).rolling(window=window, min_periods=window).max().values
+    weekly_low = pd.Series(df_1d['low'].values).rolling(window=window, min_periods=window).min().values
+    weekly_close = pd.Series(df_1d['close'].values).rolling(window=window, min_periods=window).mean().values  # approx weekly close
     
-    # Donchian(20) Upper = rolling max(high, 20), Lower = rolling min(low, 20)
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_upper_1d = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower_1d = low_series.rolling(window=20, min_periods=20).min().values
+    # Weekly Pivot: PP = (H + L + C) / 3
+    weekly_pp = (weekly_high + weekly_low + weekly_close) / 3
+    # Weekly R1 = 2*PP - L
+    weekly_r1 = 2 * weekly_pp - weekly_low
+    # Weekly S1 = 2*PP - H
+    weekly_s1 = 2 * weekly_pp - weekly_high
     
-    # Align to 1d timeframe (using prior 1d close for look-ahead safety)
-    donchian_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_1d)
-    donchian_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_1d)
+    # Align weekly pivot to 6h timeframe (using prior week's data)
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1d, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 50 for EMA50, 20 for Donchian and volume MA
+    start_idx = max(14, 5)  # Need 14 for Williams %R, 5 for weekly pivot
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(donchian_upper_1d_aligned[i]) or
-            np.isnan(donchian_lower_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(weekly_pp_aligned[i]) or
+            np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
-        
         if position == 0:
-            # Long: Close > Upper + volume confirmation + price > 1w EMA50
-            if (close[i] > donchian_upper_1d_aligned[i] and 
-                volume_confirm and 
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: Williams %R < -90 (oversold) AND price > Weekly PP AND price < Weekly R1
+            if (williams_r[i] < -90 and 
+                close[i] > weekly_pp_aligned[i] and 
+                close[i] < weekly_r1_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Lower + volume confirmation + price < 1w EMA50
-            elif (close[i] < donchian_lower_1d_aligned[i] and 
-                  volume_confirm and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: Williams %R > -10 (overbought) AND price < Weekly PP AND price > Weekly S1
+            elif (williams_r[i] > -10 and 
+                  close[i] < weekly_pp_aligned[i] and 
+                  close[i] > weekly_s1_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < Upper OR price < 1w EMA50 (trend flip)
-            if close[i] < donchian_upper_1d_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Long exit: Williams %R returns to > -50 (momentum returning) OR weekly pivot flip
+            if williams_r[i] > -50 or close[i] < weekly_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > Lower OR price > 1w EMA50 (trend flip)
-            if close[i] > donchian_lower_1d_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Short exit: Williams %R returns to < -50 (momentum returning) OR weekly pivot flip
+            if williams_r[i] < -50 or close[i] > weekly_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_WeeklyPivot_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
