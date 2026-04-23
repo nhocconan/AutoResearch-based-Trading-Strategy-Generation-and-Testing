@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ATR-based volatility filter and volume confirmation.
-Long when price breaks above 20-period Donchian high and 1d ATR(14)/ATR(50) > 1.2 with volume > 1.3x average.
-Short when price breaks below 20-period Donchian low and 1d ATR(14)/ATR(50) > 1.2 with volume > 1.3x average.
-Exit on opposite Donchian break or ATR ratio < 0.8 (low volatility).
-Donchian channels provide clear trend-following structure.
-1d ATR ratio filters for expanding volatility regimes to avoid false breakouts in low-vol chop.
-Volume confirmation ensures breakout legitimacy.
-Designed for 12h timeframe targeting 50-150 total trades over 4 years with low frequency to minimize fee drag.
-Works in both bull and bear markets by only taking breakouts in expanding volatility regimes.
+Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume confirmation.
+Long when price breaks above upper Donchian(20) and 1d ATR > 0.02 * price with volume > 1.5x average.
+Short when price breaks below lower Donchian(20) and 1d ATR > 0.02 * price with volume > 1.5x average.
+Exit on opposite Donchian break or ATR < 0.015 * price (low volatility).
+ATR filter ensures sufficient volatility for breakout follow-through, avoiding chop.
+Designed for 4h timeframe targeting 75-200 total trades over 4 years with low frequency to minimize fee drag.
+Works in both bull and bear markets by only taking breakouts during sufficient volatility periods.
 """
 
 import numpy as np
@@ -17,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,9 +23,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for ATR volatility filter - ONCE before loop
+    # Load 1d data for ATR filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -47,16 +45,12 @@ def generate_signals(prices):
         
         return atr
     
-    atr_14_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    atr_50_1d = calculate_atr(high_1d, low_1d, close_1d, 50)
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d)
     
-    # Calculate ATR ratio (short-term/long-term volatility)
-    atr_ratio_1d = np.where(atr_50_1d != 0, atr_14_1d / atr_50_1d, 1.0)
+    # Align 1d ATR to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align 1d ATR ratio to 12h timeframe
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    
-    # Calculate Donchian channels on primary timeframe
+    # Calculate Donchian channels on primary timeframe (4h)
     def calculate_donchian(high, low, period=20):
         upper = np.full_like(high, np.nan)
         lower = np.full_like(high, np.nan)
@@ -65,7 +59,7 @@ def generate_signals(prices):
             lower[i] = np.min(low[i-period+1:i+1])
         return upper, lower
     
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    upper_donchian, lower_donchian = calculate_donchian(high, low, 20)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -74,30 +68,33 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(upper_donchian[i]) or 
+            np.isnan(lower_donchian[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        atr_ratio = atr_ratio_1d_aligned[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        vol_ma_val = vol_ma[i]
+        atr_val = atr_1d_aligned[i]
         price = close[i]
+        vol_ma_val = vol_ma[i]
         vol_current = volume[i]
+        upper_val = upper_donchian[i]
+        lower_val = lower_donchian[i]
+        
+        # Volatility filter: ATR > 1.5% of price (ensures sufficient volatility)
+        vol_filter = atr_val > 0.015 * price
         
         if position == 0:
-            # Long: price breaks above upper Donchian AND ATR ratio > 1.2 (expanding vol) AND volume spike
-            if (price > upper and atr_ratio > 1.2 and vol_current > 1.3 * vol_ma_val):
+            # Long: price breaks above upper Donchian AND volatility filter AND volume spike
+            if (price > upper_val and vol_filter and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below lower Donchian AND ATR ratio > 1.2 (expanding vol) AND volume spike
-            elif (price < lower and atr_ratio > 1.2 and vol_current > 1.3 * vol_ma_val):
+            # Short: price breaks below lower Donchian AND volatility filter AND volume spike
+            elif (price < lower_val and vol_filter and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -106,12 +103,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below lower Donchian OR ATR ratio < 0.8 (low volatility)
-                if (price < lower or atr_ratio < 0.8):
+                # Exit long: price breaks below lower Donchian OR volatility drops (low volatility = chop)
+                if (price < lower_val or atr_val < 0.01 * price):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above upper Donchian OR ATR ratio < 0.8 (low volatility)
-                if (price > upper or atr_ratio < 0.8):
+                # Exit short: price breaks above upper Donchian OR volatility drops
+                if (price > upper_val or atr_val < 0.01 * price):
                     exit_signal = True
             
             if exit_signal:
@@ -123,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_1dATRratio_Volume_Breakout"
-timeframe = "12h"
+name = "4H_Donchian20_1dATR_Volume_Breakout"
+timeframe = "4h"
 leverage = 1.0
