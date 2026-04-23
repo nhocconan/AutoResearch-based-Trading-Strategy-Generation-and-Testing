@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-Long when price breaks above Donchian upper (20) AND price > 1w EMA50 AND volume > 1.5x 20-period average.
-Short when price breaks below Donchian lower (20) AND price < 1w EMA50 AND volume > 1.5x 20-period average.
-Exit when price reverts to Donchian midpoint OR ATR trailing stop (2.0*ATR from extreme).
-Uses 1w HTF for trend alignment to capture primary trend while using 1d for precise entry/exit.
-Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing 0.25.
-Works in both bull and bear markets by following the 1w trend (avoids counter-trend whipsaws).
+Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation.
+Long when Bull Power > 0 AND price > 12h EMA50 AND volume > 1.8x 20-period average.
+Short when Bear Power < 0 AND price < 12h EMA50 AND volume > 1.8x 20-period average.
+Exit when Elder Power reverses sign OR ATR trailing stop (2.0*ATR from extreme).
+Uses 12h HTF for trend alignment. Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25.
+Elder Ray works in both bull (strong Bull Power) and bear (strong Bear Power) regimes.
 """
 
 import numpy as np
@@ -23,26 +22,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:  # Need enough for EMA
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Donchian(20) channels from previous period to avoid look-ahead
-    high_roll = np.roll(high, 1)
-    low_roll = np.roll(low, 1)
-    high_roll[0] = np.nan
-    low_roll[0] = np.nan
+    # EMA13 for Elder Ray calculation (using same timeframe as prices)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    donchian_high = pd.Series(high_roll).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_roll).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # 1d volume average (20-period) for confirmation filter
+    # 6h volume average (20-period) for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for trailing stop calculation
@@ -61,12 +57,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 1)  # donchian20, ema_50_1w, and +1 for roll
+    start_idx = max(13, 20, 50)  # ema13, vol_ma, ema_50_12h
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
             np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,21 +70,20 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_val = ema_50_1w_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        mid = donchian_mid[i]
+        ema_val = ema_50_12h_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above upper AND price > 1w EMA50 AND volume confirmation
-            if price > upper and price > ema_val and volume[i] > 1.5 * vol_ma_val:
+            # Long: Bull Power > 0 AND price > 12h EMA50 AND volume spike
+            if bull > 0 and price > ema_val and volume[i] > 1.8 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: price breaks below lower AND price < 1w EMA50 AND volume confirmation
-            elif price < lower and price < ema_val and volume[i] > 1.5 * vol_ma_val:
+            # Short: Bear Power < 0 AND price < 12h EMA50 AND volume spike
+            elif bear < 0 and price < ema_val and volume[i] > 1.8 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -102,10 +97,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: price reverts to midpoint
-            if position == 1 and price < mid:
+            # Primary exit: Elder Power reverses sign
+            if position == 1 and bear >= 0:  # Bear Power turns non-negative
                 exit_signal = True
-            elif position == -1 and price > mid:
+            elif position == -1 and bull <= 0:  # Bull Power turns non-positive
                 exit_signal = True
             
             # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
@@ -124,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirmation_MidExit_ATRTrailingStop"
-timeframe = "1d"
+name = "6H_ElderRay_BullBearPower_12hEMA50_Trend_VolumeConfirmation_PowerReversalExit_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
