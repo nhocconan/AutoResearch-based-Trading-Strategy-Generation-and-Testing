@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Williams %R mean-reversion with weekly trend filter and volume confirmation.
-Buy when weekly trend is up (price > 200 EMA), daily Williams %R < -80 (oversold), and volume > 1.5x average.
-Sell when weekly trend is down (price < 200 EMA), daily Williams %R > -20 (overbought), and volume > 1.5x average.
-Exit when Williams %R reverts to mean (-50) or trend weakens.
-Designed for low trade frequency (~10-25/year) to capture mean reversion in strong trends.
-Works in both bull and bear markets by aligning with weekly trend direction.
+Hypothesis: 6-hour price crossing above/below 12-hour VWAP with 1-day ADX trend filter and volume confirmation.
+Long when price > VWAP, ADX > 25, volume > 1.5x average.
+Short when price < VWAP, ADX > 25, volume > 1.5x average.
+Exit when price crosses back across VWAP or ADX < 20.
+VWAP provides dynamic support/resistance; ADX ensures trending conditions; volume confirms conviction.
+Designed for low trade frequency (~15-30/year) to capture strong trends while minimizing whipsaws.
+Works in both bull and bear markets by requiring strong trend confirmation (ADX > 25).
 """
 
 import numpy as np
@@ -22,51 +23,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1-day data for ADX - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Load 12-hour data for VWAP - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate daily Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = williams_r.values
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 1-day ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume average (20-period)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus14 / tr14
+    minus_di = 100 * dm_minus14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    adx_values = adx.values
+    
+    # Calculate 12-hour VWAP (typical price * volume)
+    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3
+    volume_12h = df_12h['volume'].values
+    vwap_numerator = np.cumsum(typical_price_12h * volume_12h)
+    vwap_denominator = np.cumsum(volume_12h)
+    vwap_12h = vwap_numerator / vwap_denominator
+    
+    # Align HTF indicators to lower timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    
+    # Volume average (20-period) on lower timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Start after warmup period
+    for i in range(30, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vwap_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema200_val = ema200_1w_aligned[i]
-        williams_r_val = williams_r[i]
+        adx_val = adx_aligned[i]
+        vwap_val = vwap_12h_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
-        close_price = close[i]
         
         if position == 0:
-            # Long: weekly uptrend (price > EMA200), daily oversold (W%R < -80), volume confirmation
-            if (close_price > ema200_val and williams_r_val < -80 and vol_current > 1.5 * vol_ma_val):
+            # Long: price above VWAP, strong trend (ADX > 25), volume confirmation
+            if (close[i] > vwap_val and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend (price < EMA200), daily overbought (W%R > -20), volume confirmation
-            elif (close_price < ema200_val and williams_r_val > -20 and vol_current > 1.5 * vol_ma_val):
+            # Short: price below VWAP, strong trend (ADX > 25), volume confirmation
+            elif (close[i] < vwap_val and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -74,12 +112,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R reverts to mean (> -50) OR trend weakens (price < EMA200)
-                if williams_r_val > -50 or close_price < ema200_val:
+                # Exit long: price crosses below VWAP OR trend weakening (ADX < 20)
+                if close[i] < vwap_val or adx_val < 20:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R reverts to mean (< -50) OR trend weakens (price > EMA200)
-                if williams_r_val < -50 or close_price > ema200_val:
+                # Exit short: price crosses above VWAP OR trend weakening (ADX < 20)
+                if close[i] > vwap_val or adx_val < 20:
                     exit_signal = True
             
             if exit_signal:
@@ -90,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_WilliamsR_1wEMA200_Trend_Volume"
-timeframe = "1d"
+name = "6H_VWAP_12h_1dADX_Volume_Trend"
+timeframe = "6h"
 leverage = 1.0
