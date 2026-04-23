@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Camarilla pivot levels (H3/L3) act as strong support/resistance on 12h chart
-- Breakout above H3 with volume > 2.0x average signals bullish momentum
-- Breakdown below L3 with volume > 2.0x average signals bearish momentum
-- 1d EMA34 ensures trades align with daily trend (avoid counter-trend)
-- Discrete position size 0.25 to balance return and drawdown
-- Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-- Works in both bull/bear via 1d trend filter and volatility-adjusted breakouts
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Donchian channel (20-bar high/low) captures significant momentum breaks
+- Breakout above upper band with volume > 1.5x average signals bullish momentum
+- Breakdown below lower band with volume > 1.5x average signals bearish momentum
+- 1d EMA34 ensures trades align with daily trend (avoid counter-trend in bear markets)
+- Discrete position size 0.25 balances return and drawdown (BTC 2022 drawdown manageable)
+- Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years)
+- Works in both bull/bear via 1d trend filter and volatility-adjusted signals
 """
 
 import numpy as np
@@ -24,30 +24,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate typical price for Camarilla pivots (using prior bar's OHLC)
-    typical_price = (high + low + close) / 3.0
+    # Donchian channel (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Shift by 1 to use prior bar's data for pivot calculation (no look-ahead)
-    typical_price_shifted = np.roll(typical_price, 1)
-    high_shifted = np.roll(high, 1)
-    low_shifted = np.roll(low, 1)
-    close_shifted = np.roll(close, 1)
-    
-    # Set first bar to NaN since we don't have prior bar data
-    typical_price_shifted[0] = np.nan
-    high_shifted[0] = np.nan
-    low_shifted[0] = np.nan
-    close_shifted[0] = np.nan
-    
-    # Camarilla pivot levels (based on prior bar)
-    pivot = (high_shifted + low_shifted + close_shifted) / 3.0
-    range_hl = high_shifted - low_shifted
-    
-    # H3 and L3 levels
-    H3 = pivot + (range_hl * 1.1 / 2.0)  # H3 = pivot + 1.1*(H-L)/2
-    L3 = pivot - (range_hl * 1.1 / 2.0)  # L3 = pivot - 1.1*(H-L)/2
-    
-    # Volume confirmation: > 2.0x 20-period average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # 1d data for EMA34 trend filter
@@ -60,39 +42,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34)  # volume MA, 1d EMA
+    start_idx = max(lookback, 20, 34)  # Donchian, volume MA, 1d EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Close > H3 AND price above 1d EMA34 AND volume confirmation
-            if close[i] > H3[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm:
+            # Long: Close > upper Donchian AND price above 1d EMA34 AND volume confirmation
+            if close[i] > highest_high[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < L3 AND price below 1d EMA34 AND volume confirmation
-            elif close[i] < L3[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm:
+            # Short: Close < lower Donchian AND price below 1d EMA34 AND volume confirmation
+            elif close[i] < lowest_low[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < pivot OR price crosses below 1d EMA34
-            if close[i] < pivot[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: Close < lower Donchian OR price crosses below 1d EMA34
+            if close[i] < lowest_low[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > pivot OR price crosses above 1d EMA34
-            if close[i] > pivot[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: Close > upper Donchian OR price crosses above 1d EMA34
+            if close[i] > highest_high[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
