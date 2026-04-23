@@ -24,37 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Camarilla levels (based on previous day's high/low/close)
-    # For 4h timeframe, we need daily high/low/close from 1d data
+    # Calculate 4h Camarilla levels (based on previous day's range)
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        # Use previous bar's high-low range for Camarilla calculation
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        
+        if prev_high > prev_low:  # Valid range
+            range_val = prev_high - prev_low
+            camarilla_r3[i] = prev_close + range_val * 1.1 / 4
+            camarilla_s3[i] = prev_close - range_val * 1.1 / 4
+        else:
+            camarilla_r3[i] = np.nan
+            camarilla_s3[i] = np.nan
+    
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get daily high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_r3 = np.full(len(df_1d), np.nan)
-    camarilla_s3 = np.full(len(df_1d), np.nan)
-    
-    for i in range(len(df_1d)):
-        if i == 0:  # First bar has no previous day
-            continue
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_val = prev_high - prev_low
-        
-        camarilla_r3[i] = prev_close + range_val * 1.1 / 4
-        camarilla_s3[i] = prev_close - range_val * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
@@ -65,11 +58,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(1, 34, 20)  # Need at least 1 day of data for Camarilla, plus EMA34 and volume MA
+    start_idx = max(1, 34, 20)  # Camarilla (needs 1 bar), EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -77,8 +70,8 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
+        r3 = camarilla_r3[i]
+        s3 = camarilla_s3[i]
         ema_val = ema_34_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
@@ -108,11 +101,11 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches Camarilla S3 OR EMA34 starts falling
+                # Long exit: price touches S3 OR EMA34 starts falling
                 if price < s3 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches Camarilla R3 OR EMA34 starts rising
+                # Short exit: price touches R3 OR EMA34 starts rising
                 if price > r3 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
