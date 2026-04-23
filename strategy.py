@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and 1d volume spike confirmation.
-Long when price breaks above Donchian upper (20-period high) AND 1d EMA34 is rising AND 1d volume > 1.5x 20-period average.
-Short when price breaks below Donchian lower (20-period low) AND 1d EMA34 is falling AND 1d volume > 1.5x 20-period average.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and 1d volume spike confirmation.
+Long when price breaks above Donchian upper(20) AND 1d EMA34 is rising AND 1d volume > 2.0x 20-period average.
+Short when price breaks below Donchian lower(20) AND 1d EMA34 is falling AND 1d volume > 2.0x 20-period average.
 Exit when price touches the opposite Donchian level or 1d EMA34 reverses direction.
 Uses 1d HTF for trend and volume filters to reduce whipsaws and false breakouts.
-Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-Donchian channels provide clear structure, EMA34 filters trend direction, volume confirms conviction.
+Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+Donchian channels from 1d: upper = max(high,20), lower = min(low,20).
 """
 
 import numpy as np
@@ -32,13 +32,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Donchian channels (20-period) for entry
+    # Calculate 1d Donchian channels (20-period) for entry/exit
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Donchian upper = max(high, lookback=20)
+    # Donchian upper: max(high, 20)
     donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Donchian lower = min(low, lookback=20)
+    # Donchian lower: min(low, 20)
     donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
@@ -80,11 +80,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Break above Donchian upper AND EMA34 rising AND volume spike
-            if price > upper and ema_rising and volume[i] > 1.5 * vol_ma_val:
+            if price > upper and ema_rising and volume[i] > 2.0 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
             # Short: Break below Donchian lower AND EMA34 falling AND volume spike
-            elif price < lower and ema_falling and volume[i] > 1.5 * vol_ma_val:
+            elif price < lower and ema_falling and volume[i] > 2.0 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -108,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_1dVolumeSpike"
-timeframe = "4h"
+name = "12H_Donchian20_Breakout_1dEMA34_Trend_1dVolumeSpike"
+timeframe = "12h"
 leverage = 1.0
