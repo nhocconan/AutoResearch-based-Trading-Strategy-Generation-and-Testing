@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h 4-hour Donchian channel breakout with 1d volume confirmation and session filter.
-Long when price breaks above 4h Donchian upper (20) AND 1d volume > 1.5x 20-day average volume AND hour in [08,20) UTC.
-Short when price breaks below 4h Donchian lower (20) AND 1d volume > 1.5x 20-day average volume AND hour in [08,20) UTC.
-Exit when price returns to 4h Donchian middle (midpoint of upper/lower) OR ATR trailing stop (1.5*ATR from extreme).
-Uses 4h for structure/direction, 1h only for entry timing precision. Session filter reduces noise trades.
-Target: ~20-40 trades/year on 1h timeframe with discrete sizing 0.20 to minimize fee drag.
-Works in bull markets (breakouts up) and bear markets (breakouts down) by capturing expansion phases.
+Hypothesis: 6h Williams %R Mean Reversion with 1d EMA50 trend filter and volume confirmation.
+Long when Williams %R(14) crosses above -80 (oversold) AND price > 1d EMA50 (uptrend) AND 6h volume > 1.5x 20-period average volume.
+Short when Williams %R(14) crosses below -20 (overbought) AND price < 1d EMA50 (downtrend) AND 6h volume > 1.5x 20-period average volume.
+Exit when Williams %R crosses -50 (mean reversion) OR ATR trailing stop (2.5*ATR from extreme).
+Williams %R identifies overextended moves; EMA50 filters for trend alignment; volume confirms reversal strength.
+Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+Target: ~20-30 trades/year on 6h timeframe with discrete sizing 0.25.
 """
 
 import numpy as np
@@ -22,41 +22,26 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours < 20)
-    
-    # Calculate 4h Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Donchian upper/lower: 20-period high/low
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
-    
-    # Align to 1h timeframe (already delayed for completed 4h bar)
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_4h, donch_mid)
-    
-    # Calculate 1d volume average (20-period) for confirmation
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # ATR(14) for 1h trailing stop calculation
+    # 6h Williams %R(14)
+    lr = 14
+    highest_high = pd.Series(high).rolling(window=lr, min_periods=lr).max().values
+    lowest_low = pd.Series(low).rolling(window=lr, min_periods=lr).min().values
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    
+    # 6h volume average (20-period) for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR(14) for 6h trailing stop calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -72,42 +57,33 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20)  # Donchian20, vol_ma20
+    start_idx = max(lr, 20, 50)  # wr14, vol_ma20, ema_50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(donch_mid_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(wr[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-            continue
-        
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
             continue
         
         price = close[i]
-        vol_ma_val = vol_ma_1d_aligned[i]
+        wr_val = wr[i]
+        ema_50_val = ema_50_aligned[i]
+        vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        donch_high_val = donch_high_aligned[i]
-        donch_low_val = donch_low_aligned[i]
-        donch_mid_val = donch_mid_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 4h Donchian upper AND volume spike AND in session
-            if price > donch_high_val and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = 0.20
+            # Long: WR crosses above -80 (oversold) AND uptrend (price > EMA50) AND volume spike
+            if wr_val > -80 and wr[i-1] <= -80 and price > ema_50_val and volume[i] > 1.5 * vol_ma_val:
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Price breaks below 4h Donchian lower AND volume spike AND in session
-            elif price < donch_low_val and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = -0.20
+            # Short: WR crosses below -20 (overbought) AND downtrend (price < EMA50) AND volume spike
+            elif wr_val < -20 and wr[i-1] >= -20 and price < ema_50_val and volume[i] > 1.5 * vol_ma_val:
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
         else:
@@ -120,16 +96,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price returns to 4h Donchian middle (mean reversion)
-            if position == 1 and price < donch_mid_val:
+            # Primary exit: WR crosses -50 (mean reversion)
+            if position == 1 and wr_val < -50 and wr[i-1] >= -50:
                 exit_signal = True
-            elif position == -1 and price > donch_mid_val:
+            elif position == -1 and wr_val > -50 and wr[i-1] <= -50:
                 exit_signal = True
             
-            # ATR-based trailing stop: 1.5 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 1.5 * atr_val:
+            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 1.5 * atr_val:
+            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -138,10 +114,10 @@ def generate_signals(prices):
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_4hDonchian_Breakout_1dVolumeSpike_SessionFilter_MidExit_ATRTrailingStop"
-timeframe = "1h"
+name = "6H_WilliamsR_MeanReversion_1dEMA50_Trend_VolumeConfirmation_EXIT_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
