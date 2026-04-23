@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H4/L4 breakout with 1d Williams %R extreme filter and volume confirmation.
-- Uses Camarilla pivot levels (H4, L4) from 1d for stronger breakout signals (wider bands than H3/L3)
-- 1d Williams %R(14) as regime filter: long only when %R > -20 (not overbought), short only when %R < -80 (not oversold)
-- Volume > 2.0x 20-period average for confirmation to reduce false breakouts
-- Position size: 0.30 discrete level for optimal risk/reward
-- Target: 25-40 trades/year on 4h timeframe (100-160 total over 4 years)
-- Williams %R filter avoids counter-trend entries during extreme conditions, improving performance in both bull/bear markets
+Hypothesis: 6h Elder Ray + Williams Alligator with volume confirmation and 1d trend filter.
+- Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures trend strength
+- Williams Alligator (Jaw/Teeth/Lips SMAs) identifies trend vs ranging markets
+- Long when Bull Power > 0, Lips > Teeth > Jaw (bullish alignment), and volume > 1.5x average
+- Short when Bear Power > 0, Lips < Teeth < Jaw (bearish alignment), and volume > 1.5x average
+- 1d EMA50 as higher timeframe trend filter (avoid counter-trend trades)
+- Position size: 0.25 discrete level to minimize fee churn
+- Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+- Works in both bull/bear via 1d trend filter and volatility-adjusted signals
 """
 
 import numpy as np
@@ -23,88 +25,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Elder Ray components: EMA13 for Bull/Bear Power
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # High - EMA13
+    bear_power = ema13 - low   # EMA13 - Low
     
-    # 1d data for Camarilla pivot calculation and Williams %R
+    # Williams Alligator: SMAs of median price
+    median_price = (high + low) / 2.0
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # SMA13
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values   # SMA8
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values    # SMA5
+    
+    # Volume confirmation: > 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    
+    # 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels (H4, L4) from prior 1d bar - stronger breakout levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    rng = high_1d - low_1d
-    camarilla_h4 = close_1d + (rng * 1.1 / 2.0)  # H4 level
-    camarilla_l4 = close_1d - (rng * 1.1 / 2.0)  # L4 level
-    
-    # Align Camarilla levels to 1d timeframe (using completed 1d bar)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # 1d Williams %R(14) - momentum oscillator
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14)  # Volume MA, Williams %R
+    start_idx = max(13, 30, 50)  # Elder Ray, volume MA, 1d EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_ma[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or
-            np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(williams_r_aligned[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Camarilla breakout signals
-        breakout_up = close[i] > camarilla_h4_aligned[i]  # Close above H4
-        breakout_down = close[i] < camarilla_l4_aligned[i]  # Close below L4
-        
-        # Williams %R regime filter
-        # Long: avoid overbought conditions (%R > -20)
-        # Short: avoid oversold conditions (%R < -80)
-        wr_long_filter = williams_r_aligned[i] > -20
-        wr_short_filter = williams_r_aligned[i] < -80
+        # Williams Alligator alignment
+        alligator_bull = lips[i] > teeth[i] and teeth[i] > jaw[i]  # Lips > Teeth > Jaw
+        alligator_bear = lips[i] < teeth[i] and teeth[i] < jaw[i]  # Lips < Teeth < Jaw
         
         if position == 0:
-            # Long: 1d Camarilla H4 breakout up AND Williams %R not overbought AND volume confirmation
-            if breakout_up and wr_long_filter and volume_confirm:
-                signals[i] = 0.30
+            # Long: Bull Power > 0 AND alligator bullish AND price above 1d EMA50 AND volume confirmation
+            if bull_power[i] > 0 and alligator_bull and close[i] > ema_50_1d_aligned[i] and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short: 1d Camarilla L4 breakout down AND Williams %R not oversold AND volume confirmation
-            elif breakout_down and wr_short_filter and volume_confirm:
-                signals[i] = -0.30
+            # Short: Bear Power > 0 AND alligator bearish AND price below 1d EMA50 AND volume confirmation
+            elif bear_power[i] > 0 and alligator_bear and close[i] < ema_50_1d_aligned[i] and volume_confirm:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: 1d Camarilla L4 breakdown OR Williams %R becomes oversold
-            if breakout_down or williams_r_aligned[i] < -80:
+            # Long exit: Bull Power <= 0 OR alligator alignment breaks OR price crosses below 1d EMA50
+            if bull_power[i] <= 0 or not alligator_bull or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: 1d Camarilla H4 breakout OR Williams %R becomes overbought
-            if breakout_up or williams_r_aligned[i] > -20:
+            # Short exit: Bear Power <= 0 OR alligator alignment breaks OR price crosses above 1d EMA50
+            if bear_power[i] <= 0 or not alligator_bear or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_1dWilliamsR_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_ElderRay_Alligator_VolumeConfirm_1dEMA50_v1"
+timeframe = "6h"
 leverage = 1.0
