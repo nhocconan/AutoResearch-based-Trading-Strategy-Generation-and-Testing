@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R4 level AND close > 1d EMA34 AND volume > 2.5x 20-period average.
-Short when price breaks below Camarilla S4 level AND close < 1d EMA34 AND volume > 2.5x 20-period average.
+Long when price breaks above Camarilla R4 level AND close > 1d EMA34 AND volume > 2.0x 20-period average.
+Short when price breaks below Camarilla S4 level AND close < 1d EMA34 AND volume > 2.0x 20-period average.
 Exit when price crosses Camarilla Pivot point (central level).
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 20-50 trades/year per symbol.
-Camarilla levels derived from 1d OHLC provide proven intraday support/resistance on BTC/ETH pairs.
-1d EMA34 offers smooth trend filter with lower lag than slower MA. Volume confirmation at 2.5x ensures only institutional-grade breakouts are taken.
-This strategy focuses on stronger breakouts (R4/S4 vs R3/S3) to reduce trade frequency and avoid overtrading.
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 19-50 trades/year per symbol.
+Camarilla R4/S4 levels (close ± 1.5 * daily range) provide stronger breakout validation than R3/S3,
+reducing false breakouts and trade frequency. 1d EMA34 offers smooth trend filter with lower lag.
+Volume confirmation at 2.0x ensures only institutional-grade breakouts are taken.
 """
 
 import numpy as np
@@ -35,8 +35,8 @@ def generate_signals(prices):
     
     # Calculate Camarilla levels from previous 1d OHLC
     range_1d = high_1d - low_1d
-    camarilla_r4_1d = close_1d + 1.5 * range_1d
-    camarilla_s4_1d = close_1d - 1.5 * range_1d
+    camarilla_r4_1d = close_1d + 1.5 * range_1d   # R4: close + 1.5 * range
+    camarilla_s4_1d = close_1d - 1.5 * range_1d   # S4: close - 1.5 * range
     camarilla_pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     
     # Calculate 1d EMA34 for trend filter
@@ -74,13 +74,13 @@ def generate_signals(prices):
             # Long: price breaks above Camarilla R4 AND close > 1d EMA34 AND volume spike
             if (price > camarilla_r4_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                volume[i] > 2.5 * vol_ma_val):
+                volume[i] > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below Camarilla S4 AND close < 1d EMA34 AND volume spike
             elif (price < camarilla_s4_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > 2.5 * vol_ma_val):
+                  volume[i] > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
