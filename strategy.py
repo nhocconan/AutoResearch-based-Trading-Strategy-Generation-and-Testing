@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA34 trend filter and volume confirmation.
-Long when price >= R1 AND 4h EMA34 rising AND volume > 1.5x 20-period MA.
-Short when price <= S1 AND 4h EMA34 falling AND volume > 1.5x 20-period MA.
-Exit when price crosses the daily pivot (PP) or EMA34 reverses.
-Uses 4h HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
-Camarilla levels from 1d provide precise intraday support/resistance that works in both trending and ranging markets.
-Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+Hypothesis: 6h Bollinger Band breakout with 1d ADX trend filter and volume confirmation.
+Long when price breaks above upper BB AND 1d ADX > 25 AND volume > 1.5x 20-period MA.
+Short when price breaks below lower BB AND 1d ADX > 25 AND volume > 1.5x 20-period MA.
+Exit when price returns to middle BB (20-period SMA).
+Uses 1d HTF for ADX trend filter to ensure we only trade in strong trends, avoiding whipsaws in ranging markets.
+BB breakouts capture momentum, ADX ensures trend strength, volume confirms participation.
+Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -23,112 +23,141 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA34 for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
-        return np.zeros(n)
+    # Calculate 6h Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma_20 + (bb_std * std_20)
+    lower_bb = sma_20 - (bb_std * std_20)
+    middle_bb = sma_20  # 20-period SMA for exit
     
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Calculate 1d Camarilla levels (HTF)
+    # Calculate 1d ADX for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:  # Need enough data for ADX calculation
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_R1 = np.zeros(len(df_1d))
-    camarilla_S1 = np.zeros(len(df_1d))
-    camarilla_PP = np.zeros(len(df_1d))
+    # Calculate True Range (TR)
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    for i in range(len(df_1d)):
-        if i == 0:
-            camarilla_R1[i] = np.nan
-            camarilla_S1[i] = np.nan
-            camarilla_PP[i] = np.nan
-            continue
-            
-        # Use previous day's OHLC for today's Camarilla levels
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
+    # Calculate Directional Movement (+DM and -DM)
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Handle first values
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    adx_period = 14
+    alpha = 1.0 / adx_period
+    
+    atr = np.full_like(tr, np.nan)
+    atr[adx_period] = np.nanmean(tr[1:adx_period+1])  # Initial ATR
+    
+    plus_di = np.full_like(tr, np.nan)
+    minus_di = np.full_like(tr, np.nan)
+    dx = np.full_like(tr, np.nan)
+    adx = np.full_like(tr, np.nan)
+    
+    # Initial values for smoothing
+    if not np.isnan(atr[adx_period]):
+        atr_smoothed = atr[adx_period]
+        plus_dm_smoothed = np.nansum(plus_dm[1:adx_period+1])
+        minus_dm_smoothed = np.nansum(minus_dm[1:adx_period+1])
         
-        camarilla_PP[i] = (prev_high + prev_low + prev_close) / 3
-        range_val = prev_high - prev_low
-        camarilla_R1[i] = camarilla_PP[i] + range_val * 1.1 / 12
-        camarilla_S1[i] = camarilla_PP[i] - range_val * 1.1 / 12
+        plus_di[adx_period] = (plus_dm_smoothed / atr_smoothed) * 100 if atr_smoothed != 0 else 0
+        minus_di[adx_period] = (minus_dm_smoothed / atr_smoothed) * 100 if atr_smoothed != 0 else 0
+        dx[adx_period] = (np.abs(plus_di[adx_period] - minus_di[adx_period]) / 
+                         (plus_di[adx_period] + minus_di[adx_period])) * 100 if (plus_di[adx_period] + minus_di[adx_period]) != 0 else 0
+        
+        # Wilder's smoothing for subsequent values
+        for i in range(adx_period + 1, len(tr)):
+            atr_smoothed = (atr_smoothed * (adx_period - 1) + tr[i]) / adx_period
+            plus_dm_smoothed = (plus_dm_smoothed * (adx_period - 1) + plus_dm[i]) / adx_period
+            minus_dm_smoothed = (minus_dm_smoothed * (adx_period - 1) + minus_dm[i]) / adx_period
+            
+            plus_di_val = (plus_dm_smoothed / atr_smoothed) * 100 if atr_smoothed != 0 else 0
+            minus_di_val = (minus_dm_smoothed / atr_smoothed) * 100 if atr_smoothed != 0 else 0
+            plus_di[i] = plus_di_val
+            minus_di[i] = minus_di_val
+            dx_val = (np.abs(plus_di_val - minus_di_val) / (plus_di_val + minus_di_val)) * 100 if (plus_di_val + minus_di_val) != 0 else 0
+            dx[i] = dx_val
+            
+            # ADX is EMA of DX
+            if np.isnan(adx[i-1]):
+                adx[i] = dx[i]
+            else:
+                adx[i] = (dx[i] + (adx_period - 1) * adx[i-1]) / adx_period
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    camarilla_PP_aligned = align_htf_to_ltf(prices, df_1d, camarilla_PP)
+    # Align 1d ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 1h volume MA (20-period) for spike filter
+    # Calculate 6h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # EMA34, volume MA
+    start_idx = max(bb_period, 20, adx_period*2)  # BB, volume MA, ADX
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or 
-            np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_PP_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate EMA34 slope for trend direction (rising/falling)
-        if i >= start_idx + 1:
-            ema_prev = ema_34_4h_aligned[i-1]
-            ema_rising = ema_34_4h_aligned[i] > ema_prev
-            ema_falling = ema_34_4h_aligned[i] < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
-        
-        # Volume filter: 1h volume > 1.5x 20-period MA (strict threshold to reduce frequency)
+        # Volume filter: 6h volume > 1.5x 20-period MA (higher threshold to reduce frequency)
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
+        # ADX filter: trend strength > 25
+        adx_filter = adx_aligned[i] > 25
+        
         if position == 0:
-            # Long: price >= R1 AND EMA34 rising AND volume filter
-            if close[i] >= camarilla_R1_aligned[i] and ema_rising and vol_filter:
-                signals[i] = 0.20
+            # Long: price breaks above upper BB AND ADX filter AND volume filter
+            if close[i] > upper_bb[i] and adx_filter and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price <= S1 AND EMA34 falling AND volume filter
-            elif close[i] <= camarilla_S1_aligned[i] and ema_falling and vol_filter:
-                signals[i] = -0.20
+            # Short: price breaks below lower BB AND ADX filter AND volume filter
+            elif close[i] < lower_bb[i] and adx_filter and vol_filter:
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Long exit: price crosses below daily pivot OR EMA34 starts falling
-                if close[i] < camarilla_PP_aligned[i] or (i >= start_idx + 1 and ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1]):
+                # Long exit: price returns to middle BB (20-period SMA)
+                if close[i] < middle_bb[i]:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price crosses above daily pivot OR EMA34 starts rising
-                if close[i] > camarilla_PP_aligned[i] or (i >= start_idx + 1 and ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1]):
+                # Short exit: price returns to middle BB (20-period SMA)
+                if close[i] > middle_bb[i]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R1S1_Breakout_4hEMA34_Trend_VolumeSpike"
-timeframe = "1h"
+name = "6H_BollingerBreakout_ADXTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
