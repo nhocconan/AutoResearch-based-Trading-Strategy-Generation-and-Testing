@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-- Long: Close breaks above Donchian upper (20-day high) + price > 1w EMA50 + volume > 1.5x 20-day avg volume
-- Short: Close breaks below Donchian lower (20-day low) + price < 1w EMA50 + volume > 1.5x 20-day avg volume
-- Exit: Close crosses opposite Donchian band (middle = 10-day average of upper/lower)
-- Uses 1w HTF for trend alignment to avoid counter-trend trades, volume confirmation for breakout validity,
-  and Donchian channels for clear breakout levels
-- Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
+Hypothesis: 12h TRIX(12) signal line crossover with 1d volume spike and ADX(14) trend filter.
+- Long: TRIX crosses above signal line + volume > 2.0x 20-period average + ADX > 25 (trending market)
+- Short: TRIX crosses below signal line + volume > 2.0x 20-period average + ADX > 25 (trending market)
+- Exit: Opposite TRIX crossover or volume drops below average
+- Uses TRIX momentum oscillator for trend changes, volume confirmation for breakout strength,
+  and ADX to ensure we only trade in trending regimes (avoiding choppy markets)
+- Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
 - Discrete position sizing: ±0.25 to balance return and minimize fee churn
-- Works in bull markets (breakouts with trend alignment) and bear markets (avoids false breakouts via trend filter)
+- Works in bull markets (momentum continuation) and bear markets (strong trend moves)
 """
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,64 +25,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: > 1.5x 20-period average (volume filter)
+    # Volume confirmation: > 2.0x 20-period average (strict volume filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # ADX calculation for trend regime filter
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth TR and DM
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # TRIX calculation: triple EMA of ROC
+    roc = pd.Series(close).pct_change(periods=1).values  # 1-period ROC
+    roc[0] = 0
+    
+    # Triple EMA of ROC
+    ema1 = pd.Series(roc).ewm(span=12, min_periods=12, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, min_periods=12, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, min_periods=12, adjust=False).mean().values
+    trix = ema3 * 100  # Scale for readability
+    
+    # TRIX signal line (EMA of TRIX)
+    trix_signal = pd.Series(trix).ewm(span=9, min_periods=9, adjust=False).mean().values
+    
+    # Calculate 1d HTF volume for confirmation
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 50 for EMA50, 20 for Donchian/volume
+    start_idx = max(30, 20, 14)  # Need 30 for TRIX stability, 20 for volume MA, 14 for ADX
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
-            np.isnan(donchian_mid[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(adx[i]) or
+            np.isnan(trix[i]) or
+            np.isnan(trix_signal[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (> 2.0x average - strict filter)
+        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        
+        # Trend regime filter: ADX > 25 (strong trend)
+        trend_regime = adx[i] > 25
+        
+        # TRIX crossover signals
+        trix_cross_up = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]
+        trix_cross_down = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]
         
         if position == 0:
-            # Long: Close breaks above Donchian high + above 1w EMA50 + volume confirmation
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_confirm):
+            # Long: TRIX bullish crossover + volume spike + trending market
+            if (trix_cross_up and 
+                volume_confirm and 
+                trend_regime):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below Donchian low + below 1w EMA50 + volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_confirm):
+            # Short: TRIX bearish crossover + volume spike + trending market
+            elif (trix_cross_down and 
+                  volume_confirm and 
+                  trend_regime):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close crosses below Donchian mid (mean reversion)
-            if close[i] < donchian_mid[i]:
+            # Long exit: TRIX bearish crossover OR volume drops below average
+            if trix_cross_down or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close crosses above Donchian mid (mean reversion)
-            if close[i] > donchian_mid[i]:
+            # Short exit: TRIX bullish crossover OR volume drops below average
+            if trix_cross_up or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike"
-timeframe = "1d"
+name = "12h_TRIX_VolumeSpike_ADXTrend"
+timeframe = "12h"
 leverage = 1.0
