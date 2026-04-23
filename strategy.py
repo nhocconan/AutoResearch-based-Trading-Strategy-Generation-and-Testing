@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R3 level AND 1d close > 1d EMA34 AND 4h volume > 2.0x 20-period average volume.
-Short when price breaks below Camarilla S3 level AND 1d close < 1d EMA34 AND 4h volume > 2.0x 20-period average volume.
+Long when price breaks above Camarilla R3 AND 1d close > 1d EMA34 AND 4h volume > 2.0x 20-period average volume.
+Short when price breaks below Camarilla S3 AND 1d close < 1d EMA34 AND 4h volume > 2.0x 20-period average volume.
 Exit when price reaches Camarilla pivot point (PP) OR ATR trailing stop (2.0*ATR from extreme).
 Uses discrete position sizing (0.25) targeting ~20-35 trades/year on 4h timeframe.
-Camarilla levels provide intraday support/resistance that work in both trending and ranging markets.
+Camarilla levels provide intraday support/resistance that works in both trending and ranging markets when combined with trend and volume filters.
 """
 
 import numpy as np
@@ -22,42 +22,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d OHLC for EMA
+    # Calculate 1d OHLC for EMA and Camarilla
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:  # Need enough for EMA34
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    vol_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d close for Camarilla calculation (aligned)
+    # 1d close aligned for trend check
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
     # Calculate Camarilla levels from previous 1d bar
     # Camarilla: PP = (H+L+C)/3, R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    # We need previous day's H, L, C to calculate today's levels
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Set first value to NaN (no previous day)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
-    
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_pp = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    camarilla_range = prev_high_1d - prev_low_1d
-    camarilla_r3 = prev_close_1d + camarilla_range * 1.1 / 2.0
-    camarilla_s3 = prev_close_1d - camarilla_range * 1.1 / 2.0
-    
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 4h timeframe (using previous day's levels)
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
@@ -85,9 +72,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_pp_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(close_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,12 +84,10 @@ def generate_signals(prices):
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
         ema_val = ema_34_1d_aligned[i]
+        close_1d_val = close_1d_aligned[i]
+        pp = camarilla_pp_aligned[i]
         r3 = camarilla_r3_aligned[i]
         s3 = camarilla_s3_aligned[i]
-        pp = camarilla_pp_aligned[i]
-        
-        # Current 1d close value (use aligned array)
-        close_1d_val = close_1d_aligned[i]
         
         if position == 0:
             # Long: Break above Camarilla R3 AND bullish trend (close > EMA34) AND volume spike
