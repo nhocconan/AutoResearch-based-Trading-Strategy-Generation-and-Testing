@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above 20-period high AND price > 1d EMA34 AND volume > 1.5x average volume.
-Short when price breaks below 20-period low AND price < 1d EMA34 AND volume > 1.5x average volume.
-Exit when price crosses the 10-period EMA in opposite direction OR ATR trailing stop (2.0*ATR from extreme).
-Donchian channels capture volatility breakouts; EMA34 filters for higher timeframe trend alignment; volume confirms breakout strength.
-Works in both bull (breakouts up) and bear (breakouts down) markets by capturing momentum within the trend.
-Target: ~20-30 trades/year on 4h timeframe with discrete sizing 0.25.
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price closes above Camarilla R3 AND price > 1d EMA34 AND volume > 1.5x 20-period average volume.
+Short when price closes below Camarilla S3 AND price < 1d EMA34 AND volume > 1.5x 20-period average volume.
+Exit when price touches Camarilla pivot point (PP) OR ATR trailing stop (2.0*ATR from extreme).
+Camarilla levels provide institutional support/resistance; EMA34 filters for higher timeframe trend; volume confirms breakout.
+Designed for 12h timeframe to capture multi-day swings with low trade frequency (target: 15-25 trades/year).
+Works in bull markets (breakouts up) and bear markets (breakouts down) by trading with the 1d trend.
 """
 
 import numpy as np
@@ -32,17 +32,35 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous 12h bar (use rolling window of 2 for HLC of prior bar)
+    # Need at least 2 bars to get previous bar's HLC
+    if len(high) < 2 or len(low) < 2 or len(close) < 2:
+        return np.zeros(n)
     
-    # 10-period EMA for exit
-    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Previous bar's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # first bar: use current
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Volume average (20-period) for spike filter
+    # Camarilla calculation
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    
+    # Resistance levels
+    r3 = pivot + (range_hl * 1.1 / 4.0)
+    r4 = pivot + (range_hl * 1.1 / 2.0)
+    
+    # Support levels
+    s3 = pivot - (range_hl * 1.1 / 4.0)
+    s4 = pivot - (range_hl * 1.1 / 2.0)
+    
+    # 12h volume average (20-period) for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for trailing stop calculation
+    # ATR(14) for 12h trailing stop calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -57,14 +75,14 @@ def generate_signals(prices):
     highest_since_entry = 0.0  # for long trailing stop
     lowest_since_entry = 0.0   # for short trailing stop
     
-    # Start from index where all indicators are ready
-    start_idx = max(20, 10, 20, 34, 14)  # donchian20, ema10, vol_ma20, ema_34_1d, atr14
+    # Start from index where all indicators are ready (need at least 2 for roll, 20 for vol_ma, 34 for ema)
+    start_idx = max(2, 20, 34)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_10[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or
+            np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(pivot[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,13 +94,13 @@ def generate_signals(prices):
         atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above 20-period high AND price > 1d EMA34 AND volume spike
-            if price > highest_high[i] and price > ema_val and volume[i] > 1.5 * vol_ma_val:
+            # Long: price closes above Camarilla R3 AND price > 1d EMA34 AND volume spike
+            if close[i] > r3[i] and price > ema_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: price breaks below 20-period low AND price < 1d EMA34 AND volume spike
-            elif price < lowest_low[i] and price < ema_val and volume[i] > 1.5 * vol_ma_val:
+            # Short: price closes below Camarilla S3 AND price < 1d EMA34 AND volume spike
+            elif close[i] < s3[i] and price < ema_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -96,10 +114,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: price crosses 10-period EMA in opposite direction
-            if position == 1 and price < ema_10[i]:
+            # Primary exit: price touches Camarilla pivot point (PP)
+            if position == 1 and low[i] <= pivot[i]:
                 exit_signal = True
-            elif position == -1 and price > ema_10[i]:
+            elif position == -1 and high[i] >= pivot[i]:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
@@ -118,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_EMA10Exit_ATRTrailingStop"
-timeframe = "4h"
+name = "12H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_PivotExit_ATRTrailingStop"
+timeframe = "12h"
 leverage = 1.0
