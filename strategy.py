@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Donchian upper band and close > 12h EMA50 (uptrend) with volume > 2.0x average.
-Short when price breaks below Donchian lower band and close < 12h EMA50 (downtrend) with volume > 2.0x average.
-Exit on opposite Donchian band break or trend reversal. Uses 4h timeframe targeting 75-200 total trades over 4 years.
-Donchian channels provide clear breakout levels, 12h EMA50 filters medium-term trend, volume spike confirms breakout strength.
-Designed to capture strong momentum moves while avoiding whipsaws in choppy markets across both bull and bear regimes.
+Hypothesis: 12h TRIX zero-cross with 1d EMA50 trend filter and volume confirmation.
+Long when TRIX crosses above zero AND close > 1d EMA50 (uptrend) with volume > 1.5x average.
+Short when TRIX crosses below zero AND close < 1d EMA50 (downtrend) with volume > 1.5x average.
+Exit on opposite TRIX cross or trend reversal. Targets 50-150 total trades over 4 years.
+TRIX filters noise and identifies momentum shifts, effective in both bull and bear markets.
+1d EMA50 provides medium-term trend filter, volume confirmation ensures breakout strength.
+Designed to capture sustained moves while avoiding whipsaws in choppy conditions.
 """
 
 import numpy as np
@@ -22,21 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for EMA50 trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data for EMA50 trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 12h EMA50 to 4h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align 1d EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Donchian(20) on primary timeframe
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # TRIX calculation (15-period EMA applied 3 times)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3.pct_change())
+    trix_values = trix.values
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,27 +50,30 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(trix_values[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(trix_values[i-1])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_12h_aligned[i]
-        upper_val = upper[i]
-        lower_val = lower[i]
+        ema50_val = ema50_1d_aligned[i]
+        trix_now = trix_values[i]
+        trix_prev = trix_values[i-1]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper AND price > 12h EMA50 (uptrend) AND volume spike
-            if (price > upper_val and price > ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Long: TRIX crosses above zero AND price > 1d EMA50 (uptrend) AND volume confirmation
+            if (trix_now > 0 and trix_prev <= 0 and price > ema50_val and 
+                vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below Donchian lower AND price < 12h EMA50 (downtrend) AND volume spike
-            elif (price < lower_val and price < ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Short: TRIX crosses below zero AND price < 1d EMA50 (downtrend) AND volume confirmation
+            elif (trix_now < 0 and trix_prev >= 0 and price < ema50_val and 
+                  vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -76,12 +82,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below Donchian lower OR trend reversal
-                if (price < lower_val or price < ema50_val):
+                # Exit long: TRIX crosses below zero OR trend reversal
+                if (trix_now < 0 and trix_prev >= 0) or price < ema50_val:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above Donchian upper OR trend reversal
-                if (price > upper_val or price > ema50_val):
+                # Exit short: TRIX crosses above zero OR trend reversal
+                if (trix_now > 0 and trix_prev <= 0) or price > ema50_val:
                     exit_signal = True
             
             if exit_signal:
@@ -93,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "12H_TRIX_1dEMA50_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
