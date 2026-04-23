@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation.
-Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 1.5x 20-period average.
-Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 1.5x 20-period average.
-Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
-Uses 1d HTF for trend alignment. Discrete sizing 0.25 to minimize fee churn.
-Targets 12-30 trades/year on 12h timeframe.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+Long when price breaks above Donchian upper AND price > 1d EMA50 AND volume > 1.7x 20-period average.
+Short when price breaks below Donchian lower AND price < 1d EMA50 AND volume > 1.7x 20-period average.
+Exit when price reverts to Donchian midpoint OR ATR trailing stop (2.0*ATR from extreme).
+Target: 20-40 trades/year on 4h timeframe with discrete sizing 0.25 to avoid fee drag.
+Uses 1d HTF for trend alignment and avoids overtrading via strict volume confirmation.
 """
 
 import numpy as np
@@ -31,63 +31,98 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R on 12h data (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    # Calculate Donchian channels from previous 4h data (20-period)
+    # Use rolling window on 4h data to avoid look-ahead
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Shift by 1 to use previous period's values (avoid look-ahead)
+    upper = np.roll(high_roll, 1)
+    lower = np.roll(low_roll, 1)
+    midpoint = (upper + lower) / 2.0
+    # First value will be NaN due to roll
     
-    # 12h volume average (20-period) for spike filter
+    # ATR(14) for trailing stop
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 4h volume average (20-period) for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = 0.0  # for long trailing stop
+    lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(14, 20, 50)  # williams_r14, vol_ma20, ema_50_1d
+    start_idx = max(20, 50, 1)  # donchian20, ema_50_1d, and +1 for roll
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(midpoint[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        williams_val = williams_r[i]
         ema_val = ema_50_1d_aligned[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
+        midpoint_val = midpoint[i]
         vol_ma_val = vol_ma[i]
+        atr_val = atr[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume spike
-            if williams_val < -80 and price > ema_val and volume[i] > 1.5 * vol_ma_val:
+            # Long: price breaks above upper AND price > 1d EMA50 AND volume spike
+            if price > upper_val and price > ema_val and volume[i] > 1.7 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume spike
-            elif williams_val > -20 and price < ema_val and volume[i] > 1.5 * vol_ma_val:
+                highest_since_entry = price
+            # Short: price breaks below lower AND price < 1d EMA50 AND volume spike
+            elif price < lower_val and price < ema_val and volume[i] > 1.7 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
+                lowest_since_entry = price
         else:
+            # Update highest/lowest since entry for trailing stop
+            if position == 1:
+                highest_since_entry = max(highest_since_entry, price)
+            elif position == -1:
+                lowest_since_entry = min(lowest_since_entry, price)
+            
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
-            if position == 1 and williams_val > -50:
+            # Primary exit: price reverts to Donchian midpoint
+            if position == 1 and price < midpoint_val:
                 exit_signal = True
-            elif position == -1 and williams_val < -50:
+            elif position == -1 and price > midpoint_val:
+                exit_signal = True
+            
+            # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.0 * atr_val:
+                exit_signal = True
+            elif position == -1 and price > lowest_since_entry + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12H_WilliamsR_MeanReversion_1dEMA50_Trend_VolumeConfirmation"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike_MidExit_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
