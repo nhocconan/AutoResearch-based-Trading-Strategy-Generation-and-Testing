@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R3/S3 breakout with 4h ADX trend filter and volume confirmation.
-Long when price breaks above R3 and 4h ADX > 25 with volume > 1.5x average.
-Short when price breaks below S3 and 4h ADX > 25 with volume > 1.5x average.
-Exit on opposite Camarilla level break or ADX < 20 (trend weakening).
-Uses 4h/1d for signal direction (ADX, Camarilla from prior 1d) and 1h only for entry timing precision.
-Session filter (08-20 UTC) reduces noise trades. Target: 15-37 trades/year/symbol.
-Position size: 0.20 discrete levels to minimize fee churn.
+Hypothesis: 6h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
+Long when price breaks above Donchian upper band and 1d ATR ratio < 0.8 (low volatility regime) with volume > 1.3x average.
+Short when price breaks below Donchian lower band and 1d ATR ratio < 0.8 with volume > 1.3x average.
+Exit when price reverses to midpoint of Donchian channel or ATR ratio > 1.2 (high volatility regime).
+Donchian channels provide objective trend-following structure.
+1d ATR ratio (current ATR / 20-period average) filters for low volatility regimes where breakouts are more likely to succeed.
+Volume confirmation ensures breakout legitimacy.
+Designed for 6h timeframe targeting 50-150 total trades over 4 years with low frequency to minimize fee drag.
+Works in both bull and bear markets by only taking breakouts in low volatility regimes.
 """
 
 import numpy as np
@@ -23,150 +25,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (pre-compute before loop)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data for ADX trend filter - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate ADX on 4h data
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            elif plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            else:
-                minus_dm[i] = 0
-            
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(tr)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        dx = np.zeros_like(high)
-        
-        for i in range(period, len(high)):
-            if atr[i] != 0:
-                plus_di[i] = (np.sum(plus_dm[i-period+1:i+1]) / atr[i]) * 100
-                minus_di[i] = (np.sum(minus_dm[i-period+1:i+1]) / atr[i]) * 100
-                if (plus_di[i] + minus_di[i]) != 0:
-                    dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
-        
-        adx = np.zeros_like(high)
-        adx[2*period-1] = np.mean(dx[period:2*period])
-        for i in range(2*period, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx_4h = calculate_adx(high_4h, low_4h, close_4h)
-    
-    # Align 4h ADX to 1h timeframe
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
-    
-    # Load 1d data for Camarilla levels (prior day)
+    # Load 1d data for ATR regime filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from prior 1d bar
-    def calculate_camarilla(high, low, close):
-        pivot = (high + low + close) / 3
-        range_val = high - low
-        r3 = pivot + (range_val * 1.1 / 4)
-        s3 = pivot - (range_val * 1.1 / 4)
-        return r3, s3
+    # Calculate ATR on 1d data
+    def calculate_atr(high, low, close, period=14):
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = np.zeros_like(high)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        return atr
     
-    # Calculate Camarilla levels for each 1d bar (using prior bar's data)
-    camarilla_r3 = np.full(len(close_1d), np.nan)
-    camarilla_s3 = np.full(len(close_1d), np.nan)
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d)
     
-    for i in range(1, len(close_1d)):
-        r3, s3 = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-        camarilla_r3[i] = r3
-        camarilla_s3[i] = s3
+    # Calculate 20-period average ATR for regime filter
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate ATR ratio (current ATR / average ATR) - values < 1 indicate low volatility
+    atr_ratio_1d = np.zeros_like(atr_1d)
+    for i in range(len(atr_1d)):
+        if atr_ma_1d[i] > 0:
+            atr_ratio_1d[i] = atr_1d[i] / atr_ma_1d[i]
+        else:
+            atr_ratio_1d[i] = 1.0
+    
+    # Align 1d ATR ratio to 6h timeframe
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # Calculate Donchian channels (20-period) on primary timeframe
+    def calculate_donchian(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        middle = np.full_like(high, np.nan)
+        
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+            middle[i] = (upper[i] + lower[i]) / 2
+        
+        return upper, lower, middle
+    
+    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, 20)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(100, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(adx_4h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i]) or
-            not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_4h_aligned[i]
-        r3_val = camarilla_r3_aligned[i]
-        s3_val = camarilla_s3_aligned[i]
+        atr_ratio = atr_ratio_1d_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        middle = donchian_middle[i]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above R3 AND 4h ADX > 25 (strong trend) AND volume spike
-            if (price > r3_val and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
-                signals[i] = 0.20
+            # Long: price breaks above upper band AND low volatility regime (ATR ratio < 0.8) AND volume spike
+            if (price > upper and atr_ratio < 0.8 and vol_current > 1.3 * vol_ma_val):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND 4h ADX > 25 (strong trend) AND volume spike
-            elif (price < s3_val and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
-                signals[i] = -0.20
+                entry_price = price
+            # Short: price breaks below lower band AND low volatility regime (ATR ratio < 0.8) AND volume spike
+            elif (price < lower and atr_ratio < 0.8 and vol_current > 1.3 * vol_ma_val):
+                signals[i] = -0.25
                 position = -1
+                entry_price = price
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below S3 OR ADX < 20 (trend weakening)
-                if (price < s3_val or adx_val < 20):
+                # Exit long: price returns to middle OR high volatility regime (ATR ratio > 1.2)
+                if (price <= middle or atr_ratio > 1.2):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above R3 OR ADX < 20 (trend weakening)
-                if (price > r3_val or adx_val < 20):
+                # Exit short: price returns to middle OR high volatility regime (ATR ratio > 1.2)
+                if (price >= middle or atr_ratio > 1.2):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R3_S3_Breakout_4hADX_Volume_Session"
-timeframe = "1h"
+name = "6H_Donchian20_1dATR_Ratio_Volume"
+timeframe = "6h"
 leverage = 1.0
