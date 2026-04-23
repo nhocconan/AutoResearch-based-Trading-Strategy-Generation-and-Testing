@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation.
-Long when Williams %R < -80 (oversold) AND close > 1d EMA50 (uptrend) AND volume > 1.5x 20-period average.
-Short when Williams %R > -20 (overbought) AND close < 1d EMA50 (downtrend) AND volume > 1.5x 20-period average.
-Exit when Williams %R crosses above -50 (for long) or below -50 (for short) OR ATR trailing stop (2.0*ATR from extreme).
-Uses discrete position sizing (0.25) targeting ~20-40 trades/year on 4h timeframe.
-Williams %R identifies overextended moves; mean reversion works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
+Long when Tenkan crosses above Kijun AND price > Cloud AND close > 1d EMA34 AND volume > 1.5x 20-period average.
+Short when Tenkan crosses below Kijun AND price < Cloud AND close < 1d EMA34 AND volume > 1.5x 20-period average.
+Exit when Tenkan/Kijun cross reverses OR price retraces to Kijun line.
+Uses discrete position sizing (0.25) targeting ~12-30 trades/year on 6h timeframe.
+Ichimoku provides dynamic support/resistance via Cloud and momentum via TK cross.
+Works in bull (trend-following with Cloud support) and bear (mean-reversion at Cloud resistance via TK cross).
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,48 +23,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2.0
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2.0
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2.0
+    
+    # Cloud top/bottom (Senkou Span A and B)
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Williams %R(14) on 4h
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for trailing stop calculation
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = 0.0  # for long trailing stop
-    lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 14)  # EMA50 needs 50, vol MA needs 20, ATR needs 14, Williams %R needs 14
+    start_idx = max(52, 34, 20)  # Ichimoku needs 52, EMA34 needs 34, vol MA needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,53 +75,45 @@ def generate_signals(prices):
         
         price = close[i]
         vol_ma_val = vol_ma[i]
-        atr_val = atr[i]
-        ema50_val = ema50_1d_aligned[i]
-        wr_val = williams_r[i]
+        ema34_val = ema34_1d_aligned[i]
         
         if position == 0:
-            # Long: Oversold (WR < -80) AND uptrend (price > EMA50) AND volume spike (1.5x avg)
-            if wr_val < -80 and close[i] > ema50_val and volume[i] > 1.5 * vol_ma_val:
+            # Long: Tenkan crosses above Kijun AND price > Cloud AND uptrend (price > EMA34) AND volume spike
+            if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] and  # TK cross up
+                price > cloud_top[i] and close[i] > ema34_val and 
+                volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = price
-            # Short: Overbought (WR > -20) AND downtrend (price < EMA50) AND volume spike (1.5x avg)
-            elif wr_val > -20 and close[i] < ema50_val and volume[i] > 1.5 * vol_ma_val:
+            # Short: Tenkan crosses below Kijun AND price < Cloud AND downtrend (price < EMA34) AND volume spike
+            elif (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] and  # TK cross down
+                  price < cloud_bottom[i] and close[i] < ema34_val and 
+                  volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = price
         else:
-            # Update highest/lowest since entry for trailing stop
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, price)
-            elif position == -1:
-                lowest_since_entry = min(lowest_since_entry, price)
-            
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Williams %R crosses -50 (mean reversion complete)
-            if position == 1 and wr_val > -50:
+            # Primary exit: Tenkan/Kijun cross reverses
+            if position == 1 and tenkan[i] < kijun[i]:
                 exit_signal = True
-            elif position == -1 and wr_val < -50:
+            elif position == -1 and tenkan[i] > kijun[i]:
                 exit_signal = True
             
-            # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 2.0 * atr_val:
+            # Secondary exit: Price retraces to Kijun line
+            if position == 1 and close[i] <= kijun[i]:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 2.0 * atr_val:
+            elif position == -1 and close[i] >= kijun[i]:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_WilliamsR_MeanReversion_1dEMA50_Trend_VolumeConfirmation_WR50Exit_ATRTrailingStop"
-timeframe = "4h"
+name = "6H_Ichimoku_TK_Cross_Cloud_Filter_1dEMA34_Trend_VolumeConfirmation_TKExit_KijunExit"
+timeframe = "6h"
 leverage = 1.0
