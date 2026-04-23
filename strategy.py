@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 4h, HTF: 12h for trend filter
-- Long: Close breaks above R1 + price > 12h EMA50 (uptrend) + volume > 1.5x 20-period avg
-- Short: Close breaks below S1 + price < 12h EMA50 (downtrend) + volume > 1.5x 20-period avg
+Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume confirmation.
+- Primary timeframe: 1h, HTF: 4h for trend filter
+- Long: Close breaks above R1 + price > 4h EMA50 (uptrend) + volume > 1.5x 20-period avg
+- Short: Close breaks below S1 + price < 4h EMA50 (downtrend) + volume > 1.5x 20-period avg
 - Exit: Close reverts to pivot point (PP) of Camarilla levels
-- Uses tighter Camarilla breakouts (R1/S1) for controlled entries on 4h
-- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
-- Discrete position sizing: ±0.25 to balance return and risk
-- BTC/ETH focus: requires HTF trend alignment to avoid SOL-only bias
-- Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
+- Session filter: 08-20 UTC to reduce noise trades
+- Position size: 0.20 (discrete levels to minimize fee churn)
+- Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe
 - Uses mtf_data helper for proper HTF alignment without look-ahead
 """
 
@@ -43,16 +41,19 @@ def generate_signals(prices):
     s1 = close_1d - 1.1 * range_1d / 12.0
     pp = (high_1d + low_1d + close_1d) / 3.0  # Pivot point
     
-    # Align to 4h timeframe (values from previous 1d bar)
+    # Align to 1h timeframe (values from previous 1d bar)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Pre-compute session hours (08-20 UTC) to reduce noise
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,6 +62,14 @@ def generate_signals(prices):
     start_idx = max(20, 50)  # Need 20 for volume MA, 50 for EMA
     
     for i in range(start_idx, n):
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
             np.isnan(r1_aligned[i]) or 
@@ -76,17 +85,17 @@ def generate_signals(prices):
         volume_spike = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Close breaks above R1 + price > 12h EMA50 (uptrend) + volume spike
+            # Long: Close breaks above R1 + price > 4h EMA50 (uptrend) + volume spike
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema_50_aligned[i] and 
                 volume_spike):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: Close breaks below S1 + price < 12h EMA50 (downtrend) + volume spike
+            # Short: Close breaks below S1 + price < 4h EMA50 (downtrend) + volume spike
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_50_aligned[i] and 
                   volume_spike):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long exit: Close reverts to pivot point (PP)
@@ -94,17 +103,17 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Short exit: Close reverts to pivot point (PP)
             if close[i] >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hEMA50_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
