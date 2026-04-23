@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
-Long when price breaks above Kumo (cloud) AND Tenkan > Kijun AND 1d EMA50 rising AND volume > 2x 20-period MA.
-Short when price breaks below Kumo AND Tenkan < Kijun AND 1d EMA50 falling AND volume > 2x 20-period MA.
-Exit when price re-enters Kumo or Tenkan/Kijun cross reverses.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Donchian upper band AND 1d EMA34 rising AND volume > 1.5x 20-period MA.
+Short when price breaks below Donchian lower band AND 1d EMA34 falling AND volume > 1.5x 20-period MA.
+Exit when price touches opposite Donchian band or 1d EMA34 reverses.
 Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
-Ichimoku provides dynamic support/resistance via cloud, works in both bull/bear markets by following higher timeframe trend.
-Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Donchian provides clear structure, 1d EMA34 filters major trend, volume confirms breakout strength.
+Works in both bull and bear markets by following the higher timeframe trend.
 """
 
 import numpy as np
@@ -15,98 +16,75 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
+    # Calculate 4h Donchian channels (20-period)
+    donchian_upper = np.full(n, np.nan)
+    donchian_lower = np.full(n, np.nan)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan = np.full(n, np.nan)
-    for i in range(tenkan_period - 1, n):
-        tenkan[i] = (np.max(high[i-tenkan_period+1:i+1]) + np.min(low[i-tenkan_period+1:i+1])) / 2
+    for i in range(20, n):
+        # Use lookback of 20 periods (excluding current bar to avoid look-ahead)
+        donchian_upper[i] = np.max(high[i-20:i])
+        donchian_lower[i] = np.min(low[i-20:i])
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun = np.full(n, np.nan)
-    for i in range(kijun_period - 1, n):
-        kijun[i] = (np.max(high[i-kijun_period+1:i+1]) + np.min(low[i-kijun_period+1:i+1])) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_span_a = np.full(n, np.nan)
-    for i in range(kijun_period - 1, n - kijun_period + 1):
-        senkou_span_a[i + kijun_period] = (tenkan[i] + kijun[i]) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
-    senkou_span_b = np.full(n, np.nan)
-    for i in range(senkou_span_b_period - 1, n - kijun_period + 1):
-        senkou_span_b[i + kijun_period] = (np.max(high[i-senkou_span_b_period+1:i+1]) + np.min(low[i-senkou_span_b_period+1:i+1])) / 2
-    
-    # Calculate 1d EMA50 for trend filter (HTF)
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 6h volume MA (20-period) for spike filter
+    # Calculate 4h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period, 50, 20) + kijun_period
+    start_idx = max(20, 34, 20)  # Donchian (needs 20), EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        tenkan_val = tenkan[i]
-        kijun_val = kijun[i]
-        senkou_a = senkou_span_a[i]
-        senkou_b = senkou_span_b[i]
-        ema_val = ema_50_aligned[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
+        ema_val = ema_34_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
-        # Kumo (cloud) boundaries
-        upper_kumo = max(senkou_a, senkou_b)
-        lower_kumo = min(senkou_a, senkou_b)
-        
-        # Calculate EMA50 slope for trend direction (rising/falling)
+        # Calculate EMA34 slope for trend direction (rising/falling)
         if i >= start_idx + 1:
-            ema_prev = ema_50_aligned[i-1]
+            ema_prev = ema_34_aligned[i-1]
             ema_rising = ema_val > ema_prev
             ema_falling = ema_val < ema_prev
         else:
             ema_rising = False
             ema_falling = False
         
-        # Volume filter: 6h volume > 2x 20-period MA (higher threshold to reduce trades)
-        vol_filter = volume[i] > 2.0 * vol_ma_val
+        # Volume filter: 4h volume > 1.5x 20-period MA (higher threshold to reduce trades)
+        vol_filter = volume[i] > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: Price breaks above Kumo AND Tenkan > Kijun AND EMA50 rising AND volume filter
-            if price > upper_kumo and tenkan_val > kijun_val and ema_rising and vol_filter:
+            # Long: Break above Donchian upper AND EMA34 rising AND volume filter
+            if price > upper and ema_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Kumo AND Tenkan < Kijun AND EMA50 falling AND volume filter
-            elif price < lower_kumo and tenkan_val < kijun_val and ema_falling and vol_filter:
+            # Short: Break below Donchian lower AND EMA34 falling AND volume filter
+            elif price < lower and ema_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -114,12 +92,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price re-enters Kumo OR Tenkan < Kijun (cross reversal)
-                if price < upper_kumo or tenkan_val < kijun_val:
+                # Long exit: price touches Donchian lower (opposite) OR EMA34 starts falling
+                if price < lower or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price re-enters Kumo OR Tenkan > Kijun (cross reversal)
-                if price > lower_kumo or tenkan_val > kijun_val:
+                # Short exit: price touches Donchian upper (opposite) OR EMA34 starts rising
+                if price > upper or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -130,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Ichimoku_Kumo_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
