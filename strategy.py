@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h ADX regime filter and volume spike confirmation.
-Long when Bull Power > 0 AND ADX > 25 (trending) AND volume > 1.5x average.
-Short when Bear Power < 0 AND ADX > 25 (trending) AND volume > 1.5x average.
-Elder Ray measures bull/bear strength relative to EMA13; ADX filters for trending markets only.
-Designed to capture strong trends in both bull and bear markets while avoiding chop.
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+Long when price breaks above 20-period Donchian high and close > 1d EMA50 (uptrend) with volume > 1.5x average.
+Short when price breaks below 20-period Donchian low and close < 1d EMA50 (downtrend) with volume > 1.5x average.
+Uses 4h timeframe targeting 75-200 total trades over 4 years. Donchian provides clear structure,
+EMA50 filters trend direction, volume confirmation ensures breakout conviction. Designed to work in both bull and bear markets.
 """
 
 import numpy as np
@@ -22,100 +21,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray (primary timeframe)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power: high - EMA13
-    bear_power = low - ema13   # Bear Power: low - EMA13
-    
-    # Load 12h data for ADX regime filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough for ADX calculation
+    # Load 4h data for Donchian channel calculation - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate ADX (14-period) on 12h
-    def true_range(h, l, c_prev):
-        tr1 = h - l
-        tr2 = np.abs(h - c_prev)
-        tr3 = np.abs(l - c_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate Donchian channels (based on previous 4h bar) - avoid look-ahead
+    def rolling_max(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
     
-    c_12h_prev = np.roll(close_12h, 1)
-    c_12h_prev[0] = np.nan
-    tr = true_range(high_12h, low_12h, c_12h_prev)
+    def rolling_min(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
     
-    # Directional Movement
-    up_move = np.diff(high_12h, prepend=np.nan)
-    down_move = -np.diff(low_12h, prepend=np.nan)
+    # Use previous bar's high/low for Donchian calculation
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    donchian_high = rolling_max(prev_high, 20)
+    donchian_low = rolling_min(prev_low, 20)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    atr_12h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di_12h = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_12h
-    minus_di_12h = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_12h
+    # Load 1d data for EMA50 trend filter - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h)
-    adx_12h = pd.Series(dx_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align ADX to 6h timeframe
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Align HTF indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
-        adx_val = adx_12h_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        ema50_val = ema50_1d_aligned[i]
         vol_ma_val = vol_ma[i]
+        price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: Bull Power > 0 (bulls in control) AND ADX > 25 (trending) AND volume confirmation
-            if (bull_val > 0 and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+            # Long: price breaks above Donchian high AND price > 1d EMA50 (uptrend) AND volume confirmation
+            if (price > upper and price > ema50_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bears in control) AND ADX > 25 (trending) AND volume confirmation
-            elif (bear_val < 0 and adx_val > 25 and vol_current > 1.5 * vol_ma_val):
+                entry_price = price
+            # Short: price breaks below Donchian low AND price < 1d EMA50 (downtrend) AND volume confirmation
+            elif (price < lower and price < ema50_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         else:
-            # Exit conditions: Elder Ray power reverses OR ADX weakens (chop) OR volume drops
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Bull Power <= 0 OR ADX < 20 (chop) OR volume < average
-                if (bull_val <= 0 or adx_val < 20 or vol_current < vol_ma_val):
+                # Exit long: price breaks below Donchian low OR trend reversal
+                if (price < lower or price < ema50_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Bear Power >= 0 OR ADX < 20 (chop) OR volume < average
-                if (bear_val >= 0 or adx_val < 20 or vol_current < vol_ma_val):
+                # Exit short: price breaks above Donchian high OR trend reversal
+                if (price > upper or price > ema50_val):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "6H_ElderRay_12hADX_Volume"
-timeframe = "6h"
+name = "4H_Donchian20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
