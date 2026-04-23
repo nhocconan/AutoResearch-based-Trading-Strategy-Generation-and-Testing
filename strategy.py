@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 Breakout with 12h EMA50 Trend Filter and Volume Confirmation
-- Uses Camarilla pivot levels (R3/S3) from daily timeframe for structure-based entries
-- 12h EMA50 defines intermediate trend filter: only trade in direction of 12h trend
-- Volume confirmation (> 1.8x 20-period average) filters weak signals
+Hypothesis: 1h Camarilla R1/S1 Breakout with 4h EMA200 Trend Filter and Volume Confirmation
+- Uses Camarilla pivot levels (R1/S1) from 4h timeframe for structure-based entries
+- 4h EMA200 defines higher timeframe trend filter: only trade in direction of 4h trend
+- Volume confirmation (> 1.5x 20-period average) filters weak signals
 - Exit when price retouches Camarilla pivot point (PP) or trend reverses
-- Designed for 4h timeframe targeting 20-50 trades/year (80-200 over 4 years)
-- Works in both bull and bear markets by combining mean reversion at extremes with trend filter
+- Session filter: 08-20 UTC to avoid low liquidity periods
+- Target: 15-37 trades/year (60-150 over 4 years) by using 4h for direction and 1h for timing
+- Works in both bull and bear markets by combining breakout logic with trend filter
 """
 
 import numpy as np
@@ -23,87 +24,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 4h Camarilla pivot levels (R1/S1)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Camarilla calculations: based on previous day's range
-    PP = (high_1d + low_1d + close_1d) / 3
-    R = high_1d - low_1d
-    R3 = PP + R * 1.1 / 4
-    S3 = PP - R * 1.1 / 4
+    # Camarilla calculations: based on previous 4h bar's range
+    PP = (high_4h + low_4h + close_4h) / 3
+    R = high_4h - low_4h
+    R1 = PP + R * 1.1 / 12
+    S1 = PP - R * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align Camarilla levels to 1h timeframe (completed 4h bar only)
+    PP_aligned = align_htf_to_ltf(prices, df_4h, PP)
+    R1_aligned = align_htf_to_ltf(prices, df_4h, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_4h, S1)
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Calculate 4h EMA200 for trend filter
+    close_4h_series = pd.Series(close_4h)
+    ema_200_4h = close_4h_series.ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume confirmation: > 1.8x 20-period average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC (precompute hour array)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 20  # for volume MA
+    start_idx = max(20, 200)  # for volume MA and EMA200
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(PP_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(PP_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(ema_200_4h_aligned[i]) or np.isnan(vol_ma[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND above 12h EMA50 AND volume spike
-            if (close[i] > R3_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume[i] > 1.8 * vol_ma[i]):
-                signals[i] = 0.25
+            # Long: price breaks above R1 AND above 4h EMA200 AND volume spike AND in session
+            if (close[i] > R1_aligned[i] and 
+                close[i] > ema_200_4h_aligned[i] and 
+                volume[i] > 1.5 * vol_ma[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S3 AND below 12h EMA50 AND volume spike
-            elif (close[i] < S3_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume[i] > 1.8 * vol_ma[i]):
-                signals[i] = -0.25
+            # Short: price breaks below S1 AND below 4h EMA200 AND volume spike AND in session
+            elif (close[i] < S1_aligned[i] and 
+                  close[i] < ema_200_4h_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma[i]):
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit: price retouches PP OR trend reverses
             exit_signal = False
             
             if position == 1:
-                # Exit long when price retouches PP OR closes below 12h EMA50
-                if (close[i] <= PP_aligned[i] or close[i] < ema_50_12h_aligned[i]):
+                # Exit long when price retouches PP OR closes below 4h EMA200
+                if (close[i] <= PP_aligned[i] or close[i] < ema_200_4h_aligned[i]):
                     exit_signal = True
             elif position == -1:
-                # Exit short when price retouches PP OR closes above 12h EMA50
-                if (close[i] >= PP_aligned[i] or close[i] > ema_50_12h_aligned[i]):
+                # Exit short when price retouches PP OR closes above 4h EMA200
+                if (close[i] >= PP_aligned[i] or close[i] > ema_200_4h_aligned[i]):
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeConfirm"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hEMA200_Trend_VolumeConfirm"
+timeframe = "1h"
 leverage = 1.0
