@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Volume-Weighted Average Price (VWAP) Deviation with 1w Trend Filter and ATR Regime
-- Price deviation from VWAP (6h) indicates short-term overextension; mean reversion expected
-- 1w EMA200 defines primary trend: long only when price > EMA200, short only when price < EMA200
-- ATR(14) regime filter: trade only when ATR > 0.5 * ATR(50) to avoid low-volatility chop
-- Works in bull via long mean-reversion from VWAP support during uptrends
-- Works in bear via short mean-reversion from VWAP resistance during downtrends
-- Designed for 6h timeframe with low trade frequency (target: 12-37 trades/year) to avoid fee drag
+Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+- Donchian(20) provides clear breakout levels from recent price structure
+- 1d EMA34 defines intermediate trend: only long when price > EMA34, short when price < EMA34
+- Volume confirmation (> 1.5x 24-period MA) reduces false breakouts in low-volume environments
+- Designed for 12h timeframe to capture medium-term swings with controlled frequency (target: 12-37 trades/year)
+- Works in bull via long breakouts above upper channel and in bear via short breakdowns below lower channel
+- Uses discrete position sizing (0.25) to minimize fee churn
 """
 
 import numpy as np
@@ -23,70 +23,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h VWAP (typical price * volume) / cumulative volume
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.nancumsum(pv)
-    cum_vol = np.nancumsum(volume)
-    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
-    
-    # Calculate ATR(14) and ATR(50) for volatility regime
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # first bar: no previous close
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # Calculate 1w EMA200 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Calculate 1d Donchian channels (20-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Donchian levels: upper = max(high, 20), lower = min(low, 20)
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 12h timeframe (use previous day's levels for breakout)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: > 1.5x 24-period average (12 days on 12h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(14, 50, 200)  # need ATR14, ATR50, 1w EMA200
+    start_idx = max(20, 34, 24)  # need Donchian(20), EMA34, vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vwap[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or 
-            np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility regime: only trade when ATR14 > 0.5 * ATR50 (avoid low-vol chop)
-        volatile_enough = atr_14[i] > 0.5 * atr_50[i]
-        
-        if position == 0 and volatile_enough:
-            # Long: price below VWAP AND above 1w EMA200 (mean reversion in uptrend)
-            if close[i] < vwap[i] and close[i] > ema_200_1w_aligned[i]:
+        if position == 0:
+            # Long: price breaks above upper Donchian AND above 1d EMA34 AND volume spike
+            if (close[i] > donchian_upper_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price above VWAP AND below 1w EMA200 (mean reversion in downtrend)
-            elif close[i] > vwap[i] and close[i] < ema_200_1w_aligned[i]:
+            # Short: price breaks below lower Donchian AND below 1d EMA34 AND volume spike
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to VWAP OR crosses 1w EMA200
+            # Exit: price returns to opposite Donchian level OR crosses 1d EMA34
             exit_signal = False
+            
             if position == 1:
-                # Exit long when price >= VWAP OR < 1w EMA200
-                if close[i] >= vwap[i] or close[i] < ema_200_1w_aligned[i]:
+                # Exit long when price < lower Donchian OR < 1d EMA34
+                if close[i] < donchian_lower_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when price <= VWAP OR > 1w EMA200
-                if close[i] <= vwap[i] or close[i] > ema_200_1w_aligned[i]:
+                # Exit short when price > upper Donchian OR > 1d EMA34
+                if close[i] > donchian_upper_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -97,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VWAP_Deviation_1wEMA200_Trend_ATRRegime"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
