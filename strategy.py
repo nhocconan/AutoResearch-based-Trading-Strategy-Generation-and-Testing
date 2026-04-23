@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h ADX + Williams Alligator confluence with 1d Elder Power regime filter.
-Long when: ADX > 25 (trending), Alligator bullish (jaw < teeth < lips), and 1d Bull Power > 0.
-Short when: ADX > 25 (trending), Alligator bearish (jaw > teeth > lips), and 1d Bear Power < 0.
-Exit when ADX < 20 (trend weak) or Alligator reverses.
-Uses 1d HTF for Elder Power to ensure alignment with higher timeframe momentum. Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Camarilla R3 AND 1d EMA34 is rising AND volume > 1.5x 20-period average.
+Short when price breaks below Camarilla S3 AND 1d EMA34 is falling AND volume > 1.5x 20-period average.
+Exit when price touches the opposite Camarilla level (S3 for long, R3 for short) or reverses EMA34 direction.
+Uses 1d HTF for EMA34 trend to reduce whipsaws. Target: 75-200 total trades over 4 years (19-50/year).
+Camarilla levels from 1d: R3 = close + 1.1*(high-low)*1.1/12, S3 = close - 1.1*(high-low)*1.1/12.
 """
 
 import numpy as np
@@ -16,85 +17,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h ADX (14-period)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 6h Williams Alligator (jaw=13, teeth=8, lips=5, all shifted)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
-    
-    # Calculate 1d Elder Power (Bull Power = high - EMA13, Bear Power = low - EMA13)
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 1d Camarilla levels (R3, S3) for entry/exit
+    # Camarilla calculation: based on previous day's range
+    # R3 = close + 1.1*(high-low)*1.1/12, S3 = close - 1.1*(high-low)*1.1/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    close_1d = df_1d['close'].values
     
-    bull_power = high_1d - ema_13_1d
-    bear_power = low_1d - ema_13_1d
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_r3 = np.full(len(df_1d), np.nan)
+    camarilla_s3 = np.full(len(df_1d), np.nan)
     
-    # Align 1d Elder Power to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    for i in range(len(df_1d)):
+        if i == 0:  # Need previous day's data
+            continue
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        rang = prev_high - prev_low
+        if rang <= 0:
+            continue
+        camarilla_r3[i] = prev_close + 1.1 * rang * 1.1 / 12
+        camarilla_s3[i] = prev_close - 1.1 * rang * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # 20-period volume average for spike filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(14+8, 13+8, 5+3, 13)  # ADX, Alligator, Elder Power
+    start_idx = max(34, 20)  # EMA34 (34), volume MA (20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator conditions
-        alligator_bullish = jaw[i] < teeth[i] < lips[i]
-        alligator_bearish = jaw[i] > teeth[i] > lips[i]
+        price = close[i]
+        ema_val = ema_34_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        vol_ma_val = vol_ma[i]
         
-        # ADX trend strength
-        strong_trend = adx[i] > 25
-        weak_trend = adx[i] < 20
-        
-        # 1d Elder Power regime
-        bull_regime = bull_power_aligned[i] > 0
-        bear_regime = bear_power_aligned[i] < 0
+        # Calculate EMA34 slope for trend direction (rising/falling)
+        if i >= start_idx + 1:
+            ema_prev = ema_34_aligned[i-1]
+            ema_rising = ema_val > ema_prev
+            ema_falling = ema_val < ema_prev
+        else:
+            ema_rising = False
+            ema_falling = False
         
         if position == 0:
-            # Long: Strong trend + Alligator bullish + Bull regime
-            if strong_trend and alligator_bullish and bull_regime:
+            # Long: Break above Camarilla R3 AND EMA34 rising AND volume spike
+            if price > r3 and ema_rising and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Strong trend + Alligator bearish + Bear regime
-            elif strong_trend and alligator_bearish and bear_regime:
+            # Short: Break below Camarilla S3 AND EMA34 falling AND volume spike
+            elif price < s3 and ema_falling and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -102,12 +105,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: weak trend OR Alligator reverses OR bull regime ends
-                if weak_trend or not alligator_bullish or not bull_regime:
+                # Long exit: price touches S3 OR EMA34 starts falling
+                if price < s3 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: weak trend OR Alligator reverses OR bear regime ends
-                if weak_trend or not alligator_bearish or not bear_regime:
+                # Short exit: price touches R3 OR EMA34 starts rising
+                if price > r3 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -118,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ADX_Alligator_ElderPower_Confluence"
-timeframe = "6h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
