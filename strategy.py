@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla Pivot Breakout with 1d EMA34 Trend Filter and Volume Confirmation
+Hypothesis: 12h Camarilla Pivot Breakout with 1d EMA34 Trend Filter and Volume Confirmation
 - Uses 1d Camarilla pivot levels (R3/S3 for reversal, R4/S4 for breakout)
 - 1d EMA34 defines higher timeframe trend: trade R3/S3 reversals in trend direction, R4/S4 breakouts
 - Volume confirmation (> 2.0x 20-period average) ensures institutional participation
-- Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+- Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
 - Works in both bull and bear markets by combining mean reversion (R3/S3) and breakout (R4/S4) logic
 """
 
@@ -117,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S4_Breakout_1dEMA34_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R3S4_Breakout_1dEMA34_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
