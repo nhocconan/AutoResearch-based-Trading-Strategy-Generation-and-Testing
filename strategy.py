@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H4/L4 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Camarilla pivot levels (H4/L4) act as strong support/resistance on 12h chart
-- Breakout above H4 with volume > 1.8x average signals bullish momentum
-- Breakdown below L4 with volume > 1.8x average signals bearish momentum
-- 1d EMA34 ensures trades align with higher timeframe trend (avoid counter-trend)
-- Discrete position size 0.25 to minimize fee churn while maintaining profitability
-- Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years)
-- Works in both bull/bear via 1d trend filter and volatility-adjusted breakouts
-- Designed for low trade frequency to overcome fee drag in ranging/bear markets
+Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA34 trend filter and volume spike confirmation.
+- Camarilla pivot levels (H3/L3) act as strong support/resistance on 4h chart
+- Breakout above H3 with volume > 1.8x average signals bullish momentum
+- Breakdown below L3 with volume > 1.8x average signals bearish momentum
+- 12h EMA34 ensures trades align with higher timeframe trend (avoid counter-trend)
+- Discrete position size 0.25 to minimize drawdown during crashes like 2022
+- Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years)
+- Works in both bull/bear via 12h trend filter and volatility-adjusted breakouts
+- Uses tighter volume confirmation (1.8x) and smaller position (0.25) to reduce overtrading vs v1
 """
 
 import numpy as np
@@ -44,29 +44,29 @@ def generate_signals(prices):
     pivot = (high_shifted + low_shifted + close_shifted) / 3.0
     range_hl = high_shifted - low_shifted
     
-    # H4 and L4 levels (Camarilla)
-    H4 = pivot + (range_hl * 1.1 / 2.0)  # H4 = pivot + 1.1*(H-L)/2
-    L4 = pivot - (range_hl * 1.1 / 2.0)  # L4 = pivot - 1.1*(H-L)/2
+    # Resistance/support levels (H3/L3 = 1.1*(H-L)/6 from pivot)
+    H3 = pivot + (range_hl * 1.1 / 6.0)  # H3 = pivot + 1.1*(H-L)/6
+    L3 = pivot - (range_hl * 1.1 / 6.0)  # L3 = pivot - 1.1*(H-L)/6
     
-    # Volume confirmation: > 1.8x 24-period average (more lenient for 12h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: > 1.8x 20-period average (tighter than v1's 2.0x)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 12h data for EMA34 trend filter (shorter than v1's EMA50 for better responsiveness)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(24, 34)  # volume MA, 1d EMA
+    start_idx = max(20, 34)  # volume MA, 12h EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(H4[i]) or np.isnan(L4[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema_34_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,24 +76,24 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
-            # Long: Close > H4 AND price above 1d EMA34 AND volume confirmation
-            if close[i] > H4[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm:
+            # Long: Close > H3 AND price above 12h EMA34 AND volume confirmation
+            if close[i] > H3[i] and close[i] > ema_34_12h_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < L4 AND price below 1d EMA34 AND volume confirmation
-            elif close[i] < L4[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm:
+            # Short: Close < L3 AND price below 12h EMA34 AND volume confirmation
+            elif close[i] < L3[i] and close[i] < ema_34_12h_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < pivot OR price crosses below 1d EMA34
-            if close[i] < pivot[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: Close < pivot OR price crosses below 12h EMA34
+            if close[i] < pivot[i] or close[i] < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > pivot OR price crosses above 1d EMA34
-            if close[i] > pivot[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: Close > pivot OR price crosses above 12h EMA34
+            if close[i] > pivot[i] or close[i] > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_12hEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
