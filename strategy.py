@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
-Long when price breaks above Camarilla R3 AND 1w EMA50 rising AND volume > 1.5x 20-period MA.
-Short when price breaks below Camarilla S3 AND 1w EMA50 falling AND volume > 1.5x 20-period MA.
-Exit when price touches opposite Camarilla level (R3/S3) or 1w EMA50 reverses.
-Uses 1w HTF for trend filter to avoid counter-trend trades in bear markets like 2025.
-Camarilla levels provide intraday structure, 1w EMA50 filters major trend, volume confirms breakout.
-Designed for low trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag.
+Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
+Long when price breaks above Kumo (cloud) AND Tenkan > Kijun AND 1d EMA50 rising AND volume > 2x 20-period MA.
+Short when price breaks below Kumo AND Tenkan < Kijun AND 1d EMA50 falling AND volume > 2x 20-period MA.
+Exit when price re-enters Kumo or Tenkan/Kijun cross reverses.
+Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
+Ichimoku provides dynamic support/resistance via cloud, works in both bull/bear markets by following higher timeframe trend.
+Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -15,53 +15,61 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla levels (R3, S3) from previous day
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
-    camarilla_r4 = np.full(n, np.nan)  # for exit
-    camarilla_s4 = np.full(n, np.nan)  # for exit
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    for i in range(1, n):
-        # Use previous day's OHLC to avoid look-ahead
-        phigh = high[i-1]
-        plow = low[i-1]
-        pclose = close[i-1]
-        pivot = (phigh + plow + pclose) / 3.0
-        range_ = phigh - plow
-        camarilla_r3[i] = pclose + range_ * 1.1 / 4.0
-        camarilla_s3[i] = pclose - range_ * 1.1 / 4.0
-        camarilla_r4[i] = pclose + range_ * 1.1 / 2.0
-        camarilla_s4[i] = pclose - range_ * 1.1 / 2.0
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan = np.full(n, np.nan)
+    for i in range(tenkan_period - 1, n):
+        tenkan[i] = (np.max(high[i-tenkan_period+1:i+1]) + np.min(low[i-tenkan_period+1:i+1])) / 2
     
-    # Calculate 1w EMA50 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun = np.full(n, np.nan)
+    for i in range(kijun_period - 1, n):
+        kijun[i] = (np.max(high[i-kijun_period+1:i+1]) + np.min(low[i-kijun_period+1:i+1])) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_span_a = np.full(n, np.nan)
+    for i in range(kijun_period - 1, n - kijun_period + 1):
+        senkou_span_a[i + kijun_period] = (tenkan[i] + kijun[i]) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    senkou_span_b = np.full(n, np.nan)
+    for i in range(senkou_span_b_period - 1, n - kijun_period + 1):
+        senkou_span_b[i + kijun_period] = (np.max(high[i-senkou_span_b_period+1:i+1]) + np.min(low[i-senkou_span_b_period+1:i+1])) / 2
+    
+    # Calculate 1d EMA50 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d volume MA (20-period) for spike filter
+    # Calculate 6h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(1, 50, 20)  # Camarilla (needs 1), EMA50, volume MA
+    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period, 50, 20) + kijun_period
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,12 +77,16 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        r3 = camarilla_r3[i]
-        s3 = camarilla_s3[i]
-        r4 = camarilla_r4[i]
-        s4 = camarilla_s4[i]
+        tenkan_val = tenkan[i]
+        kijun_val = kijun[i]
+        senkou_a = senkou_span_a[i]
+        senkou_b = senkou_span_b[i]
         ema_val = ema_50_aligned[i]
         vol_ma_val = vol_ma_20[i]
+        
+        # Kumo (cloud) boundaries
+        upper_kumo = max(senkou_a, senkou_b)
+        lower_kumo = min(senkou_a, senkou_b)
         
         # Calculate EMA50 slope for trend direction (rising/falling)
         if i >= start_idx + 1:
@@ -85,16 +97,16 @@ def generate_signals(prices):
             ema_rising = False
             ema_falling = False
         
-        # Volume filter: 1d volume > 1.5x 20-period MA (higher threshold to reduce trades)
-        vol_filter = volume[i] > 1.5 * vol_ma_val
+        # Volume filter: 6h volume > 2x 20-period MA (higher threshold to reduce trades)
+        vol_filter = volume[i] > 2.0 * vol_ma_val
         
         if position == 0:
-            # Long: Break above Camarilla R3 AND EMA50 rising AND volume filter
-            if price > r3 and ema_rising and vol_filter:
+            # Long: Price breaks above Kumo AND Tenkan > Kijun AND EMA50 rising AND volume filter
+            if price > upper_kumo and tenkan_val > kijun_val and ema_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S3 AND EMA50 falling AND volume filter
-            elif price < s3 and ema_falling and vol_filter:
+            # Short: Price breaks below Kumo AND Tenkan < Kijun AND EMA50 falling AND volume filter
+            elif price < lower_kumo and tenkan_val < kijun_val and ema_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -102,12 +114,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches Camarilla S4 (strong reversal) OR EMA50 starts falling
-                if price < s4 or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
+                # Long exit: price re-enters Kumo OR Tenkan < Kijun (cross reversal)
+                if price < upper_kumo or tenkan_val < kijun_val:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches Camarilla R4 (strong reversal) OR EMA50 starts rising
-                if price > r4 or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
+                # Short exit: price re-enters Kumo OR Tenkan > Kijun (cross reversal)
+                if price > lower_kumo or tenkan_val > kijun_val:
                     exit_signal = True
             
             if exit_signal:
@@ -118,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "6H_Ichimoku_Kumo_Breakout_1dEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
