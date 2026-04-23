@@ -5,7 +5,7 @@ Long when price breaks above Camarilla R1 AND 1d EMA34 is rising AND volume > 2.
 Short when price breaks below Camarilla S1 AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
 Exit when price retouches Camarilla pivot point (PP) or ATR stoploss hit (2.0*ATR).
 Uses discrete position sizing (0.25) to minimize fee churn and control drawdown.
-Targets 20-50 trades/year per symbol (80-200 total over 4 years) by using 1d trend filter to reduce false breakouts.
+Targets 19-50 trades/year per symbol (75-200 total over 4 years) by using 1d trend filter to reduce false breakouts.
 Designed to work in both bull and bear markets by trading with the 1d trend and using tight risk control.
 """
 
@@ -27,7 +27,7 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Calculate Camarilla levels from daily data
+    # Calculate Camarilla levels from daily data (1d HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
