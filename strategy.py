@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R reversal with 1d EMA50 trend filter and volume spike confirmation.
-Long when Williams %R crosses above -80 from oversold AND price > 1d EMA50 AND volume > 1.5x 20-period MA.
-Short when Williams %R crosses below -20 from overbought AND price < 1d EMA50 AND volume > 1.5x 20-period MA.
-Exit when Williams %R reaches opposite extreme (-20 for long, -80 for short) or EMA50 reverses.
-Williams %R captures momentum reversals, 1d EMA50 filters major trend, volume spike confirms conviction.
-Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-Works in bull (buy pullbacks in uptrend) and bear (sell rallies in downtrend).
+Hypothesis: 4h TRIX(12) crossover with 12h EMA50 trend filter and volume spike confirmation.
+Long when TRIX crosses above signal line AND 12h EMA50 rising AND volume > 1.5x 20-period MA.
+Short when TRIX crosses below signal line AND 12h EMA50 falling AND volume > 1.5x 20-period MA.
+Exit on opposite TRIX crossover or EMA50 reversal.
+Uses TRIX for momentum, 12h EMA50 for major trend filter, volume spike for confirmation.
+Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Works in bull (trend filters) and bear (volume spikes on breakdowns).
 """
 
 import numpy as np
@@ -23,26 +23,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R (14-period)
-    lookback = 14
-    williams_r = np.full(n, np.nan)
+    # Calculate TRIX(12) - Triple Exponential Average
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12)
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = pd.Series(ema3).pct_change() * 100  # Percentage change
+    trix_values = trix.values
     
-    for i in range(lookback - 1, n):
-        highest_high = np.max(high[i-lookback+1:i+1])
-        lowest_low = np.min(low[i-lookback+1:i+1])
-        if highest_high == lowest_low:
-            williams_r[i] = -50.0  # avoid division by zero
-        else:
-            williams_r[i] = -100.0 * (highest_high - close[i]) / (highest_high - lowest_low)
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix_values).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Calculate 1d EMA50 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 12h EMA50 for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,41 +50,50 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback - 1, 50, 20)  # Williams %R, EMA50, volume MA
+    start_idx = max(12+12+12+8, 50, 20)  # TRIX calculation, EMA50, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(trix_signal[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        wr = williams_r[i]
+        trix_val = trix_values[i]
+        trix_sig = trix_signal[i]
         ema_val = ema_50_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
-        # Calculate Williams %R cross for reversal signals
+        # Calculate TRIX crossover
         if i >= start_idx + 1:
-            wr_prev = williams_r[i-1]
-            wr_cross_above_80 = wr_prev <= -80.0 and wr > -80.0
-            wr_cross_below_20 = wr_prev >= -20.0 and wr < -20.0
+            trix_prev = trix_values[i-1]
+            trix_sig_prev = trix_signal[i-1]
+            trix_cross_up = trix_prev <= trix_sig_prev and trix_val > trix_sig
+            trix_cross_down = trix_prev >= trix_sig_prev and trix_val < trix_sig
+            
+            # Calculate EMA50 slope for trend direction
+            ema_prev = ema_50_aligned[i-1]
+            ema_rising = ema_val > ema_prev
+            ema_falling = ema_val < ema_prev
         else:
-            wr_cross_above_80 = False
-            wr_cross_below_20 = False
+            trix_cross_up = False
+            trix_cross_down = False
+            ema_rising = False
+            ema_falling = False
         
-        # Volume filter: 6h volume > 1.5x 20-period MA
+        # Volume filter: volume > 1.5x 20-period MA
         vol_filter = volume[i] > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: Williams %R crosses above -80 from oversold AND price > EMA50 AND volume filter
-            if wr_cross_above_80 and price > ema_val and vol_filter:
+            # Long: TRIX crosses above signal AND EMA50 rising AND volume filter
+            if trix_cross_up and ema_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 from overbought AND price < EMA50 AND volume filter
-            elif wr_cross_below_20 and price < ema_val and vol_filter:
+            # Short: TRIX crosses below signal AND EMA50 falling AND volume filter
+            elif trix_cross_down and ema_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -93,12 +101,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: Williams %R reaches -20 (overbought) OR EMA50 starts falling
-                if wr >= -20.0 or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
+                # Long exit: TRIX crosses below signal OR EMA50 starts falling
+                if trix_cross_down or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: Williams %R reaches -80 (oversold) OR EMA50 starts rising
-                if wr <= -80.0 or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
+                # Short exit: TRIX crosses above signal OR EMA50 starts rising
+                if trix_cross_up or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -109,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsR_Reversal_1dEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "4H_TRIX12_Crossover_12hEMA50_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
