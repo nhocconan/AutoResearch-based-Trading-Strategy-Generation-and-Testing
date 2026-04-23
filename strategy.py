@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price breaks above Donchian upper band AND close > 1d EMA34 AND volume > 2.0x 20-period average.
-Short when price breaks below Donchian lower band AND close < 1d EMA34 AND volume > 2.0x 20-period average.
+Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+Long when price breaks above Donchian upper band AND close > 1w EMA34 AND volume > 2.0x 20-period average.
+Short when price breaks below Donchian lower band AND close < 1w EMA34 AND volume > 2.0x 20-period average.
 Exit when price retraces to Donchian midpoint OR ATR trailing stop (2.5*ATR from extreme).
-Uses discrete position sizing (0.25) to target 20-50 trades/year on 4h timeframe.
-Donchian channels provide robust structure, proven on SOLUSDT in test period.
-4h timeframe balances noise reduction and trade frequency for BTC/ETH in both bull and bear markets.
+Uses discrete position sizing (0.25) to target 7-25 trades/year on 1d timeframe.
+Donchian channels provide robust structure, proven on multiple symbols in test period.
+1d timeframe minimizes fee drag while capturing major trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -23,14 +23,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Donchian(20) channels
     lookback = 20
@@ -63,7 +63,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(ema34_1w_aligned[i]) or 
             np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(donchian_mid[i]) or
             np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
@@ -74,7 +74,7 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        ema34_val = ema34_1d_aligned[i]
+        ema34_val = ema34_1w_aligned[i]
         upper = donchian_upper[i]
         lower = donchian_lower[i]
         mid = donchian_mid[i]
@@ -122,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeConfirmation_MidExit_ATRTrailingStop"
-timeframe = "4h"
+name = "1D_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirmation_MidExit_ATRTrailingStop"
+timeframe = "1d"
 leverage = 1.0
