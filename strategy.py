@@ -1,16 +1,30 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 mean reversion with 1d trend filter and volume confirmation.
-Long when price touches S3 AND daily close > daily EMA50 AND volume > 1.5x average.
-Short when price touches R3 AND daily close < daily EMA50 AND volume > 1.5x average.
-Exit when price crosses the daily VWAP (mean reversion completion).
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 20-40 trades/year per symbol.
-Camarilla levels provide precise intraday support/resistance, daily trend filter avoids counter-trend trades.
+Hypothesis: 12h Williams Alligator with 1w trend filter and volume confirmation.
+Long when Alligator jaws (13-period SMMA) > teeth (8-period SMMA) > lips (5-period SMMA) AND weekly close > weekly EMA34 AND volume > 2.0x average.
+Short when jaws < teeth < lips AND weekly close < weekly EMA34 AND volume > 2.0x average.
+Exit when Alligator lines re-interlace (jaws crosses teeth or teeth crosses lips).
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-37 trades/year per symbol.
+Alligator identifies strong trends, weekly filter avoids counter-trend trades, volume confirms momentum.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(source, length):
+    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
+    if length < 1:
+        return source.copy()
+    result = np.full_like(source, np.nan, dtype=float)
+    # First value is simple average
+    if len(source) >= length:
+        result[length-1] = np.mean(source[:length])
+    # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CURRENT) / length
+    for i in range(length, len(source)):
+        if not np.isnan(result[i-1]):
+            result[i] = (result[i-1] * (length-1) + source[i]) / length
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,45 +36,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter and VWAP - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate EMA50 on 1d data
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA34 on 1w data for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate VWAP on 1d data (typical price * volume)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_1d = (pd.Series(typical_price_1d * volume_1d).cumsum() / 
-               pd.Series(volume_1d).cumsum()).values
+    # Align 1w indicators to 12h timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Align 1d indicators to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Calculate Williams Alligator on 12h timeframe
+    # Jaws: 13-period SMMA of median price, shifted 8 bars
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    median_price = (high + low) / 2.0
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla uses previous day's high, low, close
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # first bar uses current bar
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    jaws_raw = smma(median_price, 13)
+    teeth_raw = smma(median_price, 8)
+    lips_raw = smma(median_price, 5)
     
-    # Camarilla R3, S3 levels
-    rangep = prev_high_1d - prev_low_1d
-    camarilla_r3 = prev_close_1d + rangep * 1.1 / 4
-    camarilla_s3 = prev_close_1d - rangep * 1.1 / 4
+    # Apply shifts (Alligator specific)
+    jaws = np.roll(jaws_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # First values after shift should be NaN (not available yet)
+    jaws[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,42 +80,47 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        daily_trend_up = close[i] > ema50_1d_aligned[i]  # using 6h close vs daily EMA
-        daily_trend_down = close[i] < ema50_1d_aligned[i]
+        weekly_trend_up = close[i] > ema34_1w_aligned[i]
+        weekly_trend_down = close[i] < ema34_1w_aligned[i]
         
         vol_current = volume[i]
         vol_ma_val = vol_ma[i]
         
+        # Alligator alignment conditions
+        jaws_above_teeth = jaws[i] > teeth[i]
+        teeth_above_lips = teeth[i] > lips[i]
+        jaws_below_teeth = jaws[i] < teeth[i]
+        teeth_below_lips = teeth[i] < lips[i]
+        
         if position == 0:
-            # Long: Price touches S3 AND daily uptrend AND volume confirmation
-            if (low[i] <= camarilla_s3_aligned[i] and daily_trend_up and 
-                vol_current > 1.5 * vol_ma_val):
+            # Long: Alligator aligned up (jaws>teeth>lips) AND weekly uptrend AND volume confirmation
+            if (jaws_above_teeth and teeth_above_lips and weekly_trend_up and 
+                vol_current > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price touches R3 AND daily downtrend AND volume confirmation
-            elif (high[i] >= camarilla_r3_aligned[i] and daily_trend_down and 
-                  vol_current > 1.5 * vol_ma_val):
+            # Short: Alligator aligned down (jaws<teeth<lips) AND weekly downtrend AND volume confirmation
+            elif (jaws_below_teeth and teeth_below_lips and weekly_trend_down and 
+                  vol_current > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: Alligator lines re-interlace (trend weakening)
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price crosses above daily VWAP (mean reversion complete)
-                if close[i] > vwap_1d_aligned[i]:
+                # Exit long: jaws crosses below teeth OR teeth crosses below lips
+                if not (jaws_above_teeth and teeth_above_lips):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price crosses below daily VWAP (mean reversion complete)
-                if close[i] < vwap_1d_aligned[i]:
+                # Exit short: jaws crosses above teeth OR teeth crosses above lips
+                if not (jaws_below_teeth and teeth_below_lips):
                     exit_signal = True
             
             if exit_signal:
@@ -116,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R3S3_1dEMA50_VWAP"
-timeframe = "6h"
+name = "12H_WilliamsAlligator_1wEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
