@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
-Long when price breaks above 4h Donchian upper (20-period high) AND 12h close > 12h EMA50 (uptrend) AND volume > 2.0x 20-period MA.
-Short when price breaks below 4h Donchian lower (20-period low) AND 12h close < 12h EMA50 (downtrend) AND volume > 2.0x 20-period MA.
-Exit when price retouches the 4h Donchian middle (20-period median) or 12h trend reverses.
-Donchian channels provide robust price structure; 12h EMA50 filters counter-trend trades in bear markets; volume confirmation reduces false breakouts.
-Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Hypothesis: 4h Camarilla R3/S3 breakout with 12h trend filter and volume confirmation.
+Long when price breaks above 4h Camarilla R3 level AND 12h close > 12h EMA34 (uptrend) AND volume > 1.5x 20-period MA.
+Short when price breaks below 4h Camarilla S3 level AND 12h close < 12h EMA34 (downtrend) AND volume > 1.5x 20-period MA.
+Exit when price retouches 4h Camarilla pivot point or 12h trend reverses.
+Camarilla levels provide precise intraday support/resistance; 12h EMA34 filters counter-trend trades; volume confirmation reduces false breakouts.
+Designed for low trade frequency (target: 20-50/year) to minimize fee drag and work in both bull and bear markets via trend filter.
 """
 
 import numpy as np
@@ -22,21 +22,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper = high_roll
-    lower = low_roll
-    middle = (upper + lower) / 2  # 20-period median approximation
+    # Calculate 4h Camarilla levels (based on previous bar's OHLC)
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2, P = (H+L+C)/3
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate 12h EMA50 for trend filter
+    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Calculate 12h EMA34 for trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 2:
         return np.zeros(n)
     
     close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     # Calculate 4h volume MA (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,32 +51,32 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 20)
+    start_idx = max(34, 20)  # EMA34 needs 34, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(camarilla_pivot[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: 12h close > EMA50 = uptrend, close < EMA50 = downtrend
+        # Trend filter: 12h close > EMA34 = uptrend, close < EMA34 = downtrend
         close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-        trend_up = close_12h_aligned[i] > ema_50_12h_aligned[i]
-        trend_down = close_12h_aligned[i] < ema_50_12h_aligned[i]
+        trend_up = close_12h_aligned[i] > ema_34_12h_aligned[i]
+        trend_down = close_12h_aligned[i] < ema_34_12h_aligned[i]
         
-        # Volume filter: 4h volume > 2.0x 20-period MA
-        vol_filter = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume filter: 4h volume > 1.5x 20-period MA
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above upper AND uptrend AND volume filter
-            if close[i] > upper[i] and trend_up and vol_filter:
+            # Long: price breaks above R3 AND uptrend AND volume filter
+            if close[i] > camarilla_r3[i] and trend_up and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower AND downtrend AND volume filter
-            elif close[i] < lower[i] and trend_down and vol_filter:
+            # Short: price breaks below S3 AND downtrend AND volume filter
+            elif close[i] < camarilla_s3[i] and trend_down and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -78,12 +84,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price retouches middle (close crosses below middle) OR 12h trend turns down
-                if close[i] < middle[i] or not trend_up:
+                # Long exit: price retouches pivot point (close crosses below pivot) OR 12h trend turns down
+                if close[i] < camarilla_pivot[i] or not trend_up:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price retouches middle (close crosses above middle) OR 12h trend turns up
-                if close[i] > middle[i] or not trend_down:
+                # Short exit: price retouches pivot point (close crosses above pivot) OR 12h trend turns up
+                if close[i] > camarilla_pivot[i] or not trend_down:
                     exit_signal = True
             
             if exit_signal:
@@ -94,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_12hEMA50_Trend_VolumeFilter"
+name = "4H_Camarilla_R3S3_Breakout_12hEMA34_Trend_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
