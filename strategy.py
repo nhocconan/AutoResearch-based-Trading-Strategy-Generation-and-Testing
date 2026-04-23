@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-- Donchian breakouts capture momentum in trending markets; 1d EMA34 ensures alignment with long-term trend.
-- Volume > 1.8x 20-period average confirms breakout validity and reduces false signals.
-- Discrete position size 0.25 limits drawdown during crashes (max 0.40 allowed).
-- Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years).
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Donchian breakouts capture momentum; 1d EMA34 ensures alignment with daily trend.
+- Volume > 2.0x 20-period average filters weak breakouts.
+- Discrete position size 0.25 limits drawdown during crashes.
+- Target: 15-35 trades/year on 4h timeframe (60-140 total over 4 years).
 - Designed to work in both bull and bear regimes via trend filter and volume confirmation.
-- Uses proper MTF data loading: get_htf_data called ONCE before loop.
 """
 
 import numpy as np
@@ -34,7 +33,7 @@ def generate_signals(prices):
     # Lower band = lowest low over prior 20 bars
     lower_band = pd.Series(low_shifted).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: > 1.8x 20-period average
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # 1d data for EMA34 trend filter
@@ -58,16 +57,16 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume confirmation (> 1.8x average)
-        volume_confirm = volume[i] > 1.8 * vol_ma[i]
+        # Volume spike confirmation (> 2.0x average)
+        volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Close > upper band AND price above 1d EMA34 AND volume confirmation
-            if close[i] > upper_band[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm:
+            # Long: Close > upper band AND price above 1d EMA34 AND volume spike
+            if close[i] > upper_band[i] and close[i] > ema_34_1d_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < lower band AND price below 1d EMA34 AND volume confirmation
-            elif close[i] < lower_band[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm:
+            # Short: Close < lower band AND price below 1d EMA34 AND volume spike
+            elif close[i] < lower_band[i] and close[i] < ema_34_1d_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -87,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
