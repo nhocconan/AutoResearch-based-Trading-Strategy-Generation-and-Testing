@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3S3 breakout with 1d ATR volatility filter and volume spike confirmation.
-- Long: Close breaks above R3 + volume > 2.0x 20-period avg + ATR(14) > 0.5x ATR(50) (vol expansion)
-- Short: Close breaks below S3 + volume > 2.0x 20-period avg + ATR(14) > 0.5x ATR(50) (vol expansion)
-- Exit: Close retouches the pivot point (PP) from opposite side or ATR contraction < 0.3x ATR(50)
-- Uses Camarilla levels for institutional price reaction, volume for conviction, ATR regime filter
-- Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+- Donchian breakout: price breaks above/below 20-period high/low
+- Long: price > Donchian upper band + volume > 1.5x 20-period avg + price > 12h EMA50
+- Short: price < Donchian lower band + volume > 1.5x 20-period avg + price < 12h EMA50
+- Exit: Opposite Donchian breakout or EMA50 trend flip
+- Uses Donchian for structure, volume for conviction, 12h EMA50 for HTF trend filter
+- Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
 - Discrete position sizing: ±0.25 to minimize fee churn
-- Works in bull (breakouts continue) and bear (breakdowns continue) via volatility expansion
+- Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) markets
 """
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,89 +25,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: > 2.0x 20-period average (strict to avoid overtrading)
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR regime filter: ATR(14) > 0.5x ATR(50) for expansion, < 0.3x for contraction
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr_expansion = atr_14 > (0.5 * atr_50)
-    atr_contraction = atr_14 < (0.3 * atr_50)
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d Camarilla levels (R3, S3, PP)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla calculations: PP = (H+L+C)/3, R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r3_1d = close_1d + ((high_1d - low_1d) * 1.1 / 2.0)
-    s3_1d = close_1d - ((high_1d - low_1d) * 1.1 / 2.0)
-    
-    # Align HTF levels to LTF
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 14)  # Need 50 for ATR50, 20 for volume MA, 14 for ATR14
+    start_idx = max(50, 20)  # Need 50 for EMA50, 20 for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(vol_ma[i]) or 
-            np.isnan(atr_14[i]) or 
-            np.isnan(atr_50[i]) or
-            np.isnan(pp_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i])):
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
+            np.isnan(ema_50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
-        
-        # ATR regime: expansion for entry, contraction for exit
-        vol_expanding = atr_expansion[i]
-        vol_contracting = atr_contraction[i]
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Close breaks above R3 + volume confirmation + volatility expanding
-            if (close[i] > r3_aligned[i] and 
+            # Long: price breaks above Donchian upper + volume confirmation + price > 12h EMA50
+            if (close[i] > highest_high[i] and 
                 volume_confirm and 
-                vol_expanding):
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 + volume confirmation + volatility expanding
-            elif (close[i] < s3_aligned[i] and 
+            # Short: price breaks below Donchian lower + volume confirmation + price < 12h EMA50
+            elif (close[i] < lowest_low[i] and 
                   volume_confirm and 
-                  vol_expanding):
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close retouches PP from below OR volatility contraction
-            if (close[i] < pp_aligned[i] and 
-                (i == start_idx or close[i-1] >= pp_aligned[i-1])) or vol_contracting:
+            # Long exit: price breaks below Donchian lower OR price < 12h EMA50 (trend flip)
+            if close[i] < lowest_low[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close retouches PP from above OR volatility contraction
-            if (close[i] > pp_aligned[i] and 
-                (i == start_idx or close[i-1] <= pp_aligned[i-1])) or vol_contracting:
+            # Short exit: price breaks above Donchian upper OR price > 12h EMA50 (trend flip)
+            if close[i] > highest_high[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dATR_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
