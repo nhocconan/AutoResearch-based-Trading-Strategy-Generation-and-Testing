@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R3/S3 breakout with 4h trend filter and volume confirmation.
-Long when price breaks above Camarilla R3 AND 4h close > 4h EMA20 AND volume > 1.5x 20-period average.
-Short when price breaks below Camarilla S3 AND 4h close < 4h EMA20 AND volume > 1.5x 20-period average.
-Exit when price retraces to Camarilla pivot point (PP) or ATR trailing stop (1.5*ATR from extreme).
-Uses discrete position sizing (0.20) to minimize fee drag.
-Target trade frequency: 15-37/year per symbol (60-150 total over 4 years) to avoid fee drag on 1h timeframe.
-Uses 4h EMA20 for trend filter and 1d OHLC for Camarilla levels to ensure alignment with higher timeframe structure.
-Works in bull markets (breakouts with volume in uptrend) and bear markets (breakdowns with volume in downtrend).
+Hypothesis: 6h Ichimoku Cloud breakout with weekly trend filter and volume confirmation.
+Long when price breaks above Kumo (cloud) AND Tenkan > Kijun (bullish TK cross) AND weekly close > weekly Kumo top (bullish weekly trend) AND volume > 1.5x 20-period average.
+Short when price breaks below Kumo AND Tenkan < Kijun (bearish TK cross) AND weekly close < weekly Kumo bottom (bearish weekly trend) AND volume > 1.5x 20-period average.
+Exit when price re-enters Kumo or ATR trailing stop (2.5*ATR from extreme).
+Ichimoku provides dynamic support/resistance via Kumo and momentum via TK cross.
+Weekly trend filter ensures alignment with higher-timeframe bias, reducing whipsaws.
+Volume confirmation ensures institutional participation. Works in bull markets (bullish TK cross + price above cloud in uptrend)
+and bear markets (bearish TK cross + price below cloud in downtrend) by following weekly trend.
+Target trade frequency: 12-30 trades/year per symbol (48-120 total over 4 years) to avoid fee drag.
 """
 
 import numpy as np
@@ -24,40 +25,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA20 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2.0
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2.0
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2.0
+    
+    # Kumo (Cloud) top and bottom
+    kumomax = np.maximum(senkou_a, senkou_b)
+    kumomin = np.minimum(senkou_a, senkou_b)
+    
+    # Calculate weekly Ichimoku for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate Camarilla levels from 1d OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Weekly Tenkan and Kijun
+    period9_high_1w = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    period9_low_1w = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan_1w = (period9_high_1w + period9_low_1w) / 2.0
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    period26_high_1w = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    period26_low_1w = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun_1w = (period26_high_1w + period26_low_1w) / 2.0
     
-    # Camarilla calculation: PP = (H+L+C)/3, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    camarilla_pp_1d = typical_price_1d
-    camarilla_r3_1d = close_1d + (range_1d * 1.1 / 4)
-    camarilla_s3_1d = close_1d - (range_1d * 1.1 / 4)
+    # Weekly Senkou Span A and B
+    senkou_a_1w = (tenkan_1w + kijun_1w) / 2.0
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp_1d)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    period52_high_1w = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    period52_low_1w = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_b_1w = (period52_high_1w + period52_low_1w) / 2.0
+    
+    # Weekly Kumo top and bottom
+    kumomax_1w = np.maximum(senkou_a_1w, senkou_b_1w)
+    kumomin_1w = np.minimum(senkou_a_1w, senkou_b_1w)
+    
+    # Align weekly Ichimoku components to 6h timeframe
+    tenkan_1w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_1w)
+    kijun_1w_aligned = align_htf_to_ltf(prices, df_1w, kijun_1w)
+    kumomax_1w_aligned = align_htf_to_ltf(prices, df_1w, kumomax_1w)
+    kumomin_1w_aligned = align_htf_to_ltf(prices, df_1w, kumomin_1w)
+    
+    # Align 6h Ichimoku components (no additional delay needed as they are based on completed periods)
+    tenkan_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), kijun)
+    kumomax_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), kumomax)
+    kumomin_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), kumomin)
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for trailing stop calculation
+    # ATR(20) for trailing stop calculation
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -65,7 +100,7 @@ def generate_signals(prices):
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,12 +108,14 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20)  # EMA20 needs 20, vol MA needs 20
+    start_idx = max(52, 20)  # Ichimoku needs 52, vol MA needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(kumomax_aligned[i]) or np.isnan(kumomin_aligned[i]) or
+            np.isnan(tenkan_1w_aligned[i]) or np.isnan(kijun_1w_aligned[i]) or
+            np.isnan(kumomax_1w_aligned[i]) or np.isnan(kumomin_1w_aligned[i]) or
             np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,20 +125,26 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        ema20_val = ema20_4h_aligned[i]
-        camarilla_pp = camarilla_pp_aligned[i]
-        camarilla_r3 = camarilla_r3_aligned[i]
-        camarilla_s3 = camarilla_s3_aligned[i]
+        tenkan_val = tenkan_aligned[i]
+        kijun_val = kijun_aligned[i]
+        kumomax_val = kumomax_aligned[i]
+        kumomin_val = kumomin_aligned[i]
+        tenkan_1w_val = tenkan_1w_aligned[i]
+        kijun_1w_val = kijun_1w_aligned[i]
+        kumomax_1w_val = kumomax_1w_aligned[i]
+        kumomin_1w_val = kumomin_1w_aligned[i]
         
         if position == 0:
-            # Long: Break above Camarilla R3 AND uptrend (4h close > EMA20) AND volume spike
-            if close[i] > camarilla_r3 and close[i] > ema20_val and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = 0.20
+            # Long: Price above Kumo AND bullish TK cross AND weekly bullish trend AND volume spike
+            if (close[i] > kumomax_val and tenkan_val > kijun_val and 
+                close_1w[i // 20] > kumomax_1w_val and volume[i] > 1.5 * vol_ma_val):
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Break below Camarilla S3 AND downtrend (4h close < EMA20) AND volume spike
-            elif close[i] < camarilla_s3 and close[i] < ema20_val and volume[i] > 1.5 * vol_ma_val:
-                signals[i] = -0.20
+            # Short: Price below Kumo AND bearish TK cross AND weekly bearish trend AND volume spike
+            elif (close[i] < kumomin_val and tenkan_val < kijun_val and 
+                  close_1w[i // 20] < kumomin_1w_val and volume[i] > 1.5 * vol_ma_val):
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
         else:
@@ -114,16 +157,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to Camarilla pivot point
-            if position == 1 and close[i] <= camarilla_pp:
+            # Primary exit: Price re-enters Kumo
+            if position == 1 and close[i] <= kumomax_val:
                 exit_signal = True
-            elif position == -1 and close[i] >= camarilla_pp:
+            elif position == -1 and close[i] >= kumomin_val:
                 exit_signal = True
             
-            # ATR-based trailing stop: 1.5 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 1.5 * atr_val:
+            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 1.5 * atr_val:
+            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -132,10 +175,10 @@ def generate_signals(prices):
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R3S3_Breakout_4hEMA20_Trend_VolumeConfirmation_PPExit_ATRTrailingStop"
-timeframe = "1h"
+name = "6H_Ichimoku_Kumo_Breakout_WeeklyTrendFilter_VolumeConfirmation_KumoExit_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
