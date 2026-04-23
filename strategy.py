@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-Long when price breaks above 20-period high AND close > 1d EMA50 (uptrend) AND volume > 2.0x 20-period MA.
-Short when price breaks below 20-period low AND close < 1d EMA50 (downtrend) AND volume > 2.0x 20-period MA.
-Exit when price returns to midpoint of the Donchian channel or opposite breakout occurs.
-Designed for ~12-25 trades/year with structure-based edge, avoiding overtrading.
-Donchian channels provide clear breakout levels; 1d EMA50 ensures higher timeframe alignment.
+Hypothesis: 6h Williams %R mean reversion with 1d EMA50 trend filter and volume spike confirmation.
+Long when Williams %R < -80 (oversold) AND close > 1d EMA50 (uptrend) AND volume > 2.0x 20-period MA.
+Short when Williams %R > -20 (overbought) AND close < 1d EMA50 (downtrend) AND volume > 2.0x 20-period MA.
+Exit when Williams %R returns to -50 (mean reversion) or opposite extreme is hit.
+Designed for ~15-25 trades/year with mean reversion edge in ranging markets and trend filter to avoid false signals.
+Williams %R identifies exhaustion points; 1d EMA50 ensures higher timeframe alignment; volume spike confirms participation.
 """
 
 import numpy as np
@@ -31,11 +31,11 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h Donchian(20) channels
-    donchian_period = 20
-    high_ma = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    low_ma = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    donchian_mid = (high_ma + low_ma) / 2.0
+    # Calculate Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
     # Calculate volume MA (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,12 +44,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, donchian_period, 20)  # need EMA50, Donchian20, volume MA20
+    start_idx = max(50, 14, 20)  # need EMA50, Williams %R14, volume MA20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_ma[i]) or 
-            np.isnan(low_ma[i]) or np.isnan(donchian_mid[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,32 +59,32 @@ def generate_signals(prices):
         trend_up = close[i] > ema_50_1d_aligned[i]
         trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Volume filter: 12h volume > 2.0x 20-period MA
+        # Volume filter: 6h volume > 2.0x 20-period MA
         vol_filter = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > high_ma[i]  # Break above 20-period high
-        breakout_down = close[i] < low_ma[i]  # Break below 20-period low
-        return_to_mid = abs(close[i] - donchian_mid[i]) < 0.1 * (high_ma[i] - low_ma[i])  # Near midpoint
-        opposite_breakout = (position == 1 and breakout_down) or \
-                            (position == -1 and breakout_up)
+        # Williams %R conditions
+        oversold = williams_r[i] < -80  # Oversold condition for long
+        overbought = williams_r[i] > -20  # Overbought condition for short
+        mean_reversion = abs(williams_r[i] + 50) < 5  # Return to -50 (mean)
+        opposite_extreme = (position == 1 and overbought) or \
+                           (position == -1 and oversold)
         
         if position == 0:
-            # Long: Break above high AND uptrend AND volume confirmation
-            if breakout_up and trend_up and vol_filter:
+            # Long: Oversold AND uptrend AND volume confirmation
+            if oversold and trend_up and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below low AND downtrend AND volume confirmation
-            elif breakout_down and trend_down and vol_filter:
+            # Short: Overbought AND downtrend AND volume confirmation
+            elif overbought and trend_down and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to midpoint or opposite breakout
+            # Exit conditions: return to mean (-50) or opposite extreme hit
             exit_signal = False
             if position == 1:
-                exit_signal = return_to_mid or opposite_breakout
+                exit_signal = mean_reversion or opposite_extreme
             elif position == -1:
-                exit_signal = return_to_mid or opposite_breakout
+                exit_signal = mean_reversion or opposite_extreme
             
             if exit_signal:
                 signals[i] = 0.0
@@ -95,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "12h"
+name = "6H_WilliamsR_MeanReversion_1dEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
