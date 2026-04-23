@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
-Long when price breaks above 20-period Donchian high AND 1d ADX > 25 AND volume > 1.5x 20-period average.
-Short when price breaks below 20-period Donchian low AND 1d ADX > 25 AND volume > 1.5x 20-period average.
-Exit when price touches the opposite Donchian level (Donchian low for longs, Donchian high for shorts).
-Uses 1d HTF for ADX trend strength (avoids whipsaws in ranging markets). Target: 50-150 total trades over 4 years (12-37/year).
-Donchian breakouts capture strong momentum moves; ADX filter ensures we only trade in trending regimes (works in both bull and bear markets when trends exist).
+Hypothesis: 4h Donchian(20) breakout with 1d ADX > 25 trend filter and volume > 1.5x 20-period average.
+Long when price breaks above 20-period Donchian high AND 1d ADX > 25 AND volume spike.
+Short when price breaks below 20-period Donchian low AND 1d ADX > 25 AND volume spike.
+Exit when price touches opposite Donchian level (Donchian low for longs, Donchian high for shorts).
+Uses 1d HTF for ADX trend strength to avoid whipsaws in ranging markets.
+Target: 75-200 total trades over 4 years (19-50/year).
+Donchian breakouts capture strong momentum moves; ADX filter ensures we only trade in trending regimes.
 """
 
 import numpy as np
@@ -53,10 +54,10 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d ADX to 12h timeframe
+    # Align 1d ADX to 4h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -110,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Donchian20_Breakout_1dADX25_Trend_VolumeConfirmation_LevelExit"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_1dADX25_Trend_VolumeConfirmation_LevelExit"
+timeframe = "4h"
 leverage = 1.0
