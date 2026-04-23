@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R4/S4 breakout with 1d EMA50 trend filter and volume confirmation.
-Breakouts at R4 (long) and S4 (short) are rare but high-probability events when confirmed by
-1d trend and volume spike. Uses 1d EMA50 for trend alignment to avoid counter-trend trades.
-Volume > 2x average ensures conviction. Target: 50-150 total trades over 4 years (12-37/year).
-Works in bull/bear markets by only taking trend-aligned breakouts.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Donchian upper AND price > 1d EMA34 AND volume > 1.5x average.
+Short when price breaks below Donchian lower AND price < 1d EMA34 AND volume > 1.5x average.
+Exit when price touches Donchian midpoint OR volume drops below average.
+Donchian channels provide clear structure for breakouts in both bull and bear markets.
+1d EMA34 ensures trading in direction of higher timeframe trend.
+Volume confirmation avoids low-conviction false breakouts.
+Designed for 4h timeframe targeting 75-200 total trades over 4 years with tight entry conditions.
 """
 
 import numpy as np
@@ -21,38 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA50 trend filter and Camarilla calculation - ONCE before loop
+    # Load 1d data for EMA34 trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1d data for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate EMA34 on 1d data
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate previous day's Camarilla levels (R4, S4) - requires prior day's OHLC
-    # We need to shift by 1 to use previous completed day's data
-    if len(high_1d) < 2:
-        return np.zeros(n)
+    # Align 1d EMA34 to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    prev_high = high_1d[:-1]  # yesterday's high
-    prev_low = low_1d[:-1]    # yesterday's low
-    prev_close = close_1d[:-1] # yesterday's close
-    
-    # Calculate Camarilla levels for previous day
-    rang = prev_high - prev_low
-    # R4 = close + 1.5 * range
-    r4 = prev_close + 1.5 * rang
-    # S4 = close - 1.5 * range
-    s4 = prev_close - 1.5 * rang
-    
-    # Align to 6h timeframe (these levels are valid for today's trading session)
-    r4_aligned = align_htf_to_ltf(prices, df_1d.iloc[:-1], r4)  # use df without last row
-    s4_aligned = align_htf_to_ltf(prices, df_1d.iloc[:-1], s4)
+    # Calculate Donchian channels (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,40 +50,41 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_1d_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        vol_ma_val = vol_ma[i]
+        ema34_val = ema34_1d_aligned[i]
+        upper = highest_high[i]
+        lower = lowest_low[i]
+        mid = donchian_mid[i]
         price = close[i]
         vol_current = volume[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above R4 AND price > 1d EMA50 AND volume spike
-            if (price > r4_val and price > ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Long: Price breaks above Donchian upper AND price > 1d EMA34 AND volume spike
+            if (price > upper and price > ema34_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4 AND price < 1d EMA50 AND volume spike
-            elif (price < s4_val and price < ema50_val and vol_current > 2.0 * vol_ma_val):
+            # Short: Price breaks below Donchian lower AND price < 1d EMA34 AND volume spike
+            elif (price < lower and price < ema34_val and vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: reverse breakout or volume drops
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below S4 OR volume drops below average
-                if (price < s4_val or vol_current < vol_ma_val):
+                # Exit long: Price touches Donchian midpoint OR volume drops below average
+                if (price <= mid or vol_current < vol_ma_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above R4 OR volume drops below average
-                if (price > r4_val or vol_current < vol_ma_val):
+                # Exit short: Price touches Donchian midpoint OR volume drops below average
+                if (price >= mid or vol_current < vol_ma_val):
                     exit_signal = True
             
             if exit_signal:
@@ -106,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Camarilla_R4S4_Breakout_1dEMA50_Volume"
-timeframe = "6h"
+name = "4H_Donchian20_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
