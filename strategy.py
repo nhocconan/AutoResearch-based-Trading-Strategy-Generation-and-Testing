@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike.
-Long when price breaks above Donchian upper band AND price > 1w EMA50 AND volume > 2.0x 20-period average.
-Short when price breaks below Donchian lower band AND price < 1w EMA50 AND volume > 2.0x 20-period average.
-Exit when price reverts to midline (average of upper/lower) OR ATR trailing stop (2.0*ATR from extreme).
-Uses 1w HTF for trend alignment and Donchian levels from daily.
-Target: ~10-20 trades/year on 1d timeframe with discrete sizing 0.25.
+Hypothesis: 6h Elder Ray Bull/Bear Power with 12h EMA50 trend filter and volume confirmation.
+Long when Bull Power > 0 AND Bear Power < 0 AND close > 12h EMA50 AND volume > 1.5x 20-period average.
+Short when Bear Power < 0 AND Bull Power > 0 AND close < 12h EMA50 AND volume > 1.5x 20-period average.
+Exit when Elder Power signals reverse OR price closes below/above 12h EMA50.
+Uses 12h HTF for trend alignment and 6h for Elder Ray calculation.
+Target: ~12-25 trades/year on 6h timeframe with discrete sizing 0.25.
 """
 
 import numpy as np
@@ -22,116 +22,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for EMA
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:  # Need enough for EMA
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Donchian levels from daily data (previous 20 days)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate 13-period EMA for Elder Ray (13 is standard)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Donchian(20): upper = max(high,20), lower = min(low,20)
-    upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    midline = (upper + lower) / 2.0
-    
-    # Align Donchian levels to 1d timeframe (use previous day's levels)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    midline_aligned = align_htf_to_ltf(prices, df_1d, midline)
-    
-    # 1d volume average (20-period) for spike filter
+    # 6h volume average (20-period) for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR(14) for 1d trailing stop calculation
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = 0.0  # for long trailing stop
-    lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50)  # donchian20, ema_50_1w
+    start_idx = max(20, 13, 50)  # vol_ma20, ema_13, ema_50_12h
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(midline_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema_val = ema_50_1w_aligned[i]
-        upper_val = upper_aligned[i]
-        lower_val = lower_aligned[i]
-        midline_val = midline_aligned[i]
+        ema_val = ema_50_12h_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         vol_ma_val = vol_ma[i]
-        atr_val = atr[i]
         
         if position == 0:
-            # Long: price breaks above upper band AND price > 1w EMA50 AND volume spike
-            if price > upper_val and price > ema_val and volume[i] > 2.0 * vol_ma_val:
+            # Long: Bull Power > 0 AND Bear Power < 0 AND price > 12h EMA50 AND volume spike
+            if bull_val > 0 and bear_val < 0 and price > ema_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = price
-            # Short: price breaks below lower band AND price < 1w EMA50 AND volume spike
-            elif price < lower_val and price < ema_val and volume[i] > 2.0 * vol_ma_val:
+            # Short: Bear Power < 0 AND Bull Power > 0 AND price < 12h EMA50 AND volume spike
+            elif bear_val < 0 and bull_val > 0 and price < ema_val and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = price
         else:
-            # Update highest/lowest since entry for trailing stop
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, price)
-            elif position == -1:
-                lowest_since_entry = min(lowest_since_entry, price)
-            
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: price reverts to midline
-            if position == 1 and price < midline_val:
+            # Primary exit: Elder Power signals reverse
+            if position == 1 and (bull_val <= 0 or bear_val >= 0):
                 exit_signal = True
-            elif position == -1 and price > midline_val:
+            elif position == -1 and (bull_val >= 0 or bear_val <= 0):
                 exit_signal = True
             
-            # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 2.0 * atr_val:
+            # Secondary exit: price closes below/above 12h EMA50 (trend change)
+            if position == 1 and price < ema_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 2.0 * atr_val:
+            elif position == -1 and price > ema_val:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1D_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_MidlineExit_ATRTrailingStop"
-timeframe = "1d"
+name = "6H_ElderRay_BullBearPower_12hEMA50_Trend_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
