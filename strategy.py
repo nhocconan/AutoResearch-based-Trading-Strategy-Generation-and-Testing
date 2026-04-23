@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1d EMA Trend Filter and Volume Spike
-- Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend via SMAs with future shift
-- 1d EMA50 > EMA200 ensures alignment with strong daily trend for multi-timeframe confirmation
-- Volume > 1.5x 20-period average confirms breakout momentum with moderate filtering
-- Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years) to minimize fee drag
-- Works in bull markets via Alligator alignment with trend, in bear markets via fade when Alligator diverges
+Hypothesis: 4h Donchian(20) Breakout with 1w Supertrend Filter and Volume Spike
+- Donchian(20) breakouts capture strong momentum moves in both bull and bear markets
+- 1w Supertrend(ATR=10, mult=3.0) ensures alignment with major weekly trend to avoid counter-trend whipsaws
+- Volume > 1.8x 20-period average confirms breakout momentum with moderate filtering
+- Designed for 4h timeframe targeting 25-40 trades/year (100-160 over 4 years) to minimize fee drag
+- Works in bull markets via breakouts with strong weekly uptrend, in bear markets via shorting breakdowns with strong weekly downtrend
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,69 +22,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get 1w data for Supertrend trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 and EMA200
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Supertrend on weekly data
+    # True Range
+    tr1 = pd.Series(df_1w['high']).diff().abs()
+    tr2 = (pd.Series(df_1w['high']) - pd.Series(df_1w['close']).shift(1)).abs()
+    tr3 = (pd.Series(df_1w['low']) - pd.Series(df_1w['close']).shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=10, min_periods=10).mean()
     
-    # Trend filter: 1 = uptrend (EMA50 > EMA200), -1 = downtrend (EMA50 < EMA200), 0 = no trend
-    trend_1d = np.where(ema50_1d > ema200_1d, 1, np.where(ema50_1d < ema200_1d, -1, 0))
+    # Basic Upper and Lower Bands
+    basic_ub = (df_1w['high'] + df_1w['low']) / 2 + 3.0 * atr
+    basic_lb = (df_1w['high'] + df_1w['low']) / 2 - 3.0 * atr
     
-    # Align trend to 12h timeframe (completed 1d bar only)
-    trend_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Final Upper and Lower Bands
+    final_ub = basic_ub.copy()
+    final_lb = basic_lb.copy()
     
-    # Williams Alligator on 12h timeframe
-    # Jaw (13-period SMMA, shifted 8 bars forward)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)  # future shift
+    for i in range(1, len(df_1w)):
+        if df_1w['close'].iloc[i-1] > final_ub.iloc[i-1]:
+            final_ub.iloc[i] = basic_ub.iloc[i]
+        else:
+            final_ub.iloc[i] = min(basic_ub.iloc[i], final_ub.iloc[i-1])
+            
+        if df_1w['close'].iloc[i-1] < final_lb.iloc[i-1]:
+            final_lb.iloc[i] = basic_lb.iloc[i]
+        else:
+            final_lb.iloc[i] = max(basic_lb.iloc[i], final_lb.iloc[i-1])
     
-    # Teeth (8-period SMMA, shifted 5 bars forward)
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)  # future shift
+    # Supertrend direction
+    supertrend = np.zeros(len(df_1w))
+    supertrend[:] = np.nan
+    for i in range(len(df_1w)):
+        if i == 0:
+            supertrend[i] = 1  # Start with uptrend assumption
+        else:
+            if supertrend[i-1] == 1:
+                if df_1w['close'].iloc[i] <= final_lb.iloc[i]:
+                    supertrend[i] = -1  # Reverse to downtrend
+                else:
+                    supertrend[i] = 1   # Continue uptrend
+            else:  # supertrend[i-1] == -1
+                if df_1w['close'].iloc[i] >= final_ub.iloc[i]:
+                    supertrend[i] = 1   # Reverse to uptrend
+                else:
+                    supertrend[i] = -1  # Continue downtrend
     
-    # Lips (5-period SMMA, shifted 3 bars forward)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)  # future shift
+    # Align Supertrend to 4h timeframe (completed 1w bar only)
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
     
-    # Volume confirmation: > 1.5x 20-period average
+    # Donchian(20) channels on 4h data
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(200, 20)  # EMA200 needs 200 bars, volume MA 20
+    start_idx = max(30, 20)  # Supertrend needs ~30 weekly bars, Donchian 20, volume MA 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trend_aligned[i]) or 
-            np.isnan(jaw.iloc[i]) or 
-            np.isnan(teeth.iloc[i]) or 
-            np.isnan(lips.iloc[i]) or 
+        if (np.isnan(supertrend_aligned[i]) or 
+            np.isnan(high_ma[i]) or 
+            np.isnan(low_ma[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        jaw_val = jaw.iloc[i]
-        teeth_val = teeth.iloc[i]
-        lips_val = lips.iloc[i]
+        # Donchian breakout signals with weekly Supertrend filter and volume spike
+        # Long: price breaks above Donchian upper + weekly uptrend (Supertrend=1) + volume spike
+        # Short: price breaks below Donchian lower + weekly downtrend (Supertrend=-1) + volume spike
+        long_signal = (close[i] > high_ma[i] and 
+                      supertrend_aligned[i] == 1 and
+                      volume[i] > 1.8 * vol_ma[i])
         
-        # Alligator signals with trend filter and volume confirmation
-        # Long: Lips > Teeth > Jaw (bullish alignment) + uptrend + volume spike
-        # Short: Lips < Teeth < Jaw (bearish alignment) + downtrend + volume spike
-        long_signal = (lips_val > teeth_val > jaw_val and 
-                      trend_aligned[i] == 1 and
-                      volume[i] > 1.5 * vol_ma[i])
-        
-        short_signal = (lips_val < teeth_val < jaw_val and 
-                       trend_aligned[i] == -1 and
-                       volume[i] > 1.5 * vol_ma[i])
+        short_signal = (close[i] < low_ma[i] and 
+                       supertrend_aligned[i] == -1 and
+                       volume[i] > 1.8 * vol_ma[i])
         
         if position == 0:
             if long_signal:
@@ -94,18 +118,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Alligator convergence (|Lips-Jaw| < 0.5% of price) or trend change
+            # Exit conditions: opposite Donchian break or weekly trend reversal
             exit_signal = False
             
             if position == 1:
-                # Exit long: Alligator convergence or trend turns down
-                if (abs(lips_val - jaw_val) < 0.005 * close[i] or 
-                    trend_aligned[i] == -1):
+                # Exit long: price breaks below Donchian lower or weekly trend turns down
+                if (close[i] < low_ma[i] or 
+                    supertrend_aligned[i] == -1):
                     exit_signal = True
             elif position == -1:
-                # Exit short: Alligator convergence or trend turns up
-                if (abs(lips_val - jaw_val) < 0.005 * close[i] or 
-                    trend_aligned[i] == 1):
+                # Exit short: price breaks above Donchian upper or weekly trend turns up
+                if (close[i] > high_ma[i] or 
+                    supertrend_aligned[i] == 1):
                     exit_signal = True
             
             if exit_signal:
@@ -116,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_1dEMA_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian20_1wSupertrend_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
