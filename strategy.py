@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R reversal with 1d Elder Ray (Bull/Bear Power) regime filter and 1w ATR-based volume confirmation.
-- Williams %R(14): Long when crosses above -80 from below (oversold bounce), Short when crosses below -20 from above (overbought rejection)
-- 1d Elder Ray: Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-  Regime: Bullish when Bull Power > 0 AND Bear Power < 0; Bearish when Bull Power < 0 AND Bear Power > 0
-- 1w ATR(14) volume filter: Current 6h volume > 1.5x 1w average volume when 1w ATR(14) is expanding (ATR > prior ATR)
-  This confirms momentum in direction of the weekly trend.
-- Works in bull markets (catches oversold bounces in uptrend) and bear markets (catches overbought rejections in downtrend).
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-- Uses discrete position sizing (0.25) to minimize fee churn.
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Long when price breaks above Camarilla R3 AND 1d EMA34 rising AND 12h volume > 2.0x 20-period MA.
+Short when price breaks below Camarilla S3 AND 1d EMA34 falling AND 12h volume > 2.0x 20-period MA.
+Exit when price touches opposite Camarilla level (R4/S4) or 1d EMA34 reverses.
+Uses 1d HTF for trend, 12h for volume/entry precision to reduce false breakouts.
+Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+Camarilla levels provide structure in ranging/volatile markets, EMA34 filters trend,
+volume spike avoids low-momentum false breakouts. Works in bull (trend filters) 
+and bear (volume spikes on breakdowns).
 """
 
 import numpy as np
@@ -25,121 +25,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R(14) on 6h data
-    lookback_willr = 14
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(lookback_willr - 1, n):
-        highest_high[i] = np.max(high[i-lookback_willr+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback_willr+1:i+1])
-    
-    willr = np.full(n, np.nan)
-    for i in range(lookback_willr - 1, n):
-        if highest_high[i] != lowest_low[i]:
-            willr[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-        else:
-            willr[i] = -50  # neutral when range is zero
-    
-    # Calculate 1d Elder Ray (Bull/Bear Power) for regime filter
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 12h Camarilla levels from previous 1d OHLC
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
+    #            S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # EMA13 for Elder Ray
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
+    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    bull_power_1d = high_1d - ema_13_1d  # High - EMA13
-    bear_power_1d = ema_13_1d - low_1d   # EMA13 - Low
+    # Align Camarilla levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    r4_12h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_12h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Calculate 1w ATR(14) and average volume for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
-    
-    # True Range for 1w ATR
-    tr_1w = np.zeros(len(df_1w))
-    tr_1w[0] = high_1w[0] - low_1w[0]
-    for i in range(1, len(df_1w)):
-        tr_1w[i] = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i-1]),
-            abs(low_1w[i] - close_1w[i-1])
-        )
-    
-    atr_14_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_ma_1w = pd.Series(volume_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    
-    # ATR expansion: current ATR > prior ATR (momentum increasing)
-    atr_expanding = np.zeros(n, dtype=bool)
-    for i in range(1, n):
-        if not np.isnan(atr_14_aligned[i]) and not np.isnan(atr_14_aligned[i-1]):
-            atr_expanding[i] = atr_14_aligned[i] > atr_14_aligned[i-1]
-    
-    # Volume confirmation: current 6h volume > 1.5x 1w average volume when ATR expanding
-    vol_filter = np.zeros(n, dtype=bool)
-    for i in range(n):
-        if not np.isnan(volume[i]) and not np.isnan(vol_ma_1w_aligned[i]) and atr_expanding[i]:
-            vol_filter[i] = volume[i] > 1.5 * vol_ma_1w_aligned[i]
-        elif not np.isnan(volume[i]) and not np.isnan(vol_ma_1w_aligned[i]):
-            vol_filter[i] = volume[i] > vol_ma_1w_aligned[i]  # fallback: above average volume
+    # Calculate 12h volume average (20-period) for spike filter
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback_willr - 1, 13, 14)
+    start_idx = max(34, 20)  # EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(willr[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
-            np.isnan(vol_ma_1w_aligned[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(r3_12h[i]) or 
+            np.isnan(s3_12h[i]) or np.isnan(r4_12h[i]) or 
+            np.isnan(s4_12h[i]) or np.isnan(vol_ma_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams %R signals with crossover detection
-        willr_long_signal = False
-        willr_short_signal = False
+        price = close[i]
+        ema_val = ema_34_aligned[i]
+        r3 = r3_12h[i]
+        s3 = s3_12h[i]
+        r4 = r4_12h[i]
+        s4 = s4_12h[i]
+        vol_ma_val = vol_ma_12h[i]
         
+        # Calculate EMA34 slope for trend direction (rising/falling)
         if i >= start_idx + 1:
-            willr_prev = willr[i-1]
-            willr_curr = willr[i]
-            # Long: crosses above -80 from below (oversold bounce)
-            if willr_prev <= -80 and willr_curr > -80:
-                willr_long_signal = True
-            # Short: crosses below -20 from above (overbought rejection)
-            if willr_prev >= -20 and willr_curr < -20:
-                willr_short_signal = True
+            ema_prev = ema_34_aligned[i-1]
+            ema_rising = ema_val > ema_prev
+            ema_falling = ema_val < ema_prev
+        else:
+            ema_rising = False
+            ema_falling = False
         
-        # 1d Elder Ray regime filter
-        bull_regime = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0
-        bear_regime = bull_power_aligned[i] < 0 and bear_power_aligned[i] > 0
+        # Volume filter: 12h volume > 2.0x 20-period MA (adaptive to volatility)
+        vol_filter = volume[i] > 2.0 * vol_ma_val
         
         if position == 0:
-            # Long: Williams %R oversold bounce AND bullish regime AND volume confirmation
-            if willr_long_signal and bull_regime and vol_filter[i]:
+            # Long: Break above Camarilla R3 AND EMA34 rising AND volume filter
+            if price > r3 and ema_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought rejection AND bearish regime AND volume confirmation
-            elif willr_short_signal and bear_regime and vol_filter[i]:
+            # Short: Break below Camarilla S3 AND EMA34 falling AND volume filter
+            elif price < s3 and ema_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -147,23 +105,13 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: Williams %R crosses below -50 (momentum loss) OR regime turns bearish
-                if i >= start_idx + 1:
-                    willr_prev = willr[i-1]
-                    willr_curr = willr[i]
-                    if willr_prev >= -50 and willr_curr < -50:  # crosses below -50
-                        exit_signal = True
-                    elif not bull_regime:  # regime no longer bullish
-                        exit_signal = True
+                # Long exit: price touches Camarilla S4 OR EMA34 starts falling
+                if price <= s4 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
+                    exit_signal = True
             elif position == -1:
-                # Short exit: Williams %R crosses above -50 (momentum loss) OR regime turns bullish
-                if i >= start_idx + 1:
-                    willr_prev = willr[i-1]
-                    willr_curr = willr[i]
-                    if willr_prev <= -50 and willr_curr > -50:  # crosses above -50
-                        exit_signal = True
-                    elif not bear_regime:  # regime no longer bearish
-                        exit_signal = True
+                # Short exit: price touches Camarilla R4 OR EMA34 starts rising
+                if price >= r4 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
+                    exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
@@ -173,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsR_Reversal_1dElderRay_Regime_1wATRVolFilter"
-timeframe = "6h"
+name = "12H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
