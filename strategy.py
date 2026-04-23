@@ -1,115 +1,90 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6-hour Ichimoku cloud breakout with daily Kumo twist filter and volume confirmation.
-- Long when price breaks above Kumo cloud and Tenkan > Kijun (bullish TK cross), with daily Kumo twist bullish (Senkou A > Senkou B) and volume > 1.5x average.
-- Short when price breaks below Kumo cloud and Tenkan < Kijun (bearish TK cross), with daily Kumo twist bearish (Senkou A < Senkou B) and volume > 1.5x average.
-- Exit when price re-enters the Kumo cloud or TK cross reverses.
-Ichimoku provides dynamic support/resistance (cloud) and momentum (TK cross), while daily twist filters trend direction. Works in both bull/bear by requiring cloud alignment and twist confirmation.
-Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+Hypothesis: 4-hour Donchian channel breakout with 1-day ATR filter and volume confirmation.
+Long when price breaks above 20-period Donchian high, ATR(14) > 1.5x ATR(50), and volume > 1.5x average.
+Short when price breaks below 20-period Donchian low, ATR(14) > 1.5x ATR(50), and volume > 1.5x average.
+Exit when price returns to the Donchian midpoint or ATR condition fails.
+Designed for low trade frequency (~20-40/year) to capture strong trends while minimizing whipsaws.
+Works in both bull and bear markets by requiring volatility expansion (ATR ratio) and volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
-    """Calculate Ichimoku components: Tenkan-sen, Kijun-sen, Senkou Span A, Senkou Span B."""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max() + 
-                  pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min()) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high).rolling(window=kijun, min_periods=kijun).max() + 
-                 pd.Series(low).rolling(window=kijun, min_periods=kijun).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(kijun)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 52 periods ahead
-    senkou_span_b = ((pd.Series(high).rolling(window=senkou, min_periods=senkou).max() + 
-                      pd.Series(low).rolling(window=senkou, min_periods=senkou).min()) / 2).shift(kijun)
-    
-    return tenkan_sen.values, kijun_sen.values, senkou_span_a.values, senkou_span_b.values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for Ichimoku and Kumo twist - ONCE before loop
+    # Load 1-day data for ATR - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1-day Ichimoku components
+    # Calculate 1-day ATR (14 and 50 period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(high_1d, low_1d, close_1d)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Kumo twist: Senkou A > Senkou B = bullish twist, Senkou A < Senkou B = bearish twist
-    kumo_twist_bullish = senkou_a_1d > senkou_b_1d
-    kumo_twist_bearish = senkou_a_1d < senkou_b_1d
+    # ATR 14
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ATR 50
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # Calculate 6-hour Ichimoku components for price/cloud relationship
-    tenkan_6h, kijun_6h, senkou_a_6h, senkou_b_6h = calculate_ichimoku(high, low, close)
+    # ATR ratio (short-term / long-term volatility)
+    atr_ratio = np.where(atr50 > 0, atr14 / atr50, 0)
     
-    # Cloud top and bottom (Senkou Span A and B)
-    cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
-    cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
+    # Align ATR ratio to lower timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # TK cross signals
-    tk_cross_bullish = tenkan_6h > kijun_6h
-    tk_cross_bearish = tenkan_6h < kijun_6h
+    # Donchian channel (20-period) on 4h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Price above/below cloud
-    price_above_cloud = close > cloud_top
-    price_below_cloud = close < cloud_bottom
-    
-    # Align HTF indicators to 6h timeframe
-    kumo_twist_bullish_aligned = align_htf_to_ltf(prices, df_1d, kumo_twist_bullish.astype(float))
-    kumo_twist_bearish_aligned = align_htf_to_ltf(prices, df_1d, kumo_twist_bearish.astype(float))
-    
-    # Volume average (20-period) on 6h timeframe
+    # Volume average (20-period) on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(kumo_twist_bullish_aligned[i]) or np.isnan(kumo_twist_bearish_aligned[i]) or
-            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(cloud_top[i]) or 
-            np.isnan(cloud_bottom[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current values
-        twist_bull = bool(kumo_twist_bullish_aligned[i])
-        twist_bear = bool(kumo_twist_bearish_aligned[i])
-        tk_bull = tk_cross_bullish[i]
-        tk_bear = tk_cross_bearish[i]
-        price_above = price_above_cloud[i]
-        price_below = price_below_cloud[i]
+        atr_ratio_val = atr_ratio_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: Price above cloud, bullish TK cross, bullish Kumo twist, volume confirmation
-            if (price_above and tk_bull and twist_bull and 
+            # Long: break above Donchian high, volatility expansion, volume confirmation
+            if (close[i] > donchian_high[i] and 
+                atr_ratio_val > 1.5 and 
                 vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below cloud, bearish TK cross, bearish Kumo twist, volume confirmation
-            elif (price_below and tk_bear and twist_bear and 
+            # Short: break below Donchian low, volatility expansion, volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  atr_ratio_val > 1.5 and 
                   vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
@@ -118,12 +93,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price re-enters cloud OR TK cross turns bearish
-                if not price_above or tk_bear:
+                # Exit long: price returns to Donchian midpoint OR volatility contraction
+                if close[i] <= donchian_mid[i] or atr_ratio_val < 1.0:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price re-enters cloud OR TK cross turns bullish
-                if not price_below or tk_bull:
+                # Exit short: price returns to Donchian midpoint OR volatility contraction
+                if close[i] >= donchian_mid[i] or atr_ratio_val < 1.0:
                     exit_signal = True
             
             if exit_signal:
@@ -134,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Ichimoku_KumoTwist_Volume"
-timeframe = "6h"
+name = "4H_Donchian20_1dATR_Ratio_Volume"
+timeframe = "4h"
 leverage = 1.0
