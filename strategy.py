@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d strategy using 1w Donchian channel breakout with volume confirmation and ATR stoploss.
-Long when price breaks above 1w Donchian upper band (20-period high) AND volume > 1.5x 20-period average.
-Short when price breaks below 1w Donchian lower band (20-period low) AND volume > 1.5x 20-period average.
-Exit when price retouches the 1w Donchian middle band (20-period average of high/low) or ATR stoploss hit (2.0*ATR).
-Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown.
-Designed for 1d timeframe to target 7-25 trades/year per symbol (30-100 total over 4 years).
-Works in both bull and bear markets by requiring volume confirmation to filter false breakouts and using ATR stops to manage risk.
-1w Donchian channels provide strong structural support/resistance from higher timeframe.
+Hypothesis: 12h strategy using 1d Donchian(20) breakout with volume confirmation and ATR stoploss.
+Long when price breaks above 1d Donchian upper band AND volume > 1.8x 20-period average.
+Short when price breaks below 1d Donchian lower band AND volume > 1.8x 20-period average.
+Exit when price retouches 1d Donchian midpoint or ATR stoploss hit (2.0*ATR).
+Uses discrete position sizing (0.25) to balance return and drawdown.
+Designed for 12h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
+Works in both bull and bear markets by using volume confirmation to filter false breakouts and ATR stops to manage risk.
+1d Donchian levels provide strong institutional support/resistance from higher timeframe.
 """
 
 import numpy as np
@@ -24,26 +24,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w Donchian channels (20-period)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate 1d Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Donchian channels: upper = 20-period high, lower = 20-period low, middle = average
-    upper_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    middle_1w = (upper_1w + lower_1w) / 2.0
+    # Donchian channels (20-period)
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
-    # Align Donchian channels to 1d timeframe
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
-    middle_1w_aligned = align_htf_to_ltf(prices, df_1w, middle_1w)
+    # Align Donchian levels to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
     
-    # Volume average (20-period) on 1d timeframe
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss calculation
@@ -63,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or 
-            np.isnan(middle_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,18 +72,18 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        upper = upper_1w_aligned[i]
-        lower = lower_1w_aligned[i]
-        middle = middle_1w_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
+        mid = donchian_mid_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 1w Donchian upper band AND volume spike
-            if (price > upper and volume[i] > 1.5 * vol_ma_val):
+            # Long: Price breaks above 1d Donchian upper AND volume spike
+            if (price > upper and volume[i] > 1.8 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price breaks below 1w Donchian lower band AND volume spike
-            elif (price < lower and volume[i] > 1.5 * vol_ma_val):
+            # Short: Price breaks below 1d Donchian lower AND volume spike
+            elif (price < lower and volume[i] > 1.8 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -92,10 +91,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retouches 1w Donchian middle band
-            if position == 1 and price <= middle:
+            # Primary exit: Price retouches 1d Donchian midpoint
+            if position == 1 and price <= mid:
                 exit_signal = True
-            elif position == -1 and price >= middle:
+            elif position == -1 and price >= mid:
                 exit_signal = True
             
             # ATR-based stoploss: 2.0 * ATR from entry
@@ -113,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_VolumeConfirmation_ATRStop"
-timeframe = "1d"
+name = "12H_Donchian20_VolumeConfirmation_ATRStop"
+timeframe = "12h"
 leverage = 1.0
