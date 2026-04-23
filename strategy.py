@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Williams Alligator with daily trend filter and volume confirmation.
-Long when price > Alligator teeth (Jaw) + daily close > daily EMA50 + volume > 1.5x average volume.
-Short when price < Alligator teeth (Jaw) + daily close < daily EMA50 + volume > 1.5x average volume.
-Exit when price crosses Alligator lips (Lips) or daily trend changes.
-Williams Alligator acts as a dynamic trend filter, reducing whipsaws in choppy markets.
-Designed for low trade frequency (~15-30/year) to minimize fee drag in both bull and bear markets.
+Hypothesis: 4h Camarilla pivot breakout with 12h trend filter and volume spike.
+Long when price breaks above R3 + 12h EMA50 trend up + volume > 2x average.
+Short when price breaks below S3 + 12h EMA50 trend down + volume > 2x average.
+Exit when price returns to pivot point (mean reversion) or trend changes.
+Designed for low trade frequency (~20-40/year) to minimize fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -22,28 +21,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator (13,8,5 smoothed with 8,5,3)
-    # Jaw (13-period SMMA, smoothed 8)
-    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean()
-    jaw = jaw_raw.rolling(window=8, min_periods=8).mean()
-    
-    # Teeth (8-period SMMA, smoothed 5)
-    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean()
-    teeth = teeth_raw.rolling(window=5, min_periods=5).mean()
-    
-    # Lips (5-period SMMA, smoothed 3)
-    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    lips = lips_raw.rolling(window=3, min_periods=3).mean()
-    
-    # Load daily data for trend filter - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data for trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    daily_close = df_1d['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Calculate Camarilla levels from previous day
+    # Use daily high/low/close from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values  # Previous day high
+    prev_low = df_1d['low'].shift(1).values    # Previous day low
+    prev_close = df_1d['close'].shift(1).values # Previous day close
+    
+    # Align to 4h timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
+    
+    # Calculate Camarilla levels
+    range_val = prev_high_aligned - prev_low_aligned
+    # Camarilla levels: H = close + range * 1.1/2, L = close - range * 1.1/2
+    # R3 = close + range * 1.1/2 * 1.1 = close + range * 1.21
+    # S3 = close - range * 1.1/2 * 1.1 = close - range * 1.21
+    # Actually, standard Camarilla:
+    # R4 = close + range * 1.1/2
+    # R3 = close + range * 1.1/4
+    # R2 = close + range * 1.1/6
+    # R1 = close + range * 1.1/12
+    # PP = (high + low + close) / 3
+    # S1 = close - range * 1.1/12
+    # S2 = close - range * 1.1/6
+    # S3 = close - range * 1.1/4
+    # S4 = close - range * 1.1/2
+    
+    # Using common Camarilla calculation for intraday:
+    pivot = (prev_high_aligned + prev_low_aligned + prev_close_aligned) / 3.0
+    range_val = prev_high_aligned - prev_low_aligned
+    
+    # Key levels for breakout: R3 and S3
+    r3 = pivot + range_val * 1.1 / 4
+    s3 = pivot - range_val * 1.1 / 4
     
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -51,44 +77,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(daily_ema50_aligned[i]) or np.isnan(avg_volume[i]) or volume[i] == 0):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(pivot[i]) or np.isnan(avg_volume[i]) or volume[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        daily_close_val = None
-        daily_ema50_val = None
-        if i < len(daily_ema50_aligned):
-            daily_close_val = df_1d['close'].values[-1] if len(df_1d) > 0 else np.nan
-            daily_ema50_val = daily_ema50_aligned[i]
-        else:
-            daily_close_val = np.nan
-            daily_ema50_val = np.nan
-            
-        if np.isnan(daily_close_val) or np.isnan(daily_ema50_val):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        daily_trend_up = daily_close_val > daily_ema50_val
-        daily_trend_down = daily_close_val < daily_ema50_val
+        ema_12h_val = ema_12h_aligned[i]
+        r3_val = r3[i]
+        s3_val = s3[i]
+        pivot_val = pivot[i]
+        volume_confirm = volume[i] > 2.0 * avg_volume[i]
         
-        volume_confirm = volume[i] > 1.5 * avg_volume[i]
+        # Trend direction from 12h EMA
+        trend_up = close[i] > ema_12h_val
+        trend_down = close[i] < ema_12h_val
         
         if position == 0:
-            # Long: price > teeth (Alligator jaw) + daily uptrend + volume confirmation
-            if (close[i] > teeth[i] and 
-                daily_trend_up and volume_confirm):
+            # Long: Price breaks above R3 + uptrend + volume spike
+            if (close[i] > r3_val and close[i-1] <= r3_val and 
+                trend_up and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < teeth (Alligator jaw) + daily downtrend + volume confirmation
-            elif (close[i] < teeth[i] and 
-                  daily_trend_down and volume_confirm):
+            # Short: Price breaks below S3 + downtrend + volume spike
+            elif (close[i] < s3_val and close[i-1] >= s3_val and 
+                  trend_down and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -96,12 +112,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price < lips (Alligator lips) or daily trend changes to down
-                if close[i] < lips[i] or not daily_trend_up:
+                # Exit long: Price returns to pivot or trend changes
+                if close[i] <= pivot_val or not trend_up:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price > lips (Alligator lips) or daily trend changes to up
-                if close[i] > lips[i] or not daily_trend_down:
+                # Exit short: Price returns to pivot or trend changes
+                if close[i] >= pivot_val or not trend_down:
                     exit_signal = True
             
             if exit_signal:
@@ -112,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsAlligator_DailyTrend_VolumeFilter"
-timeframe = "12h"
+name = "4H_Camarilla_R3_S3_Breakout_12hEMA50_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
