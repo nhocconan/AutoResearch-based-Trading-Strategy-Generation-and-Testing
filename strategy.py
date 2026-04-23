@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-Long when price breaks above 20-day high AND 1w EMA50 is rising AND volume > 1.5x 20-day average.
-Short when price breaks below 20-day low AND 1w EMA50 is falling AND volume > 1.5x 20-day average.
-Exit when price retouches 10-day moving average or ATR stoploss hit (2.5*ATR).
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Long when price breaks above Camarilla R3 AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
+Short when price breaks below Camarilla S3 AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
+Exit when price retouches Camarilla pivot point (PP) or ATR stoploss hit (2.0*ATR).
 Uses discrete position sizing (0.25) to minimize fee churn and control drawdown.
-Designed to capture medium-term trends in both bull and bear markets by aligning with weekly trend.
+Targets 12-37 trades/year per symbol (50-150 total over 4 years) by using 1d trend filter to reduce false breakouts.
+Designed to work in both bull and bear markets by trading with the 1d trend and using tight risk control.
 """
 
 import numpy as np
@@ -26,40 +27,34 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Calculate 1w EMA50 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_1w_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
-    
-    # EMA slope (rising/falling) - compare current vs 3 periods ago
-    ema_slope = np.zeros_like(ema_1w_50_aligned)
-    ema_slope[3:] = ema_1w_50_aligned[3:] - ema_1w_50_aligned[:-3]
-    
-    # Donchian channels (20-period) on 1d data
+    # Calculate Camarilla levels from daily data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate rolling max/min for Donchian channels
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels (based on previous day's OHLC)
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_r3 = camarilla_pp + (high_1d - low_1d) * 1.1 / 4.0
+    camarilla_s3 = camarilla_pp - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align Donchian levels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # 10-day moving average for exit
-    close_10ma = pd.Series(close_1d).rolling(window=10, min_periods=10).mean().values
-    close_10ma_aligned = align_htf_to_ltf(prices, df_1d, close_10ma)
+    # Calculate 1d EMA34 for trend filter
+    ema_1d_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
-    # Volume average (20-period) on 1d timeframe
+    # EMA slope (rising/falling) - compare current vs 3 periods ago
+    ema_slope = np.zeros_like(ema_1d_34_aligned)
+    ema_slope[3:] = ema_1d_34_aligned[3:] - ema_1d_34_aligned[:-3]
+    
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss calculation
@@ -75,13 +70,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 50, 20, 20, 14, 3)
+    start_idx = max(100, 34, 20, 14, 3)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_1w_50_aligned[i]) or np.isnan(ema_slope[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(close_10ma_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(ema_1d_34_aligned[i]) or 
+            np.isnan(ema_slope[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,23 +92,23 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ma10 = close_10ma_aligned[i]
+        pp = camarilla_pp_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
         ema_slope_val = ema_slope[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian high AND 1w EMA50 rising AND volume spike
-            if (price > upper and 
+            # Long: Price breaks above Camarilla R3 AND 1d EMA34 rising AND volume spike
+            if (price > r3 and 
                 ema_slope_val > 0 and 
-                volume[i] > 1.5 * vol_ma_val):
+                volume[i] > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price breaks below Donchian low AND 1w EMA50 falling AND volume spike
-            elif (price < lower and 
+            # Short: Price breaks below Camarilla S3 AND 1d EMA34 falling AND volume spike
+            elif (price < s3 and 
                   ema_slope_val < 0 and 
-                  volume[i] > 1.5 * vol_ma_val):
+                  volume[i] > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -121,16 +116,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retouches 10-day moving average
-            if position == 1 and price < ma10:
+            # Primary exit: Price retouches Camarilla pivot point
+            if position == 1 and price <= pp:
                 exit_signal = True
-            elif position == -1 and price > ma10:
+            elif position == -1 and price >= pp:
                 exit_signal = True
             
-            # ATR-based stoploss: 2.5 * ATR from entry
-            if position == 1 and price < entry_price - 2.5 * atr_val:
+            # ATR-based stoploss: 2.0 * ATR from entry
+            if position == 1 and price < entry_price - 2.0 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > entry_price + 2.5 * atr_val:
+            elif position == -1 and price > entry_price + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -142,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_Donchian20_1wEMA50_Trend_VolumeSpike_MA10Exit_ATRStop"
-timeframe = "1d"
+name = "12H_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
