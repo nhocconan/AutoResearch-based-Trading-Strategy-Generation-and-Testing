@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-Long when price breaks above Donchian upper band and close > 1d EMA50 (uptrend) with volume > 1.5x average.
-Short when price breaks below Donchian lower band and close < 1d EMA50 (downtrend) with volume > 1.5x average.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR-based volatility filter.
+Long when price breaks above Donchian upper band and close > 1d EMA50 (uptrend) with ATR(14) > 0.5 * ATR(50) (sufficient volatility).
+Short when price breaks below Donchian lower band and close < 1d EMA50 (downtrend) with ATR(14) > 0.5 * ATR(50).
 Exit on opposite Donchian break or trend reversal. Uses 4h timeframe targeting 75-200 total trades over 4 years.
-Donchian channels provide clear trend-following structure, 1d EMA50 filters medium-term trend,
-volume confirmation reduces false breakouts. Designed to capture strong momentum moves while
-avoiding whipsaws in choppy markets across both bull and bear regimes.
+Donchian channels provide clear structure, 1d EMA50 filters medium-term trend, ATR volatility filter avoids choppy markets.
+Designed to capture strong momentum moves while avoiding whipsaws in both bull and bear regimes.
 """
 
 import numpy as np
@@ -35,12 +34,19 @@ def generate_signals(prices):
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Donchian channels (20-period) on primary timeframe
-    donchian_window = 20
-    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume average (20-period) on primary timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ATR volatility filter (14 and 50 periods)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,28 +54,31 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(atr14[i]) or np.isnan(atr50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema50_val = ema50_1d_aligned[i]
-        upper = upper_band[i]
-        lower = lower_band[i]
-        vol_ma_val = vol_ma[i]
+        upper_band = highest_high[i]
+        lower_band = lowest_low[i]
+        atr14_val = atr14[i]
+        atr50_val = atr50[i]
         price = close[i]
-        vol_current = volume[i]
+        
+        # Volatility filter: require sufficient volatility (ATR14 > 0.5 * ATR50)
+        vol_filter = atr14_val > 0.5 * atr50_val
         
         if position == 0:
-            # Long: price breaks above Donchian upper AND price > 1d EMA50 (uptrend) AND volume confirmation
-            if (price > upper and price > ema50_val and vol_current > 1.5 * vol_ma_val):
+            # Long: price breaks above upper band AND price > 1d EMA50 (uptrend) AND volatility filter
+            if (price > upper_band and price > ema50_val and vol_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: price breaks below Donchian lower AND price < 1d EMA50 (downtrend) AND volume confirmation
-            elif (price < lower and price < ema50_val and vol_current > 1.5 * vol_ma_val):
+            # Short: price breaks below lower band AND price < 1d EMA50 (downtrend) AND volatility filter
+            elif (price < lower_band and price < ema50_val and vol_filter):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -78,12 +87,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below Donchian lower OR trend reversal
-                if (price < lower or price < ema50_val):
+                # Exit long: price breaks below lower band OR trend reversal
+                if (price < lower_band or price < ema50_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above Donchian upper OR trend reversal
-                if (price > upper or price > ema50_val):
+                # Exit short: price breaks above upper band OR trend reversal
+                if (price > upper_band or price > ema50_val):
                     exit_signal = True
             
             if exit_signal:
@@ -95,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_1dEMA50_VolumeConfirmation"
+name = "4H_Donchian20_1dEMA50_ATR_VolFilter"
 timeframe = "4h"
 leverage = 1.0
