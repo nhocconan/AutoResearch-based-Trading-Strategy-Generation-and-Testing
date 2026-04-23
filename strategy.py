@@ -1,22 +1,33 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) + ADX regime filter + volume confirmation.
-- Bull Power = High - EMA13 (1d), Bear Power = EMA13 (1d) - Low
-- Long when Bull Power > 0 AND ADX(1d) > 25 (trending) AND volume > 1.5x 20-period average
-- Short when Bear Power > 0 AND ADX(1d) > 25 AND volume > 1.5x 20-period average
-- Exit when power becomes negative (Bull Power <= 0 for long, Bear Power <= 0 for short) OR ADX < 20 (range)
-- Uses 1d HTF for Elder Ray and ADX to avoid lower TF noise; 6h for execution timing.
-- Target: 80-180 total trades over 4 years (20-45/year) for 6h timeframe.
-- Works in both bull (strong Bull/Bear Power) and bear (ADX filters whipsaws, power persists in trends).
+Hypothesis: 12h Williams Alligator + 1d EMA34 trend filter + 1d volume spike confirmation.
+Long when Alligator jaws (13-period SMMA) > teeth (8-period SMMA) > lips (5-period SMMA) AND 1d EMA34 rising AND 1d volume > 1.5x 20-period average.
+Short when jaws < teeth < lips AND 1d EMA34 falling AND 1d volume > 1.5x 20-period average.
+Exit when Alligator lines cross in opposite direction or EMA34 reverses.
+Uses 1d HTF for EMA34 trend and volume filter to reduce whipsaws and false signals.
+Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+Williams Alligator: SMMA(median, period), where SMMA = smoothed moving average (EMA with alpha=1/period).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(arr, period):
+    """Smoothed Moving Average: EMA with alpha=1/period"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan, dtype=float)
+    result = np.full_like(arr, np.nan, dtype=float)
+    # First value: SMA
+    result[period-1] = np.mean(arr[:period])
+    # Subsequent values: SMMA(i) = (SMMA(i-1)*(period-1) + arr[i]) / period
+    for i in range(period, len(arr)):
+        result[i] = (result[i-1] * (period-1) + arr[i]) / period
+    return result
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,89 +35,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA13 for Elder Ray
+    # Calculate median price for Alligator
+    median_price = (high + low) / 2.0
+    
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    # Calculate 1d volume average for spike filter (HTF)
+    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Calculate Williams Alligator lines on 1d timeframe
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    bull_power = high_1d - ema_13_1d
-    bear_power = ema_13_1d - low_1d
+    median_1d = (high_1d + low_1d) / 2.0
     
-    # Calculate 1d ADX (trend strength)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(tr)
-        atr[period] = np.nanmean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-        minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-        return adx
+    # Alligator: Lips=SMMA(5), Teeth=SMMA(8), Jaws=SMMA(13)
+    lips_1d = smma(median_1d, 5)
+    teeth_1d = smma(median_1d, 8)
+    jaws_1d = smma(median_1d, 13)
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    
-    # Align all 1d indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 1d volume average for spike filter
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 13, 14)  # volume MA, EMA13, ADX
+    start_idx = max(34, 20, 13)  # EMA34 (34), volume MA (20), Alligator jaws (13)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or
+            np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(jaws_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bp = bull_power_aligned[i]
-        br = bear_power_aligned[i]
-        adx_val = adx_1d_aligned[i]
+        price = close[i]
+        ema_val = ema_34_aligned[i]
+        lips = lips_aligned[i]
+        teeth = teeth_aligned[i]
+        jaws = jaws_aligned[i]
         vol_ma_val = vol_ma_1d_aligned[i]
-        vol_current = df_1d['volume'].values[min(i, len(df_1d['volume'].values)-1)] if hasattr(df_1d['volume'], 'values') else volume[i]  # fallback
         
-        # Use 6h volume for more timely confirmation
-        vol_current = volume[i]
+        # Calculate EMA34 slope for trend direction (rising/falling)
+        if i >= start_idx + 1:
+            ema_prev = ema_34_aligned[i-1]
+            ema_rising = ema_val > ema_prev
+            ema_falling = ema_val < ema_prev
+        else:
+            ema_rising = False
+            ema_falling = False
+        
+        # Alligator alignment: Long when jaws > teeth > lips, Short when jaws < teeth < lips
+        if i >= start_idx + 1:
+            lips_prev = lips_aligned[i-1]
+            teeth_prev = teeth_aligned[i-1]
+            jaws_prev = jaws_aligned[i-1]
+            lips_rising = lips > lips_prev
+            teeth_rising = teeth > teeth_prev
+            jaws_rising = jaws > jaws_prev
+            lips_falling = lips < lips_prev
+            teeth_falling = teeth < teeth_prev
+            jaws_falling = jaws < jaws_prev
+        else:
+            lips_rising = teeth_rising = jaws_rising = False
+            lips_falling = teeth_falling = jaws_falling = False
         
         if position == 0:
-            # Long: Bull Power > 0 AND ADX > 25 (strong trend) AND volume spike
-            if bp > 0 and adx_val > 25 and vol_current > 1.5 * vol_ma_val:
+            # Long: Jaws > Teeth > Lips AND EMA34 rising AND volume spike
+            if jaws > teeth and teeth > lips and ema_rising and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power > 0 AND ADX > 25 AND volume spike
-            elif br > 0 and adx_val > 25 and vol_current > 1.5 * vol_ma_val:
+            # Short: Jaws < Teeth < Lips AND EMA34 falling AND volume spike
+            elif jaws < teeth and teeth < lips and ema_falling and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -114,12 +125,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: Bull Power <= 0 OR ADX < 20 (losing trend)
-                if bp <= 0 or adx_val < 20:
+                # Long exit: Alligator lines cross opposite (jaws < teeth OR teeth < lips) OR EMA34 starts falling
+                if jaws < teeth or teeth < lips or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: Bear Power <= 0 OR ADX < 20
-                if br <= 0 or adx_val < 20:
+                # Short exit: Alligator lines cross opposite (jaws > teeth OR teeth > lips) OR EMA34 starts rising
+                if jaws > teeth or teeth > lips or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -130,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ElderRay_ADX_Regime_VolumeConfirmation"
-timeframe = "6h"
+name = "12H_WilliamsAlligator_1dEMA34_Trend_1dVolumeSpike"
+timeframe = "12h"
 leverage = 1.0
