@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
-Long when Tenkan crosses above Kijun AND price > Cloud AND close > 1d EMA34 AND volume > 1.5x 20-period average.
-Short when Tenkan crosses below Kijun AND price < Cloud AND close < 1d EMA34 AND volume > 1.5x 20-period average.
-Exit when Tenkan/Kijun cross reverses OR price retraces to Kijun line.
-Uses discrete position sizing (0.25) targeting ~12-30 trades/year on 6h timeframe.
-Ichimoku provides dynamic support/resistance via Cloud and momentum via TK cross.
-Works in bull (trend-following with Cloud support) and bear (mean-reversion at Cloud resistance via TK cross).
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 2.0x 20-period average.
+Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 2.0x 20-period average.
+Exit when price retraces to Camarilla pivot point (PP) OR ATR trailing stop (2.5*ATR from extreme).
+Uses discrete position sizing (0.30) targeting ~25-40 trades/year on 4h timeframe.
+Camarilla R3/S3 represent stronger intraday support/resistance levels than R1/S1; breakouts with volume and trend alignment capture stronger momentum moves with fewer false signals.
+Works in bull (trend-following breakouts) and bear (mean-reversion at extreme levels via volatility expansion).
 """
 
 import numpy as np
@@ -15,36 +15,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2.0
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2.0
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2.0
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2.0
-    
-    # Cloud top/bottom (Senkou Span A and B)
-    cloud_top = np.maximum(senkou_a, senkou_b)
-    cloud_bottom = np.minimum(senkou_a, senkou_b)
     
     # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -55,19 +32,47 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
+    # Calculate Camarilla pivot levels from 1d (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla levels: PP = (H+L+C)/3, R3 = PP + (H-L)*1.1/4, S3 = PP - (H-L)*1.1/4
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_r3 = pivot + (high_1d - low_1d) * 1.1 / 4.0
+    camarilla_s3 = pivot - (high_1d - low_1d) * 1.1 / 4.0
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # ATR(14) for trailing stop calculation
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = 0.0  # for long trailing stop
+    lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(52, 34, 20)  # Ichimoku needs 52, EMA34 needs 34, vol MA needs 20
+    start_idx = max(34, 20, 14)  # EMA34 needs 34, vol MA needs 20, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(pivot_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,45 +80,55 @@ def generate_signals(prices):
         
         price = close[i]
         vol_ma_val = vol_ma[i]
+        atr_val = atr[i]
         ema34_val = ema34_1d_aligned[i]
+        r3_val = camarilla_r3_aligned[i]
+        s3_val = camarilla_s3_aligned[i]
+        pivot_val = pivot_aligned[i]
         
         if position == 0:
-            # Long: Tenkan crosses above Kijun AND price > Cloud AND uptrend (price > EMA34) AND volume spike
-            if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] and  # TK cross up
-                price > cloud_top[i] and close[i] > ema34_val and 
-                volume[i] > 1.5 * vol_ma_val):
-                signals[i] = 0.25
+            # Long: Break above Camarilla R3 AND uptrend (price > EMA34) AND volume spike (2.0x avg)
+            if close[i] > r3_val and close[i] > ema34_val and volume[i] > 2.0 * vol_ma_val:
+                signals[i] = 0.30
                 position = 1
-            # Short: Tenkan crosses below Kijun AND price < Cloud AND downtrend (price < EMA34) AND volume spike
-            elif (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] and  # TK cross down
-                  price < cloud_bottom[i] and close[i] < ema34_val and 
-                  volume[i] > 1.5 * vol_ma_val):
-                signals[i] = -0.25
+                highest_since_entry = price
+            # Short: Break below Camarilla S3 AND downtrend (price < EMA34) AND volume spike (2.0x avg)
+            elif close[i] < s3_val and close[i] < ema34_val and volume[i] > 2.0 * vol_ma_val:
+                signals[i] = -0.30
                 position = -1
+                lowest_since_entry = price
         else:
+            # Update highest/lowest since entry for trailing stop
+            if position == 1:
+                highest_since_entry = max(highest_since_entry, price)
+            elif position == -1:
+                lowest_since_entry = min(lowest_since_entry, price)
+            
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Tenkan/Kijun cross reverses
-            if position == 1 and tenkan[i] < kijun[i]:
+            # Primary exit: Price retraces to Camarilla pivot point
+            if position == 1 and close[i] <= pivot_val:
                 exit_signal = True
-            elif position == -1 and tenkan[i] > kijun[i]:
+            elif position == -1 and close[i] >= pivot_val:
                 exit_signal = True
             
-            # Secondary exit: Price retraces to Kijun line
-            if position == 1 and close[i] <= kijun[i]:
+            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
                 exit_signal = True
-            elif position == -1 and close[i] >= kijun[i]:
+            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.30 if position == 1 else -0.30
     
     return signals
 
-name = "6H_Ichimoku_TK_Cross_Cloud_Filter_1dEMA34_Trend_VolumeConfirmation_TKExit_KijunExit"
-timeframe = "6h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirmation_PivotExit_ATRTrailingStop"
+timeframe = "4h"
 leverage = 1.0
