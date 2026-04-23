@@ -1,82 +1,40 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud with 1d ADX filter and volume confirmation.
-Long when Tenkan-sen crosses above Kijun-sen, price is above cloud, 1d ADX > 25, and volume > 1.5x average.
-Short when Tenkan-sen crosses below Kijun-sen, price is below cloud, 1d ADX > 25, and volume > 1.5x average.
-Uses 6h timeframe targeting 50-150 total trades over 4 years. Ichimoku provides trend, support/resistance, and momentum.
-ADX filter ensures we only trade in trending markets, reducing whipsaw in ranging conditions. Volume confirmation adds conviction.
-Works in both bull and bear markets by aligning with higher timeframe trend strength.
+Hypothesis: 12h strategy using Williams Alligator (Jaw/Teeth/Lips) for trend direction
+combined with 1d ATR-based volatility filter and volume confirmation. Long when Alligator
+is bullish (Lips > Teeth > Jaw) with price above Teeth, volume > 1.5x average, and 1d ATR
+below its 20-period median (low volatility). Short when Alligator is bearish (Lips < Teeth < Jaw)
+with price below Teeth, volume confirmation, and low 1d volatility. Uses discrete position sizing
+to minimize fee churn and targets 50-150 trades over 4 years. Works in both bull and bear markets
+by requiring alignment with higher timeframe trend and volatility regime.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def ichimoku_cloud(high, low, close, tenkan=9, kijun=26, senkou_b=52):
-    """Ichimoku Cloud components"""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=tenkan).max()
-    period9_low = pd.Series(low).rolling(window=tenkan).min()
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=kijun).max()
-    period26_low = pd.Series(low).rolling(window=kijun).min()
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Conversion Line + Base Line)/2
-    senkou_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    period52_high = pd.Series(high).rolling(window=senkou_b).max()
-    period52_low = pd.Series(low).rolling(window=senkou_b).min()
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Chikou Span (Lagging Span): Close plotted 26 periods behind
-    # Not used in signals to avoid look-ahead
-    
-    return tenkan_sen.values, kijun_sen.values, senkou_a.values, senkou_b.values
-
-def adx(high, low, close, period=14):
-    """Average Directional Index"""
-    # True Range
-    tr1 = pd.Series(high) - pd.Series(low)
-    tr2 = abs(pd.Series(high) - pd.Series(close).shift())
-    tr3 = abs(pd.Series(low) - pd.Series(close).shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    dm_plus = pd.Series(high) - pd.Series(high).shift()
-    dm_minus = pd.Series(low).shift() - pd.Series(low)
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smoothed values
-    atr = tr.ewm(alpha=1/period, adjust=False).mean()
-    dm_plus_smooth = dm_plus.ewm(alpha=1/period, adjust=False).mean()
-    dm_minus_smooth = dm_minus.ewm(alpha=1/period, adjust=False).mean()
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = dx.ewm(alpha=1/period, adjust=False).mean()
-    
-    return adx.values
+def smma(arr, period):
+    """Smoothed Moving Average (used in Williams Alligator)"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    sma = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+    smma = np.full_like(arr, np.nan)
+    smma[period-1] = sma[period-1]
+    for i in range(period, len(arr)):
+        smma[i] = (smma[i-1] * (period-1) + arr[i]) / period
+    return smma
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for ADX filter - ONCE before loop
+    # Load 1d data for ATR and Alligator calculation - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -85,14 +43,31 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX
-    adx_1d = adx(high_1d, low_1d, close_1d, 14)
+    # Calculate Williams Alligator on 1d timeframe
+    # Jaw: 13-period SMMA smoothed by 8
+    jaw_raw = smma(close_1d, 13)
+    jaw = smma(jaw_raw, 8) if not np.all(np.isnan(jaw_raw)) else np.full_like(close_1d, np.nan)
+    # Teeth: 8-period SMMA smoothed by 5
+    teeth_raw = smma(close_1d, 8)
+    teeth = smma(teeth_raw, 5) if not np.all(np.isnan(teeth_raw)) else np.full_like(close_1d, np.nan)
+    # Lips: 5-period SMMA smoothed by 3
+    lips_raw = smma(close_1d, 5)
+    lips = smma(lips_raw, 3) if not np.all(np.isnan(lips_raw)) else np.full_like(close_1d, np.nan)
     
-    # Calculate Ichimoku on 6h timeframe
-    tenkan_sen, kijun_sen, senkou_a, senkou_b = ichimoku_cloud(high, low, close)
+    # Calculate 1d ATR(14) and its 20-period median for volatility filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = np.concatenate([[np.nan], tr])
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_median_1d = pd.Series(atr_ma_1d).rolling(window=20, min_periods=20).median().values
     
-    # Align HTF ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align HTF indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    atr_median_aligned = align_htf_to_ltf(prices, df_1d, atr_median_1d)
     
     # Volume average (20-period) on primary timeframe
     vol_ma_primary = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -100,56 +75,55 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup period
+    for i in range(60, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or np.isnan(senkou_a[i]) or 
-            np.isnan(senkou_b[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_primary[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(atr_median_aligned[i]) or np.isnan(vol_ma_primary[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        tenkan_val = tenkan_sen[i]
-        kijun_val = kijun_sen[i]
-        senkou_a_val = senkou_a[i]
-        senkou_b_val = senkou_b[i]
-        adx_val = adx_1d_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        atr_median_val = atr_median_aligned[i]
         vol_ma_val = vol_ma_primary[i]
         
         # Get current price and volume
         price = close[i]
         vol_current = volume[i]
         
-        # Determine cloud boundaries (Senkou Span A/B)
-        upper_cloud = max(senkou_a_val, senkou_b_val)
-        lower_cloud = min(senkou_a_val, senkou_b_val)
+        # Check low volatility condition (1d ATR below its median)
+        low_volatility = atr_median_val > 0 and atr_ma_1d[i] < atr_median_val if not np.isnan(atr_ma_1d[i]) else False
         
         if position == 0:
-            # Long: Tenkan crosses above Kijun, price above cloud, ADX > 25, volume confirmation
-            if (tenkan_val > kijun_val and  # Tenkan/Kijun cross (current bar)
-                price > upper_cloud and     # Price above cloud
-                adx_val > 25 and            # Strong trend
-                vol_current > 1.5 * vol_ma_val):  # Volume confirmation
+            # Bullish Alligator: Lips > Teeth > Jaw
+            bullish = lips_val > teeth_val and teeth_val > jaw_val
+            # Bearish Alligator: Lips < Teeth < Jaw
+            bearish = lips_val < teeth_val and teeth_val < jaw_val
+            
+            # Long: bullish Alligator AND price > Teeth AND volume confirmation AND low volatility
+            if bullish and price > teeth_val and vol_current > 1.5 * vol_ma_val and low_volatility:
                 signals[i] = 0.25
                 position = 1
-            # Short: Tenkan crosses below Kijun, price below cloud, ADX > 25, volume confirmation
-            elif (tenkan_val < kijun_val and  # Tenkan/Kijun cross (current bar)
-                  price < lower_cloud and     # Price below cloud
-                  adx_val > 25 and            # Strong trend
-                  vol_current > 1.5 * vol_ma_val):  # Volume confirmation
+            # Short: bearish Alligator AND price < Teeth AND volume confirmation AND low volatility
+            elif bearish and price < teeth_val and vol_current > 1.5 * vol_ma_val and low_volatility:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: Alligator reversal OR high volatility
             exit_signal = False
             
             if position == 1:
-                # Exit long: Tenkan crosses below Kijun OR price falls below cloud
-                if tenkan_val < kijun_val or price < lower_cloud:
+                # Exit long: Alligator turns bearish OR price crosses below Jaw OR high volatility
+                bearish = lips_val < teeth_val and teeth_val < jaw_val
+                if bearish or price < jaw_val or not low_volatility:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Tenkan crosses above Kijun OR price rises above cloud
-                if tenkan_val > kijun_val or price > upper_cloud:
+                # Exit short: Alligator turns bullish OR price crosses above Jaw OR high volatility
+                bullish = lips_val > teeth_val and teeth_val > jaw_val
+                if bullish or price > jaw_val or not low_volatility:
                     exit_signal = True
             
             if exit_signal:
@@ -160,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Ichimoku_1dADX_Volume"
-timeframe = "6h"
+name = "12H_WilliamsAlligator_1dATR_Volume"
+timeframe = "12h"
 leverage = 1.0
