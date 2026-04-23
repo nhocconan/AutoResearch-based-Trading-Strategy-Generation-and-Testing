@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud + 1d Weekly Pivot + Volume Confirmation.
-Long when price > Kumo cloud AND Tenkan > Kijun AND price breaks above Weekly R1 AND volume > 1.5x 20-period average.
-Short when price < Kumo cloud AND Tenkan < Kijun AND price breaks below Weekly S1 AND volume > 1.5x 20-period average.
-Exit when price re-enters Kumo cloud or Tenkan/Kijun cross reverses.
-Ichimoku provides trend, support/resistance, and momentum in one system. Weekly pivots add higher-timeframe structure.
-Volume confirmation filters weak signals. Designed for 6h timeframe to capture medium-term swings in both bull and bear markets.
-Target: 12-30 trades/year per symbol (50-120 total over 4 years).
+Hypothesis: 12h Donchian(20) breakout + 1w EMA50 trend + volume confirmation + ATR stoploss.
+Long when price breaks above 20-period Donchian high AND close > 1w EMA50 AND volume > 2.0x 20-period average.
+Short when price breaks below 20-period Donchian low AND close < 1w EMA50 AND volume > 2.0x 20-period average.
+Exit when price crosses 10-period Donchian opposite level or ATR stoploss (2.5x ATR).
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 15-30 trades/year per symbol.
+12h timeframe reduces noise and overtrading, while 1w EMA50 ensures alignment with weekly trend.
+Volume confirmation filters weak breakouts. ATR stoploss manages risk. Works in both bull and bear regimes.
 """
 
 import numpy as np
@@ -23,136 +23,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 6h data for Ichimoku - ONCE before loop
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 52:  # Need 52 for Senkou Span B
+    # Load 12h data for price action - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    kumioffset = 26  # Kumo cloud plotted 26 periods ahead
+    # Calculate ATR(14) on 12h data for stoploss
+    tr1 = np.maximum(high_12h - low_12h, np.abs(high_12h - np.roll(close_12h, 1)))
+    tr2 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high_12h[0] - low_12h[0]  # first bar
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high_6h).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
-                  pd.Series(low_6h).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high_6h).rolling(window=kijun_period, min_periods=kijun_period).max() + 
-                 pd.Series(low_6h).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    senkou_span_b = (pd.Series(high_6h).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
-                     pd.Series(low_6h).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
-    
-    # Kumo cloud boundaries (Senkou Span A and B)
-    # Kumo is plotted 26 periods ahead, so we need to shift back for current price comparison
-    senkou_span_a_shifted = senkou_span_a.shift(kumioffset)
-    senkou_span_b_shifted = senkou_span_b.shift(kumioffset)
-    
-    # Load 1d data for Weekly Pivots - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Weekly Pivot points from previous 1d bar
-    # Standard floor pivot: P = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    
-    # First bar has no previous data
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    pivot_point = (prev_high + prev_low + prev_close) / 3
-    weekly_r1 = 2 * pivot_point - prev_low
-    weekly_s1 = 2 * pivot_point - prev_high
-    
-    # Volume average (20-period) on 6h timeframe
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 6h timeframe
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # Load 1w data for Donchian channels and EMA50 - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Donchian channels (20-period) on 1w data
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Calculate EMA50 on 1w data
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen.iloc[i]) or np.isnan(kijun_sen.iloc[i]) or 
-            np.isnan(senkou_span_a_shifted.iloc[i]) or np.isnan(senkou_span_b_shifted.iloc[i]) or
-            np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             continue
         
         price = close[i]
-        tenkan = tenkan_sen.iloc[i]
-        kijun = kijun_sen.iloc[i]
-        senkou_a = senkou_span_a_shifted.iloc[i]
-        senkou_b = senkou_span_b_shifted.iloc[i]
         vol_ma_val = vol_ma[i]
         
-        # Kumo cloud: price above/below both Senkou Span A and B
-        kumo_top = max(senkou_a, senkou_b)
-        kumo_bottom = min(senkou_a, senkou_b)
-        price_above_kumo = price > kumo_top
-        price_below_kumo = price < kumo_bottom
-        
         if position == 0:
-            # Long: price > Kumo AND Tenkan > Kijun AND price breaks above Weekly R1 AND volume spike
-            if (price_above_kumo and 
-                tenkan > kijun and 
-                price > weekly_r1_aligned[i] and 
-                volume[i] > 1.5 * vol_ma_val):
+            # Long: price breaks above 1w Donchian high AND close > 1w EMA50 AND volume spike
+            if (price > donchian_high_aligned[i] and 
+                close[i] > ema50_1w_aligned[i] and 
+                volume[i] > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Kumo AND Tenkan < Kijun AND price breaks below Weekly S1 AND volume spike
-            elif (price_below_kumo and 
-                  tenkan < kijun and 
-                  price < weekly_s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma_val):
+                entry_price = price
+            # Short: price breaks below 1w Donchian low AND close < 1w EMA50 AND volume spike
+            elif (price < donchian_low_aligned[i] and 
+                  close[i] < ema50_1w_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price re-enters Kumo OR Tenkan/Kijun cross reverses (Tenkan < Kijun)
-                if not price_above_kumo or tenkan < kijun:
+                # Exit long: price crosses below 1w Donchian mid or ATR stoploss
+                if price < donchian_mid_aligned[i]:
+                    exit_signal = True
+                elif price < entry_price - 2.5 * atr_12h[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price re-enters Kumo OR Tenkan/Kijun cross reverses (Tenkan > Kijun)
-                if not price_below_kumo or tenkan > kijun:
+                # Exit short: price crosses above 1w Donchian mid or ATR stoploss
+                if price > donchian_mid_aligned[i]:
+                    exit_signal = True
+                elif price > entry_price + 2.5 * atr_12h[i]:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "6H_Ichimoku_Kumo_WeeklyPivot_VolumeConfirm"
-timeframe = "6h"
+name = "12H_Donchian20_1wEMA50_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
