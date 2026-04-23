@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour price position relative to Donchian channel combined with 1-day volume confirmation.
-Long when price breaks above 4h Donchian upper band (20) with above-average 1d volume.
-Short when price breaks below 4h Donchian lower band (20) with above-average 1d volume.
-Exit when price returns to the 4h Donchian midline (average of upper/lower).
-Designed for low-to-moderate trade frequency (~15-35/year) to capture breakouts while avoiding whipsaws.
-Volume filter ensures breakouts have participation, reducing false signals.
-Works in both bull (catching breakouts) and bear (catching breakdowns) markets.
+Hypothesis: 6-hour 1-week Relative Strength Index (RSI) divergence combined with 1-day volume surge.
+Long when weekly RSI shows bullish divergence (price makes lower low, RSI makes higher low) and daily volume > 1.5x 20-period average.
+Short when weekly RSI shows bearish divergence (price makes higher high, RSI makes lower high) and daily volume > 1.5x 20-period average.
+Exit when divergence breaks down or volume normalizes.
+Designed for low frequency (~20-40/year) to capture major reversals in both bull and bear markets with minimal whipsaws.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,83 +21,145 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4-hour data for Donchian channel - ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load 1-week data for RSI divergence - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 4-hour Donchian channel (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min()
-    donchian_upper = highest_high.values
-    donchian_lower = lowest_low.values
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
-    
-    # Load 1-day data for volume confirmation - ONCE before loop
+    # Load 1-day data for volume filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day average volume (20-period)
-    volume_1d = df_1d['volume'].values
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1-week RSI (14-period)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align HTF indicators to 1h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Calculate 1-day volume ratio (current / 20-period average)
+    volume_1d = df_1d['volume'].values
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    volume_ratio = volume_1d / vol_ma
+    volume_ratio_values = volume_ratio.values
+    
+    # Align HTF indicators to 6h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi_values)
+    volume_ratio_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio_values)
+    
+    # Calculate weekly price swings for divergence detection
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Find weekly swing highs and lows
+    def find_swings(arr, window=3):
+        # Simple peak/trough detection
+        peaks = np.zeros_like(arr, dtype=bool)
+        troughs = np.zeros_like(arr, dtype=bool)
+        for i in range(window, len(arr) - window):
+            if arr[i] == np.max(arr[i-window:i+window+1]):
+                peaks[i] = True
+            if arr[i] == np.min(arr[i-window:i+window+1]):
+                troughs[i] = True
+        return peaks, troughs
+    
+    high_peaks, _ = find_swings(high_1w)
+    _, low_troughs = find_swings(low_1w)
+    
+    # Align swing points to 6h timeframe
+    high_peaks_aligned = align_htf_to_ltf(prices, df_1w, high_peaks.astype(float))
+    low_troughs_aligned = align_htf_to_ltf(prices, df_1w, low_troughs.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    # Track divergence state
+    bullish_div = False
+    bearish_div = False
+    last_rsi_low = 100
+    last_rsi_high = 0
+    last_price_low = np.inf
+    last_price_high = 0
+    
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(avg_volume_1d_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(volume_ratio_aligned[i]) or 
+            np.isnan(high_peaks_aligned[i]) or np.isnan(low_troughs_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bullish_div = bearish_div = False
             continue
         
-        # Volume condition: current 1h volume > 1.5x average 1d volume (scaled to hourly)
-        # Approximate: 1d volume / 24 = average hourly volume
-        volume_threshold = avg_volume_1d_aligned[i] / 24.0 * 1.5
-        volume_ok = volume[i] > volume_threshold
+        rsi_val = rsi_aligned[i]
+        vol_ratio = volume_ratio_aligned[i]
+        is_peak = high_peaks_aligned[i] > 0.5
+        is_trough = low_troughs_aligned[i] > 0.5
+        
+        # Update divergence tracking
+        if is_trough:
+            if rsi_val < last_rsi_low and low[i] < last_price_low:
+                bearish_div = True  # Price makes lower low, RSI makes higher low -> bearish divergence?
+                # Actually: price lower low + RSI higher low = bullish divergence
+                # Price higher high + RSI lower high = bearish divergence
+                if rsi_val > last_rsi_low and low[i] < last_price_low:
+                    bullish_div = True
+                elif rsi_val < last_rsi_high and high[i] > last_price_high:
+                    bearish_div = True
+            last_rsi_low = rsi_val
+            last_price_low = low[i]
+        
+        if is_peak:
+            if rsi_val > last_rsi_high and high[i] > last_price_high:
+                bullish_div = True  # Price makes higher high, RSI makes lower high -> bearish divergence
+            elif rsi_val < last_rsi_low and low[i] < last_price_low:
+                bearish_div = True
+            last_rsi_high = rsi_val
+            last_price_high = high[i]
+        
+        # Reset divergence if RSI moves back to neutral territory
+        if 40 < rsi_val < 60:
+            bullish_div = bearish_div = False
         
         if position == 0:
-            # Long: price breaks above Donchian upper with volume confirmation
-            if close[i] > donchian_upper_aligned[i] and volume_ok:
-                signals[i] = 0.20
+            # Long: Bullish divergence + volume surge
+            if bullish_div and vol_ratio > 1.5:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower with volume confirmation
-            elif close[i] < donchian_lower_aligned[i] and volume_ok:
-                signals[i] = -0.20
+                bullish_div = False  # Reset after entry
+            # Short: Bearish divergence + volume surge
+            elif bearish_div and vol_ratio > 1.5:
+                signals[i] = -0.25
                 position = -1
+                bearish_div = False  # Reset after entry
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to Donchian midline
-                if close[i] <= donchian_mid_aligned[i]:
+                # Exit long: Bearish divergence appears or volume normalizes
+                if bearish_div or vol_ratio < 1.2:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to Donchian midline
-                if close[i] >= donchian_mid_aligned[i]:
+                # Exit short: Bullish divergence appears or volume normalizes
+                if bullish_div or vol_ratio < 1.2:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                bullish_div = bearish_div = False
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_Donchian_Breakout_1dVolumeConfirmation"
-timeframe = "1h"
+name = "6H_WeeklyRSI_Divergence_VolumeSurge"
+timeframe = "6h"
 leverage = 1.0
