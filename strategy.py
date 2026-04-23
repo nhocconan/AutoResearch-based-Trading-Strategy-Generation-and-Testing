@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-Long when price breaks above Donchian upper band and close > 12h EMA50 with volume > 1.8x average.
-Short when price breaks below Donchian lower band and close < 12h EMA50 with volume > 1.8x average.
+Hypothesis: 1h Donchian breakout (20-period) with 4h EMA50 trend filter and volume confirmation.
+Long when price breaks above 20-bar high AND close > 4h EMA50 AND volume > 1.5x average.
+Short when price breaks below 20-bar low AND close < 4h EMA50 AND volume > 1.5x average.
 Exit on opposite Donchian break or trend reversal.
-Donchian channels provide clear structure for breakouts in both trending and ranging markets.
-12h EMA50 filters intermediate-term trend, volume confirmation ensures breakout legitimacy.
-Designed for 4h timeframe targeting 75-200 total trades over 4 years with low frequency to minimize fee drag.
+Uses 4h for signal direction, 1h only for entry timing to minimize trades and fee drag.
+Designed for 1h timeframe targeting 60-150 total trades over 4 years (15-37/year) with session filter (08-20 UTC).
 """
 
 import numpy as np
@@ -23,22 +22,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for EMA50 trend filter - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Precompute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    # Load 4h data for EMA50 trend filter - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 12h EMA50 to 4h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align 4h EMA50 to 1h timeframe
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Donchian(20) on primary timeframe (4h)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1h Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume average (20-period) on primary timeframe
+    # Volume average (20-period) on 1h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -46,30 +48,38 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(100, n):
-        # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(vol_ma[i])):
+        # Session filter: 08-20 UTC only
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_12h_aligned[i]
-        upper_band = highest_20[i]
-        lower_band = lowest_20[i]
+        # Skip if data not ready
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(high_roll[i]) or 
+            np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        ema50_val = ema50_4h_aligned[i]
+        donch_high = high_roll[i]
+        donch_low = low_roll[i]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: price breaks above upper band AND price > 12h EMA50 (uptrend) AND volume spike
-            if (price > upper_band and price > ema50_val and vol_current > 1.8 * vol_ma_val):
-                signals[i] = 0.25
+            # Long: price breaks above Donchian high AND price > 4h EMA50 (uptrend) AND volume spike
+            if (price > donch_high and price > ema50_val and vol_current > 1.5 * vol_ma_val):
+                signals[i] = 0.20
                 position = 1
                 entry_price = price
-            # Short: price breaks below lower band AND price < 12h EMA50 (downtrend) AND volume spike
-            elif (price < lower_band and price < ema50_val and vol_current > 1.8 * vol_ma_val):
-                signals[i] = -0.25
+            # Short: price breaks below Donchian low AND price < 4h EMA50 (downtrend) AND volume spike
+            elif (price < donch_low and price < ema50_val and vol_current > 1.5 * vol_ma_val):
+                signals[i] = -0.20
                 position = -1
                 entry_price = price
         else:
@@ -77,12 +87,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price breaks below lower band OR trend reversal
-                if (price < lower_band or price < ema50_val):
+                # Exit long: price breaks below Donchian low OR trend reversal
+                if (price < donch_low or price < ema50_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price breaks above upper band OR trend reversal
-                if (price > upper_band or price > ema50_val):
+                # Exit short: price breaks above Donchian high OR trend reversal
+                if (price > donch_high or price > ema50_val):
                     exit_signal = True
             
             if exit_signal:
@@ -90,10 +100,10 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4H_Donchian20_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1H_Donchian20_4hEMA50_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
