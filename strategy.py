@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H4/L4 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Hypothesis: 4h Camarilla H4/L4 breakout with 1d EMA34 trend filter and volume spike confirmation.
 - Long: Close > Camarilla H4 AND price > 1d EMA34 AND volume > 2.0x 20-period avg
 - Short: Close < Camarilla L4 AND price < 1d EMA34 AND volume > 2.0x 20-period avg
 - Exit: Opposite Camarilla breakout OR price crosses 1d EMA34
-- Uses 1d HTF for EMA34 and 1d HTF for Camarilla levels (calculated from prior completed bars)
-- Designed for low trade frequency (12-37/year) on 12h timeframe to minimize fee drag
-- Camarilla H4/L4 levels provide strong structure, EMA34 filters trend direction
-- Volume confirmation reduces false breakouts in choppy conditions
-- Works in bull markets via trend-following breaks, in bear via mean-reversion at extremes
+- Uses 1d HTF for both EMA34 and Camarilla levels (calculated from prior completed bars)
+- Designed for low trade frequency (19-50/year) to minimize fee drag on 4h timeframe
+- Camarilla H4/L4 provide stronger structure than R3/S3, reducing false breakouts
+- Volume confirmation filters low-conviction moves
 """
 
 import numpy as np
@@ -34,17 +33,17 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from prior 1d bar (H4, L4)
+    # Calculate Camarilla levels from prior 1d bar (HTF = 1d)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Standard Camarilla: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
+    # Standard Camarilla: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
     range_1d = high_1d - low_1d
-    camarilla_h4 = close_1d + 1.1 * range_1d / 2
-    camarilla_l4 = close_1d - 1.1 * range_1d / 2
+    camarilla_h4 = close_1d + 1.5 * range_1d
+    camarilla_l4 = close_1d - 1.5 * range_1d
     
-    # Align Camarilla levels to 12h timeframe (use prior completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (use prior completed 1d bar)
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
@@ -98,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
