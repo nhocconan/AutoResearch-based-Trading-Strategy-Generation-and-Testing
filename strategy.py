@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA34 trend filter and volume spike.
-Long when price breaks above Camarilla R1 AND price > 4h EMA34 AND volume > 2.0x 20-period average.
-Short when price breaks below Camarilla S1 AND price < 4h EMA34 AND volume > 2.0x 20-period average.
-Exit when price reverts to Camarilla pivot point OR ATR trailing stop (2.5*ATR from extreme).
-Uses 4h HTF for trend alignment and 1d HTF for volume regime filter (low volume = no trades).
-Target: 60-150 total trades over 4 years (15-37/year) with discrete sizing 0.20.
-Session filter: 08-20 UTC to avoid low-liquidity hours.
+Hypothesis: 6h Camarilla R3/S3 breakout with weekly EMA34 trend filter and volume confirmation.
+Long when price breaks above Camarilla R3 AND price > weekly EMA34 AND volume > 2.0x 20-period average.
+Short when price breaks below Camarilla S3 AND price < weekly EMA34 AND volume > 2.0x 20-period average.
+Exit when price reverts to Camarilla H5/L5 level OR ATR trailing stop (2.5*ATR from extreme).
+Uses 1w HTF for trend alignment to capture major trend direction.
+Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25.
 """
 
 import numpy as np
@@ -18,64 +17,40 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA34 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:  # Need enough for EMA
+    # Calculate weekly EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:  # Need enough for EMA
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1d volume average (20-period) for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for MA
-        return np.zeros(n)
+    # Calculate Camarilla pivot levels from previous day to avoid look-ahead
+    # Roll by 96 periods (24h * 4 = 96 six-hour bars in a day)
+    high_roll = np.roll(high, 96)
+    low_roll = np.roll(low, 96)
+    close_roll = np.roll(close, 96)
+    high_roll[:96] = np.nan
+    low_roll[:96] = np.nan
+    close_roll[:96] = np.nan
     
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    pivot = (high_roll + low_roll + close_roll) / 3.0
+    range_hl = high_roll - low_roll
     
-    # Camarilla levels from previous day's OHLC (to avoid look-ahead)
-    # Use daily OHLC shifted by 1 to get previous day's values
-    df_1d = get_htf_data(prices, '1d')  # Reload for OHLC (small overhead, called once)
-    if len(df_1d) < 1:
-        return np.zeros(n)
+    camarilla_h5 = pivot + (range_hl * 1.1 / 2)
+    camarilla_l5 = pivot - (range_hl * 1.1 / 2)
+    camarilla_h3 = pivot + (range_hl * 1.1 / 4)
+    camarilla_l3 = pivot - (range_hl * 1.1 / 4)
+    camarilla_h4 = pivot + (range_hl * 1.1 / 3)
+    camarilla_l4 = pivot - (range_hl * 1.1 / 3)
     
-    # Previous day's OHLC (shifted by 1 to avoid look-ahead)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Shift to get previous day's values for today's Camarilla calculation
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    high_1d_prev[0] = np.nan
-    low_1d_prev[0] = np.nan
-    close_1d_prev[0] = np.nan
-    
-    # Camarilla calculation: based on previous day's range
-    range_1d = high_1d_prev - low_1d_prev
-    camarilla_pivot = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    camarilla_r1 = camarilla_pivot + (range_1d * 1.1 / 12)
-    camarilla_s1 = camarilla_pivot - (range_1d * 1.1 / 12)
-    
-    # Align Camarilla levels to 1h timeframe
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 1h volume average (20-period) for spike filter
+    # 6h volume average (20-period) for spike filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for trailing stop calculation
@@ -94,51 +69,36 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34, 1)  # vol_ma20, ema_34_4h, and +1 for roll
+    start_idx = max(96, 34, 20)  # camarilla (96 roll), ema_34_1w, vol_ma
     
     for i in range(start_idx, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if data not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(camarilla_pivot_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or np.isnan(camarilla_h5[i]) or np.isnan(camarilla_l5[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema_val = ema_34_4h_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        pivot = camarilla_pivot_aligned[i]
+        ema_val = ema_34_1w_aligned[i]
+        h3 = camarilla_h3[i]
+        l3 = camarilla_l3[i]
+        h5 = camarilla_h5[i]
+        l5 = camarilla_l5[i]
         vol_ma_val = vol_ma[i]
-        vol_regime = vol_ma_1d_aligned[i]  # 1d volume MA for regime filter
         atr_val = atr[i]
         
-        # Volume regime filter: only trade when 1d volume is above average
-        # Avoid trading in extremely low volume days
-        if vol_regime <= 0 or volume[i] < 0.5 * vol_ma_val:  # Additional intraday volume filter
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         if position == 0:
-            # Long: price breaks above R1 AND price > 4h EMA34 AND volume spike
-            if price > r1 and price > ema_val and volume[i] > 2.0 * vol_ma_val:
-                signals[i] = 0.20
+            # Long: price breaks above H3 AND price > weekly EMA34 AND volume spike
+            if price > h3 and price > ema_val and volume[i] > 2.0 * vol_ma_val:
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: price breaks below S1 AND price < 4h EMA34 AND volume spike
-            elif price < s1 and price < ema_val and volume[i] > 2.0 * vol_ma_val:
-                signals[i] = -0.20
+            # Short: price breaks below L3 AND price < weekly EMA34 AND volume spike
+            elif price < l3 and price < ema_val and volume[i] > 2.0 * vol_ma_val:
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
         else:
@@ -151,10 +111,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: price reverts to pivot point
-            if position == 1 and price < pivot:
+            # Primary exit: price reverts to H5/L5 levels
+            if position == 1 and price < h5:
                 exit_signal = True
-            elif position == -1 and price > pivot:
+            elif position == -1 and price > l5:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
@@ -169,10 +129,10 @@ def generate_signals(prices):
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
             else:
-                signals[i] = 0.20 if position == 1 else -0.20
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "1H_Camarilla_R1S1_Breakout_4hEMA34_Trend_VolumeSpike_PivotExit_ATRTrailingStop_Session"
-timeframe = "1h"
+name = "6H_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeSpike_H5L5Exit_ATRTrailingStop"
+timeframe = "6h"
 leverage = 1.0
