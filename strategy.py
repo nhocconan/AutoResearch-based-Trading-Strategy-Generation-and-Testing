@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 1d Camarilla H3/L3 breakout with volume confirmation and ATR stoploss.
-Long when price breaks above 1d Camarilla H3 AND volume > 1.8x 20-period average.
-Short when price breaks below 1d Camarilla L3 AND volume > 1.8x 20-period average.
-Exit when price retouches 1d Camarilla pivot point or ATR stoploss hit (2.0*ATR).
+Hypothesis: 1d strategy using weekly Donchian(20) breakout with volume confirmation and ATR stoploss.
+Long when price breaks above weekly Donchian upper band AND volume > 1.8x 20-period average.
+Short when price breaks below weekly Donchian lower band AND volume > 1.8x 20-period average.
+Exit when price retraces 50% of the breakout range or ATR stoploss hit (2.0*ATR).
 Uses discrete position sizing (0.25) to balance return and drawdown.
-Designed for 4h timeframe to target 19-50 trades/year per symbol (75-200 total over 4 years).
+Designed for 1d timeframe to target 7-25 trades/year per symbol (30-100 total over 4 years).
 Works in both bull and bear markets by using volume confirmation to filter false breakouts and ATR stops to manage risk.
-1d Camarilla H3/L3 levels provide stronger institutional support/resistance from higher timeframe.
+Weekly Donchian levels provide stronger structural support/resistance from higher timeframe.
 """
 
 import numpy as np
@@ -24,26 +24,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Calculate weekly Donchian levels (20-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Camarilla levels (based on previous day's OHLC)
-    camarilla_h3 = high_1d + (high_1d - low_1d) * 1.1 / 4.0
-    camarilla_l3 = low_1d - (high_1d - low_1d) * 1.1 / 4.0
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Donchian channels (20-period)
+    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # Align Donchian levels to 1d timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_1w, donchian_middle)
     
-    # Volume average (20-period) on 4h timeframe
+    # Volume average (20-period) on 1d timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss calculation
@@ -57,46 +56,55 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    breakout_level = 0.0  # Track breakout level for 50% retracement exit
     
     # Start from index where all indicators are ready
     start_idx = max(20, 14)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                breakout_level = 0.0
             continue
         
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        h3 = camarilla_h3_aligned[i]
-        l3 = camarilla_l3_aligned[i]
-        pivot = camarilla_pivot_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
+        middle = donchian_middle_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 1d Camarilla H3 AND volume spike
-            if (price > h3 and volume[i] > 1.8 * vol_ma_val):
+            # Long: Price breaks above weekly Donchian upper AND volume spike
+            if (price > upper and volume[i] > 1.8 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price breaks below 1d Camarilla L3 AND volume spike
-            elif (price < l3 and volume[i] > 1.8 * vol_ma_val):
+                breakout_level = upper  # Record breakout level for exit condition
+            # Short: Price breaks below weekly Donchian lower AND volume spike
+            elif (price < lower and volume[i] > 1.8 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
+                breakout_level = lower  # Record breakout level for exit condition
         else:
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retouches 1d Camarilla pivot point
-            if position == 1 and price <= pivot:
-                exit_signal = True
-            elif position == -1 and price >= pivot:
-                exit_signal = True
+            # Primary exit: Price retraces 50% of the breakout range
+            if position == 1:
+                retracement_level = breakout_level - 0.5 * (breakout_level - middle)
+                if price <= retracement_level:
+                    exit_signal = True
+            elif position == -1:
+                retracement_level = breakout_level + 0.5 * (middle - breakout_level)
+                if price >= retracement_level:
+                    exit_signal = True
             
             # ATR-based stoploss: 2.0 * ATR from entry
             if position == 1 and price < entry_price - 2.0 * atr_val:
@@ -108,11 +116,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+                breakout_level = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "4H_Camarilla_H3L3_VolumeConfirmation_ATRStop"
-timeframe = "4h"
+name = "1D_WeeklyDonchian20_Breakout_VolumeConfirmation_ATRStop"
+timeframe = "1d"
 leverage = 1.0
