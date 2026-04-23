@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d ATR-based volatility filter and volume spike confirmation.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d ATR volatility filter and volume spike confirmation.
 - Uses 1d Camarilla pivots for structure and 1d ATR(14) to filter low-volatility breakouts
 - Volume spike >2.0x average to confirm institutional participation
 - Position size: 0.25 discrete level to minimize fee churn
 - Trend-neutral: works in any market regime via volatility filter
-- Designed for 20-40 trades/year to avoid fee drag
+- Designed for 12-37 trades/year on 12h timeframe to avoid fee drag
 """
 
 import numpy as np
@@ -46,7 +46,7 @@ def generate_signals(prices):
     tr_1d[0] = high_1d[0] - low_1d[0]  # First TR
     atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align all 1d indicators to 4h timeframe
+    # Align all 1d indicators to 12h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_Filter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
