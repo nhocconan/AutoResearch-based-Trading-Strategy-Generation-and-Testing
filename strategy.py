@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using 1d Camarilla R1/S1 breakout with volume confirmation and ATR trailing stop.
-Long when price breaks above 1d Camarilla R1 AND volume > 1.5x 20-period average.
-Short when price breaks below 1d Camarilla S1 AND volume > 1.5x 20-period average.
-Exit when price retraces to 1d Camarilla pivot point or ATR trailing stop hit (2.0*ATR from highest/lowest since entry).
+Hypothesis: 4h strategy using 1d Williams Alligator (Jaw/Teeth/Lips) with volume confirmation and ATR trailing stop.
+Long when price > Alligator Lips AND Lips > Teeth AND Teeth > Jaw (bullish alignment) AND volume > 1.3x 20-period average.
+Short when price < Alligator Lips AND Lips < Teeth AND Teeth < Jaw (bearish alignment) AND volume > 1.3x 20-period average.
+Exit when price crosses Alligator Teeth or ATR trailing stop hit (2.5*ATR from extreme since entry).
 Uses discrete position sizing (0.25) to minimize fee drag and manage drawdown.
-Designed for 12h timeframe targeting ~12-37 trades/year per symbol (50-150 total over 4 years).
-Focus on BTC and ETH as primary targets with volume confirmation to filter false breakouts.
-Camarilla levels from 1d provide strong intraday support/resistance that works in both bull and bear markets.
+Designed for 4h timeframe targeting ~20-30 trades/year per symbol (80-120 total over 4 years).
+Williams Alligator is a trend-following indicator that works well in both trending and ranging markets when combined with volume confirmation.
 """
 
 import numpy as np
@@ -24,28 +23,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d OHLC for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 1h Williams Alligator components (for smoother alignment to 4h)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 13:
         return np.zeros(n)
     
-    # Camarilla levels: based on previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12, PP = (H+L+C)/3
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Alligator components using SMMA (Smoothed Moving Average)
+    # Jaw: 13-period SMMA of median price, shifted 8 bars
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    median_price = (df_1h['high'] + df_1h['low']) / 2.0
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_pp = (h_1d + l_1d + c_1d) / 3.0
-    camarilla_r1 = c_1d + (h_1d - l_1d) * 1.1 / 12.0
-    camarilla_s1 = c_1d - (h_1d - l_1d) * 1.1 / 12.0
+    def smma(series, period):
+        """Smoothed Moving Average"""
+        sma = series.rolling(window=period, min_periods=period).mean()
+        result = np.full_like(series.values, np.nan, dtype=float)
+        if len(sma) >= period:
+            result[period-1] = sma.iloc[period-1]
+            for i in range(period, len(series)):
+                result[i] = (result[i-1] * (period-1) + series.iloc[i]) / period
+        return result
     
-    # Align 1d Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    jaw = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
     
-    # Volume average (20-period) on 12h timeframe
+    # Shift components as per Alligator definition
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # Set NaN for shifted periods
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
+    
+    # Align 1h Alligator to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1h, jaw_shifted)
+    teeth_aligned = align_htf_to_ltf(prices, df_1h, teeth_shifted)
+    lips_aligned = align_htf_to_ltf(prices, df_1h, lips_shifted)
+    
+    # Volume average (20-period) on 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for trailing stop calculation
@@ -62,11 +80,11 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20)  # vol MA needs 20, ATR needs 14
+    start_idx = max(20, 13)  # vol MA needs 20, Alligator needs 13+8=21 for jaw shift
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,18 +94,20 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        pp_val = camarilla_pp_aligned[i]
-        r1_val = camarilla_r1_aligned[i]
-        s1_val = camarilla_s1_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 1d Camarilla R1 AND volume spike
-            if price > r1_val and volume[i] > 1.5 * vol_ma_val:
+            # Long: Bullish Alligator alignment AND volume spike
+            if (price > lips_val and lips_val > teeth_val and teeth_val > jaw_val and 
+                volume[i] > 1.3 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Price breaks below 1d Camarilla S1 AND volume spike
-            elif price < s1_val and volume[i] > 1.5 * vol_ma_val:
+            # Short: Bearish Alligator alignment AND volume spike
+            elif (price < lips_val and lips_val < teeth_val and teeth_val < jaw_val and 
+                  volume[i] > 1.3 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -101,16 +121,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to 1d Camarilla pivot point
-            if position == 1 and price <= pp_val:
+            # Primary exit: Price crosses Alligator Teeth (trend reversal signal)
+            if position == 1 and price < teeth_val:
                 exit_signal = True
-            elif position == -1 and price >= pp_val:
+            elif position == -1 and price > teeth_val:
                 exit_signal = True
             
-            # ATR-based trailing stop: 2.0 * ATR from highest/lowest since entry
-            if position == 1 and price < highest_since_entry - 2.0 * atr_val:
+            # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
+            if position == 1 and price < highest_since_entry - 2.5 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > lowest_since_entry + 2.0 * atr_val:
+            elif position == -1 and price > lowest_since_entry + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -123,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R1S1_Breakout_1d_VolumeSpike_ATRTrailingStop_PPExit"
-timeframe = "12h"
+name = "4H_WilliamsAlligator_1h_VolumeSpike_ATRTrailingStop_TeethExit"
+timeframe = "4h"
 leverage = 1.0
