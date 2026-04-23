@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R1 AND 1d EMA34 rising AND 12h volume > 2.0x 20-period MA.
-Short when price breaks below Camarilla S1 AND 1d EMA34 falling AND 12h volume > 2.0x 20-period MA.
-Exit when price touches opposite Camarilla level (S1 for long, R1 for short) or 1d EMA34 reverses.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+Long when price breaks above Donchian upper(20) AND 1d EMA34 rising AND 1h volume > 2.0x 20-period MA.
+Short when price breaks below Donchian lower(20) AND 1d EMA34 falling AND 1h volume > 2.0x 20-period MA.
+Exit when price touches opposite Donchian level or 1d EMA34 reverses.
 Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
-Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-Camarilla levels provide structure, 1d EMA34 filters major trend, volume spike avoids low-momentum breakouts.
+Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Donchian channels provide structure, 1d EMA34 filters major trend, volume spike avoids low-momentum breakouts.
 Works in bull (trend filters) and bear (volume spikes on breakdowns).
 """
 
@@ -24,17 +24,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla levels (R1, S1) from previous 12h bar
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = np.full(n, np.nan)
-    camarilla_s1 = np.full(n, np.nan)
-    pivot = np.full(n, np.nan)
+    # Calculate 4h Donchian channels (20-period)
+    lookback = 20
+    donchian_upper = np.full(n, np.nan)
+    donchian_lower = np.full(n, np.nan)
     
-    for i in range(1, n):
-        # Use previous bar's OHLC to calculate today's levels (no look-ahead)
-        camarilla_r1[i] = close[i-1] + 1.1 * (high[i-1] - low[i-1]) / 12
-        camarilla_s1[i] = close[i-1] - 1.1 * (high[i-1] - low[i-1]) / 12
-        pivot[i] = (high[i-1] + low[i-1] + close[i-1]) / 3
+    for i in range(lookback - 1, n):
+        donchian_upper[i] = np.max(high[i-lookback+1:i+1])
+        donchian_lower[i] = np.min(low[i-lookback+1:i+1])
     
     # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -45,18 +42,18 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h volume MA (20-period) for spike filter
+    # Calculate 1h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(1, 34, 20)  # Camarilla needs 1 bar, EMA34, volume MA
+    start_idx = max(lookback - 1, 34, 20)  # Donchian, EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,8 +61,8 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        r1 = camarilla_r1[i]
-        s1 = camarilla_s1[i]
+        upper = donchian_upper[i]
+        lower = donchian_lower[i]
         ema_val = ema_34_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
@@ -78,16 +75,16 @@ def generate_signals(prices):
             ema_rising = False
             ema_falling = False
         
-        # Volume filter: 12h volume > 2.0x 20-period MA (adaptive to volatility)
+        # Volume filter: 1h volume > 2.0x 20-period MA (adaptive to volatility)
         vol_filter = volume[i] > 2.0 * vol_ma_val
         
         if position == 0:
-            # Long: Break above Camarilla R1 AND EMA34 rising AND volume filter
-            if price > r1 and ema_rising and vol_filter:
+            # Long: Break above Donchian upper AND EMA34 rising AND volume filter
+            if price > upper and ema_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S1 AND EMA34 falling AND volume filter
-            elif price < s1 and ema_falling and vol_filter:
+            # Short: Break below Donchian lower AND EMA34 falling AND volume filter
+            elif price < lower and ema_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -95,12 +92,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches S1 OR EMA34 starts falling
-                if price < s1 or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
+                # Long exit: price touches lower Donchian OR EMA34 starts falling
+                if price < lower or (i >= start_idx + 1 and ema_val < ema_34_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches R1 OR EMA34 starts rising
-                if price > r1 or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
+                # Short exit: price touches upper Donchian OR EMA34 starts rising
+                if price > upper or (i >= start_idx + 1 and ema_val > ema_34_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -111,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
