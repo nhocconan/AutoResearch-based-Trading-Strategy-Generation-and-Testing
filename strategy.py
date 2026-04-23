@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R reversal with 1d EMA50 trend filter and ATR-based volatility filter.
-Long when Williams %R crosses above -80 from below AND close > 1d EMA50 AND ATR(14) < 0.5 * ATR(50).
-Short when Williams %R crosses below -20 from above AND close < 1d EMA50 AND ATR(14) < 0.5 * ATR(50).
-Exit when Williams %R reverts to -50 or ATR-based stoploss hits.
-Williams %R identifies overbought/oversold conditions; EMA50 filters trend direction; ATR ratio ensures low volatility environment for mean reversion.
-Target: 50-150 total trades over 4 years = 12-37/year. Uses discrete position sizing (0.25) to minimize fee churn.
+Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
+Long when price breaks above R3 AND close > 1w EMA50 AND volume > 2.0x 20-period average.
+Short when price breaks below S3 AND close < 1w EMA50 AND volume > 2.0x 20-period average.
+Exit when price reverts to Camarilla Pivot point (PP) or ATR-based stoploss hits.
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-37 trades/year per symbol.
+12h timeframe reduces trade frequency vs 4h while maintaining responsiveness. 1w EMA50 provides
+strong long-term trend filter that works in both bull and bear markets. Camarilla R3/S3 levels
+provide stronger support/resistance than R1/S1, reducing false breakouts.
 """
 
 import numpy as np
@@ -20,40 +22,60 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1d data for Williams %R and EMA50 - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data for Camarilla calculation - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Williams %R(14) on 1d data: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Camarilla levels for 12h timeframe (using previous bar's OHLC)
+    # Camarilla: PP = (H+L+C)/3, R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close = np.roll(close_12h, 1)
     
-    # Align 1d Williams %R to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # First bar: use current values (will be refined as more data comes)
+    prev_high[0] = high_12h[0]
+    prev_low[0] = low_12h[0]
+    prev_close[0] = close_12h[0]
     
-    # Calculate EMA50 on 1d data
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3.0
+    camarilla_range = prev_high - prev_low
+    camarilla_r3 = prev_close + camarilla_range * 1.1 / 4.0
+    camarilla_s3 = prev_close - camarilla_range * 1.1 / 4.0
     
-    # Align 1d EMA50 to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 12h Camarilla levels to 12h timeframe (no additional delay needed as they're based on completed bar)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_12h, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
     
-    # Calculate ATR(14) and ATR(50) on 6h data for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Load 1w data for EMA50 trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA50 on 1w data
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w EMA50 to 12h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume average (20-period) on 12h timeframe
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate ATR(14) on 12h data for stoploss
+    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
+    tr2 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
     tr[0] = high[0] - low[0]  # first bar
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,8 +83,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(atr14[i]) or np.isnan(atr50[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,24 +92,20 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        williams_r_val = williams_r_aligned[i]
-        atr14_val = atr14[i]
-        atr50_val = atr50[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: Williams %R crosses above -80 from below AND close > 1d EMA50 AND low volatility
-            if (williams_r_val > -80 and 
-                williams_r_aligned[i-1] <= -80 and  # crossed above -80
-                close[i] > ema50_1d_aligned[i] and 
-                atr14_val < 0.5 * atr50_val):
+            # Long: price breaks above R3 AND close > 1w EMA50 AND volume spike
+            if (price > camarilla_r3_aligned[i] and 
+                close[i] > ema50_1w_aligned[i] and 
+                volume[i] > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Williams %R crosses below -20 from above AND close < 1d EMA50 AND low volatility
-            elif (williams_r_val < -20 and 
-                  williams_r_aligned[i-1] >= -20 and  # crossed below -20
-                  close[i] < ema50_1d_aligned[i] and 
-                  atr14_val < 0.5 * atr50_val):
+            # Short: price breaks below S3 AND close < 1w EMA50 AND volume spike
+            elif (price < camarilla_s3_aligned[i] and 
+                  close[i] < ema50_1w_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -96,16 +114,16 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R reverts to -50 or ATR stoploss
-                if williams_r_val >= -50:
+                # Exit long: price reverts to PP or ATR stoploss
+                if price <= camarilla_pp_aligned[i]:
                     exit_signal = True
-                elif price < entry_price - 2.0 * atr14_val:
+                elif price < entry_price - 2.5 * atr_12h[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R reverts to -50 or ATR stoploss
-                if williams_r_val <= -50:
+                # Exit short: price reverts to PP or ATR stoploss
+                if price >= camarilla_pp_aligned[i]:
                     exit_signal = True
-                elif price > entry_price + 2.0 * atr14_val:
+                elif price > entry_price + 2.5 * atr_12h[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -117,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsR_Reversal_1dEMA50_VolatilityFilter"
-timeframe = "6h"
+name = "12H_Camarilla_R3S3_Breakout_1wEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
