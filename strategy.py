@@ -1,30 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1w trend filter and volume confirmation.
-Long when Alligator jaws (13-period SMMA) > teeth (8-period SMMA) > lips (5-period SMMA) AND weekly close > weekly EMA34 AND volume > 2.0x average.
-Short when jaws < teeth < lips AND weekly close < weekly EMA34 AND volume > 2.0x average.
-Exit when Alligator lines re-interlace (jaws crosses teeth or teeth crosses lips).
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-37 trades/year per symbol.
-Alligator identifies strong trends, weekly filter avoids counter-trend trades, volume confirms momentum.
+Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+Long when price breaks above Donchian upper band AND weekly close > weekly EMA34 AND volume > 1.5x average.
+Short when price breaks below Donchian lower band AND weekly close < weekly EMA34 AND volume > 1.5x average.
+Exit when price crosses the weekly VWAP (mean reversion completion).
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 15-25 trades/year per symbol.
+Donchian provides clear structure, weekly trend filter avoids counter-trend trades in bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def smma(source, length):
-    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
-    if length < 1:
-        return source.copy()
-    result = np.full_like(source, np.nan, dtype=float)
-    # First value is simple average
-    if len(source) >= length:
-        result[length-1] = np.mean(source[:length])
-    # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CURRENT) / length
-    for i in range(length, len(source)):
-        if not np.isnan(result[i-1]):
-            result[i] = (result[i-1] * (length-1) + source[i]) / length
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,7 +22,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for trend filter - ONCE before loop
+    # Load 1d data for Donchian calculation - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate Donchian(20) channels on 1d data
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 1d timeframe (already aligned as we're using 1d data)
+    # But we need to shift by 1 to avoid look-ahead (use previous day's channel)
+    donchian_upper = np.roll(donchian_upper, 1)
+    donchian_lower = np.roll(donchian_lower, 1)
+    donchian_upper[0] = donchian_upper[1] if len(donchian_upper) > 1 else donchian_upper[0]
+    donchian_lower[0] = donchian_lower[1] if len(donchian_lower) > 1 else donchian_lower[0]
+    
+    # Load 1w data for trend filter and VWAP - ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -46,81 +53,68 @@ def generate_signals(prices):
     low_1w = df_1w['low'].values
     volume_1w = df_1w['volume'].values
     
-    # Calculate EMA34 on 1w data for trend filter
+    # Calculate EMA34 on 1w data
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1w indicators to 12h timeframe
+    # Calculate VWAP on 1w data (typical price * volume)
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    vwap_1w = (pd.Series(typical_price_1w * volume_1w).cumsum() / 
+               pd.Series(volume_1w).cumsum()).values
+    
+    # Align 1w indicators to 1d timeframe
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
-    # Calculate Williams Alligator on 12h timeframe
-    # Jaws: 13-period SMMA of median price, shifted 8 bars
-    # Teeth: 8-period SMMA of median price, shifted 5 bars
-    # Lips: 5-period SMMA of median price, shifted 3 bars
-    median_price = (high + low) / 2.0
-    
-    jaws_raw = smma(median_price, 13)
-    teeth_raw = smma(median_price, 8)
-    lips_raw = smma(median_price, 5)
-    
-    # Apply shifts (Alligator specific)
-    jaws = np.roll(jaws_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    
-    # First values after shift should be NaN (not available yet)
-    jaws[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
-    # Volume average (20-period) on primary timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period) on 1d timeframe
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vwap_1w_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        weekly_trend_up = close[i] > ema34_1w_aligned[i]
-        weekly_trend_down = close[i] < ema34_1w_aligned[i]
+        # Use 1d close for breakout detection
+        daily_close = close_1d[i]
+        daily_high = high_1d[i]
+        daily_low = low_1d[i]
         
-        vol_current = volume[i]
-        vol_ma_val = vol_ma[i]
+        weekly_trend_up = daily_close > ema34_1w_aligned[i]
+        weekly_trend_down = daily_close < ema34_1w_aligned[i]
         
-        # Alligator alignment conditions
-        jaws_above_teeth = jaws[i] > teeth[i]
-        teeth_above_lips = teeth[i] > lips[i]
-        jaws_below_teeth = jaws[i] < teeth[i]
-        teeth_below_lips = teeth[i] < lips[i]
+        vol_current = volume_1d[i]
+        vol_ma_val = vol_ma_aligned[i]
         
         if position == 0:
-            # Long: Alligator aligned up (jaws>teeth>lips) AND weekly uptrend AND volume confirmation
-            if (jaws_above_teeth and teeth_above_lips and weekly_trend_up and 
-                vol_current > 2.0 * vol_ma_val):
+            # Long: Price breaks above Donchian upper AND weekly uptrend AND volume confirmation
+            if (daily_high > donchian_upper[i] and weekly_trend_up and 
+                vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator aligned down (jaws<teeth<lips) AND weekly downtrend AND volume confirmation
-            elif (jaws_below_teeth and teeth_below_lips and weekly_trend_down and 
-                  vol_current > 2.0 * vol_ma_val):
+            # Short: Price breaks below Donchian lower AND weekly downtrend AND volume confirmation
+            elif (daily_low < donchian_lower[i] and weekly_trend_down and 
+                  vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Alligator lines re-interlace (trend weakening)
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: jaws crosses below teeth OR teeth crosses below lips
-                if not (jaws_above_teeth and teeth_above_lips):
+                # Exit long: Price crosses below weekly VWAP (mean reversion complete)
+                if daily_close < vwap_1w_aligned[i]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: jaws crosses above teeth OR teeth crosses above lips
-                if not (jaws_below_teeth and teeth_below_lips):
+                # Exit short: Price crosses above weekly VWAP (mean reversion complete)
+                if daily_close > vwap_1w_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -131,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsAlligator_1wEMA34_Volume"
-timeframe = "12h"
+name = "1D_Donchian20_1wEMA34_VWAP"
+timeframe = "1d"
 leverage = 1.0
