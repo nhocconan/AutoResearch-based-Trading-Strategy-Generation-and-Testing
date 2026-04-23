@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter, volume confirmation, and ATR-based trailing stop
+Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter, volume confirmation, and ATR trailing stop
 - Long when price breaks above Donchian upper (20-period high) AND close > 1d EMA34 AND volume > 1.5x 20-period average
 - Short when price breaks below Donchian lower (20-period low) AND close < 1d EMA34 AND volume > 1.5x 20-period average
 - Exit when price reverses 2.5x ATR from extreme (trailing stop) OR Donchian breakout in opposite direction
@@ -8,7 +8,7 @@ Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter, volume confirma
 - Volume confirmation reduces false breakouts
 - ATR trailing stop manages risk without look-ahead
 - Designed for both bull and bear markets: trend filter prevents counter-trend entries
-- Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
+- Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
 """
 
 import numpy as np
@@ -128,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Trend_Volume_ATRStop"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_Trend_Volume_ATRStop"
+timeframe = "12h"
 leverage = 1.0
