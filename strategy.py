@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-- Donchian breakout captures strong momentum moves in both bull and bear markets
-- 1d EMA50 ensures trades align with the dominant daily trend (avoid counter-trend)
-- Volume > 1.5x 20-period average confirms breakout validity
-- Discrete position size 0.25 limits drawdown during crashes
-- Target: 12-25 trades/year on 12h timeframe (50-100 total over 4 years)
-- Uses fewer, tighter conditions to avoid overtrading and fee drag
+Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+- Donchian(20) breakout captures medium-term trends on daily chart
+- Breakout above upper band with volume > 1.5x average signals bullish momentum
+- Breakdown below lower band with volume > 1.5x average signals bearish momentum
+- 1w EMA50 ensures trades align with weekly trend (avoid counter-trend in choppy markets)
+- Discrete position size 0.25 to minimize drawdown during crashes like 2022
+- Target: 15-25 trades/year on 1d timeframe (60-100 total over 4 years)
+- Optimized for BTC/ETH performance in both bull and bear regimes via 1w trend filter
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,35 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) using prior bar's data (no look-ahead)
-    high_shifted = np.roll(high, 1)
-    low_shifted = np.roll(low, 1)
-    high_shifted[0] = np.nan
-    low_shifted[0] = np.nan
-    
-    # 20-period rolling max/min on shifted data
-    high_roll = pd.Series(high_shifted).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low_shifted).rolling(window=20, min_periods=20).min().values
+    # Donchian(20) channels (using prior 20 bars, no look-ahead)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1w data for EMA50 trend filter (weekly timeframe for stronger trend)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50)  # Donchian, volume MA, 1d EMA
+    start_idx = max(20, 50)  # Donchian(20), weekly EMA50
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,24 +56,24 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Close > upper Donchian AND price above 1d EMA50 AND volume confirmation
-            if close[i] > high_roll[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm:
+            # Long: Close > upper Donchian AND price above 1w EMA50 AND volume confirmation
+            if close[i] > high_roll[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < lower Donchian AND price below 1d EMA50 AND volume confirmation
-            elif close[i] < low_roll[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm:
+            # Short: Close < lower Donchian AND price below 1w EMA50 AND volume confirmation
+            elif close[i] < low_roll[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < lower Donchian OR price crosses below 1d EMA50
-            if close[i] < low_roll[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: Close < lower Donchian OR price crosses below 1w EMA50
+            if close[i] < low_roll[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > upper Donchian OR price crosses above 1d EMA50
-            if close[i] > high_roll[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: Close > upper Donchian OR price crosses above 1w EMA50
+            if close[i] > high_roll[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -86,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wEMA50_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
