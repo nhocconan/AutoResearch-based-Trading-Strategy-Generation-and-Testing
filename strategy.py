@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla Pivot R3/S3 Breakout with 1w EMA50 Trend Filter and Volume Spike
-- Uses Camarilla pivot levels (R3/S3) from 4h for high-probability breakout signals
+Hypothesis: 1d Donchian(20) Breakout with 1w EMA50 Trend Filter and Volume Spike
+- Uses Donchian(20) from 1d for breakout signals
 - 1w EMA50 defines long-term trend: only long when price > EMA50, short when price < EMA50
-- Volume confirmation (> 1.5x 20-period average) filters weak breakouts
-- Designed for 4h timeframe targeting 30-60 trades/year (120-240 over 4 years)
+- Volume confirmation (> 2.0x 20-period average) filters weak breakouts
+- Designed for 1d timeframe targeting 20-40 trades/year (80-160 over 4 years)
 - Works in both bull and bear markets by following the 1w EMA50 trend filter
 """
 
@@ -31,14 +31,14 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: > 1.5x 20-period average
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # need 1w EMA50, Camarilla
+    start_idx = max(50, 20)  # need 1w EMA50, Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -48,50 +48,42 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Calculate Camarilla pivot levels (R3, S3) on 4h data up to previous bar
-        if i >= 1:
-            # Use previous bar's OHLC to calculate today's pivot levels (avoid look-ahead)
-            prev_high = high[i-1]
-            prev_low = low[i-1]
-            prev_close = close[i-1]
-            
-            pivot = (prev_high + prev_low + prev_close) / 3
-            range_val = prev_high - prev_low
-            
-            # Camarilla levels
-            r3 = pivot + (range_val * 1.1 / 4)  # R3 = pivot + 1.1*(H-L)/4
-            s3 = pivot - (range_val * 1.1 / 4)  # S3 = pivot - 1.1*(H-L)/4
+        # Calculate Donchian(20) on 1d data up to current bar
+        if i >= 20:
+            donchian_high = np.max(high[i-20:i])
+            donchian_low = np.min(low[i-20:i])
         else:
-            # Not enough data for Camarilla yet
+            # Not enough data for Donchian yet
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND above 1w EMA50 AND volume spike
-            if (close[i] > r3 and 
+            # Long: price breaks above Donchian high AND above 1w EMA50 AND volume spike
+            if (close[i] > donchian_high and 
                 close[i] > ema_50_1w_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i]):
+                volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND below 1w EMA50 AND volume spike
-            elif (close[i] < s3 and 
+            # Short: price breaks below Donchian low AND below 1w EMA50 AND volume spike
+            elif (close[i] < donchian_low and 
                   close[i] < ema_50_1w_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i]):
+                  volume[i] > 2.0 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to pivot point OR crosses 1w EMA50
+            # Exit: price returns to Donchian midpoint OR crosses 1w EMA50
             exit_signal = False
+            donchian_mid = (donchian_high + donchian_low) / 2
             
             if position == 1:
-                # Exit long when price < pivot OR < 1w EMA50
-                if close[i] < pivot or close[i] < ema_50_1w_aligned[i]:
+                # Exit long when price < Donchian midpoint OR < 1w EMA50
+                if close[i] < donchian_mid or close[i] < ema_50_1w_aligned[i]:
                     exit_signal = True
             elif position == -1:
-                # Exit short when price > pivot OR > 1w EMA50
-                if close[i] > pivot or close[i] > ema_50_1w_aligned[i]:
+                # Exit short when price > Donchian midpoint OR > 1w EMA50
+                if close[i] > donchian_mid or close[i] > ema_50_1w_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -102,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
