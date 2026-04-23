@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour volume-weighted average price (VWAP) deviation with 1-day trend filter.
-Long when price closes below VWAP by 1.5x ATR, 1-day ADX > 25 (trending), and volume > 1.3x average.
-Short when price closes above VWAP by 1.5x ATR, 1-day ADX > 25, and volume > 1.3x average.
-Exit when price returns to VWAP or ADX < 20.
-Designed for low trade frequency (~15-30/year) to capture mean reversion in trending markets.
-Works in both bull and bear markets by requiring trend confirmation (ADX > 25) for VWAP mean reversion.
+Hypothesis: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation.
+Long when price breaks above Donchian(20) high, 12-hour EMA(50) is rising, and volume > 1.5x average.
+Short when price breaks below Donchian(20) low, 12-hour EMA(50) is falling, and volume > 1.5x average.
+Exit when price returns to Donchian midpoint or trend reverses.
+Designed for low trade frequency (~20-40/year) to capture breakouts in trending markets.
+Works in both bull and bear markets by requiring 12-hour trend confirmation.
 """
 
 import numpy as np
@@ -22,75 +22,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ADX - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate Donchian channels (20-period) on 4h
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    # Calculate 1-day ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
-    
-    # Directional Indicators
-    plus_di = 100 * dm_plus14 / tr14
-    minus_di = 100 * dm_minus14 / tr14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
-    adx_values = adx.values
-    
-    # Calculate VWAP and ATR on 12h timeframe - ONCE before loop
+    # Load 12-hour data for EMA trend - ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     volume_12h = df_12h['volume'].values
     
-    # Typical Price
-    tp_12h = (high_12h + low_12h + close_12h) / 3.0
+    # EMA(50) on 12h
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # VWAP (cumulative TP * volume / cumulative volume)
-    cum_vol = np.cumsum(volume_12h)
-    cum_tpv = np.cumsum(tp_12h * volume_12h)
-    vwap_12h = cum_tpv / cum_vol
-    
-    # ATR (14-period) on 12h
-    tr1_12h = high_12h - low_12h
-    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    tr_12h[0] = tr1_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    # Volume average (20-period) on 12h
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     # Align HTF indicators to lower timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    vwap_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
-    atr_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     # Volume average (20-period) on lower timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -98,31 +51,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(vwap_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
-        vwap_val = vwap_aligned[i]
-        atr_val = atr_aligned[i]
+        donch_high_val = donch_high[i]
+        donch_low_val = donch_low[i]
+        donch_mid_val = donch_mid[i]
+        ema_50_val = ema_50_aligned[i]
+        vol_ma_12h_val = vol_ma_12h_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
         close_val = close[i]
         
         if position == 0:
-            # Long: Price below VWAP by 1.5x ATR, strong trend (ADX > 25), volume confirmation
-            if (close_val < vwap_val - 1.5 * atr_val and
-                adx_val > 25 and vol_current > 1.3 * vol_ma_val):
+            # Long: Break above Donchian high, rising EMA, volume confirmation
+            if (close_val > donch_high_val and
+                ema_50_val > ema_50_aligned[i-1] and  # EMA rising
+                vol_current > 1.5 * vol_ma_12h_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price above VWAP by 1.5x ATR, strong trend (ADX > 25), volume confirmation
-            elif (close_val > vwap_val + 1.5 * atr_val and
-                  adx_val > 25 and vol_current > 1.3 * vol_ma_val):
+            # Short: Break below Donchian low, falling EMA, volume confirmation
+            elif (close_val < donch_low_val and
+                  ema_50_val < ema_50_aligned[i-1] and  # EMA falling
+                  vol_current > 1.5 * vol_ma_12h_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -130,12 +88,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price returns to VWAP OR trend weakening (ADX < 20)
-                if close_val >= vwap_val or adx_val < 20:
+                # Exit long: Price returns to midpoint OR EMA starts falling
+                if close_val <= donch_mid_val or ema_50_val < ema_50_aligned[i-1]:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price returns to VWAP OR trend weakening (ADX < 20)
-                if close_val <= vwap_val or adx_val < 20:
+                # Exit short: Price returns to midpoint OR EMA starts rising
+                if close_val >= donch_mid_val or ema_50_val > ema_50_aligned[i-1]:
                     exit_signal = True
             
             if exit_signal:
@@ -146,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_VWAP_Dev_1dADX_Volume"
-timeframe = "12h"
+name = "4H_Donchian20_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
