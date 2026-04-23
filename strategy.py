@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h strategy using 1d Elder Ray (Bull/Bear Power) + 1w ADX regime filter + volume confirmation.
-Long when: Bull Power > 0, ADX > 25 (trending), and volume > 1.5x 20-period average.
-Short when: Bear Power < 0, ADX > 25 (trending), and volume > 1.5x 20-period average.
-Exit when Elder Power reverses sign or volume drops below average.
-Uses discrete position sizing (0.25) to limit drawdown in bear markets (2022-like).
-Designed for 6h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
-Works in both bull and bear markets by requiring trending regime (ADX>25) and volume confirmation to avoid whipsaws.
-1d Elder Ray provides institutional buying/selling pressure, while 1w ADX ensures we only trade strong trends.
+Hypothesis: 12h strategy using 1w Donchian(20) breakout with volume confirmation and ATR stoploss.
+Long when price breaks above 1w Donchian upper band AND volume > 1.5x 20-period average.
+Short when price breaks below 1w Donchian lower band AND volume > 1.5x 20-period average.
+Exit when price retouches 1w Donchian middle band or ATR stoploss hit (2.5*ATR).
+Uses discrete position sizing (0.25) to balance return and drawdown.
+Designed for 12h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
+Works in both bull and bear markets by using volume confirmation to filter false breakouts and ATR stops to manage risk.
+1w Donchian levels provide stronger institutional support/resistance from higher timeframe.
 """
 
 import numpy as np
@@ -24,118 +24,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # EMA13 on 1d close
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = high_1d - ema13_1d  # Bull Power: High - EMA13
-    bear_power_1d = low_1d - ema13_1d   # Bear Power: Low - EMA13
-    
-    # Align 1d Elder Ray to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Calculate 1w ADX for regime filter
+    # Calculate 1w Donchian levels
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1w[0] = tr1[0]
+    # Donchian channels (20-period)
+    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
-    # +DI and -DI
-    plus_dm = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Align Donchian levels to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_1w, donchian_middle)
     
-    # Smoothed TR, +DM, -DM (period=14)
-    tr_ma = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm_ma = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_ma = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_ma / tr_ma
-    minus_di = 100 * minus_dm_ma / tr_ma
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1w ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume average (20-period) on 6h timeframe
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR(14) for stoploss calculation
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14, 13)
+    start_idx = max(20, 14)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bull_power = bull_power_aligned[i]
-        bear_power = bear_power_aligned[i]
-        adx_val = adx_aligned[i]
+        price = close[i]
         vol_ma_val = vol_ma[i]
+        atr_val = atr[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
+        middle = donchian_middle_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0, ADX > 25 (trending), volume spike
-            if (bull_power > 0 and adx_val > 25 and volume[i] > 1.5 * vol_ma_val):
+            # Long: Price breaks above 1w Donchian upper band AND volume spike
+            if (price > upper and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0, ADX > 25 (trending), volume spike
-            elif (bear_power < 0 and adx_val > 25 and volume[i] > 1.5 * vol_ma_val):
+                entry_price = price
+            # Short: Price breaks below 1w Donchian lower band AND volume spike
+            elif (price < lower and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
+                entry_price = price
         else:
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Elder Power reverses sign
-            if position == 1 and bull_power <= 0:
+            # Primary exit: Price retouches 1w Donchian middle band
+            if position == 1 and price <= middle:
                 exit_signal = True
-            elif position == -1 and bear_power >= 0:
+            elif position == -1 and price >= middle:
                 exit_signal = True
             
-            # Secondary exit: Volume drops below average (loss of momentum)
-            elif volume[i] < vol_ma_val:
+            # ATR-based stoploss: 2.5 * ATR from entry
+            if position == 1 and price < entry_price - 2.5 * atr_val:
+                exit_signal = True
+            elif position == -1 and price > entry_price + 2.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "6H_ElderRay_1dADX_Regime_VolumeConfirmation"
-timeframe = "6h"
+name = "12H_Donchian20_VolumeConfirmation_ATRStop"
+timeframe = "12h"
 leverage = 1.0
