@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day Williams %R mean reversion with 1-week trend filter and volume confirmation.
-Long when Williams %R(14) < -80 (oversold), 1-week ADX > 25 (strong trend), and volume > 1.3x average.
-Short when Williams %R(14) > -20 (overbought), 1-week ADX > 25, and volume > 1.3x average.
-Exit when Williams %R returns to -50 (mean reversion) or trend weakens (ADX < 20).
-Designed for low trade frequency (~10-25/year) to capture mean reversion in trending markets.
-Works in both bull and bear markets by requiring trend confirmation (ADX > 25) for mean-reversion entries.
+Hypothesis: 6h Elder Ray Index with 12h ADX trend filter and volume confirmation.
+Long when Bull Power > 0 and Bear Power < 0 (bullish momentum), 12h ADX > 20 (trending market),
+and volume > 1.2x average. Short when Bear Power > 0 and Bull Power < 0 (bearish momentum),
+12h ADX > 20, and volume > 1.2x average. Exit when momentum diverges (Bull Power <= 0 for long,
+Bear Power <= 0 for short) or trend weakens (ADX < 15). Designed for low trade frequency
+(~15-30/year) to capture momentum moves in trending markets while avoiding whipsaws in ranges.
+Works in both bull and bear markets by requiring trend confirmation (ADX > 20) for momentum entries.
 """
 
 import numpy as np
@@ -22,66 +23,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-week data for ADX - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data for EMA13 (Elder Ray) and ADX - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1-week ADX (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # Calculate EMA13 for 12h (Elder Ray base)
+    ema13 = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_12h - ema13
+    bear_power = low_12h - ema13
+    
+    # Calculate 12h ADX (14-period)
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h),
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)),
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
-    # Smoothed values
     tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
     dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
     dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
     
-    # Directional Indicators
     plus_di = 100 * dm_plus14 / tr14
     minus_di = 100 * dm_minus14 / tr14
     
-    # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
     adx_values = adx.values
     
-    # Calculate Williams %R on 1-day timeframe - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Align HTF indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_values)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Williams %R (14-period): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Align HTF indicators to lower timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_values)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Volume average (20-period) on lower timeframe
+    # Volume average (20-period) on 6h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -89,28 +77,28 @@ def generate_signals(prices):
     
     for i in range(30, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
         adx_val = adx_aligned[i]
-        williams_r_val = williams_r_aligned[i]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
-        close_val = close[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80), strong trend (ADX > 25), volume confirmation
-            if (williams_r_val < -80 and
-                adx_val > 25 and vol_current > 1.3 * vol_ma_val):
+            # Long: Bull Power > 0 and Bear Power < 0 (bullish momentum), ADX > 20 (trend), volume confirmation
+            if (bull_val > 0 and bear_val < 0 and
+                adx_val > 20 and vol_current > 1.2 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20), strong trend (ADX > 25), volume confirmation
-            elif (williams_r_val > -20 and
-                  adx_val > 25 and vol_current > 1.3 * vol_ma_val):
+            # Short: Bear Power > 0 and Bull Power < 0 (bearish momentum), ADX > 20, volume confirmation
+            elif (bear_val > 0 and bull_val < 0 and
+                  adx_val > 20 and vol_current > 1.2 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -118,12 +106,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R returns to -50 (mean reversion) OR trend weakening (ADX < 20)
-                if williams_r_val >= -50 or adx_val < 20:
+                # Exit long: Bull Power <= 0 (momentum fading) OR ADX < 15 (trend weakening)
+                if bull_val <= 0 or adx_val < 15:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R returns to -50 (mean reversion) OR trend weakening (ADX < 20)
-                if williams_r_val <= -50 or adx_val < 20:
+                # Exit short: Bear Power <= 0 (momentum fading) OR ADX < 15
+                if bear_val <= 0 or adx_val < 15:
                     exit_signal = True
             
             if exit_signal:
@@ -134,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1D_WilliamsR_1wADX_Volume_MeanReversion"
-timeframe = "1d"
+name = "6H_ElderRay_12hADX_Volume_Momentum"
+timeframe = "6h"
 leverage = 1.0
