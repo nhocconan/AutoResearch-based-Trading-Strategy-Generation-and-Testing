@@ -1,9 +1,12 @@
-# 1. Hypothesis: 4-hour Donchian breakout with 1-day ATR volatility filter and 1-week trend filter
-# Long when price breaks above 4h Donchian(20) high AND 1d ATR volatility is low (trending regime) AND 1w EMA(50) is rising
-# Short when price breaks below 4h Donchian(20) low AND 1d ATR volatility is low AND 1w EMA(50) is falling
-# Exit when price reverses back into the Donchian channel
-# Designed for 15-30 trades/year to minimize fee drag while capturing strong trends in any market regime
-# Uses volatility filter to avoid false breakouts in choppy markets and trend filter to align with higher timeframe momentum
+#!/usr/bin/env python3
+"""
+Hypothesis: 1-day Bollinger Band squeeze breakout with 1-week volume confirmation and ADX trend filter.
+Long when price breaks above upper BB during low volatility (BBW < 50th percentile) and weekly volume > 1.5x average.
+Short when price breaks below lower BB under same conditions.
+Exit when price returns to middle BB or volatility expands (BBW > 80th percentile).
+Designed for low-frequency, high-conviction trades (~10-25/year) to capture explosive moves after consolidation.
+Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
+"""
 
 import numpy as np
 import pandas as pd
@@ -17,87 +20,101 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1-day data for ATR and 1-week data for EMA - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 1-day Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean()
+    dev = close_s.rolling(window=20, min_periods=20).std()
+    upper = basis + 2 * dev
+    lower = basis - 2 * dev
+    
+    # Bollinger Band Width for squeeze detection
+    bbw = (upper - lower) / basis
+    bbw_percentile = pd.Series(bbw).rolling(window=50, min_periods=50).rank(pct=True) * 100
+    
+    # Weekly volume average for confirmation
     df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 30 or len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1-day ATR (14-period) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    weekly_volume = df_1w['volume'].values
+    weekly_volume_ma = pd.Series(weekly_volume).rolling(window=10, min_periods=10).mean()
+    weekly_volume_ratio = weekly_volume / weekly_volume_ma
+    weekly_volume_ratio_aligned = align_htf_to_ltf(prices, df_1w, weekly_volume_ratio.values)
+    
+    # ADX filter for trend strength (weekly)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
-    # ATR calculation
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    atr_values = atr.values
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate 1-week EMA (50-period) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean()
-    ema_values = ema_50.values
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
     
-    # Align HTF indicators to 4h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_values)
-    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_values)
+    # Directional Indicators
+    plus_di = 100 * dm_plus14 / tr14
+    minus_di = 100 * dm_minus14 / tr14
     
-    # Calculate 4-hour Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    highest_high_values = highest_high.values
-    lowest_low_values = lowest_low.values
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    adx_values = adx.values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(atr_aligned[i]) or np.isnan(ema_aligned[i]) or 
-            np.isnan(highest_high_values[i]) or np.isnan(lowest_low_values[i])):
+        if (np.isnan(bbw_percentile.iloc[i]) or np.isnan(upper.iloc[i]) or 
+            np.isnan(lower.iloc[i]) or np.isnan(basis.iloc[i]) or
+            np.isnan(weekly_volume_ratio_aligned[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        atr_val = atr_aligned[i]
-        ema_val = ema_aligned[i]
-        donchian_high = highest_high_values[i]
-        donchian_low = lowest_low_values[i]
-        price = close[i]
+        bbw_p = bbw_percentile.iloc[i]
+        vol_ratio = weekly_volume_ratio_aligned[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian high + low volatility (ATR < 1.5 * 20-period ATR mean) + rising weekly EMA
-            if (price > donchian_high and 
-                atr_val < 1.5 * np.nanmean(atr_aligned[max(0, i-20):i]) and
-                ema_val > ema_aligned[i-1]):
+            # Long: BB squeeze (low volatility) + weekly volume surge + ADX strength + breakout above upper BB
+            if bbw_p < 50 and vol_ratio > 1.5 and adx_val > 20 and close[i] > upper.iloc[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + low volatility + falling weekly EMA
-            elif (price < donchian_low and 
-                  atr_val < 1.5 * np.nanmean(atr_aligned[max(0, i-20):i]) and
-                  ema_val < ema_aligned[i-1]):
+            # Short: BB squeeze + weekly volume surge + ADX strength + breakdown below lower BB
+            elif bbw_p < 50 and vol_ratio > 1.5 and adx_val > 20 and close[i] < lower.iloc[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price reverses back into the Donchian channel
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price crosses back below Donchian high
-                if price < donchian_high:
+                # Exit long: return to middle BB or volatility expansion (high BBW)
+                if close[i] < basis.iloc[i] or bbw_p > 80:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price crosses back above Donchian low
-                if price > donchian_low:
+                # Exit short: return to middle BB or volatility expansion
+                if close[i] > basis.iloc[i] or bbw_p > 80:
                     exit_signal = True
             
             if exit_signal:
@@ -108,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian_ATR_VolatilityFilter_1wEMA_Trend"
-timeframe = "4h"
+name = "1D_BB_Squeeze_Volume_ADX_Breakout"
+timeframe = "1d"
 leverage = 1.0
