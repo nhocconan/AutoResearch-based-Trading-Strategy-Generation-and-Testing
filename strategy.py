@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 Breakout with 12h EMA50 Trend Filter and Volume Confirmation.
-- Camarilla pivots calculated from previous 12h bar (HLC of completed 12h bar)
-- Long: Close breaks above R3 with volume > 1.5x 20-period average AND price > 12h EMA50
-- Short: Close breaks below S3 with volume > 1.5x 20-period average AND price < 12h EMA50
-- Exit: Close crosses back below R3 (for longs) or above S3 (for shorts) OR EMA50 trend fails
-- Uses Camarilla for intraday support/resistance, EMA50 for HTF trend, volume for confirmation
-- Target: 75-200 total trades over 4 years (19-50/year) on 6h timeframe
-- Discrete position sizing: ±0.25 to minimize fee churn
-- Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
+Hypothesis: 4h Williams %R with 1d Bollinger Band squeeze and volume spike.
+- Williams %R(14): Oversold < -80, Overbought > -20
+- Bollinger Band squeeze (1d): BB Width < 20th percentile (low volatility regime)
+- Volume spike: Current volume > 2.0x 20-period average
+- Long: Williams %R crosses above -80 from below + BB squeeze + volume spike
+- Short: Williams %R crosses below -20 from above + BB squeeze + volume spike
+- Exit: Williams %R crosses opposite threshold (-20 for long, -80 for short) OR BB squeeze ends
+- Uses Williams %R for mean reversion in squeeze regimes, effective in both bull/bear markets
+- Target: 50-120 total trades over 4 years (12-30/year) to avoid fee drag
+- Discrete position sizing: ±0.25
 """
 
 import numpy as np
@@ -25,77 +26,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: > 1.5x 20-period average
+    # Williams %R (14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d Bollinger Bands for squeeze detection
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate Camarilla levels from previous completed 12h bar
-    # Typical price = (H+L+C)/3
-    typical_price_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    tp = typical_price_12h.values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # 1d Bollinger Bands (20, 2)
+    bb_ma = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_ma + 2 * bb_std
+    bb_lower = bb_ma - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_ma  # Normalized width
     
-    # Camarilla width = (High - Low) * 1.1 / 12
-    camarilla_width = (high_12h - low_12h) * 1.1 / 12
+    # BB squeeze: width < 20th percentile (low volatility regime)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20).values
+    bb_squeeze = bb_width < bb_width_percentile
     
-    # R3 = TP + camarilla_width * 1.1
-    # S3 = TP - camarilla_width * 1.1
-    r3 = tp + camarilla_width * 1.1
-    s3 = tp - camarilla_width * 1.1
-    
-    # Align Camarilla levels to 6h timeframe (using previous 12h bar's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    # Align 1d indicators to 4h
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze)
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 50 for EMA50, 20 for volume MA
+    start_idx = max(34, 20, 14, 50)  # Need sufficient lookback
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_ma[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i]) or
+            np.isnan(bb_squeeze_aligned[i]) or
+            np.isnan(bb_width_aligned[i]) or
+            np.isnan(bb_width_percentile_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (> 2.0x average)
+        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        
+        # Williams %R signals
+        wr_cross_above_80 = (williams_r[i] > -80) and (williams_r[i-1] <= -80) if i > 0 else False
+        wr_cross_below_20 = (williams_r[i] < -20) and (williams_r[i-1] >= -20) if i > 0 else False
         
         if position == 0:
-            # Long: Close breaks above R3 + volume confirmation + price > 12h EMA50
-            if (close[i] > r3_aligned[i] and 
-                volume_confirm and 
-                close[i] > ema_50_12h_aligned[i]):
+            # Long: Williams %R crosses above -80 + BB squeeze + volume spike
+            if wr_cross_above_80 and bb_squeeze_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 + volume confirmation + price < 12h EMA50
-            elif (close[i] < s3_aligned[i] and 
-                  volume_confirm and 
-                  close[i] < ema_50_12h_aligned[i]):
+            # Short: Williams %R crosses below -20 + BB squeeze + volume spike
+            elif wr_cross_below_20 and bb_squeeze_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close crosses back below R3 OR price < 12h EMA50
-            if close[i] < r3_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: Williams %R crosses below -20 OR BB squeeze ends
+            if wr_cross_below_20 or not bb_squeeze_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close crosses back above S3 OR price > 12h EMA50
-            if close[i] > s3_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: Williams %R crosses above -80 OR BB squeeze ends
+            if wr_cross_above_80 or not bb_squeeze_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_12hEMA50_VolumeConfirm"
-timeframe = "6h"
+name = "4h_WilliamsR_BBSqueeze_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
