@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R Extreme + 1w EMA50 Trend + Volume Spike Confirmation
-- Williams %R(14) identifies overbought/oversold conditions (< -80 for long, > -20 for short)
-- 1w EMA(50) defines major trend direction (only long when price > EMA, short when price < EMA)
-- Volume confirmation (> 1.8x 20-period average) ensures breakout momentum
-- Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years)
-- Works in both bull and bear markets by trading with the 1w trend and mean-reverting extremes
-- Higher timeframe (1w) trend filter reduces whipsaw in sideways markets
+Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
+- Donchian channel (20-period high/low) from 12h timeframe for breakout signals
+- 1d ATR(14) normalized by price defines volatility regime: only trade when ATR/price > 0.02 (sufficient volatility)
+- Volume confirmation (> 1.5x 20-period average) ensures breakout has momentum
+- Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+- Works in both bull and bear markets by trading breakouts with volatility filter
+- ATR regime filter avoids choppy markets where breakouts fail
 """
 
 import numpy as np
@@ -23,58 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly EMA(50) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Calculate 12h Donchian channel (20-period)
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d ATR(14) for volatility regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams %R(14) on 6h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Set first TR to high-low (no previous close)
+    tr[0] = tr1[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: > 1.8x 20-period average
+    # Align 1d ATR to 12h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 14, 20)  # Weekly EMA, Williams %R, volume MA
+    start_idx = max(20, 14, 20)  # Donchian, ATR, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(high_ma[i]) or np.isnan(low_ma[i]) or
+            np.isnan(atr_14_aligned[i]) or np.isnan(vol_ma[i]) or
+            close[i] == 0):  # Avoid division by zero
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams %R conditions
-        oversold = williams_r[i] < -80  # Extreme oversold
-        overbought = williams_r[i] > -20  # Extreme overbought
+        # Volatility regime filter: ATR/price > 0.02 (sufficient volatility for breakouts)
+        vol_regime = (atr_14_aligned[i] / close[i]) > 0.02
         
-        # Trend filter: price > EMA for uptrend, price < EMA for downtrend
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Determine breakout conditions
+        price_above_donchian_high = close[i] > high_ma[i]
+        price_below_donchian_low = close[i] < low_ma[i]
         
         if position == 0:
-            # Long conditions: Williams %R oversold, uptrend, volume spike
-            long_signal = (oversold and 
-                          uptrend and
-                          volume[i] > 1.8 * vol_ma[i])
+            # Long conditions: price breaks above Donchian high, vol regime, volume spike
+            long_signal = (price_above_donchian_high and 
+                          vol_regime and
+                          volume[i] > 1.5 * vol_ma[i])
             
-            # Short conditions: Williams %R overbought, downtrend, volume spike
-            short_signal = (overbought and 
-                           downtrend and
-                           volume[i] > 1.8 * vol_ma[i])
+            # Short conditions: price breaks below Donchian low, vol regime, volume spike
+            short_signal = (price_below_donchian_low and 
+                           vol_regime and
+                           volume[i] > 1.5 * vol_ma[i])
             
             if long_signal:
                 signals[i] = 0.25
@@ -83,18 +92,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Williams %R returns to neutral zone or trend reversal
+            # Exit conditions: opposite Donchian breakout or volatility regime fails
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R rises above -50 (neutral) or trend turns down
-                if (williams_r[i] > -50 or 
-                    not uptrend):
+                # Exit long: price falls below Donchian low or vol regime fails
+                if (price_below_donchian_low or 
+                    not vol_regime):
                     exit_signal = True
             elif position == -1:
-                # Exit short: Williams %R falls below -50 (neutral) or trend turns up
-                if (williams_r[i] < -50 or 
-                    not downtrend):
+                # Exit short: price rises above Donchian high or vol regime fails
+                if (price_above_donchian_high or 
+                    not vol_regime):
                     exit_signal = True
             
             if exit_signal:
@@ -105,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_Extreme_1wEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dATR_VolumeRegime"
+timeframe = "12h"
 leverage = 1.0
