@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-Long when price breaks above Donchian upper band (20-period high) AND 1d EMA50 rising AND volume > 1.5x 20-period MA.
-Short when price breaks below Donchian lower band (20-period low) AND 1d EMA50 falling AND volume > 1.5x 20-period MA.
-Exit when price touches opposite Donchian band or 1d EMA50 reverses.
-Donchian provides clear structure, 1d EMA50 filters major trend, volume spike confirms momentum.
-Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Hypothesis: 6h Williams %R reversal with 1d Elder Ray regime filter and volume confirmation.
+Long when Williams %R < -80 (oversold) AND 1d Bull Power > 0 AND volume > 1.5x 20-period MA.
+Short when Williams %R > -20 (overbought) AND 1d Bear Power < 0 AND volume > 1.5x 20-period MA.
+Exit when Williams %R crosses above -50 (for long) or below -50 (for short).
+Williams %R identifies exhaustion points, Elder Ray confirms underlying bull/bear power on 1d,
+volume filter ensures momentum validity. Target: 75-150 total trades over 4 years (19-38/year) for 6h.
 """
 
 import numpy as np
@@ -22,18 +22,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate 1d EMA50 for trend filter (HTF)
+    # Calculate 1d Elder Bull Power and Bear Power (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 13:  # EMA13 needs min_periods
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # EMA13 of close
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d - ema_13_1d
+    bear_power = low_1d - ema_13_1d
+    
+    # Align to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Calculate volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,42 +54,32 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 20)  # Donchian, EMA50, volume MA
+    start_idx = max(14, 13, 20)  # Williams %R, Elder Power, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        ema_val = ema_50_aligned[i]
+        wr = williams_r[i]
+        bp = bull_power_aligned[i]
+        br = bear_power_aligned[i]
         vol_ma_val = vol_ma_20[i]
         
-        # Calculate EMA50 slope for trend direction (rising/falling)
-        if i >= start_idx + 1:
-            ema_prev = ema_50_aligned[i-1]
-            ema_rising = ema_val > ema_prev
-            ema_falling = ema_val < ema_prev
-        else:
-            ema_rising = False
-            ema_falling = False
-        
-        # Volume filter: volume > 1.5x 20-period MA
+        # Volume filter: 6h volume > 1.5x 20-period MA
         vol_filter = volume[i] > 1.5 * vol_ma_val
         
         if position == 0:
-            # Long: Break above Donchian upper AND EMA50 rising AND volume filter
-            if price > upper and ema_rising and vol_filter:
+            # Long: Williams %R oversold (< -80) AND Bull Power > 0 AND volume filter
+            if wr < -80 and bp > 0 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian lower AND EMA50 falling AND volume filter
-            elif price < lower and ema_falling and vol_filter:
+            # Short: Williams %R overbought (> -20) AND Bear Power < 0 AND volume filter
+            elif wr > -20 and br < 0 and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -85,12 +87,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price touches Donchian lower (opposite) OR EMA50 starts falling
-                if price < lower or (i >= start_idx + 1 and ema_val < ema_50_aligned[i-1]):
+                # Long exit: Williams %R crosses above -50
+                if wr > -50:
                     exit_signal = True
             elif position == -1:
-                # Short exit: price touches Donchian upper (opposite) OR EMA50 starts rising
-                if price > upper or (i >= start_idx + 1 and ema_val > ema_50_aligned[i-1]):
+                # Short exit: Williams %R crosses below -50
+                if wr < -50:
                     exit_signal = True
             
             if exit_signal:
@@ -101,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6H_WilliamsR_Reversal_1dElderRay_Power_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
