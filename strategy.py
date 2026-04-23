@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 1d Camarilla R1/S1 breakout with volume confirmation and ATR trailing stop.
-Long when price breaks above 1d Camarilla R1 AND volume > 1.5x 20-period average.
-Short when price breaks below 1d Camarilla S1 AND volume > 1.5x 20-period average.
-Exit when price retraces to 1d Camarilla midpoint (R1+S1)/2 or ATR trailing stop hit (2.0*ATR from highest/lowest since entry).
+Hypothesis: 4h strategy using 1d Camarilla R3/S3 breakout with volume confirmation and ATR trailing stop.
+Long when price breaks above 1d Camarilla R3 AND volume > 1.5x 20-period average.
+Short when price breaks below 1d Camarilla S3 AND volume > 1.5x 20-period average.
+Exit when price retraces to 1d Camarilla midpoint (R3+S3)/2 or ATR trailing stop hit (2.0*ATR from highest/lowest since entry).
 Uses discrete position sizing (0.25) to control drawdown and fee churn.
 Designed for 4h timeframe to target 19-50 trades/year per symbol (75-200 total over 4 years).
 Works in both bull and bear markets by using volume confirmation to filter false breakouts and ATR stops to manage risk.
@@ -36,13 +36,13 @@ def generate_signals(prices):
     # Camarilla pivot calculation (based on previous 1d bar)
     pivot = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.1 / 2)  # R1 level
-    s1 = pivot - (range_1d * 1.1 / 2)  # S1 level
-    mid = (r1 + s1) / 2.0  # Camarilla midpoint
+    r3 = pivot + (range_1d * 1.1 / 4)  # R3 level
+    s3 = pivot - (range_1d * 1.1 / 4)  # S3 level
+    mid = (r3 + s3) / 2.0  # Camarilla midpoint
     
     # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     mid_aligned = align_htf_to_ltf(prices, df_1d, mid)
     
     # Volume average (20-period) on 4h timeframe
@@ -67,7 +67,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(mid_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -77,19 +77,19 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         mid_val = mid_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 1d Camarilla R1 AND volume spike
-            if (price > r1_val and volume[i] > 1.5 * vol_ma_val):
+            # Long: Price breaks above 1d Camarilla R3 AND volume spike
+            if (price > r3_val and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
                 highest_since_entry = price
-            # Short: Price breaks below 1d Camarilla S1 AND volume spike
-            elif (price < s1_val and volume[i] > 1.5 * vol_ma_val):
+            # Short: Price breaks below 1d Camarilla S3 AND volume spike
+            elif (price < s3_val and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1S1_Breakout_VolumeConfirmation_ATRTrailingStop"
+name = "4H_Camarilla_R3S3_Breakout_VolumeConfirmation_ATRTrailingStop"
 timeframe = "4h"
 leverage = 1.0
