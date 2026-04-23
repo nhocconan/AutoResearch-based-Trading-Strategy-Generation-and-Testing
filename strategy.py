@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-Long when price breaks above Donchian upper band AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
-Short when price breaks below Donchian lower band AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
+Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+Long when price breaks above Donchian upper band AND 1w EMA34 is rising AND volume > 2.0x 20-period average.
+Short when price breaks below Donchian lower band AND 1w EMA34 is falling AND volume > 2.0x 20-period average.
 Exit when price touches the opposite Donchian band or reverses EMA34 direction.
-Uses 1d HTF for EMA34 trend (avoids whipsaws in ranging markets). Volume spike filter reduces false breakouts.
-Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25.
+Uses 1w HTF for EMA34 trend (avoids whipsaws in ranging markets). Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -22,16 +21,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1w EMA34 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period)
     lookback = 20
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
@@ -103,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "1D_Donchian20_Breakout_1wEMA34_Trend_VolumeConfirmation"
+timeframe = "1d"
 leverage = 1.0
