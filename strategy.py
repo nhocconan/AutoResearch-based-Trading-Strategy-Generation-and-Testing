@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h strategy using 1d Camarilla R1/S1 breakout with volume confirmation and ATR stoploss.
-Long when price breaks above 1d Camarilla R1 AND volume > 1.5x 20-period average.
-Short when price breaks below 1d Camarilla S1 AND volume > 1.5x 20-period average.
-Exit when price retraces to 1d Camarilla pivot point or ATR stoploss hit (2.0*ATR).
-Uses discrete position sizing (0.25) to balance return and drawdown.
-Designed for 4h timeframe to target 19-50 trades/year per symbol (75-200 total over 4 years).
-Works in both bull and bear markets by using volume confirmation to filter false breakouts and ATR stops to manage risk.
-1d Camarilla R1/S1 levels provide intraday support/resistance from higher timeframe.
+Hypothesis: 1d strategy using 1w Donchian channel breakout with volume confirmation and ATR stoploss.
+Long when price breaks above 1w Donchian upper band (20-period high) AND volume > 1.5x 20-period average.
+Short when price breaks below 1w Donchian lower band (20-period low) AND volume > 1.5x 20-period average.
+Exit when price retouches the 1w Donchian middle band (20-period average of high/low) or ATR stoploss hit (2.0*ATR).
+Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown.
+Designed for 1d timeframe to target 7-25 trades/year per symbol (30-100 total over 4 years).
+Works in both bull and bear markets by requiring volume confirmation to filter false breakouts and using ATR stops to manage risk.
+1w Donchian channels provide strong structural support/resistance from higher timeframe.
 """
 
 import numpy as np
@@ -24,26 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Calculate 1w Donchian channels (20-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla levels (based on previous day's OHLC)
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Donchian channels: upper = 20-period high, lower = 20-period low, middle = average
+    upper_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lower_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    middle_1w = (upper_1w + lower_1w) / 2.0
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # Align Donchian channels to 1d timeframe
+    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    middle_1w_aligned = align_htf_to_ltf(prices, df_1w, middle_1w)
     
-    # Volume average (20-period) on 4h timeframe
+    # Volume average (20-period) on 1d timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss calculation
@@ -63,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or 
+            np.isnan(middle_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,18 +73,18 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        pivot = camarilla_pivot_aligned[i]
+        upper = upper_1w_aligned[i]
+        lower = lower_1w_aligned[i]
+        middle = middle_1w_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above 1d Camarilla R1 AND volume spike
-            if (price > r1 and volume[i] > 1.5 * vol_ma_val):
+            # Long: Price breaks above 1w Donchian upper band AND volume spike
+            if (price > upper and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price breaks below 1d Camarilla S1 AND volume spike
-            elif (price < s1 and volume[i] > 1.5 * vol_ma_val):
+            # Short: Price breaks below 1w Donchian lower band AND volume spike
+            elif (price < lower and volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -92,10 +92,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retraces to 1d Camarilla pivot point
-            if position == 1 and price <= pivot:
+            # Primary exit: Price retouches 1w Donchian middle band
+            if position == 1 and price <= middle:
                 exit_signal = True
-            elif position == -1 and price >= pivot:
+            elif position == -1 and price >= middle:
                 exit_signal = True
             
             # ATR-based stoploss: 2.0 * ATR from entry
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Camarilla_R1S1_VolumeConfirmation_ATRStop"
-timeframe = "4h"
+name = "1D_Donchian20_VolumeConfirmation_ATRStop"
+timeframe = "1d"
 leverage = 1.0
