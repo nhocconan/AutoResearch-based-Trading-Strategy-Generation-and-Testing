@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
 Long when price breaks above Camarilla R3 AND 1d EMA34 uptrend AND volume > 2.0x 20-period average.
 Short when price breaks below Camarilla S3 AND 1d EMA34 downtrend AND volume > 2.0x 20-period average.
-Exit when price retouches Camarilla pivot point (PP) or ATR stoploss hit (2.0*ATR).
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-37 trades/year per symbol.
-Camarilla levels provide precise support/resistance, while 1d EMA34 ensures alignment with higher-timeframe trend.
+Exit when price retouches Camarilla pivot point (PP) or ATR stoploss hit (1.5*ATR).
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 20-40 trades/year per symbol.
+Camarilla levels provide precise intraday support/resistance, while 1d EMA34 ensures alignment with higher-timeframe trend.
 Volume confirmation filters weak breakouts. Designed to work in both trending and ranging markets.
 """
 
@@ -23,7 +23,8 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day (1d timeframe)
+    # Calculate Camarilla pivot levels from previous day
+    # Need daily high, low, close - using 1d timeframe
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
@@ -33,12 +34,14 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels: based on previous day's range
+    # R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low), etc.
+    # But we use R3 and S3 (inner levels) for breakout
     camarilla_range = high_1d - low_1d
     camarilla_pp = (high_1d + low_1d + close_1d) / 3.0  # Pivot Point
     camarilla_r3 = close_1d + 1.125 * camarilla_range
     camarilla_s3 = close_1d - 1.125 * camarilla_range
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
@@ -46,7 +49,7 @@ def generate_signals(prices):
     # Load 1d data for EMA34 trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF EMA34 to 12h timeframe
+    # Align HTF EMA34 to 4h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume average (20-period) on primary timeframe
@@ -65,7 +68,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 34, 20, 14)  # Ensure warmup for EMA34(34), Vol MA(20), ATR(14)
+    start_idx = max(100, 50, 20, 14, 34)  # Ensure warmup for EMA34(34), Vol MA(20), ATR(14)
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -110,10 +113,10 @@ def generate_signals(prices):
             elif position == -1 and price >= pp:
                 exit_signal = True
             
-            # ATR-based stoploss: 2.0 * ATR from entry
-            if position == 1 and price < entry_price - 2.0 * atr_val:
+            # ATR-based stoploss: 1.5 * ATR from entry
+            if position == 1 and price < entry_price - 1.5 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > entry_price + 2.0 * atr_val:
+            elif position == -1 and price > entry_price + 1.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -125,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
