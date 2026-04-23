@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h strategy using 1d Williams Alligator with Elder Ray power and volume confirmation.
-Long when price > Alligator Jaw AND Bull Power > 0 AND Bear Power < 0 AND volume > 1.5x 20-period average.
-Short when price < Alligator Jaw AND Bear Power > 0 AND Bull Power < 0 AND volume > 1.5x 20-period average.
-Exit when price crosses Alligator Teeth or ATR stoploss hit (2.5*ATR).
+Hypothesis: 12h strategy using 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
+Long when price breaks above 1d Donchian upper band AND 1w EMA200 is rising AND volume > 1.5x 20-period average.
+Short when price breaks below 1d Donchian lower band AND 1w EMA200 is falling AND volume > 1.5x 20-period average.
+Exit when price retouches 1d Donchian middle band or ATR stoploss hit (2.0*ATR).
 Uses discrete position sizing (0.25) to minimize fee churn and control drawdown.
-Designed for 6h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
-Williams Alligator identifies trend via smoothed medians; Elder Ray measures bull/bear power behind the move.
-Volume confirmation filters weak breakouts. Works in both bull and bear markets by trading with the Alligator trend.
+Designed for 12h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
+Works in both bull and bear markets by trading with the 1w trend and using volume confirmation to filter false breakouts.
+1d Donchian provides clear structure; 1w EMA200 filters counter-trend moves in bear markets.
 """
 
 import numpy as np
@@ -28,44 +28,39 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Calculate 1d Williams Alligator
+    # Calculate 1d Donchian channels (20-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    median_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3) - all smoothed with SMMA
-    def smma(source, period):
-        result = np.full_like(source, np.nan, dtype=np.float64)
-        if len(source) < period:
-            return result
-        # First value is SMA
-        result[period-1] = np.mean(source[:period])
-        # Subsequent values: SMMA = (PREV * (N-1) + CURRENT) / N
-        for i in range(period, len(source)):
-            result[i] = (result[i-1] * (period-1) + source[i]) / period
-        return result
+    # Donchian channels
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
-    jaw = smma(median_1d, 13)
-    teeth = smma(median_1d, 8)
-    lips = smma(median_1d, 5)
+    # Align Donchian levels to 1d timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle)
     
-    # Align Alligator lines to 1h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Calculate 1w EMA200 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
     
-    # Calculate 1d Elder Ray Power
-    ema13_1d = pd.Series(median_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = df_1d['high'].values - ema13_1d
-    bear_power = df_1d['low'].values - ema13_1d
+    close_1w = df_1w['close'].values
+    ema_1w_200 = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_1w_200_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_200)
     
-    # Align Elder Ray to 1h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # EMA slope (rising/falling)
+    ema_slope = np.zeros_like(ema_1w_200_aligned)
+    ema_slope[1:] = ema_1w_200_aligned[1:] - ema_1w_200_aligned[:-1]
     
-    # Volume average (20-period) on 6h timeframe
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss calculation
@@ -81,13 +76,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 13, 20, 14)
+    start_idx = max(100, 20, 200, 20, 14, 1)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(ema_1w_200_aligned[i]) or 
+            np.isnan(ema_slope[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -103,24 +98,22 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        jaw = jaw_aligned[i]
-        teeth = teeth_aligned[i]
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
+        middle = donchian_middle_aligned[i]
+        ema_slope_val = ema_slope[i]
         
         if position == 0:
-            # Long: Price > Jaw AND Bull Power > 0 AND Bear Power < 0 AND volume spike
-            if (price > jaw and 
-                bull_power_val > 0 and 
-                bear_power_val < 0 and 
+            # Long: Price breaks above Donchian upper AND 1w EMA200 rising AND volume spike
+            if (price > upper and 
+                ema_slope_val > 0 and 
                 volume[i] > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price < Jaw AND Bear Power > 0 AND Bull Power < 0 AND volume spike
-            elif (price < jaw and 
-                  bear_power_val > 0 and 
-                  bull_power_val < 0 and 
+            # Short: Price breaks below Donchian lower AND 1w EMA200 falling AND volume spike
+            elif (price < lower and 
+                  ema_slope_val < 0 and 
                   volume[i] > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
@@ -129,16 +122,16 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price crosses Alligator Teeth
-            if position == 1 and price < teeth:
+            # Primary exit: Price retouches Donchian middle band
+            if position == 1 and price <= middle:
                 exit_signal = True
-            elif position == -1 and price > teeth:
+            elif position == -1 and price >= middle:
                 exit_signal = True
             
-            # ATR-based stoploss: 2.5 * ATR from entry
-            if position == 1 and price < entry_price - 2.5 * atr_val:
+            # ATR-based stoploss: 2.0 * ATR from entry
+            if position == 1 and price < entry_price - 2.0 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > entry_price + 2.5 * atr_val:
+            elif position == -1 and price > entry_price + 2.0 * atr_val:
                 exit_signal = True
             
             if exit_signal:
@@ -150,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_WilliamsAlligator_ElderRay_VolumeConfirmation_ATRStop"
-timeframe = "6h"
+name = "12H_Donchian20_1wEMA200_Trend_VolumeConfirmation_ATRStop"
+timeframe = "12h"
 leverage = 1.0
