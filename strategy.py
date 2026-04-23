@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6H_Donchian20_WeeklyPivotDirection_VolumeFilter
-Hypothesis: Donchian(20) breakouts on 6h filtered by weekly pivot direction (from 1w) and volume confirmation.
-Long when price breaks above 6h Donchian upper band AND weekly pivot > previous weekly pivot (bullish bias) AND volume > 1.5x 20-period average.
-Short when price breaks below 6h Donchian lower band AND weekly pivot < previous weekly pivot (bearish bias) AND volume > 1.5x 20-period average.
-Exit when price touches the opposite Donchian band (lower for long, upper for short) or volume drops below average.
-Designed for moderate trade frequency (~20-40/year) to capture strong directional moves with institutional bias.
-Works in bull markets via breakouts and in bear markets via short breakdowns with weekly pivot filtering out counter-trend noise.
+Hypothesis: 12-hour Bollinger Band squeeze breakout with volume confirmation and 1-week trend filter.
+Long when price breaks above upper BB after squeeze (BB width < 20th percentile) with volume > 1.5x average and weekly close > weekly EMA20.
+Short when price breaks below lower BB after squeeze with volume > 1.5x average and weekly close < weekly EMA20.
+Exit when price returns to middle BB or volatility expands (BB width > 80th percentile).
+Designed for low-frequency, high-quality breakouts in both trending and ranging markets.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,63 +21,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_up = highest_high.values
-    donchian_low = lowest_low.values
-    
-    # Load weekly data for pivot direction - ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 12-hour data for Bollinger Bands - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using weekly OHLC)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Load 1-week data for trend filter - ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Weekly pivot point: (H + L + C) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Calculate 12-hour Bollinger Bands (20, 2)
+    close_12h = df_12h['close'].values
+    sma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    middle_bb = sma_20
+    bb_width = (upper_bb - lower_bb) / middle_bb * 100  # Percentage width
     
-    # Weekly pivot direction: current pivot vs previous week's pivot
-    weekly_pivot_prev = np.roll(weekly_pivot, 1)
-    weekly_pivot_prev[0] = weekly_pivot[0]  # First value
-    weekly_pivot_bullish = weekly_pivot > weekly_pivot_prev  # Bullish bias when pivot rising
-    weekly_pivot_bearish = weekly_pivot < weekly_pivot_prev  # Bearish bias when pivot falling
+    # Calculate Bollinger Band width percentiles for squeeze detection
+    bb_width_series = pd.Series(bb_width)
+    bb_width_20th = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20)
+    bb_width_80th = bb_width_series.rolling(window=50, min_periods=20).quantile(0.80)
     
-    # Align weekly pivot direction to 6h timeframe
-    weekly_pivot_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_bullish.astype(float))
-    weekly_pivot_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_bearish.astype(float))
+    # Calculate volume average
+    volume_12h = df_12h['volume'].values
+    volume_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean()
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_condition = volume > (1.5 * vol_ma.values)
+    # Calculate 1-week EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean()
+    
+    # Align all indicators to 12h timeframe (our base)
+    sma_20_aligned = align_htf_to_ltf(df_12h, df_12h, sma_20.values)
+    std_20_aligned = align_htf_to_ltf(df_12h, df_12h, std_20.values)
+    upper_bb_aligned = align_htf_to_ltf(df_12h, df_12h, upper_bb.values)
+    lower_bb_aligned = align_htf_to_ltf(df_12h, df_12h, lower_bb.values)
+    middle_bb_aligned = align_htf_to_ltf(df_12h, df_12h, middle_bb.values)
+    bb_width_aligned = align_htf_to_ltf(df_12h, df_12h, bb_width.values)
+    bb_width_20th_aligned = align_htf_to_ltf(df_12h, df_12h, bb_width_20th.values)
+    bb_width_80th_aligned = align_htf_to_ltf(df_12h, df_12h, bb_width_80th.values)
+    volume_ma_aligned = align_htf_to_ltf(df_12h, df_12h, volume_ma.values)
+    ema_20_1w_aligned = align_htf_to_ltf(df_12h, df_1w, ema_20_1w.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(donchian_up[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_pivot_bullish_aligned[i]) or np.isnan(weekly_pivot_bearish_aligned[i]) or
-            np.isnan(vol_condition[i])):
+        if (np.isnan(bb_width_aligned[i]) or np.isnan(bb_width_20th_aligned[i]) or 
+            np.isnan(bb_width_80th_aligned[i]) or np.isnan(volume_ma_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        bb_width_val = bb_width_aligned[i]
+        bb_width_20th_val = bb_width_20th_aligned[i]
+        bb_width_80th_val = bb_width_80th_aligned[i]
+        volume_val = volume[i] if i < len(volume) else 0
+        volume_ma_val = volume_ma_aligned[i]
+        close_val = close[i]
+        upper_bb_val = upper_bb_aligned[i]
+        lower_bb_val = lower_bb_aligned[i]
+        middle_bb_val = middle_bb_aligned[i]
+        ema_20_1w_val = ema_20_1w_aligned[i]
+        
         if position == 0:
-            # Long conditions: Donchian breakout up + bullish weekly pivot + volume surge
-            if (close[i] > donchian_up[i] and 
-                weekly_pivot_bullish_aligned[i] > 0.5 and  # Bullish bias
-                vol_condition[i]):
+            # Squeeze condition: BB width below 20th percentile (low volatility)
+            is_squeeze = bb_width_val <= bb_width_20th_val
+            # Volume confirmation: volume > 1.5x average
+            volume_confirm = volume_val > 1.5 * volume_ma_val
+            
+            # Long: break above upper BB during squeeze with weekly uptrend
+            if (is_squeeze and volume_confirm and 
+                close_val > upper_bb_val and 
+                close_12h[i] > upper_bb_val and  # Confirm on 12h close
+                close_12h[i] > ema_20_1w_val):  # Weekly trend filter
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: Donchian breakout down + bearish weekly pivot + volume surge
-            elif (close[i] < donchian_low[i] and 
-                  weekly_pivot_bearish_aligned[i] > 0.5 and  # Bearish bias
-                  vol_condition[i]):
+            # Short: break below lower BB during squeeze with weekly downtrend
+            elif (is_squeeze and volume_confirm and 
+                  close_val < lower_bb_val and 
+                  close_12h[i] < lower_bb_val and  # Confirm on 12h close
+                  close_12h[i] < ema_20_1w_val):  # Weekly trend filter
                 signals[i] = -0.25
                 position = -1
         else:
@@ -87,12 +114,14 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: price touches lower Donchian band OR volume drops below average
-                if close[i] <= donchian_low[i] or not vol_condition[i]:
+                # Exit long: return to middle BB or volatility expansion
+                if (close_val <= middle_bb_val or 
+                    bb_width_val >= bb_width_80th_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price touches upper Donchian band OR volume drops below average
-                if close[i] >= donchian_up[i] or not vol_condition[i]:
+                # Exit short: return to middle BB or volatility expansion
+                if (close_val >= middle_bb_val or 
+                    bb_width_val >= bb_width_80th_val):
                     exit_signal = True
             
             if exit_signal:
@@ -103,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Donchian20_WeeklyPivotDirection_VolumeFilter"
-timeframe = "6h"
+name = "12H_BB_Squeeze_Breakout_Volume_WeeklyTrend"
+timeframe = "12h"
 leverage = 1.0
