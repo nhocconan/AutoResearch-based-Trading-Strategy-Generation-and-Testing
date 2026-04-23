@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour Donchian channel breakout with 1-day volatility filter and volume confirmation.
-Long when price breaks above upper Donchian (20-period), ATR(14) > 0.8 * ATR(50), and volume > 1.5x average.
-Short when price breaks below lower Donchian, volatility filter, and volume confirmation.
-Exit when price returns to middle of Donchian channel.
-Designed for low trade frequency (~15-30/year) to capture breakouts in volatile markets while avoiding chop.
-Works in both bull and bear markets by requiring volatility expansion (ATR ratio) and volume confirmation.
+Hypothesis: 1-hour trend following using 4-hour Supertrend for direction and 1-day volume spike for confirmation.
+Long when price > Supertrend and volume > 1.5x average, short when price < Supertrend and volume > 1.5x average.
+Exit when price crosses Supertrend in opposite direction.
+Uses 4h for trend direction (fewer signals) and 1h for entry timing. Volume filter reduces false signals.
+Designed for low trade frequency (~20-40/year) to avoid fee drag. Works in bull/bear by requiring volume confirmation.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,96 +21,126 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for ATR - ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Load 4-hour data for Supertrend - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day ATR (14 and 50 periods)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 1-day data for volume average - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 4-hour Supertrend (ATR=10, multiplier=3.0)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
-    # ATR 14
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # ATR 50
-    atr50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # ATR
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # ATR ratio (short-term / long-term volatility)
-    atr_ratio = np.where(atr50 > 0, atr14 / atr50, 0)
+    # Basic Upper and Lower Bands
+    basic_ub = (high_4h + low_4h) / 2 + 3.0 * atr
+    basic_lb = (high_4h + low_4h) / 2 - 3.0 * atr
     
-    # Align ATR ratio to lower timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(basic_ub)
+    final_lb = np.zeros_like(basic_lb)
     
-    # Donchian channel (20-period) on lower timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    middle_channel = (highest_high + lowest_low) / 2
+    for i in range(len(close_4h)):
+        if i == 0:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            if basic_ub[i] < final_ub[i-1] or close_4h[i-1] > final_ub[i-1]:
+                final_ub[i] = basic_ub[i]
+            else:
+                final_ub[i] = final_ub[i-1]
+                
+            if basic_lb[i] > final_lb[i-1] or close_4h[i-1] < final_lb[i-1]:
+                final_lb[i] = basic_lb[i]
+            else:
+                final_lb[i] = final_lb[i-1]
     
-    # Volume average (20-period) on lower timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Supertrend
+    supertrend = np.zeros_like(close_4h)
+    for i in range(len(close_4h)):
+        if i == 0:
+            supertrend[i] = final_ub[i]
+        else:
+            if supertrend[i-1] == final_ub[i-1] and close_4h[i] <= final_ub[i]:
+                supertrend[i] = final_ub[i]
+            elif supertrend[i-1] == final_ub[i-1] and close_4h[i] > final_ub[i]:
+                supertrend[i] = final_lb[i]
+            elif supertrend[i-1] == final_lb[i-1] and close_4h[i] >= final_lb[i]:
+                supertrend[i] = final_lb[i]
+            elif supertrend[i-1] == final_lb[i-1] and close_4h[i] < final_lb[i]:
+                supertrend[i] = final_ub[i]
+    
+    # Calculate 1-day volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align HTF indicators to lower timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Session filter: 8-20 UTC (already datetime64 index)
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup period
-        # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+    for i in range(30, n):  # Start after warmup period
+        # Skip if data not ready or outside session
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            not (8 <= hours[i] <= 20)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        atr_ratio_val = atr_ratio_aligned[i]
-        vol_ma_val = vol_ma[i]
+        st = supertrend_aligned[i]
+        vol_ma = vol_ma_1d_aligned[i]
         vol_current = volume[i]
-        price = close[i]
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        middle = middle_channel[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian, volatility expansion, volume confirmation
-            if (price > upper and 
-                atr_ratio_val > 0.8 and 
-                vol_current > 1.5 * vol_ma_val):
-                signals[i] = 0.25
+            # Long: price above Supertrend and volume spike
+            if close[i] > st and vol_current > 1.5 * vol_ma:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below lower Donchian, volatility expansion, volume confirmation
-            elif (price < lower and 
-                  atr_ratio_val > 0.8 and 
-                  vol_current > 1.5 * vol_ma_val):
-                signals[i] = -0.25
+            # Short: price below Supertrend and volume spike
+            elif close[i] < st and vol_current > 1.5 * vol_ma:
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: price returns to middle of channel
-                if price < middle:
+                # Exit long: price crosses below Supertrend
+                if close[i] < st:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: price returns to middle of channel
-                if price > middle:
+                # Exit short: price crosses above Supertrend
+                if close[i] > st:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "12H_Donchian20_ATRRatio_Volume"
-timeframe = "12h"
+name = "1H_Supertrend_4hDir_1dVolSpike"
+timeframe = "1h"
 leverage = 1.0
