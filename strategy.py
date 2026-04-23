@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(50) trend filter and volume confirmation.
-Long when price breaks above Donchian upper channel, 12h EMA50 rising, volume > 1.5x average.
-Short when price breaks below Donchian lower channel, 12h EMA50 falling, volume > 1.5x average.
-Exit when price returns to Donchian middle (mean) or volume drops below average.
-Designed for low trade frequency (~20-40/year) to capture strong trends while minimizing whipsaws.
-Works in both bull and bear markets by requiring trend confirmation from higher timeframe.
+Hypothesis: 1-hour Stochastic Oscillator with 4-hour trend filter and volume confirmation.
+Long when %K crosses above %D in oversold territory (<20), 4h EMA21 trending up, and volume > 1.5x average.
+Short when %K crosses below %D in overbought territory (>80), 4h EMA21 trending down, and volume > 1.5x average.
+Exit when %K crosses %D in opposite direction or 4h trend reverses.
+Uses 4h for trend direction, 1h for precise entry timing. Target 15-35 trades/year.
+Works in both bull and bear markets by requiring trend alignment and mean reversion in extreme zones.
 """
 
 import numpy as np
@@ -22,72 +22,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12-hour data for EMA50 - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4-hour data for trend filter - ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12-hour EMA(50)
-    close_12h = df_12h['close'].values
-    ema50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_prev = np.roll(ema50, 1)
-    ema50_prev[0] = ema50[0]
-    ema50_rising = ema50 > ema50_prev
+    # Calculate 4-hour EMA21 for trend direction
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_4h_prev = np.roll(ema21_4h, 1)
+    ema21_4h_prev[0] = ema21_4h[0]
+    ema21_4h_rising = ema21_4h > ema21_4h_prev
+    ema21_4h_falling = ema21_4h < ema21_4h_prev
     
-    # Calculate Donchian(20) channels on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    mid_20 = (high_20 + low_20) / 2.0
+    # Calculate 1-hour Stochastic Oscillator (14,3,3)
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume average (20-period) on 4h
+    # Avoid division by zero
+    diff = highest_high - lowest_low
+    k_percent = np.where(diff != 0, 100 * (close - lowest_low) / diff, 0)
+    
+    # Smooth %K to get %D (3-period SMA of %K)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    
+    # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align HTF indicators to 1-hour timeframe
+    ema21_4h_rising_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h_rising)
+    ema21_4h_falling_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h_falling)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(20, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema50[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema21_4h_rising_aligned[i]) or np.isnan(ema21_4h_falling_aligned[i]) or 
+            np.isnan(k_percent[i]) or np.isnan(d_percent[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_rising_val = ema50_rising[i]
+        k_val = k_percent[i]
+        d_val = d_percent[i]
+        k_prev = k_percent[i-1]
+        d_prev = d_percent[i-1]
         vol_ma_val = vol_ma[i]
         vol_current = volume[i]
+        ema21_rising = ema21_4h_rising_aligned[i]
+        ema21_falling = ema21_4h_falling_aligned[i]
         
         if position == 0:
-            # Long: Breakout above upper channel, EMA50 rising, volume confirmation
-            if (close[i] > high_20[i] and ema50_rising_val and vol_current > 1.5 * vol_ma_val):
-                signals[i] = 0.25
+            # Long: %K crosses above %D in oversold (<20), 4h EMA21 rising, volume confirmation
+            if (k_prev <= d_prev and k_val > d_val and k_val < 20 and 
+                ema21_rising and vol_current > 1.5 * vol_ma_val):
+                signals[i] = 0.20
                 position = 1
-            # Short: Breakdown below lower channel, EMA50 falling, volume confirmation
-            elif (close[i] < low_20[i] and not ema50_rising_val and vol_current > 1.5 * vol_ma_val):
-                signals[i] = -0.25
+            # Short: %K crosses below %D in overbought (>80), 4h EMA21 falling, volume confirmation
+            elif (k_prev >= d_prev and k_val < d_val and k_val > 80 and 
+                  ema21_falling and vol_current > 1.5 * vol_ma_val):
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Price returns to middle OR volume drops below average
-                if close[i] <= mid_20[i] or vol_current < vol_ma_val:
+                # Exit long: %K crosses below %D OR 4h EMA21 starts falling
+                if (k_prev >= d_prev and k_val < d_val) or ema21_falling:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Price returns to middle OR volume drops below average
-                if close[i] >= mid_20[i] or vol_current < vol_ma_val:
+                # Exit short: %K crosses above %D OR 4h EMA21 starts rising
+                if (k_prev <= d_prev and k_val > d_val) or ema21_rising:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
 
-name = "4H_Donchian20_12hEMA50_Volume_Breakout"
-timeframe = "4h"
+name = "1H_Stochastic_4hEMA21_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
