@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams %R + 1d EMA34 trend filter + volume spike.
-Long when Williams %R < -80 (oversold) AND close > 1d EMA34 AND volume > 2.0x 20-period average.
-Short when Williams %R > -20 (overbought) AND close < 1d EMA34 AND volume > 2.0x 20-period average.
-Exit when Williams %R crosses above -50 for long or below -50 for short, or ATR trailing stop (2.5*ATR from extreme).
-Williams %R identifies exhaustion points; EMA34 provides trend filter; volume spike confirms conviction.
-Designed for low trade frequency (12-25/year) with discrete sizing (0.25) to minimize fee drag.
-Works in both bull (buy oversold dips) and bear (sell overbought rallies) markets.
+Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume confirmation (2.0x 20-period average).
+Long when price breaks above upper Donchian channel AND close > 12h EMA50 AND volume > 2.0x volume MA.
+Short when price breaks below lower Donchian channel AND close < 12h EMA50 AND volume > 2.0x volume MA.
+Exit on opposite Donchian breakout or ATR trailing stop (2.5*ATR from extreme).
+Uses discrete position sizing (0.25) to minimize fee drag. Targets 20-50 trades/year per symbol.
+Donchian channels provide clear structural breakouts; 12h EMA50 filters for higher-timeframe trend; volume confirmation avoids false breakouts.
 """
 
 import numpy as np
@@ -23,34 +22,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Williams %R(14) on 12h timeframe
+    # Calculate 12h EMA50 for trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          ((highest_high - close_12h) / (highest_high - lowest_low)) * -100, 
-                          -50)
+    # Donchian channels (20-period)
+    donchian_window = 20
+    upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
-    
-    # Volume average (20-period) on 12h timeframe
+    # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for trailing stop calculation
@@ -67,11 +53,11 @@ def generate_signals(prices):
     lowest_since_entry = 0.0   # for short trailing stop
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 14)  # EMA34 needs 34, vol MA needs 20, Williams %R needs 14
+    start_idx = max(50, donchian_window, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -81,17 +67,18 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        ema34_val = ema34_1d_aligned[i]
-        williams_val = williams_r_aligned[i]
+        ema50_val = ema50_12h_aligned[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) AND uptrend (close > EMA34) AND volume spike
-            if williams_val < -80 and close[i] > ema34_val and volume[i] > 2.0 * vol_ma_val:
+            # Long: price breaks above upper Donchian AND uptrend (close > EMA50) AND volume spike
+            if price > upper_val and close[i] > ema50_val and volume[i] > 2.0 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = price
-            # Short: Williams %R > -20 (overbought) AND downtrend (close < EMA34) AND volume spike
-            elif williams_val > -20 and close[i] < ema34_val and volume[i] > 2.0 * vol_ma_val:
+            # Short: price breaks below lower Donchian AND downtrend (close < EMA50) AND volume spike
+            elif price < lower_val and close[i] < ema50_val and volume[i] > 2.0 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = price
@@ -105,10 +92,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Williams %R crosses -50 (momentum shift)
-            if position == 1 and williams_val > -50:
+            # Primary exit: opposite Donchian breakout
+            if position == 1 and price < lower_val:
                 exit_signal = True
-            elif position == -1 and williams_val < -50:
+            elif position == -1 and price > upper_val:
                 exit_signal = True
             
             # ATR-based trailing stop: 2.5 * ATR from highest/lowest since entry
@@ -127,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_1dEMA34_Trend_VolumeSpike_ATRTrailingStop_MomentumExit"
-timeframe = "12h"
+name = "4H_Donchian20_Breakout_12hEMA50_Trend_VolumeConfirmation_2x_ATRTrailingStop_2_5x_OppositeBreakoutExit"
+timeframe = "4h"
 leverage = 1.0
