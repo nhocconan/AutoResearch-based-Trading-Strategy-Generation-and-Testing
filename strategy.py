@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h strategy using 1d Camarilla R1/S1 breakout with 1w EMA34 trend filter and volume confirmation.
-Long when price breaks above 1d Camarilla R1 AND 1w EMA34 is rising AND volume > 1.5x 20-period average.
-Short when price breaks below 1d Camarilla S1 AND 1w EMA34 is falling AND volume > 1.5x 20-period average.
-Exit when price retouches 1d Camarilla pivot point or ATR stoploss hit (2.0*ATR).
-Uses discrete position sizing (0.25) to minimize fee churn and control drawdown.
-Designed for 12h timeframe to target 12-37 trades/year per symbol (50-150 total over 4 years).
-Works in both bull and bear markets by trading with the 1w trend and using volume confirmation to filter false breakouts.
-1d Camarilla levels provide institutional support/resistance; 1w EMA34 filters counter-trend moves.
+Hypothesis: 4h strategy using 1d Camarilla R1/S1 breakout with 4h HMA21 trend filter and volume confirmation.
+Long when price breaks above 1d Camarilla R1 AND 4h HMA21 is rising AND volume > 1.8x 30-period average.
+Short when price breaks below 1d Camarilla S1 AND 4h HMA21 is falling AND volume > 1.8x 30-period average.
+Exit when price retraces 50% of the breakout move or ATR stoploss hit (1.5*ATR).
+Uses discrete position sizing (0.25) to balance reward and risk while minimizing fee churn.
+Designed for 4h timeframe to target 20-50 trades/year per symbol (80-200 total over 4 years).
+Works in both bull and bear markets by trading with the 4h trend and using volume confirmation to filter false breakouts.
+1d Camarilla levels provide strong institutional support/resistance; 4h HMA21 filters noise and lag.
 """
 
 import numpy as np
@@ -23,10 +23,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
-    
-    # Precompute session hours (08-20 UTC) once before loop
-    hours = pd.DatetimeIndex(open_time).hour
     
     # Calculate 1d Camarilla levels
     df_1d = get_htf_data(prices, '1d')
@@ -46,26 +42,37 @@ def generate_signals(prices):
     camarilla_s1 = camarilla_l1 - camarilla_range * 1.1 / 12.0
     camarilla_pivot = camarilla_h1  # Pivot point
     
-    # Align Camarilla levels to 1d timeframe
+    # Align Camarilla levels to 1d timeframe (then to 4h via align_htf_to_ltf)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Calculate 4h HMA21 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_1w_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_34_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_34)
+    close_4h = df_4h['close'].values
+    # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, 'valid') / weights.sum()
     
-    # EMA slope (rising/falling)
-    ema_slope = np.zeros_like(ema_1w_34_aligned)
-    ema_slope[1:] = ema_1w_34_aligned[1:] - ema_1w_34_aligned[:-1]
+    half_n = 21 // 2
+    wma_half = np.array([wma(close_4h[i-half_n+1:i+1], half_n) if i >= half_n-1 else np.nan for i in range(len(close_4h))])
+    wma_full = np.array([wma(close_4h[i-21+1:i+1], 21) if i >= 20 else np.nan for i in range(len(close_4h))])
+    hma_4h = 2 * wma_half - wma_full
+    hma_4h = np.array([wma(hma_4h[i-int(np.sqrt(21))+1:i+1], int(np.sqrt(21))) if i >= int(np.sqrt(21))-1 else np.nan for i in range(len(hma_4h))])
     
-    # Volume average (20-period) on 12h timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align HMA to 4h timeframe
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    
+    # HMA slope (rising/falling)
+    hma_slope = np.zeros_like(hma_4h_aligned)
+    hma_slope[1:] = hma_4h_aligned[1:] - hma_4h_aligned[:-1]
+    
+    # Volume average (30-period) on 4h timeframe
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     # ATR(14) for stoploss calculation
     tr1 = np.abs(high - low)
@@ -78,25 +85,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    breakout_level = 0.0  # Track breakout level for 50% retracement exit
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 5, 34, 20, 14, 1)
+    start_idx = max(100, 5, 21, 30, 14)
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema_1w_34_aligned[i]) or 
-            np.isnan(ema_slope[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(hma_4h_aligned[i]) or 
+            np.isnan(hma_slope[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-            continue
-        
-        # Session filter: 08-20 UTC only
-        if hours[i] < 8 or hours[i] > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
+                entry_price = 0.0
+                breakout_level = 0.0
             continue
         
         price = close[i]
@@ -105,48 +108,58 @@ def generate_signals(prices):
         r1 = camarilla_r1_aligned[i]
         s1 = camarilla_s1_aligned[i]
         pivot = camarilla_pivot_aligned[i]
-        ema_slope_val = ema_slope[i]
+        hma_slope_val = hma_slope[i]
         
         if position == 0:
-            # Long: Price breaks above 1d Camarilla R1 AND 1w EMA34 rising AND volume spike
+            # Long: Price breaks above 1d Camarilla R1 AND 4h HMA21 rising AND volume spike
             if (price > r1 and 
-                ema_slope_val > 0 and 
-                volume[i] > 1.5 * vol_ma_val):
+                hma_slope_val > 0 and 
+                volume[i] > 1.8 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price breaks below 1d Camarilla S1 AND 1w EMA34 falling AND volume spike
+                breakout_level = r1  # Breakout level for exit calculation
+            # Short: Price breaks below 1d Camarilla S1 AND 4h HMA21 falling AND volume spike
             elif (price < s1 and 
-                  ema_slope_val < 0 and 
-                  volume[i] > 1.5 * vol_ma_val):
+                  hma_slope_val < 0 and 
+                  volume[i] > 1.8 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
+                breakout_level = s1  # Breakout level for exit calculation
         else:
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retouches 1d Camarilla pivot point
-            if position == 1 and price <= pivot:
-                exit_signal = True
-            elif position == -1 and price >= pivot:
-                exit_signal = True
+            # Primary exit: Price retraces 50% of the breakout move
+            if position == 1:
+                retracement_level = breakout_level + 0.5 * (price - breakout_level)  # This is wrong, let me fix
+                # Correct: 50% retracement from breakout level toward pivot
+                retracement_level = breakout_level + 0.5 * (pivot - breakout_level)
+                if price <= retracement_level:
+                    exit_signal = True
+            elif position == -1:
+                # 50% retracement from breakout level toward pivot
+                retracement_level = breakout_level + 0.5 * (pivot - breakout_level)
+                if price >= retracement_level:
+                    exit_signal = True
             
-            # ATR-based stoploss: 2.0 * ATR from entry
-            if position == 1 and price < entry_price - 2.0 * atr_val:
+            # ATR-based stoploss: 1.5 * ATR from entry
+            if position == 1 and price < entry_price - 1.5 * atr_val:
                 exit_signal = True
-            elif position == -1 and price > entry_price + 2.0 * atr_val:
+            elif position == -1 and price > entry_price + 1.5 * atr_val:
                 exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+                breakout_level = 0.0
             else:
                 signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
 
-name = "12H_Camarilla_R1S1_1wEMA34_Trend_VolumeConfirmation_ATRStop"
-timeframe = "12h"
+name = "4H_Camarilla_R1S1_4hHMA21_Trend_VolumeConfirmation_ATRStop"
+timeframe = "4h"
 leverage = 1.0
