@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams %R with 1d EMA50 trend filter and volume confirmation.
-Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 1.5x average.
-Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 1.5x average.
-Exit when Williams %R returns to neutral range (-50) or volume drops below average.
-Williams %R identifies extreme price levels for mean reversion.
-1d EMA50 ensures trading in direction of higher timeframe trend.
-Volume confirmation avoids low-conviction mean reversion attempts.
-Designed for 12h timeframe targeting 50-150 total trades over 4 years with low frequency to minimize fee drag.
-Works in both bull and bear markets by only taking mean reversion trades aligned with 1d trend.
+Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
+Long when price breaks above R1 AND close > 12h EMA50 AND volume > 1.3x average.
+Short when price breaks below S1 AND close < 12h EMA50 AND volume > 1.3x average.
+Exit when price returns to Camarilla pivot (PP) or volume drops below average.
+Camarilla levels provide precise intraday support/resistance. 12h EMA50 filters counter-trend trades.
+Volume confirmation ensures conviction. Designed for 4h timeframe targeting 75-200 total trades over 4 years.
+Works in bull markets via breakouts and bear markets via mean reversion at extremes.
 """
 
 import numpy as np
@@ -25,27 +23,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA50 trend filter - ONCE before loop
+    # Load 12h data for EMA50 trend filter - ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    
+    # Calculate EMA50 on 12h data
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 12h EMA50 to 4h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Load 1d data for Camarilla pivot calculation (using previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1d data
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels for each 1d bar: based on previous day's OHLC
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    # PP = (high + low + close)/3
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Align 1d EMA50 to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    PP = (prev_high + prev_low + prev_close) / 3
     
-    # Calculate Williams %R on 12h data (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Align 1d Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,26 +70,28 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or np.isnan(PP_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_1d_aligned[i]
-        wr_val = williams_r[i]
+        ema50_val = ema50_12h_aligned[i]
+        r1_val = R1_aligned[i]
+        s1_val = S1_aligned[i]
+        pp_val = PP_aligned[i]
         vol_ma_val = vol_ma[i]
         price = close[i]
         vol_current = volume[i]
         
         if position == 0:
-            # Long: Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume spike
-            if (wr_val < -80 and price > ema50_val and vol_current > 1.5 * vol_ma_val):
+            # Long: price breaks above R1 AND price > 12h EMA50 AND volume spike
+            if (price > r1_val and close[i-1] <= r1_val and price > ema50_val and vol_current > 1.3 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume spike
-            elif (wr_val > -20 and price < ema50_val and vol_current > 1.5 * vol_ma_val):
+            # Short: price breaks below S1 AND price < 12h EMA50 AND volume spike
+            elif (price < s1_val and close[i-1] >= s1_val and price < ema50_val and vol_current > 1.3 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
@@ -82,12 +99,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Exit long: Williams %R returns to neutral OR volume drops below average
-                if (wr_val > -50 or vol_current < vol_ma_val):
+                # Exit long: price returns to pivot PP OR volume drops below average
+                if (price <= pp_val or vol_current < vol_ma_val):
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Williams %R returns to neutral OR volume drops below average
-                if (wr_val < -50 or vol_current < vol_ma_val):
+                # Exit short: price returns to pivot PP OR volume drops below average
+                if (price >= pp_val or vol_current < vol_ma_val):
                     exit_signal = True
             
             if exit_signal:
@@ -98,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12H_WilliamsR_1dEMA50_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R1S1_Breakout_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
