@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
-Weekly pivot direction provides structural bias (bull/bear) from higher timeframe.
-Long when price breaks above 6h Donchian upper band AND weekly pivot bias is bullish AND volume > 2.0x 20-period MA.
-Short when price breaks below 6h Donchian lower band AND weekly pivot bias is bearish AND volume > 2.0x 20-period MA.
-Exit when price returns to 6h Donchian middle band (mean reversion) or opposite breakout occurs.
-Designed for ~12-25 trades/year with structural edge from weekly pivot filtering false breakouts.
+Hypothesis: 12h Williams Alligator + Elder Ray with 1d EMA50 trend filter and volume confirmation.
+Long when Alligator jaws (blue) < teeth (red) < lips (green) AND Bull Power > 0 AND close > 1d EMA50 AND volume > 1.5x 20-period MA.
+Short when Alligator jaws > teeth > lips AND Bear Power < 0 AND close < 1d EMA50 AND volume > 1.5x 20-period MA.
+Exit when Alligator reverses (jaws > lips for long, jaws < lips for short) or opposite signal triggers.
+Designed for ~12-25 trades/year with trend-following edge in both bull and bear markets.
+Alligator identifies trend direction and exhaustion; Elder Ray measures bull/bear power; 1d EMA50 ensures higher timeframe alignment.
 """
 
 import numpy as np
@@ -22,88 +22,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w HTF data for weekly pivot bias
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly pivot: based on previous week's OHLC
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly pivot point and bias
-    # Pivot = (High + Low + Close) / 3
-    # Bias bullish if close > pivot, bearish if close < pivot
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    weekly_bias_bullish = close_1w > pivot_1w
-    weekly_bias_bearish = close_1w < pivot_1w
+    # Williams Alligator (13,8,5 SMAs with offsets)
+    # Jaws (blue): 13-period SMA, offset 8 bars
+    # Teeth (red): 8-period SMA, offset 5 bars  
+    # Lips (green): 5-period SMA, offset 3 bars
+    jaws = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Align weekly bias to 6h timeframe (completed weekly bars only)
-    weekly_bias_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_bullish.astype(float))
-    weekly_bias_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_bearish.astype(float))
+    # Elder Ray Index
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Calculate 6h Donchian channels (20-period)
-    # Upper band = highest high of last 20 periods
-    # Lower band = lowest low of last 20 periods
-    # Middle band = (upper + lower) / 2
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
-    
-    # Calculate volume MA (20-period) for confirmation
+    # Volume MA (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 20)  # need Donchian20, volume MA20
+    start_idx = max(50, 13, 8, 5, 20)  # need EMA50, Alligator, Elder Ray, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(weekly_bias_bullish_aligned[i]) or 
-            np.isnan(weekly_bias_bearish_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(jaws[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly pivot bias filters
-        bias_bullish = weekly_bias_bullish_aligned[i] > 0.5
-        bias_bearish = weekly_bias_bearish_aligned[i] > 0.5
+        # Trend filter: close > 1d EMA50 = uptrend, close < 1d EMA50 = downtrend
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Volume filter: 6h volume > 2.0x 20-period MA
-        vol_filter = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume filter: 12h volume > 1.5x 20-period MA
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_upper[i]  # Break above upper band
-        breakout_down = close[i] < donchian_lower[i]  # Break below lower band
-        return_to_middle = abs(close[i] - donchian_middle[i]) < 0.1 * (donchian_upper[i] - donchian_lower[i])  # Near middle band
-        opposite_breakout = (position == 1 and breakout_down) or \
-                            (position == -1 and breakout_up)
+        # Alligator conditions: aligned = jaws < teeth < lips (uptrend), reversed = jaws > teeth > lips (downtrend)
+        alligator_aligned = (jaws[i] < teeth[i]) and (teeth[i] < lips[i])
+        alligator_reversed = (jaws[i] > teeth[i]) and (teeth[i] > lips[i])
+        
+        # Elder Ray conditions
+        bull_strong = bull_power[i] > 0
+        bear_strong = bear_power[i] < 0
+        
+        # Exit conditions: Alligator reverses or opposite Elder Ray signal
+        exit_long = not alligator_aligned or bear_strong
+        exit_short = not alligator_reversed or bull_strong
         
         if position == 0:
-            # Long: Break above upper band AND bullish weekly bias AND volume confirmation
-            if breakout_up and bias_bullish and vol_filter:
+            # Long: Alligator aligned (jaws<teeth<lips) AND bull power > 0 AND uptrend AND volume confirmation
+            if alligator_aligned and bull_strong and trend_up and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower band AND bearish weekly bias AND volume confirmation
-            elif breakout_down and bias_bearish and vol_filter:
+            # Short: Alligator reversed (jaws>teeth>lips) AND bear power < 0 AND downtrend AND volume confirmation
+            elif alligator_reversed and bear_strong and trend_down and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to middle band or opposite breakout
+            # Exit conditions
             exit_signal = False
             if position == 1:
-                exit_signal = return_to_middle or opposite_breakout
+                exit_signal = exit_long
             elif position == -1:
-                exit_signal = return_to_middle or opposite_breakout
+                exit_signal = exit_short
             
             if exit_signal:
                 signals[i] = 0.0
@@ -113,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_Donchian20_Breakout_WeeklyPivotBias_VolumeSpike"
-timeframe = "6h"
+name = "12H_WilliamsAlligator_ElderRay_1dEMA50_Trend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
