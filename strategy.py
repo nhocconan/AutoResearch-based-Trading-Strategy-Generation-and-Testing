@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-Long when price > Donchian upper AND 1d EMA34 rising AND volume > 1.5x 20-period MA.
-Short when price < Donchian lower AND 1d EMA34 falling AND volume > 1.5x 20-period MA.
-Exit when price crosses Donchian midpoint OR EMA34 reverses.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+Long when price >= R3 AND 1d EMA34 rising AND volume > 1.5x 20-period MA.
+Short when price <= S3 AND 1d EMA34 falling AND volume > 1.5x 20-period MA.
+Exit when price crosses the daily pivot (PP) or EMA34 reverses.
 Uses 1d HTF for trend filter to avoid counter-trend trades, volume spike for momentum confirmation.
+Camarilla levels from 1d provide precise support/resistance that works in both trending and ranging markets.
 Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
@@ -31,10 +32,37 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) on primary timeframe
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2
+    # Calculate 1d Camarilla levels (HTF)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_R3 = np.zeros(len(df_1d))
+    camarilla_S3 = np.zeros(len(df_1d))
+    camarilla_PP = np.zeros(len(df_1d))
+    
+    for i in range(len(df_1d)):
+        if i == 0:
+            camarilla_R3[i] = np.nan
+            camarilla_S3[i] = np.nan
+            camarilla_PP[i] = np.nan
+            continue
+            
+        # Use previous day's OHLC for today's Camarilla levels
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        
+        camarilla_PP[i] = (prev_high + prev_low + prev_close) / 3
+        range_val = prev_high - prev_low
+        camarilla_R3[i] = camarilla_PP[i] + range_val * 1.1 / 4
+        camarilla_S3[i] = camarilla_PP[i] - range_val * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    camarilla_PP_aligned = align_htf_to_ltf(prices, df_1d, camarilla_PP)
     
     # Calculate 4h volume MA (20-period) for spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,12 +71,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # EMA34, Donchian, volume MA
+    start_idx = max(34, 20)  # EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(donchian_mid[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or 
+            np.isnan(camarilla_S3_aligned[i]) or np.isnan(camarilla_PP_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,16 +92,16 @@ def generate_signals(prices):
             ema_rising = False
             ema_falling = False
         
-        # Volume filter: 4h volume > 1.5x 20-period MA (tight threshold to reduce trades)
+        # Volume filter: 4h volume > 1.5x 20-period MA (strict threshold to reduce trades)
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # Long: price > Donchian upper AND EMA34 rising AND volume filter
-            if close[i] > highest_20[i] and ema_rising and vol_filter:
+            # Long: price >= R3 AND EMA34 rising AND volume filter
+            if close[i] >= camarilla_R3_aligned[i] and ema_rising and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < Donchian lower AND EMA34 falling AND volume filter
-            elif close[i] < lowest_20[i] and ema_falling and vol_filter:
+            # Short: price <= S3 AND EMA34 falling AND volume filter
+            elif close[i] <= camarilla_S3_aligned[i] and ema_falling and vol_filter:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -81,12 +109,12 @@ def generate_signals(prices):
             exit_signal = False
             
             if position == 1:
-                # Long exit: price crosses below Donchian midpoint OR EMA34 starts falling
-                if close[i] < donchian_mid[i] or (i >= start_idx + 1 and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]):
+                # Long exit: price crosses below daily pivot OR EMA34 starts falling
+                if close[i] < camarilla_PP_aligned[i] or (i >= start_idx + 1 and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]):
                     exit_signal = True
             elif position == -1:
-                # Short exit: price crosses above Donchian midpoint OR EMA34 starts rising
-                if close[i] > donchian_mid[i] or (i >= start_idx + 1 and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]):
+                # Short exit: price crosses above daily pivot OR EMA34 starts rising
+                if close[i] > camarilla_PP_aligned[i] or (i >= start_idx + 1 and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]):
                     exit_signal = True
             
             if exit_signal:
@@ -97,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4H_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
