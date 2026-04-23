@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Bollinger Band squeeze breakout with weekly trend filter and volume confirmation.
-Long when price breaks above upper Bollinger Band during low volatility (squeeze) AND weekly EMA50 is rising AND volume > 1.5x 20-period average.
-Short when price breaks below lower Bollinger Band during low volatility (squeeze) AND weekly EMA50 is falling AND volume > 1.5x 20-period average.
-Exit when price retouches Bollinger middle band (20-period SMA) or ATR stoploss hit (2.0*ATR).
+Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+Long when price breaks above Donchian upper band (20) AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
+Short when price breaks below Donchian lower band (20) AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
+Exit when price retouches Donchian midpoint or ATR stoploss hit (2.0*ATR).
 Uses discrete position sizing (0.25) to minimize fee churn and control drawdown.
-Targets 12-37 trades/year per symbol (50-150 total over 4 years) by requiring Bollinger squeeze (low volatility) before breakout, reducing false signals.
-Designed to work in both bull and bear markets by trading with the weekly trend and using volatility-based entry (squeeze breakouts work in all regimes).
+Targets 12-37 trades/year per symbol (50-150 total over 4 years) by using 1d trend filter to reduce false breakouts.
+Designed to work in both bull and bear markets by trading with the 1d trend and using tight risk control.
 """
 
 import numpy as np
@@ -27,35 +27,38 @@ def generate_signals(prices):
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Calculate Bollinger Bands (20, 2) on 6h timeframe
-    bb_period = 20
-    bb_std = 2.0
-    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma_bb + (bb_std * std_bb)
-    lower_bb = sma_bb - (bb_std * std_bb)
-    middle_bb = sma_bb  # 20-period SMA
-    
-    # Bollinger Band Width for squeeze detection (low volatility)
-    bb_width = (upper_bb - lower_bb) / middle_bb
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    # Squeeze condition: current BB width < 80% of 20-period average BB width
-    squeeze_condition = bb_width < (0.8 * bb_width_ma)
-    
-    # Calculate weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate Donchian channels from 12h data
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_1w_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Donchian channels (20-period)
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    
+    # Align Donchian levels to 12h timeframe (primary)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_1d_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_34_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_34)
     
     # EMA slope (rising/falling) - compare current vs 3 periods ago
-    ema_slope = np.zeros_like(ema_1w_50_aligned)
-    ema_slope[3:] = ema_1w_50_aligned[3:] - ema_1w_50_aligned[:-3]
+    ema_slope = np.zeros_like(ema_1d_34_aligned)
+    ema_slope[3:] = ema_1d_34_aligned[3:] - ema_1d_34_aligned[:-3]
     
-    # Volume average (20-period) on 6h timeframe
+    # Volume average (20-period) on 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss calculation
@@ -71,14 +74,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(bb_period, 50, 20, 14, 3)
+    start_idx = max(100, 20, 34, 20, 14, 3)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(sma_bb[i]) or np.isnan(std_bb[i]) or np.isnan(upper_bb[i]) or 
-            np.isnan(lower_bb[i]) or np.isnan(middle_bb[i]) or np.isnan(squeeze_condition[i]) or
-            np.isnan(ema_1w_50_aligned[i]) or np.isnan(ema_slope[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(ema_1d_34_aligned[i]) or 
+            np.isnan(ema_slope[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -94,26 +96,23 @@ def generate_signals(prices):
         price = close[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
-        upper = upper_bb[i]
-        lower = lower_bb[i]
-        middle = middle_bb[i]
-        squeeze = squeeze_condition[i]
+        upper = donchian_upper_aligned[i]
+        lower = donchian_lower_aligned[i]
+        mid = donchian_mid_aligned[i]
         ema_slope_val = ema_slope[i]
         
         if position == 0:
-            # Long: Price breaks above upper Bollinger Band during squeeze AND weekly EMA50 rising AND volume spike
+            # Long: Price breaks above Donchian upper AND 1d EMA34 rising AND volume spike
             if (price > upper and 
-                squeeze and 
                 ema_slope_val > 0 and 
-                volume[i] > 1.5 * vol_ma_val):
+                volume[i] > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
                 entry_price = price
-            # Short: Price breaks below lower Bollinger Band during squeeze AND weekly EMA50 falling AND volume spike
+            # Short: Price breaks below Donchian lower AND 1d EMA34 falling AND volume spike
             elif (price < lower and 
-                  squeeze and 
                   ema_slope_val < 0 and 
-                  volume[i] > 1.5 * vol_ma_val):
+                  volume[i] > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
                 entry_price = price
@@ -121,10 +120,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Primary exit: Price retouches Bollinger middle band (20-period SMA)
-            if position == 1 and price <= middle:
+            # Primary exit: Price retouches Donchian midpoint
+            if position == 1 and price <= mid:
                 exit_signal = True
-            elif position == -1 and price >= middle:
+            elif position == -1 and price >= mid:
                 exit_signal = True
             
             # ATR-based stoploss: 2.0 * ATR from entry
@@ -142,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_BollingerSqueeze_1wEMA50_Trend_VolumeSpike_ATRStop"
-timeframe = "6h"
+name = "12H_Donchian20_1dEMA34_Trend_VolumeSpike_ATRStop"
+timeframe = "12h"
 leverage = 1.0
