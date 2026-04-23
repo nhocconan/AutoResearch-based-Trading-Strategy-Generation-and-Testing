@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Bull/Bear Power with 1d Williams %R regime filter and volume confirmation.
-Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND daily Williams %R < -80 (oversold) AND volume > 1.5x average.
-Short when Bear Power < 0 AND Bull Power > 0 (bearish momentum) AND daily Williams %R > -20 (overbought) AND volume > 1.5x average.
-Exit when Elder Ray power diverges (Bull Power <= 0 for long, Bear Power >= 0 for short).
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 20-40 trades/year per symbol.
-Elder Ray measures bull/bear power via EMA13, Williams %R identifies overextended conditions for mean reversion entry.
+Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume confirmation.
+Long when %R < -80 (oversold) AND daily close > daily EMA50 AND volume > 1.5x average.
+Short when %R > -20 (overbought) AND daily close < daily EMA50 AND volume > 1.5x average.
+Exit when %R crosses back above -50 (for long) or below -50 (for short).
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 12-37 trades/year per symbol.
+Williams %R provides precise overbought/oversold levels, daily trend filter avoids counter-trend trades.
 """
 
 import numpy as np
@@ -22,29 +22,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Williams %R regime filter - ONCE before loop
+    # Load 1d data for trend filter - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Williams %R on 1d data (14-period)
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero
-    williams_r_1d = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r_1d)
+    # Calculate EMA50 on 1d data
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align Williams %R to 6h timeframe
-    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    # Align 1d EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Elder Ray on 6h data: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate Williams %R on primary timeframe (12h)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume average (20-period) on primary timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,40 +55,41 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(williams_r_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        daily_trend_up = close[i] > ema50_1d_aligned[i]  # using 12h close vs daily EMA
+        daily_trend_down = close[i] < ema50_1d_aligned[i]
+        
         vol_current = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Long: Bull Power > 0 AND Bear Power < 0 (bullish) AND Williams %R < -80 (oversold) AND volume confirmation
-            if (bull_power[i] > 0 and bear_power[i] < 0 and 
-                williams_r_1d_aligned[i] < -80 and 
+            # Long: Williams %R oversold (< -80) AND daily uptrend AND volume confirmation
+            if (williams_r[i] < -80 and daily_trend_up and 
                 vol_current > 1.5 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND Bull Power > 0 (bearish) AND Williams %R > -20 (overbought) AND volume confirmation
-            elif (bear_power[i] < 0 and bull_power[i] > 0 and 
-                  williams_r_1d_aligned[i] > -20 and 
+            # Short: Williams %R overbought (> -20) AND daily downtrend AND volume confirmation
+            elif (williams_r[i] > -20 and daily_trend_down and 
                   vol_current > 1.5 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: Elder Ray power diverges
+            # Exit conditions
             exit_signal = False
             
             if position == 1:
-                # Exit long: Bull Power <= 0 (bullish momentum faded)
-                if bull_power[i] <= 0:
+                # Exit long: Williams %R crosses back above -50 (mean reversion)
+                if williams_r[i] > -50:
                     exit_signal = True
             else:  # position == -1
-                # Exit short: Bear Power >= 0 (bearish momentum faded)
-                if bear_power[i] >= 0:
+                # Exit short: Williams %R crosses back below -50 (mean reversion)
+                if williams_r[i] < -50:
                     exit_signal = True
             
             if exit_signal:
@@ -98,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6H_ElderRay_1dWilliamsR_Volume"
-timeframe = "6h"
+name = "12H_WilliamsR_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
