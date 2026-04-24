@@ -1,37 +1,69 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d ATR regime filter and volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 1d for ATR regime and Camarilla levels.
-- ATR regime: ATR(14) > ATR(50) indicates high volatility/trending market (favor breakouts).
-- Camarilla pivot levels calculated from previous 1d OHLC.
-- Entry: Long when price breaks above H3 with volume spike and ATR regime bullish.
-         Short when price breaks below L3 with volume spike and ATR regime bearish.
-- Exit: When price returns to the Camarilla R3/S3 levels (mean reversion edge).
-- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
-- ATR regime filter reduces whipsaw in low volatility/choppy markets.
+Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for ADX regime and Elder Ray calculation.
+- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 1d EMA13).
+- ADX regime: ADX > 25 = trending (trade with momentum), ADX < 20 = ranging (fade extremes).
+- Entry Logic:
+    * Trending regime (ADX > 25): Long when Bull Power > 0 and volume spike, Short when Bear Power < 0 and volume spike.
+    * Ranging regime (ADX < 20): Long when Bear Power < -threshold and volume spike (oversold bounce), 
+                                 Short when Bull Power > threshold and volume spike (overbought fade).
+- Exit: Reverse signal or when power returns to zero (mean reversion in ranging, momentum exhaustion in trending).
+- Volume confirmation: 6h volume > 1.5 * 20-period volume MA.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+- Works in bull via buying strength in uptrends, in bear via selling weakness in downtrends, and fading extremes in ranges.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given OHLC"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close, close, close, close, close
-    camarilla_close = close
-    r3 = camarilla_close + range_val * 1.1 / 4
-    r2 = camarilla_close + range_val * 1.1 / 6
-    r1 = camarilla_close + range_val * 1.1 / 12
-    s1 = camarilla_close - range_val * 1.1 / 12
-    s2 = camarilla_close - range_val * 1.1 / 6
-    s3 = camarilla_close - range_val * 1.1 / 4
-    h3 = camarilla_close + range_val * 1.1 / 2
-    l3 = camarilla_close - range_val * 1.1 / 2
-    return r3, r2, r1, s1, s2, s3, h3, l3
+def calculate_elder_ray(high, low, close, ema_len=13):
+    """Calculate Elder Ray Bull Power and Bear Power for given OHLC and EMA"""
+    if len(close) < ema_len:
+        return np.full_like(close, np.nan), np.full_like(close, np.nan)
+    
+    ema = pd.Series(close).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    bull_power = high - ema
+    bear_power = low - ema
+    return bull_power, bear_power
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    if len(high) < period + 1:
+        return np.full_like(close, np.nan)
+    
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = np.abs(di_plus - di_minus) / (np.abs(di_plus) + np.abs(di_minus)) * 100
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -44,112 +76,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR regime and Camarilla levels
+    # Get 1d data for Elder Ray and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:  # Need enough for EMA13 and ADX14
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) and ATR(50) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA13 for Elder Ray
+    ema_13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Calculate Elder Ray components
+    bull_power_1d = df_1d['high'].values - ema_13
+    bear_power_1d = df_1d['low'].values - ema_13
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Calculate 1d ADX for regime filter
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
     
-    # ATR regime: 1 if ATR(14) > ATR(50) (high volatility/trending), 0 otherwise
-    atr_regime = (atr_14 > atr_50).astype(float)
+    # Align 1d indicators to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)  # For reference
     
-    # Calculate Camarilla levels for each 1d bar
-    r3_1d = np.full(len(df_1d), np.nan)
-    r2_1d = np.full(len(df_1d), np.nan)
-    r1_1d = np.full(len(df_1d), np.nan)
-    s1_1d = np.full(len(df_1d), np.nan)
-    s2_1d = np.full(len(df_1d), np.nan)
-    s3_1d = np.full(len(df_1d), np.nan)
-    h3_1d = np.full(len(df_1d), np.nan)
-    l3_1d = np.full(len(df_1d), np.nan)
-    
-    for i in range(len(df_1d)):
-        r3, r2, r1, s1, s2, s3, h3, l3 = calculate_camarilla(
-            df_1d['high'].iloc[i],
-            df_1d['low'].iloc[i],
-            df_1d['close'].iloc[i]
-        )
-        r3_1d[i] = r3
-        r2_1d[i] = r2
-        r1_1d[i] = r1
-        s1_1d[i] = s1
-        s2_1d[i] = s2
-        s3_1d[i] = s3
-        h3_1d[i] = h3
-        l3_1d[i] = l3
-    
-    # Align 1d indicators to 4h
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA (on 4h)
+    # Volume confirmation: 6h volume > 1.5 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Threshold for fading signals in ranging market
+    fade_threshold = 0.5  # Will be adjusted dynamically based on typical power values
+    
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need enough 1d bars for ATR50
+    start_idx = max(34, 20)  # Need enough 1d bars for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_regime_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Dynamic fade threshold based on recent power volatility
+        if i >= 50:
+            recent_bull = bull_power_aligned[max(0, i-50):i]
+            recent_bear = bear_power_aligned[max(0, i-50):i]
+            valid_bull = recent_bull[~np.isnan(recent_bull)]
+            valid_bear = recent_bear[~np.isnan(recent_bear)]
+            if len(valid_bull) > 10 and len(valid_bear) > 10:
+                fade_threshold = 0.5 * (np.nanstd(valid_bull) + np.nanstd(valid_bear))
+        
         if position == 0:
-            # Check for breakout signals with volume spike and ATR regime
-            if volume_spike[i] and atr_regime_aligned[i] > 0.5:
-                # Bullish breakout: price > H3
-                if close[i] > h3_aligned[i]:
+            if adx_aligned[i] > 25:  # Trending regime
+                # Trade with momentum: long on bullish power, short on bearish power
+                if bull_power_aligned[i] > 0 and volume_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakdown: price < L3
-                elif close[i] < l3_aligned[i]:
+                elif bear_power_aligned[i] < 0 and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif adx_aligned[i] < 20:  # Ranging regime
+                # Fade extremes: long on oversold, short on overbought
+                if bear_power_aligned[i] < -fade_threshold and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif bull_power_aligned[i] > fade_threshold and volume_spike[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price returns to R3 (mean reversion)
-            if close[i] <= r3_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Long exit: power fades or reverses
+            if adx_aligned[i] > 25:  # In trend, exit when power weakens
+                if bull_power_aligned[i] <= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # In range, exit when power returns to zero (mean reversion)
+                if bull_power_aligned[i] >= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to S3 (mean reversion)
-            if close[i] >= s3_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Short exit: power fades or reverses
+            if adx_aligned[i] > 25:  # In trend, exit when power weakens
+                if bear_power_aligned[i] >= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # In range, exit when power returns to zero (mean reversion)
+                if bear_power_aligned[i] <= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dATRRegime_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1dADXRegime_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
