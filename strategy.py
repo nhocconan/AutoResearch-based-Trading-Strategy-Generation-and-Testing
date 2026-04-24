@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Long when price breaks above Camarilla H3 AND 1d close > 1d EMA34 (bullish regime)
-- Short when price breaks below Camarilla L3 AND 1d close < 1d EMA34 (bearish regime)
-- Volume confirmation: current volume > 2.0 * 20-period average volume (strong spike)
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d Supertrend trend filter and volume spike confirmation.
+- Long when price breaks above Camarilla H3 AND 1d Supertrend is bullish AND volume > 2.0 * 20-period average
+- Short when price breaks below Camarilla L3 AND 1d Supertrend is bearish AND volume > 2.0 * 20-period average
 - Exit on opposite Camarilla level (exit long on L3, exit short on H3)
+- Supertrend uses ATR(10) with multiplier 3.0 for robust trend detection
 - Uses 4h primary with 1d HTF to target 75-200 total trades over 4 years (19-50/year)
-- Camarilla provides intraday support/resistance; EMA34 filters regime; volume spike confirms momentum
-- Designed to work in both bull (breakouts with trend) and bear (breakouts against trend) markets
+- Supertrend adapts to volatility better than EMA, reducing whipsaws in ranging markets
 - Signal size: 0.25 discrete levels to minimize fee churn
 """
 
@@ -26,8 +25,6 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate Camarilla H3 and L3 levels using previous day's OHLC
-    # For each 4h bar, we need the previous day's high, low, close
-    # We'll use daily data and align it to 4h timeframe
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -45,13 +42,38 @@ def generate_signals(prices):
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d Supertrend for trend filter
+    hl2 = (df_1d['high'] + df_1d['low']) / 2
+    atr = pd.Series(abs(df_1d['high'] - df_1d['low'])).rolling(window=10, min_periods=10).mean()
+    upperband = hl2 + (3.0 * atr)
+    lowerband = hl2 - (3.0 * atr)
     
-    # Trend filter: bullish if close > EMA34, bearish if close < EMA34
-    bullish_regime = close > ema_34_1d_aligned
-    bearish_regime = close < ema_34_1d_aligned
+    supertrend = np.zeros(len(df_1d))
+    direction = np.ones(len(df_1d))  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(df_1d)):
+        if close.iloc[i] > upperband.iloc[i-1]:
+            direction[i] = 1
+        elif close.iloc[i] < lowerband.iloc[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lowerband.iloc[i] < lowerband.iloc[i-1]:
+                lowerband.iloc[i] = lowerband.iloc[i-1]
+            if direction[i] == -1 and upperband.iloc[i] > upperband.iloc[i-1]:
+                upperband.iloc[i] = upperband.iloc[i-1]
+    
+        if direction[i] == 1:
+            supertrend[i] = lowerband.iloc[i]
+        else:
+            supertrend[i] = upperband.iloc[i]
+    
+    # Align Supertrend to 4h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    
+    # Trend filter: bullish if close > Supertrend, bearish if close < Supertrend
+    bullish_regime = close > supertrend_aligned
+    bearish_regime = close < supertrend_aligned
     
     # Volume confirmation: volume > 2.0 * 20-period average (strong spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,7 +88,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(supertrend_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_1dEMA34_VolumeSpike_v1"
+name = "4h_Camarilla_H3L3_1dSupertrend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
