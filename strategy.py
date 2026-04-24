@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w EMA34 for trend direction (bullish when close > EMA34, bearish when close < EMA34).
-- Entry: Long when price breaks above Donchian upper(20) in 1w bull trend with volume > 1.5 * 1d volume MA(20); Short when price breaks below Donchian lower(20) in 1w bear trend with volume > 1.5 * 1d volume MA(20).
-- Exit: ATR-based trailing stop (2.0 * ATR(14)) or opposite Donchian breakout.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d EMA50 for trend direction (bullish when close > EMA50, bearish when close < EMA50).
+- Entry: Long when price breaks above Donchian(20) upper band in 1d bull trend with volume > 2.0 * 12h volume MA(20); Short when price breaks below Donchian(20) lower band in 1d bear trend with volume > 2.0 * 12h volume MA(20).
+- Exit: ATR(14) trailing stop (2.0 * ATR) or opposite Donchian breakout.
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Designed for BTC/ETH: Donchian provides clear trend structure, 1w EMA34 filter avoids counter-trend trades in higher timeframe, volume confirmation reduces false breakouts. Works in both bull (trend continuation) and bear (mean reversion after panic spikes).
+- Designed for BTC/ETH: Donchian provides robust structure, 1d EMA50 filter avoids counter-trend trades in bear markets, volume spike confirms institutional participation. Works in bull (trend continuation) and bear (mean reversion after panic spikes).
 """
 
 import numpy as np
@@ -24,24 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation and volume
+    # Get 12h data for Donchian calculation and volume
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # Calculate 1d EMA50 for trend
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate 1w EMA34 for trend
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Calculate 1d volume MA(20) for confirmation
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate 12h volume MA(20) for confirmation
+    volume_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     # Calculate ATR(14) for trailing stop
     tr1 = high - low
@@ -52,22 +52,17 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) from 1d data
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = 0
     lowest_since_entry = 0
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 20, 14)
+    start_idx = max(50, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_12h_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,22 +73,38 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: 1.5x threshold (balanced to reduce trades)
-        vol_confirmed = curr_volume > 1.5 * vol_ma_1d_aligned[i]
+        # Volume confirmation: 2.0x threshold
+        vol_confirmed = curr_volume > 2.0 * vol_ma_12h_aligned[i]
         
-        # Determine 1w EMA34 trend: bullish if close > EMA34, bearish if close < EMA34
-        trend_bullish = close[i] > ema_34_1w_aligned[i]
-        trend_bearish = close[i] < ema_34_1w_aligned[i]
+        # Determine 1d EMA50 trend: bullish if close > EMA50, bearish if close < EMA50
+        trend_bullish = close[i] > ema_50_aligned[i]
+        trend_bearish = close[i] < ema_50_aligned[i]
+        
+        # Calculate Donchian channels from previous 12h bar
+        if i >= 1:
+            # Need 20 periods of 12h data for Donchian
+            if i >= 20:
+                # Get the last 20 12h closes, but we need to map to 12h indices
+                # Since we're on 12h timeframe, we can use direct indexing
+                lookback = min(20, i+1)
+                donchian_high = np.max(high[i-lookback+1:i+1])
+                donchian_low = np.min(low[i-lookback+1:i+1])
+            else:
+                donchian_high = high[i]
+                donchian_low = low[i]
+        else:
+            donchian_high = high[i]
+            donchian_low = low[i]
         
         if position == 0:
             # Check for entry signals
-            # Long: price breaks above Donchian upper in 1w bull trend with volume confirmation
-            if curr_high > donchian_upper[i] and trend_bullish and vol_confirmed:
+            # Long: price breaks above Donchian upper band in 1d bull trend with volume confirmation
+            if curr_close > donchian_high and trend_bullish and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
-            # Short: price breaks below Donchian lower in 1w bear trend with volume confirmation
-            elif curr_low < donchian_lower[i] and trend_bearish and vol_confirmed:
+            # Short: price breaks below Donchian lower band in 1d bear trend with volume confirmation
+            elif curr_close < donchian_low and trend_bearish and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
@@ -101,7 +112,7 @@ def generate_signals(prices):
             # Long position: update highest and check exit conditions
             highest_since_entry = max(highest_since_entry, curr_high)
             # Exit: ATR trailing stop or opposite breakout
-            if curr_low <= highest_since_entry - 2.0 * atr[i] or curr_low < donchian_lower[i]:
+            if curr_low <= highest_since_entry - 2.0 * atr[i] or curr_close < donchian_low:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,7 +121,7 @@ def generate_signals(prices):
             # Short position: update lowest and check exit conditions
             lowest_since_entry = min(lowest_since_entry, curr_low)
             # Exit: ATR trailing stop or opposite breakout
-            if curr_high >= lowest_since_entry + 2.0 * atr[i] or curr_high > donchian_upper[i]:
+            if curr_high >= lowest_since_entry + 2.0 * atr[i] or curr_close > donchian_high:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
