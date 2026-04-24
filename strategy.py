@@ -1,46 +1,82 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian breakout with 1d ATR regime filter and volume confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for ATR-based regime filter (high volatility = trend follow, low volatility = avoid).
-- Entry: Long when price breaks above Donchian(20) high AND 1d ATR ratio > 1.2 AND volume > 1.5x 20-period average.
-         Short when price breaks below Donchian(20) low AND 1d ATR ratio > 1.2 AND volume > 1.5x 20-period average.
-- Exit: Opposite Donchian breakout OR ATR ratio < 0.8 (low volatility regime).
-- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Donchian channels provide clear breakout levels with built-in trend following.
-- ATR regime filter avoids ranging markets where breakouts fail.
-- Volume confirmation ensures breakouts have participation.
-- Works in bull markets (buy breakouts) and bear markets (sell breakdowns).
-- Estimated trades: ~100 total over 4 years (~25/year) based on filtered breakout frequency.
+Hypothesis: 1d KAMA trend + RSI(2) mean reversion + 1w ADX regime filter.
+- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
+- HTF: 1w for ADX regime filter (ADX > 25 = trending, ADX < 20 = ranging).
+- Entry logic:
+    * In trending regime (ADX > 25): Long when price > KAMA AND RSI(2) < 10 (pullback in uptrend).
+                                 Short when price < KAMA AND RSI(2) > 90 (pullback in downtrend).
+    * In ranging regime (ADX < 20): Long when RSI(2) < 15 AND price < lower Bollinger Band(20,2).
+                                 Short when RSI(2) > 85 AND price > upper Bollinger Band(20,2).
+- Exit: Opposite signal or RSI(2) crosses 50 (mean reversion complete).
+- Signal size: 0.25 discrete to minimize fee drag.
+- KAMA adapts to market noise, reducing false signals in chop.
+- RSI(2) captures short-term extremes for mean reversion.
+- ADX regime filter ensures we use the right strategy for market conditions.
+- Works in bull markets (trend following on pullbacks) and bear markets (mean reversion in ranges, trend following on bounces).
+- Estimated trades: ~60 total over 4 years (~15/year) due to regime-specific filters reducing overtrading.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def donchian_channels(high, low, period):
-    """Calculate Donchian channels: upper = max(high, period), lower = min(low, period)."""
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=period, min_periods=period).max().values
-    lower = low_series.rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def kama(close, er_period=10, fast_sc=2, slow_sc=30):
+    """Kaufman Adaptive Moving Average."""
+    close = pd.Series(close)
+    change = abs(close.diff(er_period))
+    volatility = close.diff().abs().rolling(window=er_period, min_periods=1).sum()
+    er = change / volatility.replace(0, 1e-10)
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    kama = [close.iloc[0]]
+    for i in range(1, len(close)):
+        kama.append(kama[-1] + sc.iloc[i] * (close.iloc[i] - kama[-1]))
+    return np.array(kama)
 
-def atr(high, low, close, period):
-    """Calculate Average True Range."""
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
+def rsi(close, period=2):
+    """Relative Strength Index."""
+    close = pd.Series(close)
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period, min_periods=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period, min_periods=period).mean()
+    rs = gain / loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+def bollinger_bands(close, period=20, std_dev=2):
+    """Bollinger Bands."""
+    close = pd.Series(close)
+    ma = close.rolling(window=period, min_periods=period).mean()
+    std = close.rolling(window=period, min_periods=period).std()
+    upper = ma + (std * std_dev)
+    lower = ma - (std * std_dev)
+    return upper.values, lower.values
+
+def adx(high, low, close, period=14):
+    """Average Directional Index."""
+    high = pd.Series(high)
+    low = pd.Series(low)
+    close = pd.Series(close)
+    
+    plus_dm = high.diff()
+    minus_dm = low.diff()
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm > 0] = 0
+    
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_values = tr.ewm(span=period, adjust=False, min_periods=period).mean().values
-    return atr_values
-
-def sma(values, period):
-    """Calculate Simple Moving Average."""
-    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
+    
+    atr = tr.rolling(window=period, min_periods=period).mean()
+    
+    plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).sum() / atr)
+    minus_di = 100 * (abs(minus_dm.rolling(window=period, min_periods=period).sum()) / atr)
+    
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-10)) * 100
+    adx = dx.rolling(window=period, min_periods=period).mean()
+    
+    return adx.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -51,68 +87,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1d ATR for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Calculate 1d indicators
+    kama_vals = kama(close, er_period=10, fast_sc=2, slow_sc=30)
+    rsi_vals = rsi(close, period=2)
+    bb_upper, bb_lower = bollinger_bands(close, period=20, std_dev=2)
+    
+    # Calculate 1w ADX for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    atr_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_ma_1d = sma(atr_1d, 10)  # 10-period average of ATR
-    atr_ratio_1d = atr_1d / atr_ma_1d
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d, additional_delay_bars=0)
-    
-    # Donchian channels on 4h (20-period)
-    donch_high, donch_low = donchian_channels(high, low, 20)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = sma(volume, 20)
-    volume_confirm = volume > (1.5 * vol_ma)
+    adx_1w = adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, period=14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w, additional_delay_bars=1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for Donchian/ATR/volume
+    start_idx = 50  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or np.isnan(adx_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
+        curr_rsi = rsi_vals[i]
+        curr_adx = adx_1w_aligned[i]
         
-        # Exit conditions: opposite Donchian breakout OR low volatility regime
+        # Exit conditions: opposite signal or RSI(2) crosses 50 (mean reversion complete)
         if position != 0:
-            # Exit long: price breaks below Donchian low OR ATR ratio < 0.8 (low vol)
+            # Exit long: price < KAMA OR RSI(2) > 50
             if position == 1:
-                if curr_close < donch_low[i] or atr_ratio_1d_aligned[i] < 0.8:
+                if curr_close < kama_vals[i] or curr_rsi > 50:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Donchian high OR ATR ratio < 0.8 (low vol)
+            # Exit short: price > KAMA OR RSI(2) < 50
             elif position == -1:
-                if curr_close > donch_high[i] or atr_ratio_1d_aligned[i] < 0.8:
+                if curr_close > kama_vals[i] or curr_rsi < 50:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout + high volatility regime + volume confirmation
+        # Entry conditions based on regime
         if position == 0:
-            # Long: price breaks above Donchian high AND high volatility AND volume confirmation
-            if curr_close > donch_high[i] and atr_ratio_1d_aligned[i] > 1.2 and volume_confirm[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below Donchian low AND high volatility AND volume confirmation
-            elif curr_close < donch_low[i] and atr_ratio_1d_aligned[i] > 1.2 and volume_confirm[i]:
-                signals[i] = -0.25
-                position = -1
+            # Trending regime (ADX > 25): trend following on pullbacks
+            if curr_adx > 25:
+                # Long: price > KAMA AND RSI(2) < 10 (strong pullback in uptrend)
+                if curr_close > kama_vals[i] and curr_rsi < 10:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price < KAMA AND RSI(2) > 90 (strong pullback in downtrend)
+                elif curr_close < kama_vals[i] and curr_rsi > 90:
+                    signals[i] = -0.25
+                    position = -1
+            # Ranging regime (ADX < 20): mean reversion at extremes
+            elif curr_adx < 20:
+                # Long: RSI(2) < 15 AND price < lower Bollinger Band (oversold)
+                if curr_rsi < 15 and curr_close < bb_lower[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: RSI(2) > 85 AND price > upper Bollinger Band (overbought)
+                elif curr_rsi > 85 and curr_close > bb_upper[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
             # Long position: maintain signal
             signals[i] = 0.25
@@ -122,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_1dATRRegime_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI2_ADXRegime_v1"
+timeframe = "1d"
 leverage = 1.0
