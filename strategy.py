@@ -1,31 +1,20 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d volume spike and weekly pivot trend filter.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for volume confirmation, 1w for pivot-based trend direction.
-- Camarilla Pivots: calculates key levels from prior 1d OHLC.
-- Entry: Long when price breaks above R3 AND volume > 1.8 * 20-period average volume (1d) AND weekly pivot shows uptrend (price > weekly pivot).
-         Short when price breaks below S3 AND volume > 1.8 * 20-period average volume (1d) AND weekly pivot shows downtrend (price < weekly pivot).
-- Exit: Opposite Camarilla breakout (R4/S4) or reversal signal.
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and choppiness regime filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for volume average and choppiness calculation.
+- Camarilla levels: identifies key support/resistance from prior 1d session.
+- Entry: Long when price breaks above R1 with volume confirmation and chop > 61.8 (rangy market).
+         Short when price breaks below S1 with volume confirmation and chop > 61.8.
+- Exit: Opposite Camarilla breakout or chop < 38.2 (trending market) to avoid false breakouts.
 - Signal size: 0.25 discrete to minimize fee drag.
-- Weekly pivot trend filter avoids counter-trend trades in strong weekly regimes.
-- Volume confirmation ensures breakout legitimacy.
-- Designed to work in both bull and bear markets by aligning with weekly trend.
+- Works in both bull and bear markets as it captures mean reversion in ranging markets
+  and avoids trending markets where breakouts fail.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def camarilla_pivot(high, low, close):
-    """Calculate Camarilla pivot levels for given OHLC."""
-    pivot = (high + low + close) / 3.0
-    range_hl = high - low
-    r3 = pivot + range_hl * 1.1 / 4.0
-    s3 = pivot - range_hl * 1.1 / 4.0
-    r4 = pivot + range_hl * 1.1 / 2.0
-    s4 = pivot - range_hl * 1.1 / 2.0
-    return r3, s3, r4, s4, pivot
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,77 +27,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla levels (using prior 1d bar)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:  # Need at least 2 days for prior bar
-        return np.zeros(n)
-    
-    # Use prior 1d bar for Camarilla calculation (avoid look-ahead)
-    prior_high = df_1d['high'].values[:-1]  # exclude current forming bar
-    prior_low = df_1d['low'].values[:-1]
-    prior_close = df_1d['close'].values[:-1]
-    
-    if len(prior_close) < 1:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels for each prior 1d bar
-    r3_1d = np.full_like(prior_close, np.nan)
-    s3_1d = np.full_like(prior_close, np.nan)
-    r4_1d = np.full_like(prior_close, np.nan)
-    s4_1d = np.full_like(prior_close, np.nan)
-    pivot_1d = np.full_like(prior_close, np.nan)
-    
-    for i in range(len(prior_close)):
-        r3, s3, r4, s4, pivot = camarilla_pivot(prior_high[i], prior_low[i], prior_close[i])
-        r3_1d[i] = r3
-        s3_1d[i] = s3
-        r4_1d[i] = r4
-        s4_1d[i] = s4
-        pivot_1d[i] = pivot
-    
-    # Align 1d levels to 6h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d.iloc[:-1], r3_1d) if len(df_1d) > 1 else np.full(n, np.nan)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d.iloc[:-1], s3_1d) if len(df_1d) > 1 else np.full(n, np.nan)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d.iloc[:-1], r4_1d) if len(df_1d) > 1 else np.full(n, np.nan)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d.iloc[:-1], s4_1d) if len(df_1d) > 1 else np.full(n, np.nan)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d.iloc[:-1], pivot_1d) if len(df_1d) > 1 else np.full(n, np.nan)
-    
     # Calculate 1d volume average for confirmation
-    if len(df_1d) < 20:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:  # Need sufficient data for volume MA
         return np.zeros(n)
+    
     vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate 1w pivot for trend filter (using prior 1w bar)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d choppiness index for regime filter
+    if len(df_1d) < 14:  # Need sufficient data for chop
         return np.zeros(n)
     
-    # Use prior 1w bar for weekly pivot
-    prior_week_high = df_1w['high'].values[:-1]
-    prior_week_low = df_1w['low'].values[:-1]
-    prior_week_close = df_1w['close'].values[:-1]
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.rolling(window=14, min_periods=14).sum().values
     
-    if len(prior_week_close) < 1:
-        weekly_pivot_aligned = np.full(n, np.nan)
-    else:
-        weekly_pivot_1w = np.full_like(prior_week_close, np.nan)
-        for i in range(len(prior_week_close)):
-            weekly_pivot = (prior_week_high[i] + prior_week_low[i] + prior_week_close[i]) / 3.0
-            weekly_pivot_1w[i] = weekly_pivot
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w.iloc[:-1], weekly_pivot_1w) if len(df_1w) > 1 else np.full(n, np.nan)
+    # Chop = 100 * log10(sum(TR14) / (max(HH14) - min(LL14))) / log10(14)
+    max_hh_14 = df_1d['high'].rolling(window=14, min_periods=14).max().values
+    min_ll_14 = df_1d['low'].rolling(window=14, min_periods=14).min().values
+    denominator = max_hh_14 - min_ll_14
+    denominator = np.where(denominator == 0, 1e-10, denominator)  # Avoid division by zero
+    chop = 100 * (np.log10(atr_14 / denominator) / np.log10(14))
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate Camarilla levels from 1d data (using prior day's OHLC)
+    # Camarilla: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4,
+    #            R2 = close + 1.1*(high-low)*1.1/6, R1 = close + 1.1*(high-low)*1.1/12
+    #            S1 = close - 1.1*(high-low)*1.1/12, S2 = close - 1.1*(high-low)*1.1/6,
+    #            S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
+    # We use prior day's data to avoid look-ahead
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
+    
+    # Calculate R1 and S1 levels
+    camarilla_r1 = prior_close + 1.1 * (prior_high - prior_low) * (1.1 / 12)
+    camarilla_s1 = prior_close - 1.1 * (prior_high - prior_low) * (1.1 / 12)
+    
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 2)  # Need 20 for volume MA, 2 for prior bar
+    start_idx = max(20, 14)  # Need 20 for volume MA, 14 for chop
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(weekly_pivot_aligned[i])):
+        # Skip if data not ready (check for NaN from alignment or calculations)
+        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -120,44 +92,41 @@ def generate_signals(prices):
         curr_volume = volume[i]
         prev_close = close[i-1]
         
-        # Exit conditions: opposite Camarilla breakout (R4/S4) or weekly pivot reversal
+        # Exit conditions
         if position != 0:
-            exit_signal = False
-            # Exit long: price breaks below S4 or weekly pivot turns down
-            if position == 1:
-                if curr_low <= s4_1d_aligned[i]:
-                    exit_signal = True
-                elif curr_close < weekly_pivot_aligned[i] and prev_close >= weekly_pivot_aligned[i]:
-                    exit_signal = True
-            # Exit short: price breaks above R4 or weekly pivot turns up
-            elif position == -1:
-                if curr_high >= r4_1d_aligned[i]:
-                    exit_signal = True
-                elif curr_close > weekly_pivot_aligned[i] and prev_close <= weekly_pivot_aligned[i]:
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit if chop < 38.2 (trending market) - avoid false breakouts in trends
+            if chop_aligned[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
                 continue
+            # Exit opposite Camarilla breakout
+            elif position == 1:
+                if curr_low <= s1_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
+            elif position == -1:
+                if curr_high >= r1_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
         
-        # Entry conditions: Camarilla breakout with volume confirmation and weekly pivot trend filter
+        # Entry conditions: Camarilla breakout with volume confirmation and chop > 61.8 (rangy market)
         if position == 0:
-            # Camarilla breakout signals (using current bar high/low vs prior levels)
-            breakout_up = curr_high >= r3_1d_aligned[i] and prev_close < r3_1d_aligned[i]
-            breakout_down = curr_low <= s3_1d_aligned[i] and prev_close > s3_1d_aligned[i]
+            # Camarilla breakout signals
+            breakout_up = curr_high >= r1_aligned[i] and prev_close < r1_aligned[i]
+            breakout_down = curr_low <= s1_aligned[i] and prev_close > s1_aligned[i]
             
-            # Volume confirmation: current volume > 1.8 * 20-period average volume
-            volume_confirm = curr_volume > 1.8 * vol_ma_20_aligned[i]
+            # Volume confirmation: current volume > 1.5 * 20-period average volume (aligned)
+            volume_confirm = curr_volume > 1.5 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
             
-            # Weekly pivot trend filter: price > weekly pivot for long, price < weekly pivot for short
-            weekly_trend_up = curr_close > weekly_pivot_aligned[i]
-            weekly_trend_down = curr_close < weekly_pivot_aligned[i]
+            # Chop regime filter: chop > 61.8 (rangy market)
+            chop_regime = chop_aligned[i] > 61.8
             
-            if breakout_up and volume_confirm and weekly_trend_up:
+            if breakout_up and volume_confirm and chop_regime:
                 signals[i] = 0.25
                 position = 1
-            elif breakout_down and volume_confirm and weekly_trend_down:
+            elif breakout_down and volume_confirm and chop_regime:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -169,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dVolumeSpike_1wPivotTrend_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dVolumeSpike_ChopFilter_v1"
+timeframe = "12h"
 leverage = 1.0
