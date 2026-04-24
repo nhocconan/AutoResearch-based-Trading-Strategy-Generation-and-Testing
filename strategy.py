@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Camarilla pivot breakout with volume confirmation and weekly trend filter.
-- Primary timeframe: 1d targeting 30-80 total trades over 4 years (7-20/year).
-- HTF: 1w EMA34 for trend filter.
-- Entry: Long when price breaks above Camarilla H3 level AND ATR ratio > 1.5 AND price > 1w EMA34.
-         Short when price breaks below Camarilla L3 level AND ATR ratio > 1.5 AND price < 1w EMA34.
-- Exit: Opposite Camarilla breakout OR price crosses 1w EMA34 in opposite direction.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d ATR volume spike filter and 1d EMA34 trend filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA34 trend filter and ATR volume spike confirmation.
+- Entry: Long when price breaks above Camarilla H3 level AND ATR ratio > 1.8 AND price > 1d EMA34.
+         Short when price breaks below Camarilla L3 level AND ATR ratio > 1.8 AND price < 1d EMA34.
+- Exit: Opposite Camarilla breakout (H4/L4) OR price crosses 1d EMA34 in opposite direction.
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Camarilla levels provide institutional support/resistance levels that work in both ranging and trending markets.
-- Volume confirmation via ATR spike filters out low-momentum false breakouts.
-- Weekly EMA34 trend filter ensures we trade with the higher-timeframe momentum.
-- Works in bull markets (buy H3 breakouts in uptrend) and bear markets (sell L3 breakdowns in downtrend).
-- Estimated trades: ~50 total over 4 years (~12-13/year) based on Camarilla breakout frequency with strict filters.
+- ATR ratio (current ATR/20-period ATR) > 1.8 confirms significant volatility expansion to avoid false breakouts.
+- 1d EMA34 provides trend filter to avoid counter-trend trades.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
+- Camarilla levels calculated from prior 1d OHLC (H3/L3 = close + 1.1*(high-low)/6, H4/L4 = close + 1.5*(high-low)/6).
 """
 
 import numpy as np
@@ -32,22 +32,17 @@ def atr(high, low, close, period):
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def camarilla_levels(high, low, close):
-    """Calculate Camarilla pivot levels for intraday trading."""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    h4 = pivot + (range_val * 1.1 / 2)
-    h3 = pivot + (range_val * 1.1 / 4)
-    h2 = pivot + (range_val * 1.1 / 6)
-    h1 = pivot + (range_val * 1.1 / 12)
-    l1 = pivot - (range_val * 1.1 / 12)
-    l2 = pivot - (range_val * 1.1 / 6)
-    l3 = pivot - (range_val * 1.1 / 4)
-    l4 = pivot - (range_val * 1.1 / 2)
-    return h3, l3  # We only need H3 and L3 for breakouts
+    """Calculate Camarilla pivot levels."""
+    range_ = high - low
+    H3 = close + range_ * 1.1 / 6
+    L3 = close - range_ * 1.1 / 6
+    H4 = close + range_ * 1.5 / 6
+    L4 = close - range_ * 1.5 / 6
+    return H3, L3, H4, L4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price data
@@ -55,43 +50,40 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate 1w trend filter: EMA34
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Calculate 1d trend filter: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    ema34_1w = ema(df_1w['close'].values, 34)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w, additional_delay_bars=1)
+    ema34_1d = ema(df_1d['close'].values, 34)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d, additional_delay_bars=1)
     
     # Calculate 1d ATR for volume spike filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
     atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
     atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
     atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
     
-    # Calculate Camarilla levels on 1d (using previous day's data to avoid look-ahead)
-    camarilla_h3 = np.full(n, np.nan)
-    camarilla_l3 = np.full(n, np.nan)
-    
-    for i in range(1, n):  # Start from 1 to have previous day's data
-        h3, l3 = camarilla_levels(high[i-1], low[i-1], close[i-1])
-        camarilla_h3[i] = h3
-        camarilla_l3[i] = l3
+    # Calculate Camarilla levels from prior 1d OHLC (using 1d data)
+    camarilla_H3, camarilla_L3, camarilla_H4, camarilla_L4 = camarilla_levels(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
+    )
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3, additional_delay_bars=1)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3, additional_delay_bars=1)
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4, additional_delay_bars=1)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4, additional_delay_bars=1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 40  # Need sufficient data for all indicators
+    start_idx = 40  # Need sufficient data for EMA34
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or
+            np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or
+            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,29 +91,29 @@ def generate_signals(prices):
         
         curr_close = close[i]
         
-        # Exit conditions: opposite Camarilla breakout OR price crosses 1w EMA34 in opposite direction
+        # Exit conditions: opposite Camarilla breakout (H4/L4) OR price crosses 1d EMA34 in opposite direction
         if position != 0:
-            # Exit long: price breaks below Camarilla L3 OR price falls below 1w EMA34
+            # Exit long: price breaks below Camarilla L4 OR price falls below 1d EMA34
             if position == 1:
-                if curr_close < camarilla_l3[i] or curr_close < ema34_1w_aligned[i]:
+                if curr_close < camarilla_L4_aligned[i] or curr_close < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Camarilla H3 OR price rises above 1w EMA34
+            # Exit short: price breaks above Camarilla H4 OR price rises above 1d EMA34
             elif position == -1:
-                if curr_close > camarilla_h3[i] or curr_close > ema34_1w_aligned[i]:
+                if curr_close > camarilla_H4_aligned[i] or curr_close > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
         # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: price breaks above Camarilla H3 AND ATR ratio > 1.5 AND bullish 1w trend
-            if curr_close > camarilla_h3[i] and atr_ratio_aligned[i] > 1.5 and curr_close > ema34_1w_aligned[i]:
+            # Long: price breaks above Camarilla H3 AND ATR ratio > 1.8 AND bullish 1d trend
+            if curr_close > camarilla_H3_aligned[i] and atr_ratio_aligned[i] > 1.8 and curr_close > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3 AND ATR ratio > 1.5 AND bearish 1w trend
-            elif curr_close < camarilla_l3[i] and atr_ratio_aligned[i] > 1.5 and curr_close < ema34_1w_aligned[i]:
+            # Short: price breaks below Camarilla L3 AND ATR ratio > 1.8 AND bearish 1d trend
+            elif curr_close < camarilla_L3_aligned[i] and atr_ratio_aligned[i] > 1.8 and curr_close < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -133,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_1wEMA34_TrendFilter_v1"
-timeframe = "1d"
+name = "12h_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_1dEMA34_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
