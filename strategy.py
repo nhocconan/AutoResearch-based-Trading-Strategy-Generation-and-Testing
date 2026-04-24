@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Index with 1d EMA200 trend filter and 12h ATR volume confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for EMA200 trend filter, 12h for ATR volume spike filter.
-- Elder Ray: Bull Power = High - EMA13(Close), Bear Power = Low - EMA13(Close)
-- Entry: Long when Bull Power > 0 AND Bear Power rising (less negative) AND price > 1d EMA200 AND ATR ratio > 1.5
-         Short when Bear Power < 0 AND Bull Power falling (less positive) AND price < 1d EMA200 AND ATR ratio > 1.5
-- Exit: Opposite Elder Ray signal OR price crosses 1d EMA200 in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag.
-- Works in bull markets (buy strength in uptrend) and bear markets (sell weakness in downtrend).
-- Elder Ray measures buying/selling pressure relative to trend; volume confirmation avoids low-conviction moves.
+Hypothesis: 12h Williams Fractal breakout with 1w EMA50 trend filter and volume confirmation using 1d ATR spike.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for EMA50 trend filter and 1d for ATR volume spike filter.
+- Entry: Long when price breaks above prior 12h Williams bearish fractal AND ATR ratio > 2.0 AND price > 1w EMA50.
+         Short when price breaks below prior 12h Williams bullish fractal AND ATR ratio > 2.0 AND price < 1w EMA50.
+- Exit: Opposite Williams fractal breakout OR price crosses 1w EMA50 in opposite direction.
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- ATR ratio (current ATR/20-period ATR) > 2.0 confirms significant volatility expansion to avoid false breakouts.
+- 1w EMA50 provides trend filter to avoid counter-trend trades.
+- Williams fractals from prior 12h provide swing high/low structure.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def ema(values, period):
     """Calculate Exponential Moving Average."""
@@ -29,13 +31,6 @@ def atr(high, low, close, period):
     true_range[0] = high_low[0]  # First period
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def elder_ray(high, low, close, ema_period):
-    """Calculate Elder Ray Index (Bull Power and Bear Power)."""
-    ema_close = ema(close, ema_period)
-    bull_power = high - ema_close
-    bear_power = low - ema_close
-    return bull_power, bear_power
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -46,78 +41,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate 1d trend filter: EMA200
+    # Calculate 1w trend filter: EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
+        return np.zeros(n)
+    
+    ema50_1w = ema(df_1w['close'].values, 50)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w, additional_delay_bars=1)
+    
+    # Calculate 1d ATR for volume spike filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 210:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    ema200_1d = ema(df_1d['close'].values, 200)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d, additional_delay_bars=1)
+    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
+    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
+    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
     
-    # Calculate 12h ATR for volume confirmation
+    # Williams fractals from prior 12h OHLC
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    atr_20_12h = atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 20)
-    atr_current_12h = atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 1)
-    atr_ratio_12h = atr_current_12h / (atr_20_12h + 1e-10)  # Avoid division by zero
-    atr_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio_12h, additional_delay_bars=1)
-    
-    # Calculate Elder Ray (13-period EMA for power calculation)
-    ema13 = ema(close, 13)
-    bull_power, bear_power = elder_ray(high, low, close, 13)
+    # Compute Williams fractals on 12h data
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_12h['high'].values,
+        df_12h['low'].values,
+    )
+    # Align fractals with extra delay (Williams fractals need 2 extra bars for confirmation)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_12h, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_12h, bullish_fractal, additional_delay_bars=2
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 210  # Need sufficient data for 1d EMA200
+    start_idx = 100  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(atr_ratio_12h_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or
+            np.isnan(bullish_fractal_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_bull = bull_power[i]
-        curr_bear = bear_power[i]
         
-        # Calculate power momentum (change from previous bar)
-        if i > start_idx:
-            bull_momentum = curr_bull - bull_power[i-1]
-            bear_momentum = curr_bear - bear_power[i-1]
-        else:
-            bull_momentum = 0
-            bear_momentum = 0
-        
-        # Exit conditions: opposite Elder Ray signal OR price crosses 1d EMA200 in opposite direction
+        # Exit conditions: opposite Williams fractal breakout OR price crosses 1w EMA50 in opposite direction
         if position != 0:
-            # Exit long: Bear Power becomes positive OR price falls below 1d EMA200
+            # Exit long: price breaks below prior bullish fractal OR price falls below 1w EMA50
             if position == 1:
-                if curr_bear > 0 or curr_close < ema200_1d_aligned[i]:
+                if curr_close < bullish_fractal_aligned[i] or curr_close < ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Bull Power becomes negative OR price rises above 1d EMA200
+            # Exit short: price breaks above prior bearish fractal OR price rises above 1w EMA50
             elif position == -1:
-                if curr_bull < 0 or curr_close > ema200_1d_aligned[i]:
+                if curr_close > bearish_fractal_aligned[i] or curr_close > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Elder Ray signals with trend filter and volume confirmation
+        # Entry conditions: Williams fractal breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) AND Bear Power rising (less negative) AND uptrend AND volume confirmation
-            if curr_bull > 0 and bear_momentum > 0 and curr_close > ema200_1d_aligned[i] and atr_ratio_12h_aligned[i] > 1.5:
+            # Long: price breaks above prior bearish fractal AND ATR ratio > 2.0 AND bullish 1w trend
+            if curr_close > bearish_fractal_aligned[i] and atr_ratio_aligned[i] > 2.0 and curr_close > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (selling pressure) AND Bull Power falling (less positive) AND downtrend AND volume confirmation
-            elif curr_bear < 0 and bull_momentum < 0 and curr_close < ema200_1d_aligned[i] and atr_ratio_12h_aligned[i] > 1.5:
+            # Short: price breaks below prior bullish fractal AND ATR ratio > 2.0 AND bearish 1w trend
+            elif curr_close < bullish_fractal_aligned[i] and atr_ratio_aligned[i] > 2.0 and curr_close < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -129,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA200_TrendFilter_12hATR_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Williams_Fractal_Breakout_1dATR_VolumeSpike_1wEMA50_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
