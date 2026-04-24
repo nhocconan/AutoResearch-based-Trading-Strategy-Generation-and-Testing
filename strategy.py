@@ -1,34 +1,56 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla R3/S3 breakout with 1d volume spike and 1w pivot trend filter.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for volume confirmation and Camarilla levels, 1w for pivot trend direction.
-- Camarilla levels: R3/S3 as breakout continuation zones (price breaking R3/S3 with volume continues trend).
-- Entry: Long when price breaks above R3 AND volume > 2.0 * 20-period average volume AND 1w pivot trend is up.
-         Short when price breaks below S3 AND volume > 2.0 * 20-period average volume AND 1w pivot trend is down.
-- Exit: Opposite Camarilla breakout (R4/S4) or time-based (max 10 bars hold).
+Hypothesis: 12h Camarilla pivot (H3/L3) breakout with 1w volume spike and ADX regime filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for volume average and trend direction, 1d for ADX regime filter.
+- Camarilla Pivot: calculates key support/resistance levels from prior 1d OHLC.
+- Entry: Long when price breaks above H3 AND volume > 2.0 * 1w average volume AND ADX(14) > 25 (trending regime).
+         Short when price breaks below L3 AND volume > 2.0 * 1w average volume AND ADX(14) > 25.
+- Exit: Opposite Camarilla breakout signal (price re-enters the pivot range).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in bull markets via breakout continuation and bear markets via short breakdowns.
-- Volume confirmation avoids false breakouts. Weekly pivot trend ensures trading with higher timeframe momentum.
+- Works in both bull and bear markets as ADX filter ensures we only trade strong trends,
+  while Camarilla levels provide precise entry points after consolidation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period."""
-    typical = (high + low + close) / 3.0
-    range_val = high - low
-    R4 = close + range_val * 1.1 / 2.0
-    R3 = close + range_val * 1.1 / 4.0
-    S3 = close - range_val * 1.1 / 4.0
-    S4 = close - range_val * 1.1 / 2.0
-    return R4, R3, S3, S4
+def adx(high, low, close, period=14):
+    """Calculate Average Directional Index with proper min_periods."""
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    close_series = pd.Series(close)
+    
+    # True Range
+    tr1 = high_series - low_series
+    tr2 = abs(high_series - close_series.shift(1))
+    tr3 = abs(low_series - close_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False, min_periods=period).mean()
+    
+    # Directional Movement
+    dm_plus = high_series.diff()
+    dm_minus = low_series.diff() * -1
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+    
+    # Smoothed DM
+    dm_plus_smooth = dm_plus.ewm(span=period, adjust=False, min_periods=period).mean()
+    dm_minus_smooth = dm_minus.ewm(span=period, adjust=False, min_periods=period).mean()
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr.replace(0, 1e-10)
+    di_minus = 100 * dm_minus_smooth / atr.replace(0, 1e-10)
+    
+    # DX and ADX
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus).replace(0, 1e-10)
+    adx_values = dx.ewm(span=period, adjust=False, min_periods=period).mean().values
+    return adx_values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:  # Need sufficient data for calculations
+    if n < 100:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -37,60 +59,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla levels for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient data for volume MA and Camarilla
-        return np.zeros(n)
-    
-    r4_1d, r3_1d, s3_1d, s4_1d = camarilla(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
-        df_1d['close'].values
-    )
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Calculate 1d volume average for confirmation
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    
-    # Calculate 1w pivot trend (Higher High/Higher Low for uptrend, Lower High/Lower Low for downtrend)
+    # Calculate 1w volume average for confirmation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:  # Need at least 2 weeks for trend
+    if len(df_1w) < 20:  # Need sufficient data for volume MA
         return np.zeros(n)
     
-    # Simple trend: compare current week close to previous week close
-    close_1w = df_1w['close'].values
-    trend_1w = np.zeros(len(close_1w))
-    trend_1w[0] = 0  # No trend for first week
-    for i in range(1, len(close_1w)):
-        if close_1w[i] > close_1w[i-1]:
-            trend_1w[i] = 1   # Uptrend
-        elif close_1w[i] < close_1w[i-1]:
-            trend_1w[i] = -1  # Downtrend
-        else:
-            trend_1w[i] = trend_1w[i-1]  # Same as previous
+    vol_ma_20_1w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
     
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # Calculate 1d ADX for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need sufficient data for ADX
+        return np.zeros(n)
+    
+    adx_1d = adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate Camarilla levels from 1d data (H3, L3, H4, L4)
+    # H3 = close + 1.1*(high-low)/4
+    # L3 = close - 1.1*(high-low)/4
+    # H4 = close + 1.1*(high-low)/2
+    # L4 = close - 1.1*(high-low)/2
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    camarilla_high = df_1d['close'].values + 1.1 * (df_1d['high'].values - df_1d['low'].values) / 4
+    camarilla_low = df_1d['close'].values - 1.1 * (df_1d['high'].values - df_1d['low'].values) / 4
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_in_trade = 0  # For time-based exit
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20)  # Need 20 for volume MA
+    start_idx = max(20, 30)  # Need 20 for volume MA, 30 for ADX
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(trend_1w_aligned[i])):
+        if (np.isnan(vol_ma_20_1w_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_in_trade = 0
             continue
         
         curr_close = close[i]
@@ -99,53 +110,39 @@ def generate_signals(prices):
         curr_volume = volume[i]
         prev_close = close[i-1]
         
-        # Increment bars in trade
+        # Exit conditions: price re-enters the Camarilla pivot range (H3 to L3)
         if position != 0:
-            bars_in_trade += 1
-        
-        # Exit conditions: opposite Camarilla breakout or max hold time (10 bars)
-        if position != 0:
-            exit_signal = False
-            # Exit long: price breaks below S3
+            # Exit long: price moves back below H3
             if position == 1:
-                if curr_low <= s3_1d_aligned[i]:
-                    exit_signal = True
-            # Exit short: price breaks above R3
+                if curr_close < camarilla_high_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
+            # Exit short: price moves back above L3
             elif position == -1:
-                if curr_high >= r3_1d_aligned[i]:
-                    exit_signal = True
-            
-            # Time-based exit: max 10 bars (~60 hours)
-            if bars_in_trade >= 10:
-                exit_signal = True
-            
-            if exit_signal:
-                signals[i] = 0.0
-                position = 0
-                bars_in_trade = 0
-                continue
+                if curr_close > camarilla_low_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
         
-        # Entry conditions: Camarilla breakout with volume confirmation and 1w pivot trend filter
+        # Entry conditions: Camarilla breakout with volume confirmation and ADX regime filter
         if position == 0:
             # Camarilla breakout signals
-            breakout_up = curr_high >= r3_1d_aligned[i] and prev_close < r3_1d_aligned[i-1]
-            breakout_down = curr_low <= s3_1d_aligned[i] and prev_close > s3_1d_aligned[i-1]
+            breakout_up = curr_high >= camarilla_high_aligned[i] and prev_close < camarilla_high_aligned[i-1]
+            breakout_down = curr_low <= camarilla_low_aligned[i] and prev_close > camarilla_low_aligned[i-1]
             
             # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
-            volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
+            volume_confirm = curr_volume > 2.0 * vol_ma_20_1w_aligned[i] if not np.isnan(vol_ma_20_1w_aligned[i]) else False
             
-            # 1w pivot trend filter: only trade in direction of weekly trend
-            trend_filter_long = trend_1w_aligned[i] >= 0   # Allow uptrend and sideways
-            trend_filter_short = trend_1w_aligned[i] <= 0  # Allow downtrend and sideways
+            # ADX regime filter: ADX(14) > 25 (trending regime)
+            adx_regime = adx_1d_aligned[i] > 25
             
-            if breakout_up and volume_confirm and trend_filter_long:
+            if breakout_up and volume_confirm and adx_regime:
                 signals[i] = 0.25
                 position = 1
-                bars_in_trade = 0
-            elif breakout_down and volume_confirm and trend_filter_short:
+            elif breakout_down and volume_confirm and adx_regime:
                 signals[i] = -0.25
                 position = -1
-                bars_in_trade = 0
         elif position == 1:
             # Long position: maintain signal
             signals[i] = 0.25
@@ -155,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dVolumeSpike_1wPivotTrend_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1wVolumeSpike_ADXRegime_v1"
+timeframe = "12h"
 leverage = 1.0
