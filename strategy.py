@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 1d for EMA trend and pivot calculation.
+- Primary timeframe: 4h for execution, HTF: 1d for EMA trend.
 - Camarilla pivot levels (H3, L3) from prior 1d: Long when price > H3, Short when price < L3.
 - Trend filter: Only trade in direction of 1d EMA34 (long if EMA34 rising, short if falling).
-- Volume confirmation: current volume > 2.0x 20-period volume MA to ensure strong participation.
+- Volume confirmation: current volume > 1.8x 20-period volume MA to ensure strong participation.
+- Exit: price returns to prior 1d close or opposite Camarilla level (L3 for long, H3 for short).
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
 - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Uses actual Camarilla calculation: H3 = H + 1.1*(L-C)/4, L3 = L - 1.1*(H-C)/4.
 - Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
+- Uses actual Camarilla calculation: H3 = H + 1.1*(L-C)/4, L3 = L - 1.1*(H-C)/4.
 """
 
 import numpy as np
@@ -35,7 +36,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla H3 and L3 levels from prior 1d bar
+    # Calculate Camarilla levels from prior 1d bar
     # H3 = H + 1.1*(L - C)/4, L3 = L - 1.1*(H - C)/4
     camarilla_H3 = high_1d + 1.1 * (low_1d - close_1d) / 4
     camarilla_L3 = low_1d - 1.1 * (high_1d - close_1d) / 4
@@ -48,9 +49,9 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA
+    # Volume confirmation: current volume > 1.8 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    volume_spike = volume > (1.8 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -82,21 +83,39 @@ def generate_signals(prices):
                         signals[i] = -0.25
                         position = -1
         elif position == 1:
-            # Long exit: price returns to Camarilla L3 level or opposite break
-            if not np.isnan(camarilla_L3_aligned[i]):
-                if close[i] < camarilla_L3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
+            # Long exit: price returns to prior 1d close or breaks below L3
+            if not np.isnan(close_1d[-1]) and not np.isnan(camarilla_L3_aligned[i]):
+                # Use last completed 1d close for exit
+                last_1d_close = close_1d[-1] if len(close_1d) > 0 else np.nan
+                # Align last 1d close to 4h
+                if not np.isnan(last_1d_close):
+                    last_1d_close_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, last_1d_close))[i]
+                    if close[i] < last_1d_close_aligned or close[i] < camarilla_L3_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
                 else:
                     signals[i] = 0.25
+            else:
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to Camarilla H3 level or opposite break
-            if not np.isnan(camarilla_H3_aligned[i]):
-                if close[i] > camarilla_H3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
+            # Short exit: price returns to prior 1d close or breaks above H3
+            if not np.isnan(close_1d[-1]) and not np.isnan(camarilla_H3_aligned[i]):
+                # Use last completed 1d close for exit
+                last_1d_close = close_1d[-1] if len(close_1d) > 0 else np.nan
+                # Align last 1d close to 4h
+                if not np.isnan(last_1d_close):
+                    last_1d_close_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, last_1d_close))[i]
+                    if close[i] > last_1d_close_aligned or close[i] > camarilla_H3_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
                 else:
                     signals[i] = -0.25
+            else:
+                signals[i] = -0.25
     
     return signals
 
