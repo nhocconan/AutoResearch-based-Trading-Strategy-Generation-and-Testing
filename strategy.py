@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 Breakout with 1d EMA34 Trend Filter and Volume Spike.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d EMA34 for trend filter (price > EMA34 = uptrend, price < EMA34 = downtrend).
-- Entry: Long when price breaks above Camarilla H3 level AND price > 1d EMA34 AND volume > 2.0 * 12h volume MA(20);
-         Short when price breaks below Camarilla L3 level AND price < 1d EMA34 AND volume > 2.0 * 12h volume MA(20).
-- Exit: Long exits when price breaks below Camarilla L3 level; Short exits when price breaks above Camarilla H3 level.
+Hypothesis: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 12h HMA21 for trend filter (price > HMA21 = uptrend, price < HMA21 = downtrend).
+- Entry: Long when price breaks above Donchian(20) high AND price > 12h HMA21 AND volume > 1.5 * 4h volume MA(20);
+         Short when price breaks below Donchian(20) low AND price < 12h HMA21 AND volume > 1.5 * 4h volume MA(20).
+- Exit: Long exits when price breaks below Donchian(20) low; Short exits when price breaks above Donchian(20) high.
 - Signal size: 0.25 discrete to balance capture and fee control.
 - Works in bull (buying breakouts in uptrend) and bear (selling breakdowns in downtrend) with volume confirmation to avoid false breakouts.
-- Uses Camarilla pivot levels for intraday support/resistance with trend alignment to avoid counter-trend trades.
+- Uses Donchian channel for structure and HMA for smooth trend following.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_hma(arr, period):
+    """Calculate Hull Moving Average."""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    half = arr.rolling(window=period//2, min_periods=period//2).mean()
+    sqrt = arr.rolling(window=int(np.sqrt(period)), min_periods=int(np.sqrt(period))).mean()
+    raw = 2 * half - arr
+    hma = pd.Series(raw).rolling(window=int(np.sqrt(period)), min_periods=int(np.sqrt(period))).mean()
+    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,59 +36,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need sufficient data for EMA34
+    # Get 12h data for HMA21 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:  # Need sufficient data for HMA21
         return np.zeros(n)
     
-    # Calculate EMA34 for 1d
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate HMA21 for 12h
+    close_12h = df_12h['close'].values
+    hma_21 = calculate_hma(close_12h, 21)
     
-    # Align EMA34 to 12h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align HMA21 to 4h timeframe
+    hma_21_aligned = align_htf_to_ltf(prices, df_12h, hma_21)
     
-    # Calculate Camarilla levels from 1d data (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian(20) channels on 4h
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels for each 1d bar (H3, L3)
-    H3 = []
-    L3 = []
-    for i in range(len(high_1d)):
-        if i == 0:
-            H3.append(np.nan)
-            L3.append(np.nan)
-        else:
-            # Camarilla formulas using previous day's data
-            range_prev = high_1d[i-1] - low_1d[i-1]
-            H3_val = close_1d[i-1] + range_prev * 1.1 / 4
-            L3_val = close_1d[i-1] - range_prev * 1.1 / 4
-            H3.append(H3_val)
-            L3.append(L3_val)
-    
-    H3 = np.array(H3)
-    L3 = np.array(L3)
-    
-    # Align Camarilla levels to 12h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # Get 12h data for volume MA(20)
+    # Calculate volume MA(20) for 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # EMA34 needs 34, volume MA needs 20
+    start_idx = max(20, 20)  # Donchian needs 20, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(H3_aligned[i]) or 
-            np.isnan(L3_aligned[i]) or 
+        if (np.isnan(hma_21_aligned[i]) or 
+            np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -90,30 +77,30 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: 2.0x threshold
-        vol_confirm = curr_volume > 2.0 * vol_ma[i]
+        # Volume confirmation: 1.5x threshold
+        vol_confirm = curr_volume > 1.5 * vol_ma[i]
         
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: price breaks above H3 level AND price > 1d EMA34 (uptrend)
-                if curr_high > H3_aligned[i] and curr_close > ema_34_aligned[i]:
+                # Long: price breaks above Donchian high AND price > 12h HMA21 (uptrend)
+                if curr_high > donch_high[i] and curr_close > hma_21_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: price breaks below L3 level AND price < 1d EMA34 (downtrend)
-                elif curr_low < L3_aligned[i] and curr_close < ema_34_aligned[i]:
+                # Short: price breaks below Donchian low AND price < 12h HMA21 (downtrend)
+                elif curr_low < donch_low[i] and curr_close < hma_21_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long position: exit when price breaks below L3 level
-            if curr_low < L3_aligned[i]:
+            # Long position: exit when price breaks below Donchian low
+            if curr_low < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price breaks above H3 level
-            if curr_high > H3_aligned[i]:
+            # Short position: exit when price breaks above Donchian high
+            if curr_high > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hHMA21_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
