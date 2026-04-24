@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d Williams %R regime filter and volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 1d for Williams %R overbought/oversold conditions.
-- Williams %R > -20 indicates overbought (favor shorts on breakdowns), Williams %R < -80 indicates oversold (favor longs on breakouts).
-- Entry: Long when price breaks above Donchian(20) upper AND Williams %R < -80 (breakout from oversold).
-         Short when price breaks below Donchian(20) lower AND Williams %R > -20 (breakdown from overbought).
-         In neutral (-80 <= Williams %R <= -20): require stricter volume confirmation (1.5x average).
-- Exit: Opposite Donchian breakout or Williams %R crosses midpoint (-50) indicating regime shift.
-- Volume confirmation: current volume > 1.3 * 20-period volume MA (to avoid false breakouts).
+Hypothesis: 6h Camarilla H3/L3 breakout with 1d volume spike and 1w EMA50 trend filter.
+- Primary timeframe: 6h for execution, HTF: 1d for Camarilla levels and volume confirmation, HTF: 1w for EMA50 trend.
+- Camarilla levels calculated from prior 1d OHLC: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4.
+- Entry: Long when price breaks above H3 with volume spike (>1.5x 20-period MA) AND 1w EMA50 up (close > EMA50).
+         Short when price breaks below L3 with volume spike AND 1w EMA50 down (close < EMA50).
+- Exit: Opposite Camarilla break (H3/L3) or loss of volume confirmation.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -27,84 +25,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R
+    # Get 1d data for Camarilla and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Williams %R (14-period) on 1d
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - pd.Series(df_1d['close'])) / (highest_high - lowest_low + 1e-10)
-    williams_r = williams_r.values
+    # Calculate Camarilla levels (H3, L3) from prior 1d OHLC
+    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    prior_close = df_1d['close'].shift(1).values
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    camarilla_h3 = prior_close + 1.1 * (prior_high - prior_low) / 4.0
+    camarilla_l3 = prior_close - 1.1 * (prior_high - prior_low) / 4.0
     
-    # Align 1d Williams %R to 4h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align 1d Camarilla to 6h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Donchian channels (20-period) on 4h
-    lookback = 20
-    highest_high_4h = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low_4h = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high_4h + lowest_low_4h) / 2.0
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 1d)
+    volume_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = df_1d['volume'].values > (1.5 * volume_ma_1d)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 4h)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * volume_ma)
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate EMA50 on 1w close
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, lookback, 20)  # Need enough 1d bars for Williams %R and lookback for Donchian
+    start_idx = max(30, 50)  # Need enough 1d and 1w bars
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(highest_high_4h[i]) or np.isnan(lowest_low_4h[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        wr_val = williams_r_aligned[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        prev_close = close[i-1]
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
+        vol_spike = volume_spike_aligned[i]
+        ema50 = ema_50_aligned[i]
         
         if position == 0:
             # Check for entry signals
-            if volume_spike[i]:
-                if wr_val < -80:  # Oversold: favor longs on breakouts
-                    # Bullish breakout: price closes above upper Donchian
-                    if curr_close > highest_high_4h[i]:
-                        signals[i] = 0.25
-                        position = 1
-                elif wr_val > -20:  # Overbought: favor shorts on breakdowns
-                    # Bearish breakout: price closes below lower Donchian
-                    if curr_close < lowest_low_4h[i]:
-                        signals[i] = -0.25
-                        position = -1
-                else:  # Neutral regime: require stricter volume confirmation
-                    if volume > (1.5 * volume_ma[i]):  # Stricter volume filter
-                        # Bullish breakout: price closes above upper Donchian
-                        if curr_close > highest_high_4h[i]:
-                            signals[i] = 0.25
-                            position = 1
-                        # Bearish breakout: price closes below lower Donchian
-                        elif curr_close < lowest_low_4h[i]:
-                            signals[i] = -0.25
-                            position = -1
+            if vol_spike:
+                # Bullish breakout: price breaks above H3 AND 1w EMA50 up
+                if curr_high > h3 and curr_close > ema50:
+                    signals[i] = 0.25
+                    position = 1
+                # Bearish breakout: price breaks below L3 AND 1w EMA50 down
+                elif curr_low < l3 and curr_close < ema50:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian mid OR Williams %R crosses above -50 (shift from oversold)
-            if curr_close < donchian_mid[i] or wr_val > -50:
+            # Long exit: price breaks below L3 OR loss of volume spike
+            if curr_low < l3 or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Donchian mid OR Williams %R crosses below -50 (shift from overbought)
-            if curr_close > donchian_mid[i] or wr_val < -50:
+            # Short exit: price breaks above H3 OR loss of volume spike
+            if curr_high > h3 or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dWilliamsRRegime_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_CamarillaH3L3_1dVolumeSpike_1wEMA50Trend_v1"
+timeframe = "6h"
 leverage = 1.0
