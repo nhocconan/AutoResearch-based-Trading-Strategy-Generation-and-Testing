@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
-- Entry: Long when close breaks above Donchian upper band AND price > 1w EMA50 AND volume > 2.0 * 1d volume MA(20);
-         Short when close breaks below Donchian lower band AND price < 1w EMA50 AND volume > 2.0 * 1d volume MA(20).
-- Exit: Long exits when close crosses below Donchian lower band; Short exits when close crosses above Donchian upper band.
+Hypothesis: 12h Donchian(20) breakout + 1d EMA34 Trend + Volume Spike.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d EMA34 for trend filter (price > EMA34 = uptrend, price < EMA34 = downtrend).
+- Entry: Long when close breaks above Donchian(20) upper band AND price > 1d EMA34 AND volume > 2.0 * 12h volume MA(20);
+         Short when close breaks below Donchian(20) lower band AND price < 1d EMA34 AND volume > 2.0 * 12h volume MA(20).
+- Exit: Long exits when close crosses below Donchian(20) lower band; Short exits when close crosses above Donchian(20) upper band.
 - Signal size: 0.25 discrete to control fee drag.
-- Uses Donchian channels for structure, volume confirmation for participation,
-  and 1w EMA50 trend filter to avoid counter-trend trades.
+- Uses Donchian breakouts for clear structure, volume confirmation for participation,
+  and EMA34 trend filter to avoid counter-trend trades. Proven structure with tight entries.
 """
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -26,49 +26,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channel calculation (using 1d data on 1d timeframe)
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient data for Donchian(20)
+    if len(df_1d) < 34:  # Need sufficient data for EMA34
         return np.zeros(n)
     
-    # Calculate Donchian(20) on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA34 for 1d trend filter
     close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Donchian upper band: 20-period high
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Donchian lower band: 20-period low
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Align 1d EMA34 to 12h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Align Donchian levels to 1d timeframe (no change needed as already on 1d)
+    # Get 12h data for Donchian(20) and volume MA(20)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:  # Need sufficient data for Donchian(20) and volume MA(20)
+        return np.zeros(n)
+    
+    # Calculate Donchian(20) bands for 12h
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align 12h Donchian bands to 12h timeframe (no alignment needed as already 12h)
     donchian_upper_aligned = donchian_upper
     donchian_lower_aligned = donchian_lower
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need sufficient data for EMA50
-        return np.zeros(n)
-    
-    # Calculate EMA50 for 1w trend filter
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1w EMA50 to 1d timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
-    
-    # Get 1d data for volume MA(20)
+    # Get 12h data for volume MA(20)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # EMA50 needs 50, Donchian needs 20, volume MA needs 20
+    start_idx = max(34, 20)  # EMA34 needs 34, Donchian/volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or 
             np.isnan(donchian_upper_aligned[i]) or 
             np.isnan(donchian_lower_aligned[i]) or 
             np.isnan(vol_ma[i])):
@@ -86,12 +82,12 @@ def generate_signals(prices):
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: Close breaks above Donchian upper AND price > 1w EMA50 (uptrend)
-                if curr_close > donchian_upper_aligned[i] and curr_close > ema_50_aligned[i]:
+                # Long: Close breaks above Donchian upper AND price > 1d EMA34 (uptrend)
+                if curr_close > donchian_upper_aligned[i] and curr_close > ema_34_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Close breaks below Donchian lower AND price < 1w EMA50 (downtrend)
-                elif curr_close < donchian_lower_aligned[i] and curr_close < ema_50_aligned[i]:
+                # Short: Close breaks below Donchian lower AND price < 1d EMA34 (downtrend)
+                elif curr_close < donchian_lower_aligned[i] and curr_close < ema_34_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
@@ -111,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
