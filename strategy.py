@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
-- Primary timeframe: 12h for execution, HTF: 1d for ADX trend strength.
-- ADX > 25 indicates trending market (breakout strategy), ADX < 20 indicates ranging (mean reversion at Donchian mid).
-- Entry: Long when price breaks above Donchian(20) upper AND ADX > 25 (bullish breakout in trend).
-         Short when price breaks below Donchian(20) lower AND ADX > 25 (bearish breakout in trend).
-         In ranging (ADX < 20): Long when price touches lower Donchian AND reverses up (close > low).
-                                Short when price touches upper Donchian AND reverses down (close < high).
-- Exit: Opposite Donchian breakout or ADX regime shift to ranging.
+Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
+- Primary timeframe: 4h for execution, HTF: 1d for ATR-based volatility regime.
+- ATR(14) > 1.5 * ATR(50) indicates high volatility (breakout regime), ATR(14) < 0.8 * ATR(50) indicates low volatility (mean reversion regime).
+- Entry: Long when price breaks above Donchian(20) upper AND ATR ratio > 1.5 (bullish breakout in high vol).
+         Short when price breaks below Donchian(20) lower AND ATR ratio > 1.5 (bearish breakout in high vol).
+         In low volatility (ATR ratio < 0.8): Long when price touches Donchian lower AND reverses up (close > low).
+                                Short when price touches Donchian upper AND reverses down (close < high).
+- Exit: Opposite Donchian breakout or ATR regime shift to opposite condition.
 - Volume confirmation: current volume > 1.3 * 20-period volume MA (to avoid false breakouts).
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -19,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -28,47 +28,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX
+    # Get 1d data for ATR regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate ADX (14-period) on 1d
+    # Calculate ATR (14-period and 50-period) on 1d
     # True Range
     tr1 = pd.Series(df_1d['high']).diff().abs()
     tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
     tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    up_move = pd.Series(df_1d['high']).diff()
-    down_move = -pd.Series(df_1d['low']).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # ATR ratio: short-term ATR relative to long-term ATR
+    atr_ratio = atr_14 / (atr_50 + 1e-10)
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
+    # Align 1d ATR ratio to 4h
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 12h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian channels (20-period) on 12h
+    # Donchian channels (20-period) on 4h
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 12h)
+    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 4h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.3 * volume_ma)
     
@@ -76,18 +63,18 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, lookback, 20)  # Need enough 1d bars for ADX and lookback for Donchian
+    start_idx = max(60, lookback, 20)  # Need enough 1d bars for ATR and lookback for Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
+        atr_ratio_val = atr_ratio_aligned[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
@@ -96,7 +83,7 @@ def generate_signals(prices):
         if position == 0:
             # Check for entry signals
             if volume_spike[i]:
-                if adx_val > 25:  # Trending regime: breakout strategy
+                if atr_ratio_val > 1.5:  # High volatility regime: breakout strategy
                     # Bullish breakout: price closes above upper Donchian
                     if curr_close > highest_high[i]:
                         signals[i] = 0.25
@@ -105,7 +92,7 @@ def generate_signals(prices):
                     elif curr_close < lowest_low[i]:
                         signals[i] = -0.25
                         position = -1
-                else:  # Ranging regime (ADX < 20): mean reversion at extremes
+                elif atr_ratio_val < 0.8:  # Low volatility regime: mean reversion at extremes
                     # Long when price touches lower Donchian and shows reversal (close > low)
                     if curr_low <= lowest_low[i] and curr_close > curr_low:
                         signals[i] = 0.25
@@ -114,16 +101,17 @@ def generate_signals(prices):
                     elif curr_high >= highest_high[i] and curr_close < curr_high:
                         signals[i] = -0.25
                         position = -1
+                # In medium volatility (0.8 <= ATR ratio <= 1.5): no new entries, hold or exit
         elif position == 1:
-            # Long exit: price closes below Donchian mid OR ADX drops to ranging
-            if curr_close < donchian_mid[i] or adx_val < 20:
+            # Long exit: price closes below Donchian mid OR ATR ratio shifts to low volatility (mean reversion)
+            if curr_close < donchian_mid[i] or atr_ratio_val < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Donchian mid OR ADX drops to ranging
-            if curr_close > donchian_mid[i] or adx_val < 20:
+            # Short exit: price closes above Donchian mid OR ATR ratio shifts to low volatility (mean reversion)
+            if curr_close > donchian_mid[i] or atr_ratio_val < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dADXRegime_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dATRRatioRegime_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
