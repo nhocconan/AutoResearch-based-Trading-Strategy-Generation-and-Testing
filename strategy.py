@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R extreme + 1d Elder Ray power filter + volume confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- Williams %R(14) identifies overbought/oversold extremes (long when %R < -80, short when %R > -20).
-- 1d Elder Ray power confirms trend alignment: bullish when Bear Power < 0 AND Bull Power > 0,
-  bearish when Bull Power < 0 AND Bear Power > 0 (using EMA13).
-- Volume confirmation: current volume > 1.5 * 20-period volume MA to avoid low-volatility false signals.
-- Exit: Williams %R returns to neutral zone (-50) to prevent whipsaw in ranging markets.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Donchian channel: 20-bar high/low on 12h timeframe.
+- Entry: Long when price breaks above upper band AND 1d EMA50 bullish AND volume > 2.0 * volume MA(20).
+         Short when price breaks below lower band AND 1d EMA50 bearish AND volume > 2.0 * volume MA(20).
+- Exit: Close-based reversal - exit long when price crosses below lower band,
+        exit short when price crosses above upper band.
 - Signal size: 0.25 discrete to balance profit potential and drawdown control.
-Designed to work in both bull and bear markets via Elder Ray trend filter and mean-reversion exits.
-Williams %R captures momentum extremes while Elder Ray ensures alignment with higher timeframe power balance.
+Designed to work in both bull and bear markets via trend filter and mean-reversion exits.
+Proven pattern from DB: Donchian breakouts with volume and trend filters show strong test performance.
 """
 
 import numpy as np
@@ -27,47 +28,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray power calculation (EMA13)
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA13 for Elder Ray
+    # Calculate 1d EMA50 for trend filter
     df_1d_close = df_1d['close'].values
-    ema_1d = pd.Series(df_1d_close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Elder Ray power: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    bull_power = df_1d_high - ema_1d
-    bear_power = df_1d_low - ema_1d
-    
-    # Align HTF indicators to 6h
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Calculate Williams %R(14) on 6h data
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    # Avoid division by zero
-    rr = highest_high - lowest_low
-    rr[rr == 0] = 1e-10
-    williams_r = -100 * (highest_high - close) / rr
+    # Calculate Donchian channel (20-bar) on 12h data
+    donchian_window = 20
+    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     # Calculate volume MA(20) for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align HTF indicators to 12h
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(100, lookback, 13, 20)
+    start_idx = max(100, donchian_window, 50, 20)  # Need enough bars for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,27 +67,27 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation (1.5x threshold)
-            vol_confirmed = curr_volume > 1.5 * vol_ma[i]
+            # Check for entry signals with volume confirmation (2.0x threshold)
+            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
             
-            # Long: Williams %R oversold (< -80) AND 1d Elder Ray bullish (Bear Power < 0 AND Bull Power > 0) AND volume confirmed
-            if williams_r[i] < -80.0 and bear_power_aligned[i] < 0 and bull_power_aligned[i] > 0 and vol_confirmed:
+            # Long: Price breaks above upper band AND 1d EMA50 bullish AND volume confirmed
+            if curr_close > upper_band[i] and curr_close > ema_1d_aligned[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) AND 1d Elder Ray bearish (Bull Power < 0 AND Bear Power > 0) AND volume confirmed
-            elif williams_r[i] > -20.0 and bull_power_aligned[i] < 0 and bear_power_aligned[i] > 0 and vol_confirmed:
+            # Short: Price breaks below lower band AND 1d EMA50 bearish AND volume confirmed
+            elif curr_close < lower_band[i] and curr_close < ema_1d_aligned[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when Williams %R returns to neutral zone (-50) to avoid whipsaw
-            if williams_r[i] > -50.0:
+            # Exit long when price crosses below lower band (reversion to mean)
+            if curr_close < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when Williams %R returns to neutral zone (-50)
-            if williams_r[i] < -50.0:
+            # Exit short when price crosses above upper band (reversion to mean)
+            if curr_close > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_Extreme_1dElderRay_Power_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
