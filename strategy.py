@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA50 trend filter and volume confirmation.
-- Uses 12h timeframe for HTF trend alignment (more stable than 1d for 4h entries)
-- Camarilla H3/L3 from previous 12h bar: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-- Long when price breaks above H3 AND price > 12h EMA50 (uptrend) AND volume > 1.5 * volume MA(20)
-- Short when price breaks below L3 AND price < 12h EMA50 (downtrend) AND volume > 1.5 * volume MA(20)
-- Exit when price reverts to Camarilla H4/L4 levels
-- Discrete signal size: 0.25 to minimize fee churn
-- Target: 75-200 total trades over 4 years (19-50/year)
+Hypothesis: 1h EMA(21) + 4h Supertrend(10,3) + Volume Spike + Session Filter
+- Uses 4h Supertrend for HTF trend direction (works in bull/bear via ATR adaptive bands)
+- 1h EMA(21) for entry timing precision (avoid whipsaws)
+- Volume spike > 2.0 * 20-period MA to confirm momentum
+- Session filter 08-20 UTC to avoid low-liquidity hours
+- Discrete signal size: 0.20 to minimize fee churn
+- Target: 60-150 total trades over 4 years (15-37/year)
 """
 
 import numpy as np
@@ -24,81 +23,122 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h OHLC for Camarilla pivots (using previous completed 12h bar)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:  # Need enough data for EMA50
+    # Pre-compute session hours (08-20 UTC) - prices.index is DatetimeIndex
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Calculate 4h Supertrend for HTF trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:  # Need enough data for ATR and Supertrend
         return np.zeros(n)
     
-    # Camarilla levels from previous 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate Camarilla H3 and L3 (using previous bar's OHLC)
-    camarilla_h3 = close_12h + 1.1 * (high_12h - low_12h) / 4
-    camarilla_l3 = close_12h - 1.1 * (high_12h - low_12h) / 4
+    # ATR(10) for Supertrend
+    tr1 = pd.Series(high_4h - low_4h)
+    tr2 = pd.Series(np.abs(high_4h - pd.Series(close_4h).shift(1)))
+    tr3 = pd.Series(np.abs(low_4h - pd.Series(close_4h).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_10 = tr.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align Camarilla levels to 4h timeframe (previous 12h bar's levels available at open)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    # Basic Upper and Lower Bands
+    hl2 = (high_4h + low_4h) / 2
+    upper_band = hl2 + (3.0 * atr_10)
+    lower_band = hl2 - (3.0 * atr_10)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Initialize Supertrend
+    supertrend = np.full_like(close_4h, np.nan, dtype=float)
+    direction = np.full_like(close_4h, 1, dtype=int)  # 1 for uptrend, -1 for downtrend
     
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    for i in range(1, len(close_4h)):
+        if np.isnan(atr_10[i-1]) or np.isnan(upper_band[i-1]) or np.isnan(lower_band[i-1]):
+            continue
+            
+        # Upper band logic
+        if close_4h[i-1] <= upper_band[i-1]:
+            upper_band[i] = min(upper_band[i], upper_band[i-1])
+        else:
+            upper_band[i] = upper_band[i]
+            
+        # Lower band logic
+        if close_4h[i-1] >= lower_band[i-1]:
+            lower_band[i] = max(lower_band[i], lower_band[i-1])
+        else:
+            lower_band[i] = lower_band[i]
+        
+        # Supertrend logic
+        if supertrend[i-1] == upper_band[i-1]:
+            if close_4h[i] <= upper_band[i]:
+                supertrend[i] = upper_band[i]
+            else:
+                supertrend[i] = lower_band[i]
+                direction[i] = -1
+        else:
+            if close_4h[i] >= lower_band[i]:
+                supertrend[i] = lower_band[i]
+            else:
+                supertrend[i] = upper_band[i]
+                direction[i] = 1
+    
+    # Align Supertrend direction to 1h timeframe
+    supertrend_direction_aligned = align_htf_to_ltf(prices, df_4h, direction.astype(float))
+    
+    # 1h EMA(21) for entry timing
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * volume_ma)
-    
-    # Trend filter: price above/below 12h EMA50
-    uptrend = close > ema_50_12h_aligned
-    downtrend = close < ema_50_12h_aligned
+    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 12h EMA50, volume MA
+    start_idx = max(30, 21, 20)  # Need 4h Supertrend, EMA21, volume MA
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_confirm[i])):
+        # Skip if not in trading session or data not ready
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        if (np.isnan(supertrend_direction_aligned[i]) or np.isnan(ema_21[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above H3 AND uptrend AND volume confirmation
-            if close[i] > camarilla_h3_aligned[i] and uptrend[i] and volume_confirm[i]:
-                signals[i] = 0.25
+            # Long: Supertrend uptrend AND price > EMA21 AND volume spike
+            if supertrend_direction_aligned[i] == 1 and close[i] > ema_21[i] and volume_spike[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below L3 AND downtrend AND volume confirmation
-            elif close[i] < camarilla_l3_aligned[i] and downtrend[i] and volume_confirm[i]:
-                signals[i] = -0.25
+            # Short: Supertrend downtrend AND price < EMA21 AND volume spike
+            elif supertrend_direction_aligned[i] == -1 and close[i] < ema_21[i] and volume_spike[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price reverts to Camarilla H4 level
-            camarilla_h4 = close_12h + 1.1 * (high_12h - low_12h) / 2  # H4 level
-            camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-            if close[i] < camarilla_h4_aligned[i]:
+            # Long exit: Supertrend turns down OR price < EMA21
+            if supertrend_direction_aligned[i] == -1 or close[i] < ema_21[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price reverts to Camarilla L4 level
-            camarilla_l4 = close_12h - 1.1 * (high_12h - low_12h) / 2  # L4 level
-            camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
-            if close[i] > camarilla_l4_aligned[i]:
+            # Short exit: Supertrend turns up OR price > EMA21
+            if supertrend_direction_aligned[i] == 1 or close[i] > ema_21[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_12hEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1h_EMA21_4hSupertrend_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
