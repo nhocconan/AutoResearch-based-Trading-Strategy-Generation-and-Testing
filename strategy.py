@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) Breakout with 1w EMA34 Trend Filter and Volume Spike.
-- Donchian(20) levels from daily chart capture intermediate-term momentum breakouts.
-- 1w EMA34 provides higher-timeframe trend filter to align with weekly momentum and reduce counter-trend trades.
-- Volume spike (>2x 20-period average volume) confirms breakout validity and reduces false signals.
-- Discrete position sizing (0.30) balances return potential with fee minimization.
-- Target trades: 30-100 total over 4 years (7-25/year) to avoid fee drag on 1d timeframe.
-- Works in bull/bear markets via 1w trend filter and volatility-based volume confirmation.
+Hypothesis: 6h Elder Ray Power with 12h ATR Regime and Volume Confirmation.
+- Elder Ray Bull Power = High - EMA13; Bear Power = EMA13 - Low. Measures bull/bear strength relative to trend.
+- 12h ATR(14) regime filter: High volatility (ATR > 20-period mean) favors trend continuation; low volatility favors mean reversion.
+- Volume spike (>1.8x 20-period average) confirms institutional participation.
+- In high volatility regime: trend follow (long when Bull Power > 0, short when Bear Power > 0).
+- In low volatility regime: mean revert (long when Bull Power < 0, short when Bear Power < 0).
+- Discrete position sizing (0.25) to manage fee drag on 6h timeframe.
+- Target trades: 50-150 total over 4 years (12-37/year) to avoid fee drag.
+- Works in bull/bear markets via adaptive regime filter and volume confirmation.
 """
 
 import numpy as np
@@ -23,78 +25,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data ONCE before loop for ATR regime filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 1w EMA34 trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 12h ATR(14) for regime filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    tr_12h = np.maximum(high_12h - low_12h, np.absolute(high_12h - np.roll(close_12h, 1)), np.absolute(low_12h - np.roll(close_12h, 1)))
+    tr_12h[0] = high_12h[0] - low_12h[0]  # first period
+    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma_20_12h = pd.Series(atr_14_12h).rolling(window=20, min_periods=20).mean().values
+    atr_regime_high = atr_14_12h > atr_ma_20_12h  # True = high volatility (trend regime)
+    atr_regime_high_aligned = align_htf_to_ltf(prices, df_12h, atr_regime_high)
     
-    # Get 1d data ONCE before loop for Donchian levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate EMA13 for Elder Ray (using 15m equivalent: 12 periods of 6h = 3 days, but we'll use 13 for standard)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Donchian(20) levels from 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Elder Ray Power
+    bull_power = high - ema_13  # Bull Power = High - EMA
+    bear_power = ema_13 - low   # Bear Power = EMA - Low
     
-    # Donchian upper (20-period high) and lower (20-period low)
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 1d timeframe (using previous completed 1d bar)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    
-    # Volume confirmation: > 2.0x 20-period average volume
+    # Volume confirmation: > 1.8x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma
+    volume_spike = volume > 1.8 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34) + 1
+    start_idx = max(13, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(atr_regime_high_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian upper with volume spike and above 1w EMA34 (bullish higher-timeframe trend)
-            if close[i] > donchian_upper_aligned[i] and volume_spike[i] and close[i] > ema_34_1w_aligned[i]:
-                signals[i] = 0.30
-                position = 1
-            # Short: break below Donchian lower with volume spike and below 1w EMA34 (bearish higher-timeframe trend)
-            elif close[i] < donchian_lower_aligned[i] and volume_spike[i] and close[i] < ema_34_1w_aligned[i]:
-                signals[i] = -0.30
-                position = -1
+            # Regime-dependent entry logic
+            if atr_regime_high_aligned[i]:  # High volatility = trend following regime
+                # Long: Bull Power > 0 (bulls in control) with volume spike
+                if bull_power[i] > 0 and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Bear Power > 0 (bears in control) with volume spike
+                elif bear_power[i] > 0 and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+            else:  # Low volatility = mean reversion regime
+                # Long: Bull Power < 0 (bulls weak) with volume spike (mean reversion long)
+                if bull_power[i] < 0 and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Bear Power < 0 (bears weak) with volume spike (mean reversion short)
+                elif bear_power[i] < 0 and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian lower OR below 1w EMA34 (trend change)
-            if close[i] < donchian_lower_aligned[i] or close[i] < ema_34_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.30
+            # Long exit: regime change or power deterioration
+            if atr_regime_high_aligned[i]:  # Trend regime
+                if bull_power[i] <= 0:  # Bulls lose control
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # Mean reversion regime
+                if bull_power[i] >= 0:  # Bulls recover (mean reversion complete)
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Donchian upper OR above 1w EMA34 (trend change)
-            if close[i] > donchian_upper_aligned[i] or close[i] > ema_34_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.30
+            # Short exit: regime change or power deterioration
+            if atr_regime_high_aligned[i]:  # Trend regime
+                if bear_power[i] <= 0:  # Bears lose control
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # Mean reversion regime
+                if bear_power[i] >= 0:  # Bears recover (mean reversion complete)
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA34_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_12hATRRegime_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
