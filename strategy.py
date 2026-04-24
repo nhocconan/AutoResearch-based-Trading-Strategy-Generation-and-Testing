@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h TRIX crossover with 1d volume spike and chop regime filter.
-- TRIX (12,9,9) crossover signals momentum shifts.
-- Volume > 2.0x 20-bar average confirms institutional participation.
-- Choppiness Index (14) > 61.8 = ranging market (mean reversion), < 38.2 = trending (momentum).
-- In ranging markets, we fade TRIX crossovers; in trending markets, we follow them.
-- Designed for 4h timeframe to capture medium-term swings in both bull and bear markets.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Uses Camarilla pivot levels (H3, L3) from prior completed 1d candles to identify support/resistance.
+- Breakout above H3 or below L3 with volume > 2.0x 20-bar average signals strong momentum.
+- Trend filter: price must be above/below 1d EMA34 to align with higher timeframe direction.
+- Designed for 12h timeframe to capture medium-term breakouts in both bull and bear markets.
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 30-60 trades/year (120-240 total over 4 years) to stay fee-efficient.
+- Targets 12-37 trades/year (50-150 total over 4 years) to stay fee-efficient.
 """
 
 import numpy as np
@@ -26,93 +25,66 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d volume spike confirmation
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = df_1d['volume'].values > 2.0 * vol_ma_1d
+    # Prior completed 1d OHLC for Camarilla and EMA34
+    high_1d = df_1d['high'].shift(1).values
+    low_1d = df_1d['low'].shift(1).values
+    close_1d = df_1d['close'].shift(1).values
     
-    # 1d Choppiness Index (14)
-    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high) - min(low))))
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr14 = tr.rolling(window=14, min_periods=14).mean()
-    sum_atr14 = atr14.rolling(window=14, min_periods=14).sum()
-    max_high = df_1d['high'].rolling(window=14, min_periods=14).max()
-    min_low = df_1d['low'].rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(sum_atr14 / (np.log10(14) * (max_high - min_low)))
-    chop_values = chop.values
+    # Camarilla levels: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_high = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_low = close_1d - 1.1 * (high_1d - low_1d) / 4
+    
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align HTF indicators to LTF
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # TRIX (12,9,9) on LTF close
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean()
-    trix_hist = trix - trix_signal
-    
-    # Align TRIX histogram (already LTF, but ensure proper alignment)
-    trix_hist_values = trix_hist.values
+    # Volume confirmation: > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 34, 20)
+    start_idx = max(50, 34)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(trix_hist_values[i]) or np.isnan(trix_hist_values[i-1])):
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation and regime filter
-        volume_confirm = vol_spike_1d_aligned[i] > 0.5  # boolean as float
-        chop_value = chop_aligned[i]
-        is_ranging = chop_value > 61.8
-        is_trending = chop_value < 38.2
-        
-        # TRIX histogram crossover
-        trix_cross_up = trix_hist_values[i-1] <= 0 and trix_hist_values[i] > 0
-        trix_cross_down = trix_hist_values[i-1] >= 0 and trix_hist_values[i] < 0
+        # Volume confirmation (> 2.0x average)
+        volume_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # In ranging market: mean reversion - fade TRIX crossovers
-            if is_ranging and volume_confirm:
-                if trix_cross_down:  # TRIX turning down -> short
-                    signals[i] = -0.25
-                    position = -1
-                elif trix_cross_up:  # TRIX turning up -> long
-                    signals[i] = 0.25
-                    position = 1
-            # In trending market: follow TRIX crossovers
-            elif is_trending and volume_confirm:
-                if trix_cross_up:  # TRIX turning up -> long
-                    signals[i] = 0.25
-                    position = 1
-                elif trix_cross_down:  # TRIX turning down -> short
-                    signals[i] = -0.25
-                    position = -1
+            # Long: breakout above H3 AND price above 1d EMA34 AND volume confirmation
+            if close[i] > camarilla_high_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm:
+                signals[i] = 0.25
+                position = 1
+            # Short: breakout below L3 AND price below 1d EMA34 AND volume confirmation
+            elif close[i] < camarilla_low_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: TRIX histogram crosses below zero OR chop exits trending/ranging
-            if trix_cross_down or not (is_ranging or is_trending):
+            # Long exit: close below L3 OR price below 1d EMA34
+            if close[i] < camarilla_low_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX histogram crosses above zero OR chop exits trending/ranging
-            if trix_cross_up or not (is_ranging or is_trending):
+            # Short exit: close above H3 OR price above 1d EMA34
+            if close[i] > camarilla_high_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_ChopRegime_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
