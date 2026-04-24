@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Donchian breakout with 4h trend filter and volume spike confirmation.
-- Primary timeframe: 1h for entries/exits.
-- HTF: 4h Donchian(20) for trend direction (bullish if close > upper, bearish if close < lower).
-- Volume: Current 1h volume > 1.8 * 20-period volume MA to avoid false breakouts.
-- Entry: Long when price breaks above 1h Donchian(20) upper AND 4h trend bullish AND volume spike.
-         Short when price breaks below 1h Donchian(20) lower AND 4h trend bearish AND volume spike.
-- Exit: Opposite Donchian breakout or loss of volume confirmation.
-- Signal size: 0.20 discrete to limit drawdown and reduce fee churn.
-- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
-Donchian breakouts capture strong momentum moves, and the 4h filter ensures we trade with the higher timeframe trend.
-Volume spike confirms institutional participation, reducing false signals in ranging markets.
+Hypothesis: 6h Donchian(20) breakout with weekly pivot regime filter and volume confirmation.
+- Primary timeframe: 6h for breakout entries.
+- HTF: 1w Camarilla pivot levels (H3/L3) for regime - long only when price > weekly H3, short only when price < weekly L3.
+- Volume: Current 6h volume > 1.5 * 20-period volume MA to confirm breakout strength.
+- Entry: Long when price breaks above Donchian(20) high AND price > weekly H3 AND volume spike.
+         Short when price breaks below Donchian(20) low AND price < weekly L3 AND volume spike.
+- Exit: Opposite Donchian breakout or loss of volume/regime confirmation.
+- Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+Weekly Camarilla pivots provide strong structural support/resistance that works in both bull and bear markets.
 """
 
 import numpy as np
@@ -28,47 +27,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1h Donchian channels (20-period)
+    # Calculate Donchian(20) channels on 6h
     period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate 20-period volume MA on 6h
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1w data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period) for trend
-    df_4h_high = df_4h['high'].values
-    df_4h_low = df_4h['low'].values
-    df_4h_close = df_4h['close'].values
+    # Calculate weekly Camarilla pivot levels (H3, L3)
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    typical_price_vals = typical_price.values
     
-    period20_high_4h = pd.Series(df_4h_high).rolling(window=20, min_periods=20).max().values
-    period20_low_4h = pd.Series(df_4h_low).rolling(window=20, min_periods=20).min().values
+    # Weekly range
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_range = weekly_high - weekly_low
     
-    # 4h trend: 1 if bullish (close > upper), -1 if bearish (close < lower), 0 otherwise
-    trend_4h = np.where(df_4h_close > period20_high_4h, 1, np.where(df_4h_close < period20_low_4h, -1, 0))
+    # Camarilla levels
+    # H3 = typical_price + (range * 1.1 / 4)
+    # L3 = typical_price - (range * 1.1 / 4)
+    camarilla_h3 = typical_price_vals + (weekly_range * 1.1 / 4)
+    camarilla_l3 = typical_price_vals - (weekly_range * 1.1 / 4)
     
-    # Calculate 20-period volume MA on 4h for volume confirmation
-    df_4h_volume = df_4h['volume'].values
-    vol_ma_4h = pd.Series(df_4h_volume).rolling(window=20, min_periods=20).mean().values
+    # Align HTF indicators to 6h
+    period20_high_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high}), period20_high)
+    period20_low_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low}), period20_low)
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, prices, vol_ma_6h)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
-    # Align HTF indicators to 1h
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    
-    # Volume confirmation: current 1h volume > 1.8 * 20-period 4h volume MA (aligned)
-    volume_spike = volume > (1.8 * vol_ma_4h_aligned)
+    # Volume confirmation: current 6h volume > 1.5 * 20-period volume MA
+    volume_spike = volume > (1.5 * vol_ma_6h_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20)  # Need enough bars for Donchian and volume MA
+    start_idx = max(20, 5)  # Need enough bars for Donchian and weekly data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(period20_high[i]) or np.isnan(period20_low[i]) or 
-            np.isnan(trend_4h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(period20_high_aligned[i]) or np.isnan(period20_low_aligned[i]) or
+            np.isnan(vol_ma_6h_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,36 +84,39 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        trend_val = trend_4h_aligned[i]
+        donchian_high = period20_high_aligned[i]
+        donchian_low = period20_low_aligned[i]
+        weekly_h3 = camarilla_h3_aligned[i]
+        weekly_l3 = camarilla_l3_aligned[i]
         
         if position == 0:
-            # Check for entry signals with volume spike
+            # Check for entry signals with volume spike and regime filter
             if volume_spike[i]:
-                # Bullish: price breaks above 1h Donchian upper AND 4h trend bullish
-                if curr_high > period20_high[i] and trend_val == 1:
-                    signals[i] = 0.20
+                # Bullish: price breaks above Donchian high AND price > weekly H3
+                if curr_high > donchian_high and curr_close > weekly_h3:
+                    signals[i] = 0.25
                     position = 1
-                # Bearish: price breaks below 1h Donchian lower AND 4h trend bearish
-                elif curr_low < period20_low[i] and trend_val == -1:
-                    signals[i] = -0.20
+                # Bearish: price breaks below Donchian low AND price < weekly L3
+                elif curr_low < donchian_low and curr_close < weekly_l3:
+                    signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price breaks below 1h Donchian lower OR loss of volume confirmation
-            if curr_low < period20_low[i] or not volume_spike[i]:
+            # Long exit: price breaks below Donchian low OR loss of volume/regime
+            if curr_low < donchian_low or not volume_spike[i] or curr_close <= weekly_h3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above 1h Donchian upper OR loss of volume confirmation
-            if curr_high > period20_high[i] or not volume_spike[i]:
+            # Short exit: price breaks above Donchian high OR loss of volume/regime
+            if curr_high > donchian_high or not volume_spike[i] or curr_close >= weekly_l3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_DonchianBreakout_4hTrend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyCamarilla_H3L3_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
