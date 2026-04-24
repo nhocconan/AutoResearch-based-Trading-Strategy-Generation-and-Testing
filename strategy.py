@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R + 1d Volume Spike + 1w EMA Trend Filter.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for Williams %R (momentum) and volume spike confirmation, 1w for EMA trend filter.
-- Entry: Long when Williams %R crosses above -80 from oversold AND 1d volume > 1.5x 20-period average AND price > 1w EMA50.
-         Short when Williams %R crosses below -20 from overbought AND 1d volume > 1.5x 20-period average AND price < 1w EMA50.
-- Exit: Opposite Williams %R cross OR price crosses 1w EMA50 in opposite direction.
+Hypothesis: 12h Donchian(20) breakout + 1w ATR volume spike + 1d EMA34 trend filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for ATR volume spike and 1d for EMA34 trend filter.
+- Entry: Long when price breaks above Donchian(20) high AND 1w ATR ratio > 1.8 AND price > 1d EMA34.
+         Short when price breaks below Donchian(20) low AND 1w ATR ratio > 1.8 AND price < 1d EMA34.
+- Exit: Opposite Donchian breakout OR price crosses 1d EMA34 in opposite direction.
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Williams %R identifies momentum extremes and reversals.
-- Volume spike confirms participation in the move.
-- 1w EMA50 provides higher-timeframe trend filter to avoid counter-trend trades.
-- Works in bull markets (buy oversold bounces in uptrend) and bear markets (sell overbought retracements in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on momentum reversal frequency with filters.
+- Donchian channels identify volatility breakouts.
+- ATR ratio (current ATR/20-period ATR) > 1.8 confirms volatility expansion (tighter for 12h).
+- 1d EMA34 provides trend filter to avoid counter-trend trades.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Estimated trades: ~80 total over 4 years (~20/year) based on volatility breakout frequency with filters.
 """
 
 import numpy as np
@@ -22,12 +22,20 @@ def ema(values, period):
     """Calculate Exponential Moving Average."""
     return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def williams_r(high, low, close, period):
-    """Calculate Williams %R."""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    return wr
+def atr(high, low, close, period):
+    """Calculate Average True Range."""
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    true_range[0] = high_low[0]  # First period
+    return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def donchian_channels(high, low, period):
+    """Calculate Donchian Channels."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,28 +46,27 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1w trend filter: EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
-        return np.zeros(n)
-    
-    ema50_1w = ema(df_1w['close'].values, 50)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w, additional_delay_bars=1)
-    
-    # Calculate 1d Williams %R (14-period)
+    # Calculate 1d trend filter: EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    wr_14 = williams_r(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    wr_aligned = align_htf_to_ltf(prices, df_1d, wr_14, additional_delay_bars=1)
+    ema34_1d = ema(df_1d['close'].values, 34)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d, additional_delay_bars=1)
     
-    # Calculate 1d volume spike filter: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma_20 + 1e-10)  # Avoid division by zero
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio, additional_delay_bars=1)
+    # Calculate 1w ATR for volume spike filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    atr_20_1w = atr(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 20)
+    atr_current_1w = atr(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 1)
+    atr_ratio_1w = atr_current_1w / (atr_20_1w + 1e-10)  # Avoid division by zero
+    atr_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio_1w, additional_delay_bars=1)
+    
+    # Donchian channels on 12h (20-period)
+    donch_hi, donch_lo = donchian_channels(high, low, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,40 +76,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(wr_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_ratio_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_wr = wr_aligned[i]
-        prev_wr = wr_aligned[i-1] if i > 0 else curr_wr
         
-        # Exit conditions: opposite Williams %R cross OR price crosses 1w EMA50 in opposite direction
+        # Exit conditions: opposite Donchian breakout OR price crosses 1d EMA34 in opposite direction
         if position != 0:
-            # Exit long: Williams %R crosses below -50 from above OR price falls below 1w EMA50
+            # Exit long: price breaks below Donchian low OR price falls below 1d EMA34
             if position == 1:
-                if curr_wr < -50 and prev_wr >= -50 or curr_close < ema50_1w_aligned[i]:
+                if curr_close < donch_lo[i] or curr_close < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Williams %R crosses above -50 from below OR price rises above 1w EMA50
+            # Exit short: price breaks above Donchian high OR price rises above 1d EMA34
             elif position == -1:
-                if curr_wr > -50 and prev_wr <= -50 or curr_close > ema50_1w_aligned[i]:
+                if curr_close > donch_hi[i] or curr_close > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Williams %R extreme with volume confirmation and trend filter
+        # Entry conditions: Donchian breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: Williams %R crosses above -80 from below AND volume spike AND bullish 1w trend
-            if curr_wr > -80 and prev_wr <= -80 and vol_ratio_aligned[i] > 1.5 and curr_close > ema50_1w_aligned[i]:
+            # Long: price breaks above Donchian high AND ATR ratio > 1.8 AND bullish 1d trend
+            if curr_close > donch_hi[i] and atr_ratio_1w_aligned[i] > 1.8 and curr_close > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 from above AND volume spike AND bearish 1w trend
-            elif curr_wr < -20 and prev_wr >= -20 and vol_ratio_aligned[i] > 1.5 and curr_close < ema50_1w_aligned[i]:
+            # Short: price breaks below Donchian low AND ATR ratio > 1.8 AND bearish 1d trend
+            elif curr_close < donch_lo[i] and atr_ratio_1w_aligned[i] > 1.8 and curr_close < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -114,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1dVolumeSpike_1wEMA50_TrendFilter_v1"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1wATR_VolumeSpike_1dEMA34_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
