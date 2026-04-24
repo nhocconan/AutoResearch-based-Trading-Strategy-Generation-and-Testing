@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-- Uses 4h timeframe (primary) and 1d HTF for trend alignment (proven pattern from DB)
-- Donchian channel from previous 20 completed 4h bars (structure-based breakout)
+Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+- Uses 6h timeframe (primary) and 1d HTF for trend alignment (proven pattern from DB)
+- Donchian channel from previous 20 completed 6h bars (structure-based breakout)
 - Long when price breaks above upper Donchian AND price > 1d EMA34 (uptrend) AND volume > 2.0 * volume MA(20)
 - Short when price breaks below lower Donchian AND price < 1d EMA34 (downtrend) AND volume > 2.0 * volume MA(20)
 - Exit when price reverts to the middle of the Donchian channel (mean reversion structure)
 - Discrete signal size: 0.25 to minimize fee churn
-- Target: 75-200 total trades over 4 years (19-50/year) as per 4h timeframe recommendation
+- Target: 50-150 total trades over 4 years (12-37/year) as per 6h timeframe recommendation
 - Works in both bull/bear: trend filter avoids counter-trend trades, Donchian breakouts capture momentum in all regimes
 """
 
@@ -34,23 +34,23 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 4h Donchian channel (20-period high/low)
-    # Use rolling window on 4h data, then align to 4h timeframe
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:  # Need enough data for Donchian
+    # Calculate 6h Donchian channel (20-period high/low)
+    # Use rolling window on 6h data, then align to 6h timeframe
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:  # Need enough data for Donchian
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    # Donchian upper = max(high_4h over 20 periods)
-    # Donchian lower = min(low_4h over 20 periods)
-    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Donchian upper = max(high_6h over 20 periods)
+    # Donchian lower = min(low_6h over 20 periods)
+    high_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 4h timeframe (previous 20-bar Donchian available at open)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, low_20)
+    # Align Donchian levels to 6h timeframe (previous 20-bar Donchian available at open)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, low_20)
     donchian_mid = (donchian_high_aligned + donchian_low_aligned) / 2.0  # Middle for exit
     
     # Volume confirmation: current volume > 2.0 * 20-period volume MA
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_Donchian20_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
