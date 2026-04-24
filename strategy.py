@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 12h volume spike and ATR regime filter.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 12h for volume average and ATR calculation (more responsive than 1d).
+Hypothesis: 1d Donchian channel breakout with 1w volume spike and ATR regime filter.
+- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
+- HTF: 1w for volume average and ATR calculation.
 - Donchian Channel: identifies breakouts from 20-period high/low.
-- Entry: Long when price breaks above 20-period high AND volume > 2.0 * 12h average volume AND ATR(14) < ATR(50) (low volatility regime).
-         Short when price breaks below 20-period low AND volume > 2.0 * 12h average volume AND ATR(14) < ATR(50).
+- Entry: Long when price breaks above 20-period high AND volume > 2.0 * 1w average volume AND ATR(14) < ATR(50) (low volatility regime).
+         Short when price breaks below 20-period low AND volume > 2.0 * 1w average volume AND ATR(14) < ATR(50).
 - Exit: Opposite Donchian breakout signal.
 - Signal size: 0.25 discrete to minimize fee drag.
 - Donchian breakouts capture strong momentum moves.
@@ -41,24 +41,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h volume average for confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:  # Need sufficient data for volume MA
+    # Calculate 1w volume average for confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need sufficient data for volume MA
         return np.zeros(n)
     
-    vol_ma_20 = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    vol_ma_20 = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
     
-    # Calculate 12h ATR for regime filter
-    if len(df_12h) < 50:  # Need sufficient data for ATR(50)
+    # Calculate 1w ATR for regime filter
+    if len(df_1w) < 50:  # Need sufficient data for ATR(50)
         return np.zeros(n)
     
-    atr_14_12h = atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
-    atr_50_12h = atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 50)
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-    atr_50_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_50_12h)
+    atr_14_1w = atr(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
+    atr_50_1w = atr(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 50)
+    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    atr_50_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_50_1w)
     
-    # Calculate Donchian Channel from 4h data (20-period)
+    # Calculate Donchian Channel from 1d data (20-period)
     donchian_period = 20
     donchian_high = pd.Series(close).rolling(window=donchian_period, min_periods=donchian_period).max().values
     donchian_low = pd.Series(close).rolling(window=donchian_period, min_periods=donchian_period).min().values
@@ -71,8 +71,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_14_12h_aligned[i]) or
-            np.isnan(atr_50_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_14_1w_aligned[i]) or
+            np.isnan(atr_50_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -109,7 +109,7 @@ def generate_signals(prices):
             volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
             
             # ATR regime filter: ATR(14) < ATR(50) (low volatility regime)
-            atr_regime = atr_14_12h_aligned[i] < atr_50_12h_aligned[i]
+            atr_regime = atr_14_1w_aligned[i] < atr_50_1w_aligned[i]
             
             if breakout_up and volume_confirm and atr_regime:
                 signals[i] = 0.25
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hVolumeSpike_ATRRegime_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wVolumeSpike_ATRRegime_v1"
+timeframe = "1d"
 leverage = 1.0
