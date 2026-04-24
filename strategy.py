@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike.
-- Primary timeframe: 4h for execution, HTF: 1d for EMA trend and Camarilla pivot levels.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike.
+- Primary timeframe: 12h for execution, HTF: 1d for EMA trend and Camarilla pivot levels.
 - Camarilla levels from prior 1d: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
   Long when price breaks above H3 with volume spike, Short when price breaks below L3 with volume spike.
 - Trend filter: Only trade in direction of 1d EMA34 (long if EMA34 rising, short if falling).
 - Volume confirmation: current volume > 2.0x 20-period volume MA to ensure strong participation.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 - Works in bull via buying H3 breakouts in uptrend, in bear via selling L3 breakouts in downtrend.
 """
 
@@ -40,7 +40,7 @@ def generate_signals(prices):
     camarilla_H3 = close_1d + 1.1 * (high_1d - low_1d) / 2
     camarilla_L3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Align Camarilla levels to 4h (each 1d bar = 6x 4h bars)
+    # Align Camarilla levels to 12h (each 1d bar = 2x 12h bars)
     camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
     camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
     
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
