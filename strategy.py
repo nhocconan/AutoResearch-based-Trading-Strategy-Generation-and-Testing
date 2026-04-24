@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 12h for EMA50 trend filter (bullish if close > EMA50, bearish if close < EMA50).
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 6h EMA13).
-- Regime: Only trade Bull Power breakouts in bullish 12h regime, Bear Power breakdowns in bearish regime.
-- Volume filter: Require volume > 1.5 * 20-period average volume for confirmation.
-- Entry: Long when Bull Power crosses above zero AND bullish regime AND volume confirmation.
-         Short when Bear Power crosses below zero AND bearish regime AND volume confirmation.
-- Exit: Opposite signal (Long exits when Bear Power < 0, Short exits when Bull Power > 0).
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d volume spike and choppiness regime filter.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d for volume spike detection (>2.0x 20-period average) and choppiness regime (CHOP > 61.8 = range, < 38.2 = trend).
+- Camarilla levels: R1, S1, R3, S3 calculated from prior 1d OHLC.
+- Entry: Long when price > R1 AND trending regime (CHOP < 38.2) AND volume > 2.0 * 20-period average volume.
+         Short when price < S1 AND trending regime AND volume confirmation.
+- Exit: Opposite Camarilla breakout (price < R1 for long exit, price > S1 for short exit) OR regime shifts to choppy (CHOP > 61.8).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in bull markets via Bull Power longs and bear markets via Bear Power shorts,
-  while avoiding whipsaws via regime and volume filters.
+- Works in both bull and bear markets by only trading breakouts in trending regimes, avoiding whipsaws in chop.
 """
 
 import numpy as np
@@ -20,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:  # Need sufficient data for calculations
+    if n < 60:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -29,74 +26,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:  # Need sufficient data for EMA50
+    # Calculate 1d choppiness index and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need sufficient data for CHOP
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Calculate 12h trend: bullish if close > EMA50, bearish if close < EMA50
-    # We need the 12h close aligned to 6h
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-    bullish_regime = close_12h_aligned > ema50_12h_aligned
-    bearish_regime = close_12h_aligned < ema50_12h_aligned
+    # True Range for choppiness
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # Align length
     
-    # Calculate 6h volume average for confirmation (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ATR(14) for denominator
+    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (max(high)-min(low)) * sqrt(period))
+    # Using rolling window of 14 periods
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    sum_atr = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
+    
+    # Avoid division by zero
+    range_hl = max_high - min_low
+    chop_raw = 100 * np.log10(sum_atr / range_hl * np.sqrt(14))
+    chop_raw = np.where(range_hl == 0, 50, chop_raw)  # Default to middle when no range
+    chop_raw = np.concatenate([[np.nan] * 13, chop_raw[13:]])  # Align for min_periods
+    
+    # Align choppiness to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
+    
+    # Calculate 1d volume average for confirmation (20-period)
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Calculate Camarilla levels from prior 1d OHLC
+    # R1 = C + (H-L) * 1.1/12, S1 = C - (H-L) * 1.1/12
+    # R3 = C + (H-L) * 1.1/4, S3 = C - (H-L) * 1.1/4
+    camarilla_multiplier = 1.1
+    r1_1d = close_1d + (high_1d - low_1d) * camarilla_multiplier / 12
+    s1_1d = close_1d - (high_1d - low_1d) * camarilla_multiplier / 12
+    r3_1d = close_1d + (high_1d - low_1d) * camarilla_multiplier / 4
+    s3_1d = close_1d - (high_1d - low_1d) * camarilla_multiplier / 4
+    
+    # Align Camarilla levels to 4h timeframe (use prior day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 20)  # Need 13 for EMA13, 20 for volume MA
+    start_idx = 30  # Need 30 for CHOP calculations
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(close_12h_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average volume
-        volume_confirm = volume[i] > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
+        curr_close = close[i]
+        curr_volume = volume[i]
         
-        # Exit conditions: opposite Elder Ray signal
+        # Regime filter: CHOP < 38.2 = trending (favor breakouts), CHOP > 61.8 = choppy (favor mean reversion)
+        trending_regime = chop_aligned[i] < 38.2
+        choppy_regime = chop_aligned[i] > 61.8
+        
+        # Volume confirmation: current volume > 2.0 * 20-period average volume
+        volume_confirm = curr_volume > 2.0 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
+        
+        # Exit conditions
         if position != 0:
-            # Exit long: Bear Power < 0 (momentum fading)
+            # Exit long: price < R1 OR regime shifts to choppy
             if position == 1:
-                if bear_power[i] < 0:
+                if curr_close < r1_aligned[i] or choppy_regime:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Bull Power > 0 (momentum fading)
+            # Exit short: price > S1 OR regime shifts to choppy
             elif position == -1:
-                if bull_power[i] > 0:
+                if curr_close > s1_aligned[i] or choppy_regime:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Elder Ray crossover with regime and volume filters
+        # Entry conditions: Camarilla breakout with regime and volume filters
         if position == 0:
-            # Long: Bull Power crosses above zero AND bullish regime AND volume confirmation
-            long_condition = (bull_power[i] > 0 and bull_power[i-1] <= 0 and
-                            bullish_regime[i] and
+            # Long: price > R1 AND trending regime AND volume confirmation
+            long_condition = (curr_close > r1_aligned[i] and 
+                            trending_regime and
                             volume_confirm)
             
-            # Short: Bear Power crosses below zero AND bearish regime AND volume confirmation
-            short_condition = (bear_power[i] < 0 and bear_power[i-1] >= 0 and
-                             bearish_regime[i] and
+            # Short: price < S1 AND trending regime AND volume confirmation
+            short_condition = (curr_close < s1_aligned[i] and 
+                             trending_regime and
                              volume_confirm)
             
             if long_condition:
@@ -114,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_12hEMA50Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dVolSpike_ChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
