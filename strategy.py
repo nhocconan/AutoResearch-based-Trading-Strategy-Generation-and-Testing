@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams Alligator + Elder Ray + 1w Trend Filter.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1w for trend filter (only trade in direction of weekly EMA13 slope).
-- Entry: Long when Alligator lips (SMA5) > teeth (SMA8) > jaw (SMA13) AND Elder Bull Power > 0 AND weekly EMA13 slope > 0;
-         Short when Alligator lips < teeth < jaw AND Elder Bear Power < 0 AND weekly EMA13 slope < 0.
-- Exit: Close-based reversal (opposite signal) or Alligator convergence (lips crosses teeth).
+Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
+- HTF: 1w for EMA34 trend filter (aligned with extra delay for trend confirmation).
+- Entry: Long when price breaks above Donchian upper(20) AND 1w EMA34 > 1w EMA34(previous bar) (uptrend) AND volume > 1.5 * 1d volume MA(20);
+         Short when price breaks below Donchian lower(20) AND 1w EMA34 < 1w EMA34(previous bar) (downtrend) AND volume > 1.5 * 1d volume MA(20).
+- Exit: Close-based reversal (opposite signal) or trend change (signal=0 when EMA34 slope changes sign).
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Williams Alligator identifies trend alignment; Elder Ray measures bull/bear power; weekly trend filter avoids counter-trend whipsaws.
-- Works in bull markets (buy when all aligned up) and bear markets (sell when all aligned down) with weekly filter to avoid false signals.
-- Estimated trades: ~120 total over 4 years (~30/year) based on Alligator alignment frequency with weekly filter.
+- Donchian channels provide clear structure; EMA34 trend filter ensures we trade with the weekly trend; volume confirmation avoids false breakouts.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend) with trend filter to avoid counter-trend whipsaws.
+- Estimated trades: ~50 total over 4 years (~12/year) based on Donchian(20) breakout frequency with filters.
 """
 
 import numpy as np
@@ -25,89 +25,93 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for trend filter
+    # Get 1w data for EMA34 trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_slope_1w = ema_13_1w - np.roll(ema_13_1w, 1)
-    ema_13_slope_1w[0] = 0
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_slope = ema_34_1w - np.roll(ema_34_1w, 1)
+    ema_34_slope[0] = 0
     
-    # Calculate Williams Alligator on primary 4h
-    # Jaw: SMA13 of median price
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    # Teeth: SMA8 of median price
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    # Lips: SMA5 of median price
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    # Get 1d data for Donchian channels and volume MA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate Elder Ray on primary 4h
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Align all indicators to primary 4h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, prices, jaw)  # Already LTF
-    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
-    lips_aligned = align_htf_to_ltf(prices, prices, lips)
-    bull_power_aligned = align_htf_to_ltf(prices, prices, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, prices, bear_power)
-    ema_13_slope_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_slope_1w)
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to primary 1d timeframe
+    # EMA34 on 1w needs extra delay because trend confirmation requires the 1w bar to close
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_34_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_34_slope, additional_delay_bars=1)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 13  # Need sufficient data for Alligator and Elder Ray
+    start_idx = 50  # Need sufficient data for EMA34 and Donchian(20)
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(ema_13_slope_1w_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(ema_34_slope_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Exit conditions
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        
+        # Exit: trend change (EMA34 slope changes sign)
         if position != 0:
-            if position == 1:
-                # Exit long: Alligator convergence (lips crosses below teeth) OR weekly trend turns down
-                if lips_aligned[i] < teeth_aligned[i] or ema_13_slope_1w_aligned[i] <= 0:
-                    signals[i] = 0.0
-                    position = 0
-                    continue
-            elif position == -1:
-                # Exit short: Alligator convergence (lips crosses above teeth) OR weekly trend turns up
-                if lips_aligned[i] > teeth_aligned[i] or ema_13_slope_1w_aligned[i] >= 0:
-                    signals[i] = 0.0
-                    position = 0
-                    continue
+            if position == 1 and ema_34_slope_aligned[i] <= 0:
+                signals[i] = 0.0
+                position = 0
+                continue
+            elif position == -1 and ema_34_slope_aligned[i] >= 0:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # Entry conditions
-        bullish_alignment = (lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i])
-        bearish_alignment = (lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i])
+        # Entry conditions with volume confirmation and Donchian breakout
+        bullish_breakout = curr_high > donchian_high_aligned[i]  # Break above upper channel
+        bearish_breakout = curr_low < donchian_low_aligned[i]    # Break below lower channel
         
-        bullish_power = bull_power_aligned[i] > 0
-        bearish_power = bear_power_aligned[i] < 0
+        # Trend filter: only trade in direction of 1w EMA34 slope
+        uptrend = ema_34_slope_aligned[i] > 0
+        downtrend = ema_34_slope_aligned[i] < 0
         
-        weekly_uptrend = ema_13_slope_1w_aligned[i] > 0
-        weekly_downtrend = ema_13_slope_1w_aligned[i] < 0
+        # Volume confirmation
+        vol_confirm = curr_volume > 1.5 * vol_ma_1d_aligned[i]
         
         if position == 0:
             # Check for entry signals
-            if bullish_alignment and bullish_power and weekly_uptrend:
-                signals[i] = 0.25
-                position = 1
-            elif bearish_alignment and bearish_power and weekly_downtrend:
-                signals[i] = -0.25
-                position = -1
+            if vol_confirm:
+                # Long: Price breaks above Donchian upper AND uptrend
+                if bullish_breakout and uptrend:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Price breaks below Donchian lower AND downtrend
+                elif bearish_breakout and downtrend:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
             # Long position: maintain signal
             signals[i] = 0.25
@@ -117,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_ElderRay_1wTrendFilter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_EMA34_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
