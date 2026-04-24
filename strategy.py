@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R extreme reversal with 12h EMA34 trend filter and 1d ATR volume spike confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 12h for EMA34 trend filter, 1d for ATR volume spike.
-- Entry: Long when Williams %R(14) crosses above -80 from below AND ATR ratio > 1.5 AND price > 12h EMA34.
-         Short when Williams %R(14) crosses below -20 from above AND ATR ratio > 1.5 AND price < 12h EMA34.
-- Exit: Williams %R crosses below -50 for long OR above -50 for short.
-- Signal size: 0.25 discrete to minimize fee drag.
-- Williams %R identifies overbought/oversold conditions; extreme readings (> -80 or < -20) followed by reversal offer high-probability mean reversion spots.
-- 12h EMA34 ensures trades align with intermediate-term trend to avoid counter-trend whipsaws.
-- 1d ATR ratio > 1.5 confirms volatility expansion to validate reversal strength.
-- Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on Williams %R reversal frequency with strict filters.
+Hypothesis: 12h Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation using 12h ATR spike.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for EMA50 trend filter.
+- Entry: Long when price breaks above Donchian(20) high AND ATR ratio > 2.0 AND price > 1w EMA50.
+         Short when price breaks below Donchian(20) low AND ATR ratio > 2.0 AND price < 1w EMA50.
+- Exit: Opposite Donchian breakout OR price crosses 1w EMA50 in opposite direction.
+- Signal size: 0.30 discrete to balance profit potential and fee drag.
+- ATR ratio (current ATR/20-period ATR) > 2.0 confirms significant volatility expansion to avoid false breakouts.
+- 1w EMA50 provides trend filter to avoid counter-trend trades.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
 """
 
 import numpy as np
@@ -31,12 +30,11 @@ def atr(high, low, close, period):
     true_range[0] = high_low[0]  # First period
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def williams_r(high, low, close, period):
-    """Calculate Williams %R."""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    return wr
+def donchian_channels(high, low, period):
+    """Calculate Donchian Channels."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -48,80 +46,78 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate 12h trend filter: EMA34
+    # Calculate 1w trend filter: EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
+        return np.zeros(n)
+    
+    ema50_1w = ema(df_1w['close'].values, 50)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w, additional_delay_bars=1)
+    
+    # Calculate 12h ATR for volume spike filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 40:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    ema34_12h = ema(df_12h['close'].values, 34)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h, additional_delay_bars=1)
-    
-    # Calculate 1d ATR for volume spike filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
-    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
+    atr_20 = atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 20)
+    atr_current = atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 1)
     atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio, additional_delay_bars=1)
     
-    # Williams %R on 6h (14-period)
-    wr = williams_r(high, low, close, 14)
+    # Donchian channels on 12h (20-period)
+    donch_hi, donch_lo = donchian_channels(high, low, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 40  # Need sufficient data for all indicators
+    start_idx = 60  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or
-            np.isnan(wr[i])):
+        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_wr = wr[i]
-        prev_wr = wr[i-1] if i > 0 else -50  # Previous Williams %R
         
-        # Exit conditions: Williams %R crosses -50 midpoint
+        # Exit conditions: opposite Donchian breakout OR price crosses 1w EMA50 in opposite direction
         if position != 0:
-            # Exit long: Williams %R crosses below -50
+            # Exit long: price breaks below Donchian low OR price falls below 1w EMA50
             if position == 1:
-                if prev_wr > -50 and curr_wr <= -50:
+                if curr_close < donch_lo[i] or curr_close < ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Williams %R crosses above -50
+            # Exit short: price breaks above Donchian high OR price rises above 1w EMA50
             elif position == -1:
-                if prev_wr < -50 and curr_wr >= -50:
+                if curr_close > donch_hi[i] or curr_close > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Williams %R extreme reversal with volume confirmation and trend filter
+        # Entry conditions: Donchian breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: Williams %R crosses above -80 from below (oversold reversal) AND ATR ratio > 1.5 AND bullish 12h trend
-            if prev_wr <= -80 and curr_wr > -80 and atr_ratio_aligned[i] > 1.5 and curr_close > ema34_12h_aligned[i]:
-                signals[i] = 0.25
+            # Long: price breaks above Donchian high AND ATR ratio > 2.0 AND bullish 1w trend
+            if curr_close > donch_hi[i] and atr_ratio_aligned[i] > 2.0 and curr_close > ema50_1w_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Williams %R crosses below -20 from above (overbought reversal) AND ATR ratio > 1.5 AND bearish 12h trend
-            elif prev_wr >= -20 and curr_wr < -20 and atr_ratio_aligned[i] > 1.5 and curr_close < ema34_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: price breaks below Donchian low AND ATR ratio > 2.0 AND bearish 1w trend
+            elif curr_close < donch_lo[i] and atr_ratio_aligned[i] > 2.0 and curr_close < ema50_1w_aligned[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.25
+            signals[i] = -0.30
     
     return signals
 
-name = "6h_WilliamsR_Extreme_12hEMA34_TrendFilter_1dATR_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_DonchianBreakout_12hATR_VolumeSpike_1wEMA50_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
