@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI(2) mean reversion with 4h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h for EMA50 trend filter and volume MA.
-- Entry: Long when RSI(2) < 10 AND price > 4h EMA50 (uptrend) AND volume > 1.5 * 4h volume MA(20);
-         Short when RSI(2) > 90 AND price < 4h EMA50 (downtrend) AND volume > 1.5 * 4h volume MA(20).
-- Exit: RSI(2) > 50 for long exit, RSI(2) < 50 for short exit, or trend change (signal=0 when 4h EMA50 slope changes sign).
-- Signal size: 0.20 discrete to minimize fee drag.
-- Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend) with trend filter to avoid counter-trend whipsaws.
-- Estimated trades: ~100 total over 4 years (~25/year) based on RSI(2) extremes with filters.
+Hypothesis: 6h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for EMA50 trend filter (more stable than daily).
+- Entry: Long when price breaks above Camarilla H3 level AND 1w EMA50 > 1w EMA50(previous) (uptrend) AND volume > 1.5 * 6h volume MA(20);
+         Short when price breaks below Camarilla L3 level AND 1w EMA50 < 1w EMA50(previous) (downtrend) AND volume > 1.5 * 6h volume MA(20).
+- Exit: Close-based reversal (opposite signal) or trend change (signal=0 when 1w EMA50 slope changes sign).
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- Camarilla levels provide intraday support/resistance; 1w EMA50 trend filter ensures we trade with the primary trend; volume confirmation avoids false breakouts.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend) with trend filter to avoid counter-trend whipsaws.
+- Estimated trades: ~100 total over 4 years (~25/year) based on Camarilla H3/L3 breakout frequency with filters.
 """
 
 import numpy as np
@@ -26,97 +27,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(2) on 1h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get 4h data for EMA50 trend filter and volume MA
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate 4h EMA50 and its slope
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_slope = ema_50_4h - np.roll(ema_50_4h, 1)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_slope = ema_50_1w - np.roll(ema_50_1w, 1)
     ema_50_slope[0] = 0
     
-    # Calculate 4h volume MA(20)
-    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Get 1d data for Camarilla pivot calculation (H3, L3 levels)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align all indicators to primary 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    ema_50_slope_aligned = align_htf_to_ltf(prices, df_4h, ema_50_slope)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels (H3, L3) from previous day
+    # H3 = close + 1.1*(high-low)/4
+    # L3 = close - 1.1*(high-low)/4
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    
+    # Get 6h data for volume MA
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    volume_6h = df_6h['volume'].values
+    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to primary 6h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_50_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_50_slope)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for RSI(2) and EMA50
+    start_idx = 50  # Need sufficient data for EMA50 and pivot calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_50_slope_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_50_slope_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma_6h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
         
-        # Exit conditions
+        # Exit: trend change (1w EMA50 slope changes sign)
         if position != 0:
-            # Exit on RSI mean reversion or trend change
-            if position == 1 and (rsi[i] > 50 or ema_50_slope_aligned[i] <= 0):
+            if position == 1 and ema_50_slope_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
                 continue
-            elif position == -1 and (rsi[i] < 50 or ema_50_slope_aligned[i] >= 0):
+            elif position == -1 and ema_50_slope_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Entry conditions with volume confirmation and trend filter
-        bullish_setup = rsi[i] < 10  # Oversold
-        bearish_setup = rsi[i] > 90  # Overbought
+        # Entry conditions with volume confirmation and Camarilla breakout
+        bullish_breakout = curr_high > camarilla_h3_aligned[i]  # Break above H3 level
+        bearish_breakout = curr_low < camarilla_l3_aligned[i]    # Break below L3 level
         
-        # Trend filter: only trade in direction of 4h EMA50
-        uptrend = ema_50_4h_aligned[i] > ema_50_4h_aligned[max(0, i-1)]  # Rising EMA50
-        downtrend = ema_50_4h_aligned[i] < ema_50_4h_aligned[max(0, i-1)]  # Falling EMA50
+        # Trend filter: only trade in direction of 1w EMA50 slope
+        uptrend = ema_50_slope_aligned[i] > 0
+        downtrend = ema_50_slope_aligned[i] < 0
         
         # Volume confirmation
-        vol_confirm = curr_volume > 1.5 * vol_ma_4h_aligned[i]
+        vol_confirm = curr_volume > 1.5 * vol_ma_6h_aligned[i]
         
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: RSI oversold AND uptrend
-                if bullish_setup and uptrend:
-                    signals[i] = 0.20
+                # Long: Price breaks above Camarilla H3 AND uptrend
+                if bullish_breakout and uptrend:
+                    signals[i] = 0.25
                     position = 1
-                # Short: RSI overbought AND downtrend
-                elif bearish_setup and downtrend:
-                    signals[i] = -0.20
+                # Short: Price breaks below Camarilla L3 AND downtrend
+                elif bearish_breakout and downtrend:
+                    signals[i] = -0.25
                     position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.20
+            signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI2_EMA50_Trend_VolumeConfirm_v1"
-timeframe = "1h"
+name = "6h_Camarilla_H3L3_EMA50_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
