@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume spike.
-- Primary timeframe: 6h for execution, HTF: 1d for EMA trend and Elder Ray calculation.
-- Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13) using 1d data.
-- Long when Bull Power > 0 and rising (making higher low) with volume spike in uptrend (1d EMA34 rising).
-- Short when Bear Power < 0 and falling (making lower high) with volume spike in downtrend (1d EMA34 falling).
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike.
+- Primary timeframe: 12h for execution, HTF: 1d for EMA trend and Camarilla pivot levels.
+- Camarilla levels from prior 1d: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+  Long when price breaks above H3 with volume spike, Short when price breaks below L3 with volume spike.
+- Trend filter: Only trade in direction of 1d EMA34 (long if EMA34 rising, short if falling).
 - Volume confirmation: current volume > 2.0x 20-period volume MA to ensure strong participation.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-- Works in bull via buying Bull Power strength in uptrend, in bear via selling Bear Power weakness in downtrend.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Works in bull via buying H3 breakouts in uptrend, in bear via selling L3 breakouts in downtrend.
+- BTC and ETH focus: avoids SOL-only bias by requiring volume confirmation and trend alignment.
 """
 
 import numpy as np
@@ -26,7 +27,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA13 (Elder Ray) and EMA34 trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -35,16 +36,14 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA13 for Elder Ray (1d)
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla H3 and L3 levels from prior 1d bar
+    # H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+    camarilla_H3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_L3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema_13_1d
-    bear_power = low_1d - ema_13_1d
-    
-    # Align Elder Ray components to 6h (each 1d bar = 4x 6h bars)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align Camarilla levels to 12h (each 1d bar = 2x 12h bars)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -62,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,25 +73,25 @@ def generate_signals(prices):
             if i > 0 and not np.isnan(ema_34_1d_aligned[i-1]):
                 ema34_slope = ema_34_1d_aligned[i] - ema_34_1d_aligned[i-1]
                 if ema34_slope > 0:  # Uptrend
-                    # Long when Bull Power > 0 and rising (higher low) with volume spike
-                    if bull_power_aligned[i] > 0 and bull_power_aligned[i] > bull_power_aligned[i-1] and volume_spike[i]:
+                    # Long when price breaks above H3 with volume spike
+                    if close[i] > camarilla_H3_aligned[i] and volume_spike[i]:
                         signals[i] = 0.25
                         position = 1
                 elif ema34_slope < 0:  # Downtrend
-                    # Short when Bear Power < 0 and falling (lower high) with volume spike
-                    if bear_power_aligned[i] < 0 and bear_power_aligned[i] < bear_power_aligned[i-1] and volume_spike[i]:
+                    # Short when price breaks below L3 with volume spike
+                    if close[i] < camarilla_L3_aligned[i] and volume_spike[i]:
                         signals[i] = -0.25
                         position = -1
         elif position == 1:
-            # Long exit: Bull Power becomes negative or opposite signal
-            if bull_power_aligned[i] <= 0:
+            # Long exit: price breaks below L3 or opposite signal
+            if close[i] < camarilla_L3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power becomes positive or opposite signal
-            if bear_power_aligned[i] >= 0:
+            # Short exit: price breaks above H3 or opposite signal
+            if close[i] > camarilla_H3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -100,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
