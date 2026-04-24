@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1d EMA trend filter and volume confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for EMA trend filter (EMA34 > EMA89 = bull trend, EMA34 < EMA89 = bear trend).
-- Williams Alligator: Jaw (EMA13 of median price, 8-bar offset), Teeth (EMA8 of median price, 5-bar offset), Lips (EMA5 of median price, 3-bar offset).
-- Entry: Long when Lips > Teeth > Jaw (bullish alignment) AND price > Lips AND bull trend AND volume > 1.5 * 20-period average volume.
-         Short when Lips < Teeth < Jaw (bearish alignment) AND price < Lips AND bear trend AND volume > 1.5 * 20-period average volume.
-- Exit: Opposite Alligator alignment (Lips < Teeth for long exit, Lips > Teeth for short exit).
+Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 12h for EMA50 trend direction.
+- Camarilla levels: Calculated from previous 1d OHLC (R1, S1, R3, S3, etc.).
+- Trend filter: 12h EMA50 slope > 0 for longs, < 0 for shorts (using 3-bar slope to avoid noise).
+- Volume confirmation: 4h volume > 1.5 * 20-period average volume.
+- Entry: Long when price > R1 AND uptrend AND volume confirmation.
+         Short when price < S1 AND downtrend AND volume confirmation.
+- Exit: Opposite Camarilla break (price < R1 for long exit, price > S1 for short exit).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in bull markets by catching trends, avoids chop by requiring clear Alligator alignment and volume confirmation.
+- Works in both bull and bear markets by only trading breakouts in the direction of the 12h trend.
 """
 
 import numpy as np
@@ -26,59 +28,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 and EMA89 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 89:  # Need sufficient data for EMA89
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 3-bar slope to determine trend direction
+    ema_slope = np.zeros_like(ema_50)
+    ema_slope[3:] = (ema_50[3:] - ema_50[:-3]) / 3  # 3-period slope
+    ema_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_slope)
+    
+    # Calculate Camarilla levels from previous 1d OHLC
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    # Camarilla levels: based on previous day's range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA34 and EMA89
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
+    # Calculate Camarilla R1, S1, R3, S3
+    # R1 = Close + 1.1*(High-Low)/12
+    # S1 = Close - 1.1*(High-Low)/12
+    # R3 = Close + 1.1*(High-Low)/4
+    # S3 = Close - 1.1*(High-Low)/4
+    rng = high_1d - low_1d
+    r1 = close_1d + 1.1 * rng / 12
+    s1 = close_1d - 1.1 * rng / 12
+    r3 = close_1d + 1.1 * rng / 4
+    s3 = close_1d - 1.1 * rng / 4
     
-    # Trend: 1 = bull (EMA34 > EMA89), -1 = bear (EMA34 < EMA89), 0 = unclear
-    trend_1d = np.where(ema34_1d > ema89_1d, 1, np.where(ema34_1d < ema89_1d, -1, 0))
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Align trend to 12h timeframe
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
-    
-    # Calculate 1d volume average for confirmation (20-period)
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Calculate Williams Alligator on 12h timeframe
-    # Median price = (high + low) / 2
-    median_price = (high + low) / 2
-    
-    # Jaw: EMA13 of median price, 8-bar offset
-    jaw = pd.Series(median_price).ewm(span=13, adjust=False, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # 8-bar offset to the right
-    jaw[:8] = np.nan  # First 8 values are invalid
-    
-    # Teeth: EMA8 of median price, 5-bar offset
-    teeth = pd.Series(median_price).ewm(span=8, adjust=False, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # 5-bar offset to the right
-    teeth[:5] = np.nan  # First 5 values are invalid
-    
-    # Lips: EMA5 of median price, 3-bar offset
-    lips = pd.Series(median_price).ewm(span=5, adjust=False, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # 3-bar offset to the right
-    lips[:3] = np.nan  # First 3 values are invalid
+    # Calculate 4h volume average for confirmation (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 20)  # Need 13 for Jaw, 20 for volume MA
+    start_idx = max(20, 50)  # Need 20 for volume MA, 50 for EMA50
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i])):
+        if (np.isnan(ema_slope_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,40 +88,38 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Trend filter: 12h EMA50 slope > 0 for uptrend, < 0 for downtrend
+        uptrend = ema_slope_aligned[i] > 0
+        downtrend = ema_slope_aligned[i] < 0
         
         # Volume confirmation: current volume > 1.5 * 20-period average volume
-        volume_confirm = curr_volume > 1.5 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
+        volume_confirm = curr_volume > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
         
-        # Exit conditions: opposite Alligator alignment
+        # Exit conditions: opposite Camarilla break
         if position != 0:
-            # Exit long: Lips <= Teeth (bullish alignment broken)
+            # Exit long: price < R1
             if position == 1:
-                if lips[i] <= teeth[i]:
+                if curr_close < r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Lips >= Teeth (bearish alignment broken)
+            # Exit short: price > S1
             elif position == -1:
-                if lips[i] >= teeth[i]:
+                if curr_close > s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Alligator alignment with trend and volume filters
+        # Entry conditions: Camarilla breakout with trend and volume filters
         if position == 0:
-            # Long: Bullish alignment AND price > Lips AND bull trend AND volume confirmation
-            long_condition = (bullish_alignment and 
-                            curr_close > lips[i] and
-                            trend_1d_aligned[i] == 1 and
+            # Long: price > R1 AND uptrend AND volume confirmation
+            long_condition = (curr_close > r1_aligned[i] and 
+                            uptrend and
                             volume_confirm)
             
-            # Short: Bearish alignment AND price < Lips AND bear trend AND volume confirmation
-            short_condition = (bearish_alignment and 
-                             curr_close < lips[i] and
-                             trend_1d_aligned[i] == -1 and
+            # Short: price < S1 AND downtrend AND volume confirmation
+            short_condition = (curr_close < s1_aligned[i] and 
+                             downtrend and
                              volume_confirm)
             
             if long_condition:
@@ -138,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1dEMATrend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_12hEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
