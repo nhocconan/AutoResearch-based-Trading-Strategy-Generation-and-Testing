@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 12h for EMA trend direction.
-- EMA > price indicates uptrend bias for longs, EMA < price indicates downtrend bias for shorts.
-- Entry: Long when price breaks above Donchian(20) upper AND close > 12h EMA (bullish breakout in uptrend).
-         Short when price breaks below Donchian(20) lower AND close < 12h EMA (bearish breakout in downtrend).
-- Exit: Opposite Donchian breakout (price crosses Donchian mid) or loss of trend bias.
-- Volume confirmation: current volume > 1.5 * 20-period volume MA (to avoid false breakouts).
-- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Hypothesis: 1h Donchian(20) breakout with 4h ADX regime filter and volume confirmation.
+- Primary timeframe: 1h for execution, HTF: 4h for ADX trend strength.
+- ADX > 25 indicates trending market (breakout strategy), ADX < 20 indicates ranging (mean reversion at Donchian mid).
+- Entry: Long when price breaks above Donchian(20) upper AND ADX > 25 (bullish breakout in trend).
+         Short when price breaks below Donchian(20) lower AND ADX > 25 (bearish breakout in trend).
+         In ranging (ADX < 20): Long when price touches Donchian lower AND reverses up (close > low).
+                                Short when price touches Donchian upper AND reverses down (close < high).
+- Exit: Opposite Donchian breakout or ADX regime shift to ranging.
+- Volume confirmation: current volume > 1.3 * 20-period volume MA (to avoid false breakouts).
+- Discrete signal size: 0.20 to limit drawdown and reduce fee churn.
+- Session filter: 08-20 UTC to reduce noise trades.
+- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 """
 
 import numpy as np
@@ -26,75 +29,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for ADX
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate EMA (34-period) on 12h
-    ema_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate ADX (14-period) on 4h
+    # True Range
+    tr1 = pd.Series(df_4h['high']).diff().abs()
+    tr2 = (pd.Series(df_4h['high']) - pd.Series(df_4h['low'].shift())).abs()
+    tr3 = (pd.Series(df_4h['low']) - pd.Series(df_4h['close'].shift())).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 12h EMA to 4h
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Directional Movement
+    up_move = pd.Series(df_4h['high']).diff()
+    down_move = -pd.Series(df_4h['low']).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Donchian channels (20-period) on 4h
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 4h ADX to 1h
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    
+    # Donchian channels (20-period) on 1h
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 4h)
+    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 1h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    volume_spike = volume > (1.3 * volume_ma)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, lookback, 20)  # Need enough 12h bars for EMA and lookback for Donchian
+    start_idx = max(30, lookback, 20)  # Need enough 4h bars for ADX and lookback for Donchian
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_spike[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_trend = ema_12h_aligned[i]
+        adx_val = adx_aligned[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        prev_close = close[i-1]
         
         if position == 0:
             # Check for entry signals
             if volume_spike[i]:
-                # Bullish breakout: price closes above upper Donchian AND close > 12h EMA (uptrend bias)
-                if curr_close > highest_high[i] and curr_close > ema_trend:
-                    signals[i] = 0.25
-                    position = 1
-                # Bearish breakout: price closes below lower Donchian AND close < 12h EMA (downtrend bias)
-                elif curr_close < lowest_low[i] and curr_close < ema_trend:
-                    signals[i] = -0.25
-                    position = -1
+                if adx_val > 25:  # Trending regime: breakout strategy
+                    # Bullish breakout: price closes above upper Donchian
+                    if curr_close > highest_high[i]:
+                        signals[i] = 0.20
+                        position = 1
+                    # Bearish breakout: price closes below lower Donchian
+                    elif curr_close < lowest_low[i]:
+                        signals[i] = -0.20
+                        position = -1
+                else:  # Ranging regime (ADX < 20): mean reversion at extremes
+                    # Long when price touches lower Donchian and shows reversal (close > low)
+                    if curr_low <= lowest_low[i] and curr_close > curr_low:
+                        signals[i] = 0.20
+                        position = 1
+                    # Short when price touches upper Donchian and shows reversal (close < high)
+                    elif curr_high >= highest_high[i] and curr_close < curr_high:
+                        signals[i] = -0.20
+                        position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian mid OR close drops below 12h EMA (trend bias lost)
-            if curr_close < donchian_mid[i] or curr_close < ema_trend:
+            # Long exit: price closes below Donchian mid OR ADX drops to ranging
+            if curr_close < donchian_mid[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price closes above Donchian mid OR close rises above 12h EMA (trend bias lost)
-            if curr_close > donchian_mid[i] or curr_close > ema_trend:
+            # Short exit: price closes above Donchian mid OR ADX drops to ranging
+            if curr_close > donchian_mid[i] or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA34_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1h_Donchian20_4hADXRegime_VolumeConfirm_SessionFilter_v1"
+timeframe = "1h"
 leverage = 1.0
