@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
 - Long when price breaks above Donchian upper band and close > 1d EMA34 (bullish trend)
 - Short when price breaks below Donchian lower band and close < 1d EMA34 (bearish trend)
 - Volume must be > 2.0x 20-period average for high-conviction breakouts
@@ -41,7 +41,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe
+    # Align 1d EMA34 to 12h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: > 2.0x 20-period average volume
@@ -108,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dEMA34_VolumeSpike_ATRTrailingStop_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_ATRTrailingStop_v1"
+timeframe = "12h"
 leverage = 1.0
