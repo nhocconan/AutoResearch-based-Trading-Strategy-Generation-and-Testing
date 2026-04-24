@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA20 trend filter and volume spike confirmation.
-- Uses 1h timeframe (primary) and 4h HTF for EMA20 trend alignment (reduces counter-trend trades).
-- Camarilla pivot levels calculated from prior 1d high/low/close.
-- Breakout logic: long when price closes above H3 with volume spike and uptrend,
-                  short when price closes below L3 with volume spike and downtrend.
-- Trend filter: only long when 1h close > 4h EMA20, only short when 1h close < 4h EMA20.
-- Volume confirmation: current 1h volume > 2.0 * 20-period 1h volume MA (strict to reduce trades).
-- Discrete signal size: 0.20 to balance reward and risk, minimizing fee churn.
-- Session filter: only trade between 08:00-20:00 UTC to avoid low-liquidity hours.
-- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
-- Works in both bull/bear: trend filter avoids counter-trend trades, Camarilla breakouts capture momentum in all regimes.
+Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX25 regime filter and volume confirmation.
+- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 1d EMA13 for smoothing).
+- Regime filter: Only trade when 1d ADX > 25 (trending market) to avoid whipsaws in ranging periods.
+- Entry: Long when Bull Power > 0 and rising (current > previous) AND volume spike.
+         Short when Bear Power < 0 and falling (current < previous) AND volume spike.
+- Volume confirmation: Current 6h volume > 1.8 * 20-period 6h volume MA (moderate to balance signal quality and frequency).
+- Discrete signal size: 0.25 to manage drawdown and reduce fee churn.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+- Works in both bull/bear: ADX regime ensures we only trade strong trends, Elder Ray captures momentum with trend alignment.
 """
 
 import numpy as np
@@ -28,93 +26,103 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours for efficiency
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    
-    # Calculate 4h EMA20 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Calculate Camarilla levels from prior 1d OHLC (using mtf_data for 1d)
+    # Calculate 1d EMA13 for Elder Ray smoothing
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Prior 1d OHLC (shifted by 1 to avoid look-ahead)
+    close_1d = df_1d['close'].values
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    
+    # Calculate 1d ADX for regime filter
+    if len(df_1d) < 14:  # ADX needs at least 14 periods
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Align 1d data to 1h timeframe
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align length
     
-    # Camarilla calculations (based on prior 1d range)
-    camarilla_range = high_1d_aligned - low_1d_aligned
-    camarilla_H3 = close_1d_aligned + camarilla_range * 1.1 / 4
-    camarilla_L3 = close_1d_aligned - camarilla_range * 1.1 / 4
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA (strict)
+    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / np.where(atr == 0, np.nan, atr)
+    di_minus = 100 * dm_minus_smooth / np.where(atr == 0, np.nan, atr)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, np.nan, (di_plus + di_minus))
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Elder Ray components
+    bull_power = high - ema_13_1d_aligned
+    bear_power = low - ema_13_1d_aligned
+    
+    # Volume confirmation: current volume > 1.8 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
-    
-    # Trend filter: 1h close vs 4h EMA20
-    uptrend = close > ema_20_4h_aligned
-    downtrend = close < ema_20_4h_aligned
+    volume_spike = volume > (1.8 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 20)  # Need 4h EMA20 and sufficient volume MA
+    start_idx = max(100, 14)  # Need ADX and sufficient volume MA
     
     for i in range(start_idx, n):
-        # Session filter: only trade 08:00-20:00 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(camarilla_H3[i]) or 
-            np.isnan(camarilla_L3[i]) or np.isnan(volume_spike[i]) or not in_session):
+        # Skip if data not ready
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_spike[i]) or i == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price closes above H3 AND uptrend AND volume spike
-            if close[i] > camarilla_H3[i] and uptrend[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: Bull Power > 0 AND rising (current > previous) AND ADX > 25 AND volume spike
+            if (bull_power[i] > 0 and i > 0 and bull_power[i] > bull_power[i-1] and 
+                adx_aligned[i] > 25 and volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price closes below L3 AND downtrend AND volume spike
-            elif close[i] < camarilla_L3[i] and downtrend[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: Bear Power < 0 AND falling (current < previous) AND ADX > 25 AND volume spike
+            elif (bear_power[i] < 0 and i > 0 and bear_power[i] < bear_power[i-1] and 
+                  adx_aligned[i] > 25 and volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverts to midpoint of Camarilla levels or reverse signal
-            camarilla_mid = (camarilla_H3[i] + camarilla_L3[i]) / 2
-            if close[i] <= camarilla_mid:
+            # Long exit: Bull Power <= 0 (momentum lost) OR reverse signal
+            if bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverts to midpoint of Camarilla levels or reverse signal
-            camarilla_mid = (camarilla_H3[i] + camarilla_L3[i]) / 2
-            if close[i] >= camarilla_mid:
+            # Short exit: Bear Power >= 0 (momentum lost) OR reverse signal
+            if bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3_L3_4hEMA20_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_ElderRay_1dADX25_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
