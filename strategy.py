@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d ATR regime filter and volume spike confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for ATR regime (trending vs ranging) and Camarilla pivot levels.
-- Camarilla levels: H3 = close + 1.1*(high-low)/12, L3 = close - 1.1*(high-low)/12.
-- ATR regime: ATR(14) > 1.5 * ATR(50) indicates trending market (breakout favorable).
-- Volume confirmation: current volume > 2.0 * 20-period average volume.
-- Entry: Long when price > H3 AND trending regime AND volume spike.
-         Short when price < L3 AND trending regime AND volume spike.
-- Exit: Opposite Camarilla level touch (price < H3 for long exit, price > L3 for short exit).
+Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
+- HTF: 1w for EMA50 trend direction.
+- Donchian breakout: Long when price > upper band (20-period high), short when price < lower band (20-period low).
+- Volume confirmation: current volume > 1.5 * 20-period average volume.
+- Exit: Opposite Donchian breakout or trailing stop via signal=0 when price crosses 10-period EMA in opposite direction.
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in bull markets (strong breakouts) and bear markets (strong breakdowns) with regime filter avoiding false breakouts in chop.
+- Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by 1w EMA50).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def ema(values, period):
+    """Calculate Exponential Moving Average with proper min_periods."""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -28,55 +29,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need sufficient data for ATR50
+    # Calculate 1d Donchian channels (20-period)
+    if len(close) < 20:
         return np.zeros(n)
     
-    # True Range calculation
-    tr1 = df_1d['high'].values - df_1d['low'].values
-    tr2 = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-    tr3 = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
-    tr1[0] = df_1d['high'].values[0] - df_1d['low'].values[0]  # First bar
-    tr2[0] = np.abs(df_1d['high'].values[0] - df_1d['close'].values[0])
-    tr3[0] = np.abs(df_1d['low'].values[0] - df_1d['close'].values[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Upper band: 20-period high, Lower band: 20-period low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_band = high_series.rolling(window=20, min_periods=20).max().values
+    lower_band = low_series.rolling(window=20, min_periods=20).min().values
     
-    # ATR(14) and ATR(50)
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align ATR arrays to 4h timeframe
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
-    
-    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
-    # H3 = close + 1.1*(high-low)/12, L3 = close - 1.1*(high-low)/12
-    camarilla_h3 = df_1d['close'].values + (1.1 * (df_1d['high'].values - df_1d['low'].values) / 12)
-    camarilla_l3 = df_1d['close'].values - (1.1 * (df_1d['high'].values - df_1d['low'].values) / 12)
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    ema50_1w = ema(df_1w['close'].values, 50)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Calculate 1d volume average for confirmation (20-period)
-    if len(df_1d) < 20:
+    if len(volume) < 20:
         return np.zeros(n)
     
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 50 for ATR50, 20 for volume MA
+    start_idx = max(20, 50)  # Need 20 for Donchian/volume, 50 for EMA50
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(atr14_aligned[i]) or np.isnan(atr50_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,38 +71,39 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Regime filter: ATR(14) > 1.5 * ATR(50) indicates trending market
-        trending_regime = atr14_aligned[i] > 1.5 * atr50_aligned[i]
+        # Volume confirmation: current volume > 1.5 * 20-period average volume
+        volume_confirm = curr_volume > 1.5 * vol_ma_20[i]
         
-        # Volume confirmation: current volume > 2.0 * 20-period average volume
-        volume_confirm = curr_volume > 2.0 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
+        # Donchian breakout conditions
+        breakout_up = curr_close > upper_band[i]
+        breakout_down = curr_close < lower_band[i]
         
-        # Exit conditions: opposite Camarilla level touch
+        # Trend filter: price > 1w EMA50 for long bias, price < 1w EMA50 for short bias
+        long_trend = curr_close > ema50_1w_aligned[i]
+        short_trend = curr_close < ema50_1w_aligned[i]
+        
+        # Exit conditions
         if position != 0:
-            # Exit long: price < H3 (breakout failed)
+            # Exit long: price breaks below lower band OR crosses below 10-period EMA
             if position == 1:
-                if curr_close < camarilla_h3_aligned[i]:
+                if breakout_down or curr_close < ema50_1w_aligned[i]:  # Simple trend-based exit
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price > L3 (breakdown failed)
+            # Exit short: price breaks above upper band OR crosses above 10-period EMA
             elif position == -1:
-                if curr_close > camarilla_l3_aligned[i]:
+                if breakout_up or curr_close > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with regime and volume filters
+        # Entry conditions: Donchian breakout with trend filter and volume confirmation
         if position == 0:
-            # Long: price > H3 AND trending regime AND volume spike
-            long_condition = (curr_close > camarilla_h3_aligned[i] and 
-                            trending_regime and
-                            volume_confirm)
+            # Long: breakout above upper band AND long trend bias AND volume confirmation
+            long_condition = breakout_up and long_trend and volume_confirm
             
-            # Short: price < L3 AND trending regime AND volume spike
-            short_condition = (curr_close < camarilla_l3_aligned[i] and 
-                             trending_regime and
-                             volume_confirm)
+            # Short: breakout below lower band AND short trend bias AND volume confirmation
+            short_condition = breakout_down and short_trend and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -133,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dATRRegime_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
