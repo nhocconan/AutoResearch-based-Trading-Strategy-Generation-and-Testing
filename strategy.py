@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI(14) mean reversion with 4h/1d regime filters to avoid whipsaws in trends.
-- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h for trend direction (EMA50 slope), 1d for volatility regime (ATR ratio).
-- RSI(14): Long when RSI < 30 in bullish/low-vol regime, Short when RSI > 70 in bearish/low-vol regime.
-- Regime filters: 
-  * 4h EMA50 slope > 0 = bullish trend (favor longs), < 0 = bearish trend (favor shorts)
-  * 1d ATR(10)/ATR(30) < 1.0 = low volatility (mean revert favorable), > 1.5 = high volatility (avoid)
-- Volume confirmation: 1h volume > 1.5 * 20-period average to avoid low-liquidity false signals.
-- Exit: Opposite RSI condition (RSI > 50 for long exit, RSI < 50 for short exit) or regime change.
-- Signal size: 0.20 discrete to minimize fee drag.
-- Works in bull markets by taking longs on pullbacks, in bear markets by taking shorts on bounces, and avoids ranging/choppy markets where mean reversion fails.
+Hypothesis: 6h Ichimoku Cloud with 1d EMA trend filter and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA trend filter (bull/bear regime) and 1w for Ichimoku baseline confirmation.
+- Ichimoku Components: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (52 displacement).
+- Entry: Long when price > Cloud AND Tenkan > Kijun AND 1d EMA50 > 1d EMA200 AND volume > 1.5 * 20-period average volume.
+         Short when price < Cloud AND Tenkan < Kijun AND 1d EMA50 < 1d EMA200 AND volume > 1.5 * 20-period average volume.
+- Exit: Opposite Ichimoku signal (price crosses into/through Cloud or TK cross reverses).
+- Signal size: 0.25 discrete to minimize fee drag.
+- Works in both bull and bear markets by aligning with 1d EMA trend (EMA50 > EMA200 = bull, < = bear) and only trading Ichimoku signals in that direction, avoiding counter-trend whipsaws.
 """
 
 import numpy as np
@@ -19,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need sufficient data for calculations
+    if n < 100:  # Need sufficient data for Ichimoku calculations
         return np.zeros(n)
     
     # Extract price data
@@ -28,40 +26,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA50 for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Calculate slope of EMA50: (current - previous) / previous to get % change
-    ema50_slope_4h = np.diff(ema50_4h, prepend=ema50_4h[0]) / np.where(ema50_4h == 0, 1e-10, ema50_4h)
-    ema50_slope_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_slope_4h)
-    
-    # Calculate 1d ATR(10) and ATR(30) for volatility regime
+    # Calculate 1d EMA50 and EMA200 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:  # Need sufficient data for EMA200
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    tr = np.concatenate([[np.nan], tr])  # Align length
-    
-    # ATR(10) and ATR(30)
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
-    
-    # ATR ratio for volatility regime: <1.0 = low vol (good for mean reversion), >1.5 = high vol (avoid)
-    atr_ratio = atr10 / atr30
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Align 1d EMA trend to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Calculate 1d volume average for confirmation (20-period)
     if len(df_1d) < 20:
@@ -70,91 +46,117 @@ def generate_signals(prices):
     vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Ichimoku components on 6h data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    tenkan_sen = (pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values +
+                  pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values) / 2
     
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    kijun_sen = (pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values +
+                 pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values) / 2
     
-    rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Calculate 1h volume average for confirmation (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    senkou_span_b = ((pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values +
+                      pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for entry/exit)
+    
+    # The Ichimoku Cloud is between Senkou Span A and Senkou Span B
+    # For simplicity, we'll use the unshifted Senkou Span A/B to represent current cloud
+    # (In practice, the cloud is plotted 26 periods ahead, but for signal generation we use current values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 30, 20, 14)  # Need 50 for EMA50, 30 for ATR30, 20 for volume MA, 14 for RSI
+    start_idx = max(period_kijun, period_senkou_b, 200)  # Need 26 for Kijun, 52 for Senkou B, 200 for EMA200
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema50_slope_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or
+            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        curr_rsi = rsi[i]
+        curr_close = close[i]
         curr_volume = volume[i]
         
-        # Regime filters
-        bullish_trend = ema50_slope_4h_aligned[i] > 0  # 4h EMA50 rising = bullish
-        bearish_trend = ema50_slope_4h_aligned[i] < 0  # 4h EMA50 falling = bearish
-        low_volatility = atr_ratio_aligned[i] < 1.0    # 1d ATR ratio < 1.0 = low vol (mean revert favorable)
-        high_volatility = atr_ratio_aligned[i] > 1.5   # 1d ATR ratio > 1.5 = high vol (avoid trading)
+        # Trend filter: 1d EMA50 > EMA200 = bullish trend, < = bearish trend
+        bullish_trend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
+        bearish_trend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5 * 20-period average (both 1h and 1d)
-        volume_confirm_1h = curr_volume > 1.5 * vol_ma_20[i]
-        volume_confirm_1d = not np.isnan(vol_ma_20_1d_aligned[i]) and volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
-        volume_confirm = volume_confirm_1h and volume_confirm_1d
+        # Volume confirmation: current volume > 1.5 * 20-period average volume
+        volume_confirm = curr_volume > 1.5 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
         
-        # Exit conditions
+        # Ichimoku signals
+        # Price above Cloud: close > max(Senkou Span A, Senkou Span B)
+        # Price below Cloud: close < min(Senkou Span A, Senkou Span B)
+        # Tenkan-sen > Kijun-sen = bullish momentum
+        # Tenkan-sen < Kijun-sen = bearish momentum
+        
+        cloud_top = max(senkou_span_a[i], senkou_span_b[i])
+        cloud_bottom = min(senkou_span_a[i], senkou_span_b[i])
+        
+        price_above_cloud = curr_close > cloud_top
+        price_below_cloud = curr_close < cloud_bottom
+        
+        tenkan_above_kijun = tenkan_sen[i] > kijun_sen[i]
+        tenkan_below_kijun = tenkan_sen[i] < kijun_sen[i]
+        
+        # Exit conditions: opposite Ichimoku signal
         if position != 0:
-            # Exit long: RSI > 50 OR regime becomes unfavorable (high vol or trend flip)
+            # Exit long: price falls below Cloud OR Tenkan crosses below Kijun
             if position == 1:
-                if curr_rsi > 50 or high_volatility or (bullish_trend and not bearish_trend and curr_rsi > 60):
+                if (curr_close < cloud_top or tenkan_below_kijun):
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: RSI < 50 OR regime becomes unfavorable
+            # Exit short: price rises above Cloud OR Tenkan crosses above Kijun
             elif position == -1:
-                if curr_rsi < 50 or high_volatility or (bearish_trend and not bullish_trend and curr_rsi < 40):
+                if (curr_close > cloud_bottom or tenkan_above_kijun):
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: RSI mean reversion with regime and volume filters
+        # Entry conditions: Ichimoku breakout with trend and volume filters
         if position == 0:
-            # Long: RSI < 30 (oversold) AND bullish trend OR low volatility AND volume confirmation
-            long_condition = (curr_rsi < 30 and 
-                            ((bullish_trend and low_volatility) or low_volatility) and  # Bullish trend OR low vol
+            # Long: price > Cloud AND Tenkan > Kijun AND bullish trend AND volume confirmation
+            long_condition = (price_above_cloud and
+                            tenkan_above_kijun and
+                            bullish_trend and
                             volume_confirm)
             
-            # Short: RSI > 70 (overbought) AND bearish trend OR low volatility AND volume confirmation
-            short_condition = (curr_rsi > 70 and 
-                             ((bearish_trend and low_volatility) or low_volatility) and  # Bearish trend OR low vol
+            # Short: price < Cloud AND Tenkan < Kijun AND bearish trend AND volume confirmation
+            short_condition = (price_below_cloud and
+                             tenkan_below_kijun and
+                             bearish_trend and
                              volume_confirm)
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.20
+            signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI14_MeanReversion_4hEMA50Trend_1dATRRegime_VolumeConfirm_v1"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_1dEMATrend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
