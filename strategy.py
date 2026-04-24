@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-- Long when price breaks above Donchian upper band AND close > 1w EMA50 (bullish trend)
-- Short when price breaks below Donchian lower band AND close < 1w EMA50 (bearish trend)
-- Volume must be > 1.5 * ATR(14) * close (volatility-adjusted volume filter)
-- Exit on trend reversal (close crosses opposite 1w EMA50) for faster mean reversion in chop
-- Uses 1d primary timeframe with 1w HTF to target 30-100 trades over 4 years (7-25/year)
-- Donchian channels provide robust breakout levels that work in trending markets
-- 1w EMA50 ensures alignment with longer-term trend to avoid whipsaws in ranging/bear markets
-- ATR-scaled volume filter adapts to changing volatility, reducing false breakouts
-- Designed for BTC/ETH with edge in bull markets (breakout continuation) and bear markets (avoiding false breakouts via trend filter)
+Hypothesis: 6h Donchian(20) breakout with 1d ADX trend filter and ATR volume confirmation.
+- Long when price breaks above Donchian upper band (20-period high) AND 1d ADX > 25 (trending) AND volume > 1.5 * ATR(14) * close
+- Short when price breaks below Donchian lower band (20-period low) AND 1d ADX > 25 (trending) AND volume > 1.5 * ATR(14) * close
+- Exit on Donchian middle band (10-period median) cross for faster mean reversion in chop
+- Uses 6h primary timeframe with 1d HTF to target 50-150 trades over 4 years (12-37/year)
+- Donchian channels provide clear breakout levels that work in trending markets
+- 1d ADX > 25 ensures we only trade in trending regimes, avoiding whipsaws in ranging markets
+- ATR-scaled volume filter confirms breakout strength with institutional participation
+- Designed for BTC/ETH with edge in trending markets (both bull and bear) while avoiding ranging chop
 """
 
 import numpy as np
@@ -27,25 +26,63 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate Donchian channels (20-period) using previous period (no look-ahead)
-    # Upper band = max(high, lookback=20), Lower band = min(low, lookback=20)
-    # Using previous 20 bars' high-low
+    # Upper band = highest high of last 20 periods
+    # Lower band = lowest low of last 20 periods
+    # Middle band = median of upper and lower (or 10-period EMA approximation)
     lookback = 20
-    upper_band = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    lower_band = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
     
-    # Get 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    for i in range(lookback, n):
+        upper_band[i] = np.max(high[i-lookback:i])
+        lower_band[i] = np.min(low[i-lookback:i])
+    
+    # Middle band as 10-period EMA of price (approximation for Donchian middle)
+    middle_band = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Get 1d data ONCE before loop for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough data for ADX calculation
         return np.zeros(n)
     
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1w EMA50 to 1d timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr2.iloc[0] = np.nan
+    tr3.iloc[0] = np.nan
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Calculate ATR(14) for dynamic volume threshold
+    # Directional Movement
+    dm_plus = pd.Series(np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                                 np.maximum(high_1d - np.roll(high_1d, 1), 0), 0))
+    dm_minus = pd.Series(np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                                  np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0))
+    dm_plus.iloc[0] = np.nan
+    dm_minus.iloc[0] = np.nan
+    
+    # Smoothed values
+    atr_1d = tr_1d.ewm(span=14, adjust=False, min_periods=14).mean()
+    dm_plus_smooth = dm_plus.ewm(span=14, adjust=False, min_periods=14).mean()
+    dm_minus_smooth = dm_minus.ewm(span=14, adjust=False, min_periods=14).mean()
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr_1d
+    di_minus = 100 * dm_minus_smooth / atr_1d
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx_1d = dx.ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate ATR(14) for dynamic volume threshold (6h timeframe)
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -62,36 +99,36 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 50, 14) + 1
+    start_idx = max(lookback, 30) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(middle_band[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper band, trend up (close > EMA50), volume confirmation
-            if close[i] > upper_band[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm[i]:
+            # Long: price breaks above Donchian upper band, trend strong (ADX > 25), volume confirmation
+            if close[i] > upper_band[i] and adx_1d_aligned[i] > 25 and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band, trend down (close < EMA50), volume confirmation
-            elif close[i] < lower_band[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm[i]:
+            # Short: price breaks below Donchian lower band, trend strong (ADX > 25), volume confirmation
+            elif close[i] < lower_band[i] and adx_1d_aligned[i] > 25 and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below 1w EMA50 (trend reversal)
-            if close[i] < ema_50_1w_aligned[i]:
+            # Long exit: price closes below Donchian middle band (mean reversion in chop)
+            if close[i] < middle_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above 1w EMA50 (trend reversal)
-            if close[i] > ema_50_1w_aligned[i]:
+            # Short exit: price closes above Donchian middle band (mean reversion in chop)
+            if close[i] > middle_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_ATRVolConfirm_v1"
-timeframe = "1d"
+name = "6h_Donchian20_1dADX_ATRVolConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
