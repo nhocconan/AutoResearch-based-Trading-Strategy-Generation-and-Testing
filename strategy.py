@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1d EMA50 for trend filter (price above/below EMA50 defines bull/bear regime).
-- Entry: Long when price breaks above Donchian upper(20) in bull regime with volume > 1.8 * 12h volume MA(20);
-         Short when price breaks below Donchian lower(20) in bear regime with volume > 1.8 * 12h volume MA(20).
+- Entry: Long when price breaks above Donchian upper(20) in bull regime with volume > 1.8 * 4h volume MA(20);
+         Short when price breaks below Donchian lower(20) in bear regime with volume > 1.8 * 4h volume MA(20).
 - Exit: ATR trailing stop (2.0 * ATR(14)) or opposite Donchian breakout.
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Donchian channels provide clear structure; EMA50 regime filter avoids counter-trend trades.
-- Works in bull (breakouts with trend) and bear (strong moves after trend continuation).
+- Donchian channels provide structure; EMA50 filters regime; volume confirms breakout strength.
+- Works in bull (breakouts with trend) and bear (strong moves after panic lows/highs).
+- Tight volume threshold (1.8x) and ATR stop (2.0x) aim to reduce trade frequency vs. loose variants.
 """
 
 import numpy as np
@@ -26,9 +27,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian calculation and volume
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Donchian calculation and volume
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
     # Get 1d data for EMA50 trend filter
@@ -40,12 +41,12 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h volume MA(20) for confirmation
-    volume_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # Calculate 4h volume MA(20) for confirmation
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
-    # Calculate 12h ATR(14) for trailing stop
+    # Calculate 4h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -54,16 +55,15 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) on 12h data using previous 20 bars
-    # Donchian Upper = max(high, last 20 periods)
-    # Donchian Lower = min(low, last 20 periods)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Shift to avoid look-ahead: channels from previous 20 bars apply to current bar
-    donchian_upper = np.roll(donchian_upper, 1)
-    donchian_lower = np.roll(donchian_lower, 1)
-    donchian_upper[0] = np.nan
-    donchian_lower[0] = np.nan
+    # Calculate Donchian channels (20-period) on 4h data using historical high/low
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    # Use rolling window on 4h data, then align to LTF
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,12 +71,12 @@ def generate_signals(prices):
     lowest_since_entry = 0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 14, 1)  # EMA50 needs 50, Donchian needs 20, ATR needs 14, plus 1 for roll
+    start_idx = max(50, 20, 14, 20)  # EMA50 needs 50, volume MA needs 20, ATR needs 14, Donchian needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_12h_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,8 +87,8 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume spike confirmation: 1.8x threshold (balanced to reduce trades)
-        vol_spike = curr_volume > 1.8 * vol_ma_12h_aligned[i]
+        # Volume spike confirmation: 1.8x threshold (tight to reduce trades)
+        vol_spike = curr_volume > 1.8 * vol_ma_4h_aligned[i]
         
         # Trend filter: price above/below 1d EMA50
         bull_regime = curr_close > ema_50_1d_aligned[i]
@@ -96,21 +96,21 @@ def generate_signals(prices):
         
         if position == 0:
             # Check for entry signals
-            # Long: price breaks above Donchian upper in bull regime with volume spike
-            if curr_close > donchian_upper[i] and bull_regime and vol_spike:
+            # Long: price breaks above Donchian upper(20) in bull regime with volume spike
+            if curr_close > donchian_high_aligned[i] and bull_regime and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
-            # Short: price breaks below Donchian lower in bear regime with volume spike
-            elif curr_close < donchian_lower[i] and bear_regime and vol_spike:
+            # Short: price breaks below Donchian lower(20) in bear regime with volume spike
+            elif curr_close < donchian_low_aligned[i] and bear_regime and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
         elif position == 1:
             # Long position: update highest and check exit conditions
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit: ATR trailing stop or opposite breakout (below lower)
-            if curr_low <= highest_since_entry - 2.0 * atr[i] or curr_close < donchian_lower[i]:
+            # Exit: ATR trailing stop or opposite breakout (below Donchian lower)
+            if curr_low <= highest_since_entry - 2.0 * atr[i] or curr_close < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,8 +118,8 @@ def generate_signals(prices):
         elif position == -1:
             # Short position: update lowest and check exit conditions
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit: ATR trailing stop or opposite breakout (above upper)
-            if curr_high >= lowest_since_entry + 2.0 * atr[i] or curr_close > donchian_upper[i]:
+            # Exit: ATR trailing stop or opposite breakout (above Donchian upper)
+            if curr_high >= lowest_since_entry + 2.0 * atr[i] or curr_close > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
