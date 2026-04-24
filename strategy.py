@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1w EMA trend filter and volume confirmation.
-- Primary timeframe: 6h for execution, HTF: 1w for EMA50 trend direction.
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (13-period EMA on 6h).
-- Trend filter: 1w EMA50 slope (rising/falling) determines bias: only long in uptrend, short in downtrend.
-- Entry: Long when Bull Power > 0 AND rising AND volume > 1.5 * 20-period volume MA.
-         Short when Bear Power < 0 AND falling AND volume > 1.5 * 20-period volume MA.
-- Exit: Opposite Elder Ray signal (Bull Power < 0 for long exit, Bear Power > 0 for short exit).
-- Volume confirmation: avoids low-conviction moves.
+Hypothesis: 12h Donchian(20) breakout with 1d volume spike and ATR-based stoploss.
+- Primary timeframe: 12h for execution, HTF: 1d for volume confirmation.
+- Volume confirmation: current 12h volume > 1.5 * 20-period volume MA on 1d data (aligned to 12h).
+- Entry: Long when price closes above Donchian(20) upper with volume confirmation.
+         Short when price closes below Donchian(20) lower with volume confirmation.
+- Exit: Opposite Donchian breakout or ATR-based trailing stop (2.5 * ATR from extreme).
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-- Works in both bull and bear: trend filter ensures we only trade with the 1w trend,
-  Elder Ray captures momentum within that trend, volume filters noise.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Works in bull via breakouts, in bear via short breakdowns with volume confirmation.
 """
 
 import numpy as np
@@ -29,81 +26,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for volume confirmation (using same Donchian lookback)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 and its slope (trend direction)
-    close_1w = pd.Series(df_1w['close'])
-    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Slope: current EMA - previous EMA (positive = rising, negative = falling)
-    ema50_slope = np.diff(ema50_1w, prepend=ema50_1w[0])
+    # Calculate volume MA (20-period) on 1d
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (1.5 * volume_ma_1d)
     
-    # Align 1w EMA50 and slope to 6h
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    ema50_slope_aligned = align_htf_to_ltf(prices, df_1w, ema50_slope)
+    # Align 1d volume spike to 12h
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Calculate 6h EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Donchian channels (20-period) on 12h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
-    
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 6h)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    # ATR for dynamic stoploss (14-period) on 12h
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr2.iloc[0] = np.abs(high[0] - close[0])  # First bar: use close instead of previous close
+    tr3.iloc[0] = np.abs(low[0] - close[0])
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    long_stop = 0.0
+    short_stop = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 13, 20)  # Need enough 1w bars for EMA50, 6h bars for EMA13 and volume MA
+    start_idx = max(30, lookback, 20)  # Need enough 1d bars for volume MA and lookback for Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_slope_aligned[i]) or 
-            np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 1w
-        is_uptrend = ema50_slope_aligned[i] > 0  # Rising EMA50 = uptrend
-        is_downtrend = ema50_slope_aligned[i] < 0  # Falling EMA50 = downtrend
+        vol_spike = volume_spike_aligned[i]
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
         if position == 0:
-            # Check for entry signals
-            if volume_spike[i]:
-                # Long conditions: uptrend + Bull Power > 0 (bullish momentum)
-                if is_uptrend and bull_power[i] > 0:
+            # Check for entry signals with volume confirmation
+            if vol_spike:
+                # Bullish breakout: price closes above upper Donchian
+                if curr_close > highest_high[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short conditions: downtrend + Bear Power < 0 (bearish momentum)
-                elif is_downtrend and bear_power[i] < 0:
+                    entry_price = curr_close
+                    long_stop = curr_low - 2.5 * atr[i]  # Initial stop below entry
+                # Bearish breakout: price closes below lower Donchian
+                elif curr_close < lowest_low[i]:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
+                    short_stop = curr_high + 2.5 * atr[i]  # Initial stop above entry
         elif position == 1:
-            # Long exit: Bull Power turns negative (momentum fading) OR trend shifts to downtrend
-            if bull_power[i] < 0 or not is_uptrend:
+            # Long position management
+            signals[i] = 0.25
+            
+            # Update trailing stop: move stop up as price makes new highs
+            long_stop = max(long_stop, curr_low - 2.5 * atr[i])
+            
+            # Exit conditions: opposite breakout or stoploss hit
+            if curr_close < lowest_low[i] or curr_close < long_stop:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power turns positive (momentum fading) OR trend shifts to uptrend
-            if bear_power[i] > 0 or not is_downtrend:
+            # Short position management
+            signals[i] = -0.25
+            
+            # Update trailing stop: move stop down as price makes new lows
+            short_stop = min(short_stop, curr_high + 2.5 * atr[i])
+            
+            # Exit conditions: opposite breakout or stoploss hit
+            if curr_close > highest_high[i] or curr_close > short_stop:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
 
-name = "6h_ElderRay_1wEMA50Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dVolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
