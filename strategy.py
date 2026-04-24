@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and ATR-based volatility filter.
-- Long when price breaks above Donchian(20) high AND price > 12h EMA50 AND ATR(14) > 0.5 * ATR(50)
-- Short when price breaks below Donchian(20) low AND price < 12h EMA50 AND ATR(14) > 0.5 * ATR(50)
-- Exit when price crosses the 10-period EMA (on 4h) or volatility drops below threshold
-- Uses discrete position sizing (0.25) to minimize fee churn
-- Target: 75-200 total trades over 4 years (19-50/year)
+Hypothesis: 1d Williams Alligator with 1w EMA trend filter and volume confirmation.
+- Williams Alligator: Jaw (13-period SMMA, 8-bar shift), Teeth (8-period SMMA, 5-bar shift), Lips (5-period SMMA, 3-bar shift)
+- Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1w EMA50 (uptrend filter) AND volume > 1.5 * volume SMA20
+- Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1w EMA50 (downtrend filter) AND volume > 1.5 * volume SMA20
+- Exit when Alligator alignment breaks or volume drops below threshold
+- Designed to capture strong trending moves with fractal-based trend detection
+- Signal size: 0.25 discrete levels to minimize fee churn
+- Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(source, length):
+    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's EMA"""
+    return pd.Series(source).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,71 +28,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Alligator components (using 1d data)
+    # Jaw: 13-period SMMA of median price, shifted 8 bars
+    median_price = (high + low) / 2
+    jaw_raw = smma(median_price, 13)
+    jaw = np.roll(jaw_raw, 8)  # shift 8 bars forward
+    jaw[:8] = np.nan  # first 8 values invalid due to shift
     
-    # Calculate 10-period EMA for exit (on 4h)
-    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    teeth_raw = smma(median_price, 8)
+    teeth = np.roll(teeth_raw, 5)  # shift 5 bars forward
+    teeth[:5] = np.nan  # first 5 values invalid due to shift
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    lips_raw = smma(median_price, 5)
+    lips = np.roll(lips_raw, 3)  # shift 3 bars forward
+    lips[:3] = np.nan  # first 3 values invalid due to shift
+    
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need enough data for EMA50
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Trend filter: price above/below 12h EMA50
-    uptrend = close > ema_50_12h_aligned
-    downtrend = close < ema_50_12h_aligned
+    # Trend filter: price above/below 1w EMA50
+    uptrend = close > ema_50_1w_aligned
+    downtrend = close < ema_50_1w_aligned
     
-    # ATR-based volatility filter: ATR(14) > 0.5 * ATR(50)
-    # True Range calculation
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    volatility_filter = atr_14 > (0.5 * atr_50)
+    # Volume confirmation: volume > 1.5 * volume SMA20
+    volume_sma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * volume_sma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 10, 50, 50)  # Donchian, EMA10, ATRs, 12h EMA50
+    start_idx = max(13, 8, 5, 50, 20)  # Need Alligator components, 1w EMA50, and volume SMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_10[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(volatility_filter[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high AND uptrend AND sufficient volatility
-            if close[i] > donchian_high[i] and uptrend[i] and volatility_filter[i]:
+            # Long: Lips > Teeth > Jaw (bullish alignment) AND uptrend AND volume confirmation
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and uptrend[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND downtrend AND sufficient volatility
-            elif close[i] < donchian_low[i] and downtrend[i] and volatility_filter[i]:
+            # Short: Lips < Teeth < Jaw (bearish alignment) AND downtrend AND volume confirmation
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and downtrend[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below EMA10 OR volatility drops
-            if close[i] < ema_10[i] or not volatility_filter[i]:
+            # Long exit: Alligator alignment breaks OR volume drops below threshold
+            if not (lips[i] > teeth[i] and teeth[i] > jaw[i]) or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above EMA10 OR volatility drops
-            if close[i] > ema_10[i] or not volatility_filter[i]:
+            # Short exit: Alligator alignment breaks OR volume drops below threshold
+            if not (lips[i] < teeth[i] and teeth[i] < jaw[i]) or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_VolatilityFilter_v1"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wEMA50_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
