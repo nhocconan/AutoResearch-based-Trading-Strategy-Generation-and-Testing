@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 12h for EMA trend.
-- Donchian channel (20-period high/low) from prior completed 4h bar: Long when price > upper band, Short when price < lower band.
-- Trend filter: Only trade in direction of 12h EMA50 (long if EMA50 rising, short if falling).
-- Volume confirmation: current volume > 2.0x 20-period volume MA to ensure strong participation.
-- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Hypothesis: 1h Camarilla H4/L4 breakout with 4h EMA20 trend filter and volume confirmation.
+- Primary timeframe: 1h for execution, HTF: 4h for EMA trend and Camarilla pivots.
+- Camarilla pivot levels (H4, L4) from prior 4h: Long when price > H4, Short when price < L4.
+- Trend filter: Only trade in direction of 4h EMA20 (long if EMA20 rising, short if falling).
+- Volume confirmation: current volume > 1.5x 20-period volume MA to ensure strong participation.
+- Session filter: Only trade between 08:00-20:00 UTC to avoid low-liquidity hours.
+- Discrete signal size: 0.20 to limit drawdown and reduce fee churn.
+- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 - Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
+- Uses actual Camarilla calculation: H4 = C + 1.1*(H-L), L4 = C - 1.1*(H-L).
 """
 
 import numpy as np
@@ -25,78 +27,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for Camarilla pivots and EMA20
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Camarilla levels from prior 4h bar
+    # H4 = C + 1.1*(H-L), L4 = C - 1.1*(H-L)
+    camarilla_H4 = close_4h + 1.1 * (high_4h - low_4h)
+    camarilla_L4 = close_4h - 1.1 * (high_4h - low_4h)
     
-    # Donchian(20) from prior completed 4h bar (shifted by 1 to avoid look-ahead)
-    # We calculate on prior completed bar, so we use rolling window on [0:i] but shift results by 1
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # Align to 1h: use prior 4h's levels (already completed bar)
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_L4)
     
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA
+    # 4h EMA20 for trend filter
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    volume_spike = volume > (1.5 * volume_ma)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20) + 1  # EMA50 + Donchian20 + 1 for shift
+    start_idx = max(20, 20)  # EMA20 + volume MA
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
+            np.isnan(ema_20_4h_aligned[i]) or np.isnan(volume_spike[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Only trade in direction of 12h EMA50 trend
-            if i > 0 and not np.isnan(ema_50_12h_aligned[i-1]):
-                ema50_slope = ema_50_12h_aligned[i] - ema_50_12h_aligned[i-1]
-                if ema50_slope > 0:  # Uptrend
-                    if close[i] > donchian_high[i] and volume_spike[i]:
-                        # Buy on Donchian breakout in uptrend
-                        signals[i] = 0.25
+            # Only trade in direction of 4h EMA20 trend
+            if i > 0 and not np.isnan(ema_20_4h_aligned[i-1]):
+                ema20_slope = ema_20_4h_aligned[i] - ema_20_4h_aligned[i-1]
+                if ema20_slope > 0:  # Uptrend
+                    if close[i] > camarilla_H4_aligned[i] and volume_spike[i]:
+                        # Buy on H4 breakout in uptrend
+                        signals[i] = 0.20
                         position = 1
-                elif ema50_slope < 0:  # Downtrend
-                    if close[i] < donchian_low[i] and volume_spike[i]:
-                        # Sell on Donchian breakdown in downtrend
-                        signals[i] = -0.25
+                elif ema20_slope < 0:  # Downtrend
+                    if close[i] < camarilla_L4_aligned[i] and volume_spike[i]:
+                        # Sell on L4 breakdown in downtrend
+                        signals[i] = -0.20
                         position = -1
         elif position == 1:
-            # Long exit: price returns to Donchian middle or opposite break
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if not np.isnan(donchian_mid):
-                if close[i] < donchian_mid or close[i] < donchian_low[i]:
+            # Long exit: price returns to Camarilla H3/L3 level or opposite break
+            # Calculate H3 and L3 for exit (from same prior 4h bar)
+            camarilla_H3 = close_4h + 1.1 * (high_4h - low_4h) / 4  # H3 = C + 1.1*(H-L)/4
+            camarilla_L3 = close_4h - 1.1 * (high_4h - low_4h) / 4  # L3 = C - 1.1*(H-L)/4
+            camarilla_H3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_H3)
+            camarilla_L3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_L3)
+            
+            if not np.isnan(camarilla_H3_aligned[i]) and not np.isnan(camarilla_L3_aligned[i]):
+                if close[i] < camarilla_H3_aligned[i] or close[i] < camarilla_L4_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
         elif position == -1:
-            # Short exit: price returns to Donchian middle or opposite break
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if not np.isnan(donchian_mid):
-                if close[i] > donchian_mid or close[i] > donchian_high[i]:
+            # Short exit: price returns to Camarilla H3/L3 level or opposite break
+            camarilla_H3 = close_4h + 1.1 * (high_4h - low_4h) / 4
+            camarilla_L3 = close_4h - 1.1 * (high_4h - low_4h) / 4
+            camarilla_H3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_H3)
+            camarilla_L3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_L3)
+            
+            if not np.isnan(camarilla_H3_aligned[i]) and not np.isnan(camarilla_L3_aligned[i]):
+                if close[i] > camarilla_L3_aligned[i] or close[i] > camarilla_H4_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H4L4_4hEMA20_Trend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
