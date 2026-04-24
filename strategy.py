@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H4/L4 breakout with 1d ATR regime filter and volume spike confirmation.
-- Long when price breaks above H4 AND 1d ATR(14) > 1d ATR(50) (high volatility regime)
-- Short when price breaks below L4 AND 1d ATR(14) > 1d ATR(50) (high volatility regime)
-- Volume confirmation: current volume > 1.5 * 24-period average volume (moderate spike)
-- Exit on opposite Camarilla level (L4 for long exit, H4 for short exit)
-- Uses 12h primary with 1d HTF to target 50-150 trades over 4 years (12-37/year)
-- Camarilla H4/L4 levels provide stronger breakout signals than H3/L3
-- ATR regime filter ensures we only trade in high volatility environments
-- Volume spike confirms momentum behind breakouts
-- Signal size: 0.25 discrete levels to minimize fee churn
-- Designed to work in both bull (breakouts with momentum) and bear (breakouts with momentum) markets
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation.
+- Long when price breaks above Donchian upper band (20-period high) AND 12h close > 12h EMA50 (bullish regime)
+- Short when price breaks below Donchian lower band (20-period low) AND 12h close < 12h EMA50 (bearish regime)
+- Volume confirmation: current volume > 2.0 * 20-period average volume (strong spike)
+- Exit on opposite Donchian band (lower band for long exit, upper band for short exit)
+- Uses 4h primary with 12h HTF to target 75-200 trades over 4 years (19-50/year)
+- Donchian breakouts capture momentum; EMA50 filters regime; volume spike confirms strength
+- Signal size: 0.30 discrete levels to balance return and fee drag
 """
 
 import numpy as np
@@ -19,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,88 +24,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels (based on previous period) on 12h data
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    camarilla_h4 = np.roll(close, 1) + 1.5 * (np.roll(high, 1) - np.roll(low, 1))
-    camarilla_l4 = np.roll(close, 1) - 1.5 * (np.roll(high, 1) - np.roll(low, 1))
-    camarilla_h4[0] = np.nan
-    camarilla_l4[0] = np.nan
+    # Calculate Donchian channels (20-period) - using previous period for forward-looking
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 1d ATR for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    daily_close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(daily_close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # True Range calculation
-    tr1 = daily_high - daily_low
-    tr2 = np.abs(daily_high - np.roll(daily_close, 1))
-    tr3 = np.abs(daily_low - np.roll(daily_close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Trend filter: bullish if close > EMA50, bearish if close < EMA50
+    bullish_regime = close > ema_50_12h_aligned
+    bearish_regime = close < ema_50_12h_aligned
     
-    # ATR(14) and ATR(50) for regime detection
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # Regime filter: high volatility when ATR(14) > ATR(50)
-    high_vol_regime = atr_14 > atr_50
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
-    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime.astype(float)) > 0.5
-    
-    # Volume confirmation: volume > 1.5 * 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    # Volume confirmation: volume > 2.0 * 20-period average (strong spike)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(1, 50, 24)  # Need Camarilla (1), ATR(50), and volume MA
+    start_idx = max(20, 50, 20)  # Need Donchian (20), EMA50, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Camarilla H4 AND high volatility regime AND volume confirmation
-            if close[i] > camarilla_h4[i] and high_vol_regime_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+            # Long: break above Donchian upper band AND bullish regime AND volume confirmation
+            if close[i] > highest_20[i] and bullish_regime[i] and volume_confirm[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: break below Camarilla L4 AND high volatility regime AND volume confirmation
-            elif close[i] < camarilla_l4[i] and high_vol_regime_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+            # Short: break below Donchian lower band AND bearish regime AND volume confirmation
+            elif close[i] < lowest_20[i] and bearish_regime[i] and volume_confirm[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: break below Camarilla L4 (opposite level)
-            if close[i] < camarilla_l4[i]:
+            # Long exit: break below Donchian lower band (opposite band)
+            if close[i] < lowest_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: break above Camarilla H4 (opposite level)
-            if close[i] > camarilla_h4[i]:
+            # Short exit: break above Donchian upper band (opposite band)
+            if close[i] > highest_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Camarilla_H4L4_1dATRRegime_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
