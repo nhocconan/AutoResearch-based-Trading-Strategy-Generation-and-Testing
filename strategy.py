@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
-- Long when price breaks above Donchian(20) high AND 1d ADX > 25 (strong trend) AND volume > 1.5 * 20-period average
+Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
+- Long when price breaks above Donchian(20) high AND 1d ADX > 25 (trending) AND volume > 1.5 * 20-period average
 - Short when price breaks below Donchian(20) low AND 1d ADX > 25 AND volume > 1.5 * 20-period average
-- Exit when price reverts to Donchian(20) midpoint OR ADX < 20 (ranging market)
-- Uses 12h primary with 1d HTF for ADX regime filter to avoid whipsaws in ranging markets
-- Donchian channels provide clear breakout levels; ADX filters for trending conditions; volume confirms conviction
-- Designed to work in both bull (strong breakouts) and bear (strong breakdowns) markets with trend filter
-- Signal size: 0.25 discrete levels to minimize fee churn
-- Target: 50-150 total trades over 4 years (12-37/year)
+- Exit when price returns to Donchian(20) midpoint OR ADX < 20 (range) OR volume < average
+- Uses 4h primary with 1d HTF for ADX regime filter to avoid false breakouts in ranging markets
+- Donchian channels provide objective breakout levels; ADX filters for trending conditions; volume confirms conviction
+- Works in bull markets (breakouts continue) and bear markets (breakdowns continue) with trend filter
+- Signal size: 0.30 discrete levels to balance return and drawdown
+- Target: 75-200 total trades over 4 years (19-50/year)
 """
 
 import numpy as np
@@ -26,25 +26,14 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate Donchian(20) channels
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
-    
-    donchian_high = rolling_max(high, 20)
-    donchian_low = rolling_min(low, 20)
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
     # Calculate 1d ADX for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough data for ADX calculation
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # True Range calculation for 1d data
@@ -97,10 +86,6 @@ def generate_signals(prices):
     adx_1d = wilders_smoothing(dx, period)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Trend filter: trending if ADX > 25, ranging if ADX < 20
-    strong_trend = adx_1d_aligned > 25
-    weak_trend = adx_1d_aligned < 20
-    
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
@@ -109,7 +94,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 30) + 1  # Need Donchian(20), volume MA, and ADX data
+    start_idx = max(donchian_window, 20, 30) + 1  # Need Donchian, volume MA, and ADX data
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -121,31 +106,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high AND strong trend AND volume confirmation
-            if close[i] > donchian_high[i] and strong_trend[i] and volume_confirm[i]:
-                signals[i] = 0.25
+            # Long: price breaks above Donchian high AND strong trend AND volume confirmation
+            if close[i] > donchian_high[i] and adx_1d_aligned[i] > 25 and volume_confirm[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below Donchian low AND strong trend AND volume confirmation
-            elif close[i] < donchian_low[i] and strong_trend[i] and volume_confirm[i]:
-                signals[i] = -0.25
+            # Short: price breaks below Donchian low AND strong trend AND volume confirmation
+            elif close[i] < donchian_low[i] and adx_1d_aligned[i] > 25 and volume_confirm[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: Price reverts to midpoint OR weak trend
-            if close[i] <= donchian_mid[i] or weak_trend[i]:
+            # Long exit: price returns to midpoint OR weak trend OR volume drops
+            if close[i] < donchian_mid[i] or adx_1d_aligned[i] < 20 or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: Price reverts to midpoint OR weak trend
-            if close[i] >= donchian_mid[i] or weak_trend[i]:
+            # Short exit: price returns to midpoint OR weak trend OR volume drops
+            if close[i] > donchian_mid[i] or adx_1d_aligned[i] < 20 or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Donchian20_1dADX_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
