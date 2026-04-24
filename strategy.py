@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla H4/L4 breakout with 4h EMA20 trend filter and volume spike confirmation.
-- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h EMA20 for trend direction (bullish if close > EMA20, bearish if close < EMA20).
-- Camarilla pivot: Calculated from prior 1h OHLC (using prior bar's high/low/close).
-- Entry: Long when price breaks above H4 AND 4h EMA20 bullish AND volume > 2.0 * volume MA(24).
-         Short when price breaks below L4 AND 4h EMA20 bearish AND volume > 2.0 * volume MA(24).
-- Exit: Close-based reversal - exit long when price crosses below L4,
-        exit short when price crosses above H4.
-- Signal size: 0.20 discrete to minimize fee churn.
-- Session filter: Only trade between 08:00-20:00 UTC to avoid low-volume periods.
-Designed to work in both bull and bear markets via trend filter and mean-reversion exits.
-Uses proven Camarilla structure with volume confirmation and tighter timeframe for better entry timing.
+Hypothesis: 6h Williams %R Extreme + 1w Elder Ray Power + Volume Spike Confirmation
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w Elder Ray Power (bull/bear power from weekly candles) for regime filter.
+- Williams %R(14): Extreme oversold (< -80) for long, overbought (> -20) for short.
+- Volume confirmation: Current volume > 1.5 * 20-period volume MA.
+- Exit: Reverse signal on opposite extreme or volume drying up.
+- Signal size: 0.25 discrete to manage drawdown in volatile 6h bars.
+- Works in bull/bear: Elder Ray regime filters counter-trend extremes; Williams %R captures mean reversion in extended moves.
+- Novelty: Combines momentum extreme (Williams %R) with weekly power balance (Elder Ray) and volume confirmation - not recently tried on 6h.
 """
 
 import numpy as np
@@ -29,57 +26,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1w data for Elder Ray Power (HTF regime filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h EMA20 for trend filter
-    df_4h_close = df_4h['close'].values
-    ema_4h = pd.Series(df_4h_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 1w Elder Ray Power: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    df_1w_high = df_1w['high'].values
+    df_1w_low = df_1w['low'].values
+    df_1w_close = df_1w['close'].values
+    ema_13 = pd.Series(df_1w_close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = df_1w_high - ema_13  # Bull Power: High - EMA
+    bear_power = df_1w_low - ema_13   # Bear Power: Low - EMA
+    # Net Power: Bull Power + Bear Power (positive = bullish regime, negative = bearish regime)
+    elder_ray_power = bull_power + bear_power
     
-    # Align 4h EMA20 to 1h
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Get 6h data for Williams %R calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 14:
+        return np.zeros(n)
     
-    # Calculate volume MA(24) for confirmation (using 1h data)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    df_6h_high = df_6h['high'].values
+    df_6h_low = df_6h['low'].values
+    df_6h_close = df_6h['close'].values
+    
+    highest_high = pd.Series(df_6h_high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_6h_low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_6h_close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Align HTF indicators to 6h
+    elder_ray_aligned = align_htf_to_ltf(prices, df_1w, elder_ray_power)
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    
+    # Calculate volume MA(20) for confirmation (using 6h data)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 20, 24)  # Need enough bars for EMA20 and volume MA
+    start_idx = max(100, 13, 14, 20)  # Need enough bars for EMA13, Williams %R, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: 08:00-20:00 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Calculate Camarilla pivot levels from prior 1h bar
-        if i >= 1:
-            prior_high = high[i-1]
-            prior_low = low[i-1]
-            prior_close = close[i-1]
-            
-            pivot = (prior_high + prior_low + prior_close) / 3.0
-            range_1h = prior_high - prior_low
-            
-            # H4 and L4 levels (Camarilla)
-            h4 = pivot + (range_1h * 1.1 / 2)
-            l4 = pivot - (range_1h * 1.1 / 2)
-        else:
-            # Not enough data for pivot calculation
+        if (np.isnan(elder_ray_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -89,34 +83,34 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation (2.0x threshold)
-            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
+            # Check for entry signals with volume confirmation (1.5x threshold)
+            vol_confirmed = curr_volume > 1.5 * vol_ma[i]
             
-            # Long: Price breaks above H4 AND 4h EMA20 bullish AND volume confirmed
-            if curr_close > h4 and curr_close > ema_4h_aligned[i] and vol_confirmed:
-                signals[i] = 0.20
+            # Long: Williams %R extremely oversold (< -80) AND Elder Ray bullish (> 0) AND volume confirmed
+            if williams_r_aligned[i] < -80.0 and elder_ray_aligned[i] > 0 and vol_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below L4 AND 4h EMA20 bearish AND volume confirmed
-            elif curr_close < l4 and curr_close < ema_4h_aligned[i] and vol_confirmed:
-                signals[i] = -0.20
+            # Short: Williams %R extremely overbought (> -20) AND Elder Ray bearish (< 0) AND volume confirmed
+            elif williams_r_aligned[i] > -20.0 and elder_ray_aligned[i] < 0 and vol_confirmed:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price crosses below L4 (reversion to mean)
-            if curr_close < l4:
+            # Exit long when Williams %R rises above -50 (momentum fading) OR volume dries up
+            if williams_r_aligned[i] > -50.0 or curr_volume < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short when price crosses above H4 (reversion to mean)
-            if curr_close > h4:
+            # Exit short when Williams %R falls below -50 (momentum fading) OR volume dries up
+            if williams_r_aligned[i] < -50.0 or curr_volume < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H4L4_Breakout_4hEMA20_Trend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1wElderRay_Power_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
