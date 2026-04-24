@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R Extreme with 1d EMA50 trend filter and volume confirmation.
-- Primary timeframe: 6h for execution, HTF: 1d for EMA trend and Williams %R calculation.
-- Williams %R(14): measures overbought/oversold levels (-100 to 0). 
-  Extreme readings: <= -90 (oversold) for long, >= -10 (overbought) for short.
-- Entry: Long when Williams %R <= -90 with volume spike and price > 1d EMA50 (uptrend).
-         Short when Williams %R >= -10 with volume spike and price < 1d EMA50 (downtrend).
-- Exit: When Williams %R reverts to > -50 (for long) or < -50 (for short) or opposite signal.
-- Works in bull via buying oversold dips in uptrend, in bear via selling overbought rallies in downtrend.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
+- Primary timeframe: 12h for execution, HTF: 1d for EMA trend and Donchian levels.
+- Donchian channels: Upper = 20-period high, Lower = 20-period low on 1d.
+- Entry: Long when price breaks above Upper with volume spike and price > 1d EMA50 (uptrend).
+         Short when price breaks below Lower with volume spike and price < 1d EMA50 (downtrend).
+- Exit: When price reverts to 1d EMA50 or opposite signal.
+- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 6h timeframe.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 """
 
 import numpy as np
@@ -27,7 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R and EMA trend
+    # Get 1d data for Donchian levels and EMA trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -35,21 +34,16 @@ def generate_signals(prices):
     # Calculate 1d EMA50 for trend filter
     ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Williams %R(14) on 1d
-    # Williams %R = [(Highest High - Close) / (Highest High - Lowest Low)] * -100
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - df_1d['close'].values) / (highest_high - lowest_low)) * -100,
-        -50  # neutral when range is zero
-    )
+    # Calculate Donchian channels on 1d (20-period high/low)
+    donchian_upper = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d indicators to 6h
+    # Align 1d indicators to 12h
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA (on 6h)
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA (on 12h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * volume_ma)
     
@@ -57,38 +51,38 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need enough 1d bars for EMA50 and Williams %R
+    start_idx = max(50, 20)  # Need enough 1d bars for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Check for Williams %R extreme signals with volume spike and trend filter
+            # Check for Donchian breakout signals with volume spike and trend filter
             if volume_spike[i]:
-                # Long: Williams %R <= -90 (oversold) in uptrend
-                if williams_r_aligned[i] <= -90 and close[i] > ema_50_aligned[i]:
+                # Long: price breaks above upper channel in uptrend
+                if close[i] > donchian_upper_aligned[i] and close[i] > ema_50_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R >= -10 (overbought) in downtrend
-                elif williams_r_aligned[i] >= -10 and close[i] < ema_50_aligned[i]:
+                # Short: price breaks below lower channel in downtrend
+                elif close[i] < donchian_lower_aligned[i] and close[i] < ema_50_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: Williams %R reverts above -50 or short signal
-            if williams_r_aligned[i] > -50:
+            # Long exit: price reverts to EMA50 or short signal
+            if close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R reverts below -50 or long signal
-            if williams_r_aligned[i] < -50:
+            # Short exit: price reverts to EMA50 or long signal
+            if close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_Extreme_1dEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
