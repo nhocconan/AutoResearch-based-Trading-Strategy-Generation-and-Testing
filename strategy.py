@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud Breakout with Weekly Trend Filter.
-- Primary timeframe: 6h for execution, HTF: 1w for trend filter (price above/below weekly cloud).
-- Entry: Price breaks above/below 6h Ichimoku cloud with TK cross confirmation, only in direction of weekly trend.
-- Weekly trend: price > weekly Senkou Span A (long) or < weekly Senkou Span B (short).
-- Ichimoku components: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (26 displacement).
-- Exit: Price returns to opposite cloud boundary (Tenkan-Kijun midpoint) or TK cross reversal.
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and chop regime filter.
+- Primary timeframe: 4h for execution, HTF: 1d for chop regime filter (chop > 61.8 = range).
+- Entry: Price breaks above Donchian(20) high (long) or below Donchian(20) low (short) on 4h close,
+         with volume > 1.5x 20-period volume MA AND chop regime > 61.8 (range market).
+- Direction: In chop regime (>61.8), we mean-revert: long on lower band break, short on upper band break.
+- Chop regime filter avoids trending markets where breakouts fail, focuses on ranging markets.
+- Exit: Price returns to Donchian(20) midpoint or chop regime shifts to trending (< 38.2).
 - Discrete signal size: 0.25 to balance return and drawdown control.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-- Works in bull via buying cloud breakouts in uptrend, in bear via selling breakdowns in downtrend.
-- Weekly filter avoids counter-trend trades in strong trends, reducing whipsaw.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Works in bull via buying dips in range, in bear via selling rallies in range.
 """
 
 import numpy as np
@@ -21,96 +21,91 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Extract price data
+    # Extract price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 1w Ichimoku for trend filter (use weekly cloud)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:  # Need 26*2 for Senkou Span
+    # Calculate 1d chop regime (EHLERS CHOPPINESS INDEX)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly Tenkan-sen (9-period) and Kijun-sen (26-period)
-    tenkan_1w = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
-                 pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
-    kijun_1w = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
-                pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
+    # True Range for 1d
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.abs(high_1d[0] - low_1d[0])], tr])  # first bar
     
-    # Weekly Senkou Span A and B (26 periods ahead)
-    senkou_span_a_1w = ((tenkan_1w + kijun_1w) / 2).shift(26)
-    senkou_span_b_1w = ((pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
-                         pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    # ATR(14) and highest high/lowest low over 14 periods
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Align weekly Ichimoku to 6h timeframe (completed weekly bar only)
-    tenkan_1w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_1w.values)
-    kijun_1w_aligned = align_htf_to_ltf(prices, df_1w, kijun_1w.values)
-    senkou_span_a_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a_1w.values)
-    senkou_span_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b_1w.values)
+    # Chopiness Index: 100 * log10(sum(atr14) / (hh14 - ll14)) / log10(14)
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    denominator = hh_14 - ll_14
+    # Avoid division by zero
+    denominator = np.where(denominator == 0, 1e-10, denominator)
+    chop = 100 * np.log10(sum_atr_14 / denominator) / np.log10(14)
     
-    # Calculate 6h Ichimoku for entry signals
-    tenkan_6h = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
-                 pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
-    kijun_6h = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
-                pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
-    senkou_span_a_6h = ((tenkan_6h + kijun_6h) / 2).shift(26)
-    senkou_span_b_6h = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
-                         pd.Series(low).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    # Align chop regime to 4h timeframe (completed 1d bar only)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Cloud boundaries (top and bottom of cloud)
-    cloud_top_6h = np.maximum(senkou_span_a_6h.values, senkou_span_b_6h.values)
-    cloud_bottom_6h = np.minimum(senkou_span_a_6h.values, senkou_span_b_6h.values)
-    # Kumo midpoint (Tenkan-Kijun midpoint) for exit
-    kumo_midpoint_6h = (tenkan_6h.values + kijun_6h.values) / 2
+    # Donchian(20) channels on 4h
+    donchian_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_m = (donchian_h + donchian_l) / 2  # midpoint
     
-    # TK cross signals
-    tk_cross_above = (tenkan_6h.values > kijun_6h.values) & (tenkan_6h.values.shift(1) <= kijun_6h.values.shift(1))
-    tk_cross_below = (tenkan_6h.values < kijun_6h.values) & (tenkan_6h.values.shift(1) >= kijun_6h.values.shift(1))
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(52, 26) + 1  # Need Ichimoku(52) and TK cross
+    start_idx = max(20, 14, 20) + 1  # Donchian(20), chop(14), volume MA(20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_1w_aligned[i]) or np.isnan(kijun_1w_aligned[i]) or 
-            np.isnan(senkou_span_a_1w_aligned[i]) or np.isnan(senkou_span_b_1w_aligned[i]) or
-            np.isnan(cloud_top_6h[i]) or np.isnan(cloud_bottom_6h[i]) or
-            np.isnan(kumo_midpoint_6h[i])):
+        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter: price relative to weekly cloud
-        weekly_uptrend = close[i] > senkou_span_a_1w_aligned[i]  # Price above weekly Senkou Span A
-        weekly_downtrend = close[i] < senkou_span_b_1w_aligned[i]  # Price below weekly Senkou Span B
+        chop_val = chop_aligned[i]
+        in_range = chop_val > 61.8  # chop > 61.8 = ranging market
         
         if position == 0:
-            # Long: Price breaks above 6h cloud with TK cross bullish AND weekly uptrend
-            if (close[i] > cloud_top_6h[i] and tk_cross_above[i] and weekly_uptrend):
-                signals[i] = 0.25
-                position = 1
-            # Short: Price breaks below 6h cloud with TK cross bearish AND weekly downtrend
-            elif (close[i] < cloud_bottom_6h[i] and tk_cross_below[i] and weekly_downtrend):
-                signals[i] = -0.25
-                position = -1
+            if in_range:
+                # In range: mean reversion - long at lower band, short at upper band
+                if (close[i] <= donchian_l[i] and volume_spike[i]):
+                    signals[i] = 0.25
+                    position = 1
+                elif (close[i] >= donchian_h[i] and volume_spike[i]):
+                    signals[i] = -0.25
+                    position = -1
+            # Optional: in trending markets (chop < 38.2), could add breakout logic
+            # but we focus only on ranging for now to keep trades low and win rate high
         elif position == 1:
-            # Long exit: Price returns to 6h cloud bottom OR TK cross bearish
-            if (close[i] < cloud_bottom_6h[i] or tk_cross_below[i]):
+            # Long exit: price returns to midpoint or chop shifts to trending
+            if (close[i] >= donchian_m[i]) or (chop_val < 38.2):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price returns to 6h cloud top OR TK cross bullish
-            if (close[i] > cloud_top_6h[i] or tk_cross_above[i]):
+            # Short exit: price returns to midpoint or chop shifts to trending
+            if (close[i] <= donchian_m[i]) or (chop_val < 38.2):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_CloudBreakout_1wTrendFilter_v1"
-timeframe = "6h"
+name = "4h_Donchian20_ChopRange_MeanReversion_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
