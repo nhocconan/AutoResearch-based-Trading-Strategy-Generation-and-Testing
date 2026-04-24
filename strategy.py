@@ -45,7 +45,6 @@ def generate_signals(prices):
     tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
     tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     # Handle first value for roll
     tr.iloc[0] = high_4h[0] - low_4h[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
