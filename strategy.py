@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter, volume confirmation, and chop regime filter.
-- Primary timeframe: 4h for execution, HTF: 1d for EMA trend and chop regime.
-- Donchian breakout: Close > upper band (long) or Close < lower band (short).
-- Trend filter: Only trade breakouts in direction of 1d EMA50 (long if close > EMA50, short if close < EMA50).
-- Volume confirmation: Volume > 1.5x 20-period volume MA.
-- Chop regime filter: Only trade when 1d chop < 61.8 (trending regime).
-- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
+Hypothesis: 6h Ichimoku Cloud breakout with 1d ADX trend filter and volume confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for Ichimoku Cloud and ADX trend.
+- Ichimoku Cloud: Tenkan-sen (9-period) and Kijun-sen (26-period) from prior 1d candles.
+- Breakout: Close > Senkou Span A (leading span 1) for long, Close < Senkou Span B (leading span 2) for short.
+- Trend filter: Only trade breakouts in direction of 1d ADX(14) > 25 (strong trend).
+- Volume confirmation: Current volume > 1.5x 20-period volume MA.
+- Works in bull via buying cloud breakouts in uptrend, in bear via selling cloud breakdowns in downtrend.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -26,36 +26,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian bands, EMA trend, and chop regime
+    # Get 1d data for Ichimoku and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:  # Need 26*2 for Senkou Span B
         return np.zeros(n)
     
-    # Calculate Donchian bands (20-period) from prior 1d data
-    # Upper band = max(high, 20), Lower band = min(low, 20)
-    donchian_upper = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Calculate Ichimoku components (using prior 1d OHLC)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Calculate 1d Chopiness Index (14-period) for regime filter
-    # CHOP = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    tr1 = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values - pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    tr2 = abs(pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values - pd.Series(df_1d['close']).shift(1).rolling(window=14, min_periods=14).mean().values)
-    tr3 = abs(pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values - pd.Series(df_1d['close']).shift(1).rolling(window=14, min_periods=14).mean().values)
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    max_high14 = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    min_low14 = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr14 * 14 / (max_high14 - min_low14 + 1e-10)) / np.log10(14)
-    chop_regime = chop < 61.8  # Trending regime when chop < 61.8
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Align 1d indicators to 4h
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime.astype(float))
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = ((period52_high + period52_low) / 2)
+    
+    # Calculate ADX(14) for trend strength
+    # True Range (TR)
+    tr1 = pd.Series(df_1d['high']).values - pd.Series(df_1d['low']).values
+    tr2 = abs(pd.Series(df_1d['high']).values - pd.Series(df_1d['close']).shift(1).values)
+    tr3 = abs(pd.Series(df_1d['low']).values - pd.Series(df_1d['close']).shift(1).values)
+    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1).values
+    
+    # Directional Movement (DM)
+    dm_plus = pd.Series(df_1d['high']).values - pd.Series(df_1d['high']).shift(1).values
+    dm_minus = pd.Series(df_1d['low']).shift(1).values - pd.Series(df_1d['low']).values
+    dm_plus = np.where((dm_plus > dm_minus) & (dm_plus > 0), dm_plus, 0)
+    dm_minus = np.where((dm_minus > dm_plus) & (dm_minus > 0), dm_minus, 0)
+    
+    # Smoothed TR and DM
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus = 100 * (dm_plus_14 / tr14)
+    di_minus = 100 * (dm_minus_14 / tr14)
+    
+    # DX and ADX
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d indicators to 6h (Ichimoku lines are plotted current, ADX is lagging)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: current volume > 1.5 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,39 +91,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # EMA50 + volume MA
+    start_idx = max(52, 20)  # Ichimoku needs 52, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(chop_regime_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Check for Donchian breakout with volume spike, trend filter, and chop regime
-            if volume_spike[i] and chop_regime_aligned[i]:
-                # Long breakout: close > upper band and close > 1d EMA50 (uptrend)
-                if close[i] > donchian_upper_aligned[i] and close[i] > ema_50_aligned[i]:
+            # Check for Ichimoku Cloud breakout with ADX trend filter and volume spike
+            if volume_spike[i] and adx_aligned[i] > 25:
+                # Long breakout: close > Senkou Span A (top of cloud) and Tenkan > Kijun (bullish)
+                if close[i] > senkou_span_a_aligned[i] and tenkan_sen_aligned[i] > kijun_sen_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short breakdown: close < lower band and close < 1d EMA50 (downtrend)
-                elif close[i] < donchian_lower_aligned[i] and close[i] < ema_50_aligned[i]:
+                # Short breakdown: close < Senkou Span B (bottom of cloud) and Tenkan < Kijun (bearish)
+                elif close[i] < senkou_span_b_aligned[i] and tenkan_sen_aligned[i] < kijun_sen_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price re-enters Donchian bands or opposite signal
-            if close[i] < donchian_lower_aligned[i]:  # Exit when price falls below lower band
+            # Long exit: price re-enters cloud or opposite Ichimoku signal
+            if close[i] < senkou_span_b_aligned[i]:  # Exit when price falls below cloud bottom
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price re-enters Donchian bands or opposite signal
-            if close[i] > donchian_upper_aligned[i]:  # Exit when price rises above upper band
+            # Short exit: price re-enters cloud or opposite Ichimoku signal
+            if close[i] > senkou_span_a_aligned[i]:  # Exit when price rises above cloud top
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout_1dADX_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
