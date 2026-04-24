@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout + 1d ATR regime filter + volume spike confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d ATR(14) for volatility regime (high volatility = ATR > 1.5 * 50-period ATR MA).
-- Donchian channels: calculated from prior 12h OHLC; long on break above upper band, short on breakdown below lower band.
-- Volume confirmation: current volume > 2.0 * 20-period volume MA to filter weak signals.
-- ATR-based stoploss: exit when price moves against position by 2.5 * ATR(14) (using 12h ATR).
-- Signal size: 0.25 discrete to minimize fee churn while maintaining profitability.
-Designed to capture volatility expansion breakouts with proper filtering to avoid overtrading and fee drag.
-Works in both bull and bear markets by using volatility regime filter and volatility-based stops.
+Hypothesis: 6h Williams %R Extreme + 1d Elder Ray Power + volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) for trend strength.
+- Williams %R(14): long when < -80 (oversold), short when > -20 (overbought).
+- Volume confirmation: current volume > 1.5 * 20-period volume MA to filter weak signals.
+- Signal size: 0.25 discrete to balance return and drawdown control.
+- Designed to catch reversals in extended moves with trend strength filter.
+- Works in both bull and bear markets by using Elder Ray to confirm underlying trend.
 """
 
 import numpy as np
@@ -26,63 +25,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need for ATR MA
+    # Get 6h data for Williams %R calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 14:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) and its 50-period MA for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 1d data for Elder Ray Power and volume MA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate 6h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    williams_r_6h_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    
+    # Calculate 1d EMA(13) for Elder Ray
     close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    atr_regime = align_htf_to_ltf(prices, df_1d, atr_ma_50)
-    atr_current = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 12h ATR(14) for stoploss
-    tr1_12h = high - low
-    tr2_12h = np.abs(high - np.roll(close, 1))
-    tr3_12h = np.abs(low - np.roll(close, 1))
-    tr2_12h[0] = 0
-    tr3_12h[0] = 0
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d Elder Ray Power
+    bull_power = df_1d['high'].values - ema_13_1d  # High - EMA13
+    bear_power = ema_13_1d - df_1d['low'].values   # EMA13 - Low
     
-    # Calculate 12h volume MA(20) for confirmation
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Calculate 1d volume MA(20) for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate Donchian channels from prior 12h OHLC (20-period)
-    # Need to calculate from price series directly since we don't have HTF 12h data
-    # We'll calculate rolling max/min on the 12h timeframe data
-    # Since we're already on 12h timeframe, we can use the current prices directly
-    donchian_upper = pd.Series(close).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(close).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to prevent look-ahead (use previous bar's values)
-    donchian_upper_aligned = np.roll(donchian_upper, 1)
-    donchian_lower_aligned = np.roll(donchian_lower, 1)
-    donchian_upper_aligned[0] = np.nan
-    donchian_lower_aligned[0] = np.nan
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 50, 20, 14, 20)
+    start_idx = max(100, 14, 13, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_regime[i]) or np.isnan(atr_current[i]) or 
-            np.isnan(atr_12h[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i])):
+        if (np.isnan(williams_r_6h_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,35 +79,28 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volatility regime filter: only trade when current ATR > 1.5 * ATR MA (high volatility)
-        vol_regime = atr_current[i] > 1.5 * atr_regime[i]
-        
         if position == 0:
-            # Check for entry signals with volume confirmation (2.0x threshold) and volatility regime
-            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
+            # Check for entry signals with volume confirmation (1.5x threshold)
+            vol_confirmed = curr_volume > 1.5 * vol_ma_aligned[i]
             
-            # Long: price breaks above Donchian upper band AND volatility regime AND volume confirmed
-            if curr_high > donchian_upper_aligned[i] and vol_regime and vol_confirmed:
+            # Long: Williams %R < -80 (oversold) AND Bull Power > 0 (uptrend strength) AND volume confirmed
+            if williams_r_6h_aligned[i] < -80 and bull_power_aligned[i] > 0 and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-                entry_price = curr_close
-            # Short: price breaks below Donchian lower band AND volatility regime AND volume confirmed
-            elif curr_low < donchian_lower_aligned[i] and vol_regime and vol_confirmed:
+            # Short: Williams %R > -20 (overbought) AND Bear Power > 0 (downtrend strength) AND volume confirmed
+            elif williams_r_6h_aligned[i] > -20 and bear_power_aligned[i] > 0 and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
-                entry_price = curr_close
         elif position == 1:
-            # Long position: exit on stoploss (2.5 * ATR) or price breaks below Donchian lower band
-            stop_loss = entry_price - 2.5 * atr_12h[i]
-            if curr_low < stop_loss or curr_low < donchian_lower_aligned[i]:
+            # Long position: exit when Williams %R > -50 (momentum fading) OR Bear Power > Bull Power (trend weakening)
+            if williams_r_6h_aligned[i] > -50 or bear_power_aligned[i] > bull_power_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit on stoploss (2.5 * ATR) or price breaks above Donchian upper band
-            stop_loss = entry_price + 2.5 * atr_12h[i]
-            if curr_high > stop_loss or curr_high > donchian_upper_aligned[i]:
+            # Short position: exit when Williams %R < -50 (momentum fading) OR Bull Power > Bear Power (trend weakening)
+            if williams_r_6h_aligned[i] < -50 or bull_power_aligned[i] > bear_power_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dATR_Regime_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_WilliamsR_Extreme_1dElderRay_Power_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
