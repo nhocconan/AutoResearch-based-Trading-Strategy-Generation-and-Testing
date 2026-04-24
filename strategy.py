@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA34 trend filter and volume confirmation using ATR spike.
-- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h for EMA34 trend filter and ATR-based volatility confirmation.
-- Entry: Long when price breaks above Camarilla H3 AND ATR ratio > 1.5 AND price > 4h EMA34.
-         Short when price breaks below Camarilla L3 AND ATR ratio > 1.5 AND price < 4h EMA34.
-- Exit: Opposite Camarilla breakout (L3 for long, H3 for short) OR price crosses 4h EMA34 in opposite direction.
-- Signal size: 0.20 discrete to minimize fee drag while maintaining profit potential.
-- ATR ratio (current ATR/20-period ATR) > 1.5 confirms significant volatility expansion to avoid false breakouts.
-- 4h EMA34 provides trend filter to avoid counter-trend trades.
-- Session filter: 08-20 UTC to avoid low-liquidity periods.
-- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
+Hypothesis: 6h Williams %R Extreme Reversal with 1-week EMA200 trend filter and 1d ATR volume spike confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for EMA200 trend filter, 1d for ATR volume spike filter.
+- Entry: Long when Williams %R(14) < -80 (oversold) AND ATR ratio > 1.8 AND price > 1w EMA200.
+         Short when Williams %R(14) > -20 (overbought) AND ATR ratio > 1.8 AND price < 1w EMA200.
+- Exit: Opposite Williams %R extreme OR price crosses 1w EMA200 in opposite direction.
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- Williams %R identifies exhaustion points where reversals are likely.
+- ATR ratio (current ATR/20-period ATR) > 1.8 confirms significant volatility to avoid choppy false signals.
+- 1w EMA200 provides strong trend filter to avoid counter-trend trades in ranging markets.
+- Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on Williams %R extreme frequency with strict filters.
 """
 
 import numpy as np
@@ -31,13 +31,12 @@ def atr(high, low, close, period):
     true_range[0] = high_low[0]  # First period
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def camarilla_pivots(high, low, close):
-    """Calculate Camarilla Pivot Points (H3, L3 levels)."""
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    h3 = close + range_val * 1.1 / 4
-    l3 = close - range_val * 1.1 / 4
-    return h3, l3
+def williams_r(high, low, close, period):
+    """Calculate Williams %R."""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    return wr
 
 def generate_signals(prices):
     n = len(prices)
@@ -49,84 +48,80 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Calculate 4h trend filter: EMA34
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 40:
+    # Calculate 1w trend filter: EMA200
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 210:
         return np.zeros(n)
     
-    ema34_4h = ema(df_4h['close'].values, 34)
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h, additional_delay_bars=1)
+    ema200_1w = ema(df_1w['close'].values, 200)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w, additional_delay_bars=1)
     
-    # Calculate 4h ATR for volume spike filter
-    atr_20_4h = atr(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 20)
-    atr_current_4h = atr(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 1)
-    atr_ratio_4h = atr_current_4h / (atr_20_4h + 1e-10)  # Avoid division by zero
-    atr_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_ratio_4h, additional_delay_bars=1)
+    # Calculate 1d ATR for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
+    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
+    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
+    
+    # Williams %R on 6h (14-period)
+    wr = williams_r(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for all indicators
+    start_idx = 210  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(atr_ratio_4h_aligned[i])):
+        if (np.isnan(wr[i]) or
+            np.isnan(ema200_1w_aligned[i]) or
+            np.isnan(atr_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        # Calculate Camarilla levels for current 1h bar
-        h3, l3 = camarilla_pivots(high[i], low[i], close[i])
         
         curr_close = close[i]
+        curr_wr = wr[i]
         
-        # Exit conditions: opposite Camarilla breakout OR price crosses 4h EMA34 in opposite direction
+        # Exit conditions: opposite Williams %R extreme OR price crosses 1w EMA200 in opposite direction
         if position != 0:
-            # Exit long: price breaks below Camarilla L3 OR price falls below 4h EMA34
+            # Exit long: Williams %R rises above -20 (overbought) OR price falls below 1w EMA200
             if position == 1:
-                if curr_close < l3 or curr_close < ema34_4h_aligned[i]:
+                if curr_wr > -20 or curr_close < ema200_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Camarilla H3 OR price rises above 4h EMA34
+            # Exit short: Williams %R falls below -80 (oversold) OR price rises above 1w EMA200
             elif position == -1:
-                if curr_close > h3 or curr_close > ema34_4h_aligned[i]:
+                if curr_wr < -80 or curr_close > ema200_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
+        # Entry conditions: Williams %R extreme with volatility confirmation and trend filter
         if position == 0:
-            # Long: price breaks above Camarilla H3 AND ATR ratio > 1.5 AND bullish 4h trend
-            if curr_close > h3 and atr_ratio_4h_aligned[i] > 1.5 and curr_close > ema34_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: Williams %R < -80 (oversold) AND ATR ratio > 1.8 AND bullish 1w trend
+            if curr_wr < -80 and atr_ratio_aligned[i] > 1.8 and curr_close > ema200_1w_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3 AND ATR ratio > 1.5 AND bearish 4h trend
-            elif curr_close < l3 and atr_ratio_4h_aligned[i] > 1.5 and curr_close < ema34_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: Williams %R > -20 (overbought) AND ATR ratio > 1.8 AND bearish 1w trend
+            elif curr_wr > -20 and atr_ratio_aligned[i] > 1.8 and curr_close < ema200_1w_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.20
+            signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_Breakout_4hATR_VolumeSpike_4hEMA34_TrendFilter_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1dATR_VolumeSpike_1wEMA200_TrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
