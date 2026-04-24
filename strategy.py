@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA(34) trend filter and volume spike confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 12h EMA(34) for trend filter (defines bull/bear regime).
-- Entry: Long when price breaks above Donchian(20) high in bull regime with volume > 2.0 * 4h volume MA(20);
-         Short when price breaks below Donchian(20) low in bear regime with volume > 2.0 * 4h volume MA(20).
-- Exit: Price crosses below Donchian(10) high for long or above Donchian(10) low for short.
-- Signal size: 0.25 discrete to balance capture and fee control.
-- Donchian breakouts capture momentum; EMA filter avoids counter-trend trades; volume spike confirms conviction.
-- Works in bull (buying breakouts in uptrend) and bear (selling breakdowns in downtrend).
+Hypothesis: 1h Camarilla pivot (H3/L3) breakout with 4h EMA(34) trend filter and volume confirmation.
+- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
+- HTF: 4h EMA(34) for trend filter (defines bull/bear regime).
+- Entry: Long when price breaks above Camarilla H3 in bull regime with volume > 1.5 * 1h volume MA(20);
+         Short when price breaks below Camarilla L3 in bear regime with volume > 1.5 * 1h volume MA(20).
+- Exit: Price crosses below/above Camarilla H4/L4 levels (closer to pivot for faster reversion).
+- Session filter: 08:00-20:00 UTC only to reduce noise trades.
+- Signal size: 0.20 discrete to minimize fee churn while allowing meaningful position.
+- Works in bull (buying H3 breakouts in uptrend) and bear (selling L3 breakdowns in downtrend).
 """
 
 import numpy as np
@@ -26,35 +26,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for volume MA calculation
+    # Get 4h data for EMA calculation
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    # Get 12h data for EMA calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
+    # Calculate 4h EMA(34)
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 12h EMA(34)
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Calculate 4h volume MA(20) for confirmation
-    volume_4h = df_4h['volume'].values
-    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Calculate 1h volume MA(20) for confirmation
+    vol_ma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Pre-compute session hours for efficiency
+    hours = prices.index.hour if hasattr(prices.index, 'hour') else pd.DatetimeIndex(prices['open_time']).hour
+    
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 20)  # EMA needs 34, Donchian needs 20, volume MA needs 20
+    start_idx = max(34, 20)  # EMA needs 34, volume MA needs 20
     
     for i in range(start_idx, n):
+        # Session filter: 08:00-20:00 UTC only
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_1h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,49 +69,67 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Calculate Donchian channels (20-period for entry, 10-period for exit)
-        lookback_20 = max(0, i-19)
-        donchian_high_20 = np.max(high[lookback_20:i+1])
-        donchian_low_20 = np.min(low[lookback_20:i+1])
+        # Calculate Camarilla pivot levels using previous day's OHLC
+        # Need to get daily OHLC - use 1d data from mtf_data
+        if i >= 24:  # Need at least 24 hours of 1h data for previous day
+            # Get daily OHLC from 1h data (simplified: use rolling window)
+            # For proper Camarilla, we need actual daily OHLC
+            # Approximate using 24-period lookback for 1h timeframe
+            lookback_24 = max(0, i-23)
+            prev_high = np.max(high[lookback_24:i])  # Previous period high (exclude current)
+            prev_low = np.min(low[lookback_24:i])    # Previous period low
+            prev_close = close[i-1]                  # Previous close
+            
+            # Calculate pivot point
+            pivot = (prev_high + prev_low + prev_close) / 3.0
+            range_hl = prev_high - prev_low
+            
+            # Camarilla levels
+            h3 = pivot + (range_hl * 1.1 / 4.0)
+            l3 = pivot - (range_hl * 1.1 / 4.0)
+            h4 = pivot + (range_hl * 1.1 / 2.0)
+            l4 = pivot - (range_hl * 1.1 / 2.0)
+        else:
+            # Not enough data for pivot calculation
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        lookback_10 = max(0, i-9)
-        donchian_high_10 = np.max(high[lookback_10:i+1])
-        donchian_low_10 = np.min(low[lookback_10:i+1])
+        # Volume confirmation: 1.5x threshold (balanced for 1h timeframe)
+        vol_confirm = curr_volume > 1.5 * vol_ma_1h[i]
         
-        # Volume confirmation: 2.0x threshold (strict to reduce trades)
-        vol_confirm = curr_volume > 2.0 * vol_ma_4h_aligned[i]
-        
-        # Trend filter: price relative to 12h EMA
-        bull_regime = curr_close > ema_12h_aligned[i]
-        bear_regime = curr_close < ema_12h_aligned[i]
+        # Trend filter: price relative to 4h EMA
+        bull_regime = curr_close > ema_4h_aligned[i]
+        bear_regime = curr_close < ema_4h_aligned[i]
         
         if position == 0:
             # Check for entry signals
-            # Long: price breaks above Donchian(20) high in bull regime with volume confirmation
-            if curr_high > donchian_high_20 and bull_regime and vol_confirm:
-                signals[i] = 0.25
+            # Long: price breaks above Camarilla H3 in bull regime with volume confirmation
+            if curr_high > h3 and bull_regime and vol_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian(20) low in bear regime with volume confirmation
-            elif curr_low < donchian_low_20 and bear_regime and vol_confirm:
-                signals[i] = -0.25
+            # Short: price breaks below Camarilla L3 in bear regime with volume confirmation
+            elif curr_low < l3 and bear_regime and vol_confirm:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long position: exit when price crosses below Donchian(10) high
-            if curr_close < donchian_high_10:
+            # Long position: exit when price crosses below Camarilla H4
+            if curr_close < h4:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short position: exit when price crosses above Donchian(10) low
-            if curr_close > donchian_low_10:
+            # Short position: exit when price crosses above Camarilla L4
+            if curr_close > l4:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA34_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_4hEMA34_Trend_VolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
