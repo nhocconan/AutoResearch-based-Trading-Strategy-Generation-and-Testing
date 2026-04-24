@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1-week ADX regime filter and volume confirmation.
-- Primary timeframe: 12h for execution, HTF: 1w for ADX trend strength.
-- ADX > 25 indicates trending market (breakout strategy), ADX < 20 indicates ranging (mean reversion at Camarilla H3/L3).
-- Entry: Long when price breaks above Camarilla H3 AND ADX > 25 (bullish breakout in trend).
-         Short when price breaks below Camarilla L3 AND ADX > 25 (bearish breakout in trend).
-         In ranging (ADX < 20): Long when price touches Camarilla L3 AND reverses up (close > low).
-                                Short when price touches Camarilla H3 AND reverses down (close < high).
-- Exit: Opposite Camarilla breakout or ADX regime shift to ranging.
-- Volume confirmation: current volume > 1.3 * 20-period volume MA (to avoid false breakouts).
-- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 4h for execution, HTF: 1d for EMA trend and Camarilla levels.
+- Trend: Price > EMA34 = bullish bias (long H3 breakout, short only on strong breakdown).
+         Price < EMA34 = bearish bias (short L3 breakdown, long only on strong breakout).
+- Entry: Long when price breaks above H3 AND volume > 1.5 * 20-period volume MA.
+         Short when price breaks below L3 AND volume > 1.5 * 20-period volume MA.
+         In strong counter-trend: only allow entries with volume > 2.0 * 20-period volume MA.
+- Exit: Opposite Camarilla level (L3 for long, H3 for short) or volume drops below 1.0 * MA.
+- Volume confirmation avoids false breakouts in low-liquidity periods.
+- Discrete signal size: 0.25 to balance profit potential and drawdown control.
+- Target: 50-150 total trades over 4 years (12-38/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -28,114 +28,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Calculate ADX (14-period) on 1w
-    # True Range
-    tr1 = pd.Series(df_1w['high']).diff().abs()
-    tr2 = (pd.Series(df_1w['high']) - pd.Series(df_1w['low'].shift())).abs()
-    tr3 = (pd.Series(df_1w['low']) - pd.Series(df_1w['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = pd.Series(df_1w['high']).diff()
-    down_move = -pd.Series(df_1w['low']).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1w ADX to 12h
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Calculate Camarilla levels from previous 1d (using HTF 1d data)
+    # Get 1d data for HTF indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Camarilla levels: based on previous day's range
-    # H3 = close + 1.1*(high-low)/2
-    # L3 = close - 1.1*(high-low)/2
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # Calculate EMA34 on 1d
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Align Camarilla levels to 12h
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Calculate Camarilla levels (H3, L3) on 1d
+    # Camarilla: based on previous day's range
+    prev_close = df_1d['close'].shift(1)
+    prev_high = df_1d['high'].shift(1)
+    prev_low = df_1d['low'].shift(1)
+    range_ = prev_high - prev_low
     
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 12h)
+    # H3 = prev_close + range * 1.1/4
+    # L3 = prev_close - range * 1.1/4
+    h3 = prev_close + (range_ * 1.1 / 4)
+    l3 = prev_close - (range_ * 1.1 / 4)
+    
+    # Align Camarilla levels to 4h
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3.values)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3.values)
+    
+    # Volume confirmation: 20-period volume MA on 4h
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * volume_ma)
+    volume_spike = volume > (1.5 * volume_ma)
+    volume_strong = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, 20)  # Need enough 1w bars for ADX and 20 for volume MA
+    start_idx = max(40, 20)  # Need EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
+        ema_val = ema_34_aligned[i]
+        h3_val = h3_aligned[i]
+        l3_val = l3_aligned[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        prev_close = close[i-1]
         
         if position == 0:
             # Check for entry signals
             if volume_spike[i]:
-                if adx_val > 25:  # Trending regime: breakout strategy
-                    # Bullish breakout: price closes above Camarilla H3
-                    if curr_close > camarilla_h3_aligned[i]:
+                # Determine trend bias from EMA34
+                bullish_bias = curr_close > ema_val
+                bearish_bias = curr_close < ema_val
+                
+                # Bullish breakout above H3
+                if curr_high > h3_val:
+                    # In bullish bias: normal volume confirmation
+                    # In bearish bias: require strong volume to counter trend
+                    if bullish_bias or volume_strong[i]:
                         signals[i] = 0.25
                         position = 1
-                    # Bearish breakout: price closes below Camarilla L3
-                    elif curr_close < camarilla_l3_aligned[i]:
-                        signals[i] = -0.25
-                        position = -1
-                else:  # Ranging regime (ADX < 20): mean reversion at extremes
-                    # Long when price touches Camarilla L3 and shows reversal (close > low)
-                    if curr_low <= camarilla_l3_aligned[i] and curr_close > curr_low:
-                        signals[i] = 0.25
-                        position = 1
-                    # Short when price touches Camarilla H3 and shows reversal (close < high)
-                    elif curr_high >= camarilla_h3_aligned[i] and curr_close < curr_high:
+                # Bearish breakdown below L3
+                elif curr_low < l3_val:
+                    # In bearish bias: normal volume confirmation
+                    # In bullish bias: require strong volume to counter trend
+                    if bearish_bias or volume_strong[i]:
                         signals[i] = -0.25
                         position = -1
         elif position == 1:
-            # Long exit: price closes below Camarilla L3 OR ADX drops to ranging
-            if curr_close < camarilla_l3_aligned[i] or adx_val < 20:
+            # Long exit: price breaks below L3 OR volume drops significantly
+            if curr_low < l3_val or volume[i] < volume_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Camarilla H3 OR ADX drops to ranging
-            if curr_close > camarilla_h3_aligned[i] or adx_val < 20:
+            # Short exit: price breaks above H3 OR volume drops significantly
+            if curr_high > h3_val or volume[i] < volume_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -143,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_1wADXRegime_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
