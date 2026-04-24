@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud with 1d trend filter and volume spike.
-- Primary timeframe: 6h, HTF: 1d for trend alignment and cloud filter.
-- Ichimoku components: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (52 displacement).
-- Entry: Long when price > cloud AND Tenkan > Kijun AND 1d close > 1w EMA50 (bullish regime).
-         Short when price < cloud AND Tenkan < Kijun AND 1d close < 1w EMA50 (bearish regime).
-- Volume confirmation: current 6h volume > 1.5 * 20-period 6h volume MA.
-- Exit: Price crosses back into cloud (Tenkan-Kijun cross or price re-enters cloud).
-- Discrete signal size: 0.25 to balance profit potential and drawdown control.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-- Works in both bull/bear: 1d/1w regime filter avoids counter-trend trades, Ichimoku cloud acts as dynamic support/resistance.
+Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume spike.
+- Primary timeframe: 12h, HTF: 1w for EMA50 trend alignment.
+- Donchian channel from prior 20 periods (20*12h = 10d): long at upper breakout, short at lower breakdown.
+- Trend filter: only long when 12h close > 1w EMA50, only short when 12h close < 1w EMA50.
+- Volume confirmation: current 12h volume > 2.0 * 20-period 12h volume MA.
+- Discrete signal size: 0.25 to minimize fee churn and control drawdown.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Works in both bull/bear: trend filter avoids counter-trend trades, Donchian levels act as dynamic support/resistance.
+- Exit: price reverts to midpoint of Donchian channel from prior 20 periods.
 """
 
 import numpy as np
@@ -27,16 +26,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for regime filter (long-term trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 1w EMA50 for stronger regime filter (weekly trend)
+    # Calculate 1w EMA50 for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -45,87 +35,62 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Ichimoku calculations on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (high_tenkan + low_tenkan) / 2.0
+    # Calculate Donchian levels from prior 20 periods (use completed 12h bar)
+    # Upper = max(high, lookback=20)
+    # Lower = min(low, lookback=20)
+    # Mid = (Upper + Lower) / 2
+    lookback = 20
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    mid = (upper + lower) / 2.0
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (high_kijun + low_kijun) / 2.0
+    # Align Donchian levels to 12h timeframe (completed 20-bar lookback only)
+    upper_aligned = align_htf_to_ltf(prices, prices, upper)
+    lower_aligned = align_htf_to_ltf(prices, prices, lower)
+    mid_aligned = align_htf_to_ltf(prices, prices, mid)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, plotted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2.0)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, plotted 26 periods ahead
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (high_senkou_b + low_senkou_b) / 2.0
-    
-    # Align HTF indicators to 6h timeframe (completed bars only)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    volume_spike = volume > (2.0 * volume_ma)
     
-    # Trend filters: 1d and 1w EMA50 alignment
-    bullish_regime = (close > ema_50_1d_aligned) & (close > ema_50_1w_aligned)
-    bearish_regime = (close < ema_50_1d_aligned) & (close < ema_50_1w_aligned)
-    
-    # Cloud top and bottom (Senkou Span A/B)
-    cloud_top = np.maximum(senkou_a, senkou_b)
-    cloud_bottom = np.minimum(senkou_a, senkou_b)
-    
-    # Price relative to cloud
-    price_above_cloud = close > cloud_top
-    price_below_cloud = close < cloud_bottom
-    
-    # Tenkan/Kijun cross
-    tenkan_above_kijun = tenkan > kijun
-    tenkan_below_kijun = tenkan < kijun
+    # Trend filter: 12h close vs 1w EMA50
+    uptrend = close > ema_50_1w_aligned
+    downtrend = close < ema_50_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 52, 20)  # Need Ichimoku (52), volume MA (20), HTF EMA (50)
+    start_idx = max(100, 50, 20)  # Need 1w EMA50, Donchian lookback, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(cloud_top[i]) or 
-            np.isnan(cloud_bottom[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or np.isnan(mid_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above cloud AND Tenkan > Kijun AND bullish regime AND volume spike
-            if price_above_cloud[i] and tenkan_above_kijun[i] and bullish_regime[i] and volume_spike[i]:
+            # Long: price closes above upper DONCH AND uptrend AND volume spike
+            if close[i] > upper_aligned[i] and uptrend[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below cloud AND Tenkan < Kijun AND bearish regime AND volume spike
-            elif price_below_cloud[i] and tenkan_below_kijun[i] and bearish_regime[i] and volume_spike[i]:
+            # Short: price closes below lower DONCH AND downtrend AND volume spike
+            elif close[i] < lower_aligned[i] and downtrend[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price re-enters cloud OR Tenkan < Kijun (trend weakness)
-            if (not price_above_cloud[i]) or (not tenkan_above_kijun[i]):
+            # Long exit: price reverts to midpoint or reverse signal
+            if close[i] <= mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price re-enters cloud OR Tenkan > Kijun (trend weakness)
-            if (not price_below_cloud[i]) or (not tenkan_below_kijun[i]):
+            # Short exit: price reverts to midpoint or reverse signal
+            if close[i] >= mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_1d1wEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
