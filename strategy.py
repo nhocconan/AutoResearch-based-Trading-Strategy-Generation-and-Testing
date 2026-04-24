@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
 - Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d ATR(14) for regime filter (high ATR = trending market, low ATR = ranging).
-- Entry: Long when price breaks above Donchian upper(20) in high ATR regime with volume > 1.5 * 4h volume MA(20); 
-         Short when price breaks below Donchian lower(20) in high ATR regime with volume > 1.5 * 4h volume MA(20).
-- Exit: ATR trailing stop (2.0 * ATR(14)) or opposite Donchian breakout.
+- HTF: 1d EMA34 for trend filter (price above/below EMA34 defines bull/bear regime).
+- Entry: Long when price breaks above Camarilla R3 in bull regime with volume > 2.0 * 4h volume MA(20);
+         Short when price breaks below Camarilla S3 in bear regime with volume > 2.0 * 4h volume MA(20).
+- Exit: ATR trailing stop (2.5 * ATR(14)) or opposite Camarilla breakout.
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Designed for BTC/ETH: Donchian provides clear trend structure, ATR regime filter avoids false breakouts in chop, 
-  volume confirmation ensures institutional participation. Works in both bull (trend continuation) and bear (strong trends after panic).
+- Designed for BTC/ETH: Camarilla levels provide institutional pivot points, EMA34 filter avoids counter-trend trades,
+  volume spike ensures strong participation. Works in bull (breakouts with trend) and bear (strong moves after panic lows/highs).
 """
 
 import numpy as np
@@ -26,25 +26,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian calculation and volume
+    # Get 4h data for Camarilla calculation and volume
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Get 1d data for ATR regime filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for regime filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
-    tr3 = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 4h volume MA(20) for confirmation
     volume_4h = df_4h['volume'].values
@@ -60,9 +54,16 @@ def generate_signals(prices):
     tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
     atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels (R3, S3) on 4h data using previous day's OHLC
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # Using 4h bar's OHLC to calculate levels for next bar
+    camarilla_r3 = close + 1.1 * (high - low) / 2
+    camarilla_s3 = close - 1.1 * (high - low) / 2
+    # Shift to avoid look-ahead: levels calculated from current bar apply to next bar
+    camarilla_r3 = np.roll(camarilla_r3, 1)
+    camarilla_s3 = np.roll(camarilla_s3, 1)
+    camarilla_r3[0] = np.nan
+    camarilla_s3[0] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,12 +71,12 @@ def generate_signals(prices):
     lowest_since_entry = 0
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20, 14)
+    start_idx = max(34, 20, 14, 1)  # EMA34 needs 34, volume MA needs 20, ATR needs 14, plus 1 for roll
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i]) or 
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(atr_4h[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i]) or 
+            np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(atr_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,32 +87,30 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: 1.5x threshold (balanced to reduce trades)
-        vol_confirmed = curr_volume > 1.5 * vol_ma_4h_aligned[i]
+        # Volume spike confirmation: 2.0x threshold (tight to reduce trades)
+        vol_spike = curr_volume > 2.0 * vol_ma_4h_aligned[i]
         
-        # ATR regime filter: high ATR indicates trending market (good for breakouts)
-        # Use 1d ATR > 20-period 1d ATR MA as regime filter
-        atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-        atr_ma_20_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
-        trending_regime = atr_1d_aligned[i] > atr_ma_20_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        bull_regime = curr_close > ema_34_1d_aligned[i]
+        bear_regime = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
             # Check for entry signals
-            # Long: price breaks above Donchian upper in trending regime with volume confirmation
-            if curr_close > donchian_upper[i] and trending_regime and vol_confirmed:
+            # Long: price breaks above Camarilla R3 in bull regime with volume spike
+            if curr_close > camarilla_r3[i] and bull_regime and vol_spike:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
-            # Short: price breaks below Donchian lower in trending regime with volume confirmation
-            elif curr_close < donchian_lower[i] and trending_regime and vol_confirmed:
+            # Short: price breaks below Camarilla S3 in bear regime with volume spike
+            elif curr_close < camarilla_s3[i] and bear_regime and vol_spike:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
         elif position == 1:
             # Long position: update highest and check exit conditions
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit: ATR trailing stop or opposite breakout
-            if curr_low <= highest_since_entry - 2.0 * atr_4h[i] or curr_close < donchian_lower[i]:
+            # Exit: ATR trailing stop or opposite breakout (below S3)
+            if curr_low <= highest_since_entry - 2.5 * atr_4h[i] or curr_close < camarilla_s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,8 +118,8 @@ def generate_signals(prices):
         elif position == -1:
             # Short position: update lowest and check exit conditions
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit: ATR trailing stop or opposite breakout
-            if curr_high >= lowest_since_entry + 2.0 * atr_4h[i] or curr_close > donchian_upper[i]:
+            # Exit: ATR trailing stop or opposite breakout (above R3)
+            if curr_high >= lowest_since_entry + 2.5 * atr_4h[i] or curr_close > camarilla_r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dATR_Regime_VolumeConfirm_v1"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
