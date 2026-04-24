@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla pivot (H3/L3) breakout with 4h volume spike and 1d ATR regime filter.
-- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h for volume confirmation (20-period average), 1d for Camarilla pivot calculation (prior day OHLC) and ATR regime.
+Hypothesis: 12h Camarilla pivot (H3/L3) breakout with 1d volume spike and ATR regime filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for Camarilla pivot calculation (based on prior day OHLC), volume average and ATR.
 - Camarilla Pivots: identifies key support/resistance levels from prior 1d range.
-- Entry: Long when price breaks above H3 AND volume > 2.0 * 4h average volume AND ATR(14) < ATR(50) on 1d (low volatility regime).
-         Short when price breaks below L3 AND volume > 2.0 * 4h average volume AND ATR(14) < ATR(50) on 1d.
+- Entry: Long when price breaks above H3 AND volume > 2.0 * 20-period average volume AND ATR(14) < ATR(50) (low volatility regime).
+         Short when price breaks below L3 AND volume > 2.0 * 20-period average volume AND ATR(14) < ATR(50).
 - Exit: Opposite Camarilla breakout (price crosses back below H3 for longs, above L3 for shorts).
-- Signal size: 0.20 discrete to minimize fee drag.
-- Session filter: 08-20 UTC to avoid low-liquidity hours.
+- Signal size: 0.25 discrete to minimize fee drag.
 - Camarilla breakouts capture strong momentum moves after testing key levels.
 - Volume confirmation ensures breakout legitimacy.
 - ATR regime filter avoids high-volatility choppy markets where breakouts fail.
@@ -42,10 +41,6 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
     # Calculate 1d Camarilla pivots (H3, L3) from prior 1d OHLC
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:  # Need at least 2 days for prior day calculation
@@ -60,17 +55,16 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 1h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate 4h volume average for confirmation (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate 1d volume average for confirmation (20-period)
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    vol_ma_20_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     # Calculate 1d ATR for regime filter
     if len(df_1d) < 50:
@@ -88,16 +82,9 @@ def generate_signals(prices):
     start_idx = max(20, 50)  # Need 20 for volume MA, 50 for ATR(50)
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if data not ready (check for NaN from alignment or calculations)
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
             np.isnan(atr_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -131,27 +118,27 @@ def generate_signals(prices):
             breakout_up = curr_high >= camarilla_h3_aligned[i] and prev_close < camarilla_h3_aligned[i-1]
             breakout_down = curr_low <= camarilla_l3_aligned[i] and prev_close > camarilla_l3_aligned[i-1]
             
-            # Volume confirmation: current volume > 2.0 * 4h average volume (aligned)
-            volume_confirm = curr_volume > 2.0 * vol_ma_20_4h_aligned[i] if not np.isnan(vol_ma_20_4h_aligned[i]) else False
+            # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
+            volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
             
-            # ATR regime filter: ATR(14) < ATR(50) on 1d (low volatility regime)
+            # ATR regime filter: ATR(14) < ATR(50) (low volatility regime)
             atr_regime = atr_14_1d_aligned[i] < atr_50_1d_aligned[i]
             
             if breakout_up and volume_confirm and atr_regime:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif breakout_down and volume_confirm and atr_regime:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.20
+            signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_Breakout_4hVolumeSpike_1dATRRegime_v1"
-timeframe = "1h"
+name = "12h_Camarilla_H3L3_Breakout_1dVolumeSpike_ATRRegime_v1"
+timeframe = "12h"
 leverage = 1.0
