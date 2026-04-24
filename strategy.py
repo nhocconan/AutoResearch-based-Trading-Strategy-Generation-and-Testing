@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 - Primary timeframe: 4h for entries/exits.
 - HTF: 1d EMA34 for trend direction (bullish if price > EMA34, bearish if price < EMA34).
-- Volume: Current 4h volume > 1.5 * 20-period volume MA to avoid low-volume breakouts.
+- Volume: Current 4h volume > 2.0 * 20-period volume MA to avoid low-volume breakouts.
 - Entry: Long when price breaks above H3 level AND 1d EMA34 bullish AND volume spike.
          Short when price breaks below L3 level AND 1d EMA34 bearish AND volume spike.
 - Exit: Opposite Camarilla level (L3 for long, H3 for short) or loss of volume confirmation.
@@ -63,8 +63,8 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Volume confirmation: current 4h volume > 1.5 * 20-period 1d volume MA (aligned)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    # Volume confirmation: current 4h volume > 2.0 * 20-period 1d volume MA (aligned)
+    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
