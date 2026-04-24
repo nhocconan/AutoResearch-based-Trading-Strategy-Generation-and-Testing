@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R extreme reversal with 1d EMA50 trend filter and volume confirmation.
-- Primary timeframe: 6h for balance between signal frequency and noise reduction.
+Hypothesis: 12h Williams %R extreme with 1d trend filter and volume confirmation.
+- Primary timeframe: 12h for lower trade frequency and reduced fee drag.
 - HTF: 1d EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Williams %R: 14-period oscillator identifying overbought/oversold conditions.
-- Volume: Current 6h volume > 1.8 * 20-period 6h volume MA to confirm participation.
+- Williams %R: 14-period momentum oscillator measuring overbought/oversold levels.
+- Volume: Current 12h volume > 1.8 * 20-period 12h volume MA to confirm participation.
 - Entry: Long when Williams %R < -80 (oversold) AND 1d EMA50 bullish AND volume spike.
          Short when Williams %R > -20 (overbought) AND 1d EMA50 bearish AND volume spike.
-- Exit: Opposite Williams %R level (Williams %R > -20 for long, Williams %R < -80 for short).
-- Signal size: 0.25 discrete to balance return and drawdown.
-- Target: 80-120 total trades over 4 years (20-30/year) for 6h timeframe.
-Williams %R extremes often precede reversals, especially when aligned with the daily trend.
-Volume spikes confirm institutional interest in the move. Works in both bull and bear markets
-by only taking trades in the direction of the 1d trend, avoiding counter-trend whipsaws.
+- Exit: Opposite Williams %R level (%R > -20 for long, %R < -80 for short) or loss of volume confirmation.
+- Signal size: 0.25 discrete to balance profit potential and drawdown control.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+This strategy captures mean reversions in extreme momentum while aligning with the daily trend,
+avoiding counter-trend trades. Volume spikes filter for institutional interest, working in both
+bull and bear markets by only taking trades in the direction of the 1d trend.
 """
 
 import numpy as np
@@ -30,12 +30,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Williams %R(14)
+    # Calculate 12h Williams %R(14)
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    denominator = highest_high - lowest_low
+    williams_r = np.where(
+        denominator != 0,
+        -100.0 * (highest_high - close) / denominator,
+        -50.0  # neutral when no range
+    )
     
     # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -46,22 +49,20 @@ def generate_signals(prices):
     df_1d_close = df_1d['close'].values
     ema_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 20-period 1d volume MA
-    df_1d_volume = df_1d['volume'].values
-    vol_ma_1d = pd.Series(df_1d_volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period 12h volume MA
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 6h
+    # Align HTF indicators to 12h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Volume confirmation: current 6h volume > 1.8 * 20-period 1d volume MA (aligned)
-    volume_spike = volume > (1.8 * vol_ma_1d_aligned)
+    # Volume confirmation: current 12h volume > 1.8 * 20-period 12h volume MA
+    volume_spike = volume > (1.8 * vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 14)  # Need enough bars for EMA50, volume MA, and Williams %R
+    start_idx = max(14, 50, 20)  # Need enough bars for Williams %R, EMA50, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -73,30 +74,30 @@ def generate_signals(prices):
             continue
         
         curr_close = close[i]
-        curr_wr = williams_r[i]
+        curr_williams_r = williams_r[i]
         ema_val = ema_1d_aligned[i]
         
         if position == 0:
             # Check for entry signals with volume spike
             if volume_spike[i]:
                 # Bullish: Williams %R < -80 (oversold) AND 1d EMA50 bullish (close > EMA)
-                if curr_wr < -80.0 and curr_close > ema_val:
+                if curr_williams_r < -80.0 and curr_close > ema_val:
                     signals[i] = 0.25
                     position = 1
                 # Bearish: Williams %R > -20 (overbought) AND 1d EMA50 bearish (close < EMA)
-                elif curr_wr > -20.0 and curr_close < ema_val:
+                elif curr_williams_r > -20.0 and curr_close < ema_val:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: Williams %R > -20 (overbought)
-            if curr_wr > -20.0:
+            # Long exit: Williams %R > -20 (overbought) OR loss of volume confirmation
+            if curr_williams_r > -20.0 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R < -80 (oversold)
-            if curr_wr < -80.0:
+            # Short exit: Williams %R < -80 (oversold) OR loss of volume confirmation
+            if curr_williams_r < -80.0 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_Extreme_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
