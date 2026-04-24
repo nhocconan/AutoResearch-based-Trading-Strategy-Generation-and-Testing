@@ -1,162 +1,107 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d KAMA trend + RSI(2) mean reversion + 1w ADX regime filter.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w for ADX regime filter (ADX > 25 = trending, ADX < 20 = ranging).
-- Entry logic:
-    * In trending regime (ADX > 25): Long when price > KAMA AND RSI(2) < 10 (pullback in uptrend).
-                                 Short when price < KAMA AND RSI(2) > 90 (pullback in downtrend).
-    * In ranging regime (ADX < 20): Long when RSI(2) < 15 AND price < lower Bollinger Band(20,2).
-                                 Short when RSI(2) > 85 AND price > upper Bollinger Band(20,2).
-- Exit: Opposite signal or RSI(2) crosses 50 (mean reversion complete).
-- Signal size: 0.25 discrete to minimize fee drag.
-- KAMA adapts to market noise, reducing false signals in chop.
-- RSI(2) captures short-term extremes for mean reversion.
-- ADX regime filter ensures we use the right strategy for market conditions.
-- Works in bull markets (trend following on pullbacks) and bear markets (mean reversion in ranges, trend following on bounces).
-- Estimated trades: ~60 total over 4 years (~15/year) due to regime-specific filters reducing overtrading.
+Hypothesis: 6h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for trend filter (price above/below EMA34) and volume spike detection.
+- Entry: Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume > 1.5x 20-period MA.
+         Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume > 1.5x 20-period MA.
+- Exit: Opposite Donchian breakout (price crosses Donchian(20) mid-line) OR trend filter fails.
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- Donchian channels provide clear breakout levels with built-in trend following.
+- 1d EMA34 filter ensures we only trade in the direction of the higher timeframe trend.
+- Volume confirmation avoids false breakouts during low participation periods.
+- Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
+- Estimated trades: ~80 total over 4 years (~20/year) based on Donchian breakout frequency with filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def kama(close, er_period=10, fast_sc=2, slow_sc=30):
-    """Kaufman Adaptive Moving Average."""
-    close = pd.Series(close)
-    change = abs(close.diff(er_period))
-    volatility = close.diff().abs().rolling(window=er_period, min_periods=1).sum()
-    er = change / volatility.replace(0, 1e-10)
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    kama = [close.iloc[0]]
-    for i in range(1, len(close)):
-        kama.append(kama[-1] + sc.iloc[i] * (close.iloc[i] - kama[-1]))
-    return np.array(kama)
+def ema(values, period):
+    """Calculate Exponential Moving Average."""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def rsi(close, period=2):
-    """Relative Strength Index."""
-    close = pd.Series(close)
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period, min_periods=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period, min_periods=period).mean()
-    rs = gain / loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def bollinger_bands(close, period=20, std_dev=2):
-    """Bollinger Bands."""
-    close = pd.Series(close)
-    ma = close.rolling(window=period, min_periods=period).mean()
-    std = close.rolling(window=period, min_periods=period).std()
-    upper = ma + (std * std_dev)
-    lower = ma - (std * std_dev)
-    return upper.values, lower.values
-
-def adx(high, low, close, period=14):
-    """Average Directional Index."""
-    high = pd.Series(high)
-    low = pd.Series(low)
-    close = pd.Series(close)
-    
-    plus_dm = high.diff()
-    minus_dm = low.diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm > 0] = 0
-    
-    tr1 = high - low
-    tr2 = abs(high - close.shift())
-    tr3 = abs(low - close.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    atr = tr.rolling(window=period, min_periods=period).mean()
-    
-    plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).sum() / atr)
-    minus_di = 100 * (abs(minus_dm.rolling(window=period, min_periods=period).sum()) / atr)
-    
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-10)) * 100
-    adx = dx.rolling(window=period, min_periods=period).mean()
-    
-    return adx.values
+def donchian_channels(high, low, period):
+    """Calculate Donchian channels: upper, lower, middle."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    middle = (upper + lower) / 2
+    return upper, lower, middle
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 1d indicators
-    kama_vals = kama(close, er_period=10, fast_sc=2, slow_sc=30)
-    rsi_vals = rsi(close, period=2)
-    bb_upper, bb_lower = bollinger_bands(close, period=20, std_dev=2)
-    
-    # Calculate 1w ADX for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d trend filter: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    adx_1w = adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, period=14)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w, additional_delay_bars=1)
+    ema34_1d = ema(df_1d['close'].values, 34)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate 1d volume average for confirmation
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Calculate 6h Donchian(20) channels
+    donch_hi, donch_lo, donch_mid = donchian_channels(high, low, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for all indicators
+    start_idx = 40  # Need sufficient data for Donchian/EMA/volume
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or np.isnan(donch_mid[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_rsi = rsi_vals[i]
-        curr_adx = adx_1w_aligned[i]
+        curr_volume = volume[i]
+        curr_vol_ma = vol_ma_1d_aligned[i]
         
-        # Exit conditions: opposite signal or RSI(2) crosses 50 (mean reversion complete)
+        # Exit conditions: opposite Donchian breakout OR trend filter fails
         if position != 0:
-            # Exit long: price < KAMA OR RSI(2) > 50
+            # Exit long: price falls below Donchian middle OR price falls below 1d EMA34
             if position == 1:
-                if curr_close < kama_vals[i] or curr_rsi > 50:
+                if curr_close < donch_mid[i] or curr_close < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price > KAMA OR RSI(2) < 50
+            # Exit short: price rises above Donchian middle OR price rises above 1d EMA34
             elif position == -1:
-                if curr_close > kama_vals[i] or curr_rsi < 50:
+                if curr_close > donch_mid[i] or curr_close > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions based on regime
+        # Volume confirmation: current volume > 1.5x 1d volume MA
+        volume_confirmed = curr_volume > 1.5 * curr_vol_ma
+        
+        # Entry conditions: Donchian breakout with trend and volume confirmation
         if position == 0:
-            # Trending regime (ADX > 25): trend following on pullbacks
-            if curr_adx > 25:
-                # Long: price > KAMA AND RSI(2) < 10 (strong pullback in uptrend)
-                if curr_close > kama_vals[i] and curr_rsi < 10:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: price < KAMA AND RSI(2) > 90 (strong pullback in downtrend)
-                elif curr_close < kama_vals[i] and curr_rsi > 90:
-                    signals[i] = -0.25
-                    position = -1
-            # Ranging regime (ADX < 20): mean reversion at extremes
-            elif curr_adx < 20:
-                # Long: RSI(2) < 15 AND price < lower Bollinger Band (oversold)
-                if curr_rsi < 15 and curr_close < bb_lower[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: RSI(2) > 85 AND price > upper Bollinger Band (overbought)
-                elif curr_rsi > 85 and curr_close > bb_upper[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price breaks above Donchian high AND above 1d EMA34 AND volume confirmed
+            if curr_close > donch_hi[i] and curr_close > ema34_1d_aligned[i] and volume_confirmed:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below Donchian low AND below 1d EMA34 AND volume confirmed
+            elif curr_close < donch_lo[i] and curr_close < ema34_1d_aligned[i] and volume_confirmed:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
             # Long position: maintain signal
             signals[i] = 0.25
@@ -166,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI2_ADXRegime_v1"
-timeframe = "1d"
+name = "6h_Donchian20_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
