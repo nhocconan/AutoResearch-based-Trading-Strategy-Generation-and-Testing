@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume confirmation.
-- Long when price breaks above Camarilla H3 level and close > 4h EMA50 (bullish trend)
-- Short when price breaks below Camarilla L3 level and close < 4h EMA50 (bearish trend)
-- Volume must be > 1.8x 24-period average for high-conviction breakouts
-- Uses 4h HTF for trend filter to reduce noise and align with higher timeframe structure
-- Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
-- Session filter: 08-20 UTC to avoid low-liquidity periods
-- Designed to work in both bull and bear markets via strong trend filter and breakout structure
+Hypothesis: 6h Elder Ray Index with 1d ADX regime filter and volume confirmation.
+- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+- Long when Bull Power > 0 and rising (2-bar momentum) and ADX > 25 (trending market)
+- Short when Bear Power < 0 and falling (2-bar momentum) and ADX > 25 (trending market)
+- Volume must be > 1.5x 20-period average for confirmation
+- Uses 1d HTF for ADX regime filter to avoid whipsaws in ranging markets
+- Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+- Works in both bull and bear markets by only taking trend-following entries when ADX confirms trend strength
 """
 
 import numpy as np
@@ -24,85 +24,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels (based on previous day's range)
-    camarilla_h3 = np.full(n, np.nan)
-    camarilla_l3 = np.full(n, np.nan)
-    pivot = np.full(n, np.nan)
+    # Calculate EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    for i in range(1, n):
-        # Use previous day (24 bars of 1h = 1d)
-        if i >= 24:
-            prev_high = np.max(high[i-24:i])
-            prev_low = np.min(low[i-24:i])
-            prev_close = close[i-1]
-            
-            pivot[i] = (prev_high + prev_low + prev_close) / 3.0
-            range_val = prev_high - prev_low
-            camarilla_h3[i] = pivot[i] + range_val * 1.1 / 4.0  # H3 level
-            camarilla_l3[i] = pivot[i] - range_val * 1.1 / 4.0  # L3 level
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA13
+    bear_power = low - ema_13   # Bear Power = Low - EMA13
     
-    # Get 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Momentum of Elder Ray (2-bar change)
+    bull_power_momentum = bull_power - np.roll(bull_power, 2)
+    bear_power_momentum = bear_power - np.roll(bear_power, 2)
+    # Handle first 2 bars
+    bull_power_momentum[:2] = 0
+    bear_power_momentum[:2] = 0
+    
+    # Get 1d data ONCE before loop for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 4h EMA50
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ADX
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 4h EMA50 to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
+                            np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Volume confirmation: > 1.8x 24-period average volume
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > 1.8 * vol_ma
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    # First bar
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Smoothed TR, DM+, DM-
+    tr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    # Handle division by zero
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume confirmation: > 1.5x 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(24, 50, 24) + 1
+    start_idx = max(13, 20, 14) + 2  # +2 for momentum calculation
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
-            np.isnan(pivot[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_ma[i]) or not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(bull_power_momentum[i]) or np.isnan(bear_power_momentum[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla H3, trend up (close > EMA50), volume spike
-            if close[i] > camarilla_h3[i] and close[i] > ema_50_4h_aligned[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: Bull Power > 0 and rising momentum, ADX > 25 (trending), volume spike
+            if bull_power[i] > 0 and bull_power_momentum[i] > 0 and adx_1d_aligned[i] > 25 and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3, trend down (close < EMA50), volume spike
-            elif close[i] < camarilla_l3[i] and close[i] < ema_50_4h_aligned[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: Bear Power < 0 and falling momentum, ADX > 25 (trending), volume spike
+            elif bear_power[i] < 0 and bear_power_momentum[i] < 0 and adx_1d_aligned[i] > 25 and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below Camarilla L3 (mean reversion) or trend breaks
-            if close[i] < camarilla_l3[i] or close[i] < ema_50_4h_aligned[i]:
+            # Long exit: Bull Power becomes negative or momentum turns negative
+            if bull_power[i] <= 0 or bull_power_momentum[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Camarilla H3 (mean reversion) or trend breaks
-            if close[i] > camarilla_h3[i] or close[i] > ema_50_4h_aligned[i]:
+            # Short exit: Bear Power becomes positive or momentum turns positive
+            if bear_power[i] >= 0 or bear_power_momentum[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_4hEMA50_VolumeSpike_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_ElderRay_1dADXRegime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
