@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation, active only during 08-20 UTC session.
-- Uses 1h timeframe (primary) and 1d HTF for EMA34 trend alignment (more stable than 4h)
-- Camarilla levels calculated from prior 1h OHLC: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
-- Breakout logic: long when price crosses above H3 with volume confirmation and uptrend, short when price crosses below L3 with volume confirmation and downtrend
-- Trend filter: only long when price > 1d EMA34, only short when price < 1d EMA34
-- Volume confirmation: current volume > 1.5 * 20-period volume MA to avoid low-volume false signals
-- Session filter: trade only between 08:00-20:00 UTC to reduce noise and focus on liquid sessions
-- Discrete signal size: 0.20 to minimize fee churn and manage drawdown
-- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe as per research
-- Works in both bull/bear: trend filter avoids counter-trend trades, Camarilla breakouts capture momentum in all regimes
+Hypothesis: 6h Williams %R with 1d EMA34 trend filter and volume confirmation.
+- Williams %R(14) identifies overbought/oversold conditions on 6h chart
+- Trend filter: only long when price > 1d EMA34 (uptrend), only short when price < 1d EMA34 (downtrend)
+- Volume confirmation: current volume > 1.3 * 20-period volume MA to filter low-noise breakouts
+- Entry: Williams %R crosses above -20 from below (bullish momentum) in uptrend OR crosses below -80 from above (bearish momentum) in downtrend
+- Exit: Williams %R returns to -50 level (mean reversion) or opposite signal
+- Discrete signal size: 0.25 to balance profit potential and drawdown control
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+- Works in both bull/bear: trend filter ensures we trade with higher timeframe momentum, Williams %R captures short-term exhaustion
 """
 
 import numpy as np
@@ -26,7 +25,6 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
     # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -37,64 +35,63 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate prior 1h Camarilla levels (H3 and L3)
-    # H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
-    camarilla_h3 = close + 1.1 * (high - low)
-    camarilla_l3 = close - 1.1 * (high - low)
+    # Calculate Williams %R(14) on 6h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    # Volume confirmation: current volume > 1.3 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * volume_ma)
+    volume_confirm = volume > (1.3 * volume_ma)
     
     # Trend filter: price above/below 1d EMA34
     uptrend = close > ema_34_1d_aligned
     downtrend = close < ema_34_1d_aligned
     
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA(20)
+    start_idx = max(34, 20, 14)  # Need 1d EMA34, volume MA(20), Williams %R(14)
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i]) or
-            not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above H3 AND uptrend AND volume confirmation
-            if close[i] > camarilla_h3[i] and close[i-1] <= camarilla_h3[i-1] and uptrend[i] and volume_confirm[i]:
-                signals[i] = 0.20
+            # Long: Williams %R crosses above -20 from below AND uptrend AND volume confirmation
+            if williams_r[i] > -20 and williams_r[i-1] <= -20 and uptrend[i] and volume_confirm[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price crosses below L3 AND downtrend AND volume confirmation
-            elif close[i] < camarilla_l3[i] and close[i-1] >= camarilla_l3[i-1] and downtrend[i] and volume_confirm[i]:
-                signals[i] = -0.20
+            # Short: Williams %R crosses below -80 from above AND downtrend AND volume confirmation
+            elif williams_r[i] < -80 and williams_r[i-1] >= -80 and downtrend[i] and volume_confirm[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverts to prior 1h close (mean reversion) or reverse signal
-            if close[i] <= camarilla_l3[i]:
+            # Long exit: Williams %R returns to -50 (mean reversion) or bearish signal
+            if williams_r[i] >= -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverts to prior 1h close (mean reversion) or reverse signal
-            if close[i] >= camarilla_h3[i]:
+            # Short exit: Williams %R returns to -50 (mean reversion) or bullish signal
+            if williams_r[i] <= -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_1dEMA34_VolumeConfirm_Session_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
