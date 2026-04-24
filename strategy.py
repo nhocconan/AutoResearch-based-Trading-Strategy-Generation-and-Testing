@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1d ATR regime filter and volume spike confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d ATR(14) for regime filter (ATR(14)/ATR(50) > 0.8 = high volatility regime favorable for breakouts).
-- Donchian channels from 6h: upper = 20-period high, lower = 20-period low.
-- Entry: Long when close breaks above upper band AND ATR regime favorable AND volume > 1.5 * 6h volume MA(20);
-         Short when close breaks below lower band AND ATR regime favorable AND volume > 1.5 * 6h volume MA(20).
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
+- Camarilla levels from 1d: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2.
+- Entry: Long when close breaks above H3 AND price > 1d EMA50 AND volume > 2.0 * 12h volume MA(20);
+         Short when close breaks below L3 AND price < 1d EMA50 AND volume > 2.0 * 12h volume MA(20).
 - Exit: ATR-based trailing stop (2.5 * ATR(14)) from highest high/lowest low since entry.
 - Signal size: 0.25 discrete to control fee drag.
-- Donchian breakouts capture momentum; ATR regime filter avoids low-volatility choppy markets;
-  volume confirmation ensures institutional participation. Works in bull markets via breakouts and
-  bear markets via breakdowns, with volatility-adjusted stops to manage drawdown.
+- Works in bull markets via long signals and bear markets via short signals, with stops to manage drawdown.
+- Designed for low trade frequency to avoid fee drag while maintaining edge in both regimes.
 """
 
 import numpy as np
@@ -19,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -28,41 +27,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR regime filter
+    # Get 1d data for EMA50 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d ATR(14) and ATR(50) for regime filter
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], tr_1d])
-    atr14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr50_1d = pd.Series(tr_1d).rolling(window=50, min_periods=50).mean().values
-    # ATR regime: ATR(14)/ATR(50) > 0.8 indicates elevated volatility favorable for breakouts
-    atr_ratio = np.divide(atr14_1d, atr50_1d, out=np.zeros_like(atr14_1d), where=atr50_1d!=0)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 6h Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla levels: H3 and L3
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate ATR(14) for 6h timeframe (for stops)
+    # Calculate ATR(14) for 12h timeframe
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[high[0] - low[0]], tr])
-    atr14_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr = np.concatenate([[high[0] - low[0]], tr])  # first TR is high-low
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume MA(20) for 6h timeframe
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume MA(20) for 12h timeframe
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,15 +64,15 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 20)  # ATR50 needs 50, Donchian needs 20, volume MA needs 20
+    start_idx = max(50, 20, 14)  # EMA50 needs 50, volume MA needs 20, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or 
-            np.isnan(vol_ma_6h[i]) or 
-            np.isnan(atr14_6h[i])):
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or 
+            np.isnan(vol_ma_12h[i]) or 
+            np.isnan(atr14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,27 +85,23 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_atr = atr14_6h[i]
-        curr_atr_ratio = atr_ratio_aligned[i]
+        curr_atr = atr14[i]
         
-        # Volume confirmation: 1.5x threshold
-        vol_confirm = curr_volume > 1.5 * vol_ma_6h[i]
-        
-        # ATR regime filter: elevated volatility (>0.8 ratio)
-        vol_regime = curr_atr_ratio > 0.8
+        # Volume confirmation: 2.0x threshold for strict entry
+        vol_confirm = curr_volume > 2.0 * vol_ma_12h[i]
         
         if position == 0:
             # Check for entry signals
-            if vol_confirm and vol_regime:
-                # Long: Close breaks above upper Donchian band
-                if curr_close > highest_20[i]:
+            if vol_confirm:
+                # Long: Close breaks above H3 AND price > 1d EMA50 (uptrend)
+                if curr_close > h3_aligned[i] and curr_close > ema_50_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
                     lowest_since_entry = curr_close
-                # Short: Close breaks below lower Donchian band
-                elif curr_close < lowest_20[i]:
+                # Short: Close breaks below L3 AND price < 1d EMA50 (downtrend)
+                elif curr_close < l3_aligned[i] and curr_close < ema_50_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
@@ -151,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dATRRegime_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
