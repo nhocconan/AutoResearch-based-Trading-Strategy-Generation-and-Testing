@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1w for EMA34 trend direction and 1d for volume spike filter.
-- Donchian Channel: Upper = 20-period high, Lower = 20-period low.
-- Trend Filter: Price > EMA34(1w) for long bias, Price < EMA34(1w) for short bias.
-- Volume Confirmation: Current volume > 2.0 * 20-period average volume (1d).
-- Entry: Long when close breaks above Upper AND long bias AND volume confirmation.
-         Short when close breaks below Lower AND short bias AND volume confirmation.
-- Exit: Opposite Donchian breakout (long exits when close < Lower, short exits when close > Upper).
+Hypothesis: 4h Williams Alligator + Elder Ray + 1d Fractal Confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d for Williams fractal confirmation and 1w for EMA34 trend filter.
+- Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) - smoothed with SMA.
+- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+- Fractal Confirmation: 1d Williams fractals require 2-bar confirmation delay.
+- Entry: Long when Lips > Teeth > Jaw AND Bull Power > 0 AND bullish fractal confirmed.
+         Short when Lips < Teeth < Jaw AND Bear Power < 0 AND bearish fractal confirmed.
+- Exit: Opposite Alligator alignment (Lips crosses Jaw) or power signal reversal.
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in both bull and bear markets by aligning with 1w trend and filtering with volume spikes.
+- Works in both bull and bear markets by aligning with Alligator trend and filtering with Elder Ray and fractals.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,40 +26,66 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Calculate 1w EMA34 for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:  # Need sufficient data for EMA34
+    if len(df_1w) < 34:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate 1d volume average for confirmation (20-period)
+    # Calculate 1d Williams fractals for confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Calculate Donchian Channel(20) on 12h timeframe
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate Williams Alligator on 4h timeframe
+    jaw_period = 13
+    jaw_shift = 8
+    teeth_period = 8
+    teeth_shift = 5
+    lips_period = 5
+    lips_shift = 3
+    
+    # Jaw: SMA(13) shifted 8 bars ahead
+    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().values
+    jaw = np.roll(jaw, -jaw_shift)  # shift left (future)
+    jaw[:jaw_shift] = np.nan  # fill shifted values with NaN
+    
+    # Teeth: SMA(8) shifted 5 bars ahead
+    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().values
+    teeth = np.roll(teeth, -teeth_shift)
+    teeth[:teeth_shift] = np.nan
+    
+    # Lips: SMA(5) shifted 3 bars ahead
+    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().values
+    lips = np.roll(lips, -lips_shift)
+    lips[:lips_shift] = np.nan
+    
+    # Calculate Elder Ray on 4h timeframe
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 34)  # Need 20 for Donchian, 34 for EMA34
+    start_idx = max(jaw_shift, teeth_period, lips_period, 13)  # Need sufficient data
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or
+            np.isnan(bullish_fractal_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or
+            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,43 +94,41 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        curr_volume = volume[i]
-        upper = highest_high[i]
-        lower = lowest_low[i]
         
-        # Trend filter: price > EMA34 for long bias, price < EMA34 for short bias
-        long_bias = curr_close > ema34_1w_aligned[i]
-        short_bias = curr_close < ema34_1w_aligned[i]
+        # Alligator alignment: Lips > Teeth > Jaw for bullish, Lips < Teeth < Jaw for bearish
+        bullish_alligator = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alligator = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Volume confirmation: current volume > 2.0 * 20-period average volume
-        volume_confirm = curr_volume > 2.0 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
+        # Elder Ray: Bull Power > 0 for bullish bias, Bear Power < 0 for bearish bias
+        bullish_elder = bull_power[i] > 0
+        bearish_elder = bear_power[i] < 0
         
-        # Donchian breakout conditions
-        broke_above_upper = curr_close > upper
-        broke_below_lower = curr_close < lower
+        # Fractal confirmation: 1d Williams fractals require confirmation
+        bullish_fractal = bullish_fractal_aligned[i] == 1
+        bearish_fractal = bearish_fractal_aligned[i] == 1
         
-        # Exit conditions: opposite Donchian breakout
+        # Exit conditions: opposite Alligator alignment or power signal reversal
         if position != 0:
-            # Exit long: close breaks below lower band
+            # Exit long: bearish Alligator alignment or bearish Elder Ray
             if position == 1:
-                if curr_close < lower:
+                if bearish_alligator or not bullish_elder:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: close breaks above upper band
+            # Exit short: bullish Alligator alignment or bullish Elder Ray
             elif position == -1:
-                if curr_close > upper:
+                if bullish_alligator or not bearish_elder:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with trend and volume filters
+        # Entry conditions: Alligator alignment with Elder Ray and fractal confirmation
         if position == 0:
-            # Long: break above upper AND long bias AND volume confirmation
-            long_condition = broke_above_upper and long_bias and volume_confirm
+            # Long: bullish Alligator AND bullish Elder Ray AND bullish fractal
+            long_condition = bullish_alligator and bullish_elder and bullish_fractal
             
-            # Short: break below lower AND short bias AND volume confirmation
-            short_condition = broke_below_lower and short_bias and volume_confirm
+            # Short: bearish Alligator AND bearish Elder Ray AND bearish fractal
+            short_condition = bearish_alligator and bearish_elder and bearish_fractal
             
             if long_condition:
                 signals[i] = 0.25
@@ -121,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1wEMA34Trend_1dVolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_ElderRay_1dFractalConfirm_1wEMA34Trend_v1"
+timeframe = "4h"
 leverage = 1.0
