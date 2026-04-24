@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume confirmation.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume confirmation.
 - Long when price breaks above Camarilla H3 level and close > 1d EMA50 (bullish trend)
 - Short when price breaks below Camarilla L3 level and close < 1d EMA50 (bearish trend)
-- Volume must be > 1.8x 30-period average for high-conviction breakouts
-- ATR(12) trailing stop: exit when price moves 2.0x ATR from extreme since entry
+- Volume must be > 1.8x 24-period average for high-conviction breakouts
+- ATR(14) trailing stop: exit when price moves 2.0x ATR from extreme since entry
 - Uses 1d HTF for trend filter (proven effective across multiple experiments)
-- Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+- Target: 100-180 total trades over 4 years (25-45/year) to balance opportunity and cost
 - Designed to work in both bull and bear markets via strong trend filter and breakout structure
 """
 
@@ -30,10 +30,10 @@ def generate_signals(prices):
     pivot = np.full(n, np.nan)
     
     for i in range(1, n):
-        # Use previous day (1 bar of 12h = 12h, but we need 24h = 2 bars of 12h)
-        if i >= 2:
-            prev_high = np.max(high[i-2:i])
-            prev_low = np.min(low[i-2:i])
+        # Use previous day (6 bars of 4h = 24h)
+        if i >= 6:
+            prev_high = np.max(high[i-6:i])
+            prev_low = np.min(low[i-6:i])
             prev_close = close[i-1]
             
             pivot[i] = (prev_high + prev_low + prev_close) / 3.0
@@ -50,19 +50,19 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 12h timeframe
+    # Align 1d EMA50 to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: > 1.8x 30-period average volume
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: > 1.8x 24-period average volume
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > 1.8 * vol_ma
     
-    # ATR(12) for volatility and trailing stop
+    # ATR(14) for volatility and trailing stop
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=12, min_periods=12).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,7 +70,7 @@ def generate_signals(prices):
     lowest_low_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(2, 50, 30, 12) + 1
+    start_idx = max(6, 50, 24, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_1dEMA50_VolumeSpike_ATRTrailingStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dEMA50_VolumeSpike_ATRTrailingStop_v1"
+timeframe = "4h"
 leverage = 1.0
