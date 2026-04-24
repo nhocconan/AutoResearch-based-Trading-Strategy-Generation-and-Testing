@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 1d volume spike and ATR regime filter.
+Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume spike confirmation.
 - Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for volume average and ATR calculation.
+- HTF: 1d for ATR calculation and volume average.
 - Donchian Channel: identifies breakouts from 20-period high/low.
-- Entry: Long when price breaks above 20-period high AND volume > 2.0 * 1d average volume AND ATR(14) < ATR(50) (low volatility regime).
-         Short when price breaks below 20-period low AND volume > 2.0 * 1d average volume AND ATR(14) < ATR(50).
-- Exit: Opposite Donchian breakout signal.
+- Entry: Long when price breaks above 20-period high AND volume > 1.8 * 1d average volume AND ATR(14) < ATR(50) (low volatility regime).
+         Short when price breaks below 20-period low AND volume > 1.8 * 1d average volume AND ATR(14) < ATR(50).
+- Exit: Opposite Donchian breakout signal or ATR regime flip (high volatility).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Donchian breakouts capture strong momentum moves.
-- Volume confirmation ensures breakout legitimacy.
-- ATR regime filter avoids high-volatility choppy markets where breakouts fail.
-- Works in both bull and bear markets as it captures volatility expansion after contraction.
+- Donchian breakouts capture strong momentum moves after consolidation.
+- Volume confirmation ensures breakout legitimacy with institutional participation.
+- ATR regime filter avoids false breakouts in high-volatility choppy markets.
+- Works in both bull and bear markets as it captures volatility expansion after contraction periods.
 """
 
 import numpy as np
@@ -84,17 +84,17 @@ def generate_signals(prices):
         curr_volume = volume[i]
         prev_close = close[i-1]
         
-        # Exit conditions: opposite Donchian breakout
+        # Exit conditions: opposite Donchian breakout or ATR regime flip to high volatility
         if position != 0:
-            # Exit long: price breaks below Donchian low
+            # Exit long: price breaks below Donchian low OR ATR regime shifts to high volatility
             if position == 1:
-                if curr_low <= donchian_low[i]:
+                if curr_low <= donchian_low[i] or atr_14_1d_aligned[i] >= atr_50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Donchian high
+            # Exit short: price breaks above Donchian high OR ATR regime shifts to high volatility
             elif position == -1:
-                if curr_high >= donchian_high[i]:
+                if curr_high >= donchian_high[i] or atr_14_1d_aligned[i] >= atr_50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
@@ -105,8 +105,8 @@ def generate_signals(prices):
             breakout_up = curr_high >= donchian_high[i] and prev_close < donchian_high[i-1]
             breakout_down = curr_low <= donchian_low[i] and prev_close > donchian_low[i-1]
             
-            # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
-            volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
+            # Volume confirmation: current volume > 1.8 * 20-period average volume (aligned)
+            volume_confirm = curr_volume > 1.8 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
             
             # ATR regime filter: ATR(14) < ATR(50) (low volatility regime)
             atr_regime = atr_14_1d_aligned[i] < atr_50_1d_aligned[i]
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dVolumeSpike_ATRRegime_v1"
+name = "4h_Donchian20_Breakout_1dVolumeSpike_ATRRegime_v2"
 timeframe = "4h"
 leverage = 1.0
