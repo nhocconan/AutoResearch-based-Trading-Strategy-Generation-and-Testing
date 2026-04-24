@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams Alligator + Elder Ray + 1d Fractal Confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for Williams fractal confirmation and 1w for EMA34 trend filter.
-- Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) - smoothed with SMA.
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-- Fractal Confirmation: 1d Williams fractals require 2-bar confirmation delay.
-- Entry: Long when Lips > Teeth > Jaw AND Bull Power > 0 AND bullish fractal confirmed.
-         Short when Lips < Teeth < Jaw AND Bear Power < 0 AND bearish fractal confirmed.
-- Exit: Opposite Alligator alignment (Lips crosses Jaw) or power signal reversal.
+Hypothesis: 1d KAMA + RSI(2) + Choppiness Index regime filter.
+- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
+- HTF: 1w for KAMA trend direction.
+- KAMA: Kaufman Adaptive Moving Average with ER=10, fast=2, slow=30.
+- RSI(2): Ultra-short RSI for mean-reversion entries.
+- Choppiness Index: CHOP(14) > 61.8 = range (mean revert), CHOP < 38.2 = trending (avoid).
+- Entry: Long when KAMA up, RSI(2)<10, and CHOP>61.8 (oversold in range).
+         Short when KAMA down, RSI(2)>90, and CHOP>61.8 (overbought in range).
+- Exit: RSI(2)>50 for long exit, RSI(2)<50 for short exit.
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in both bull and bear markets by aligning with Alligator trend and filtering with Elder Ray and fractals.
+- Works in ranging markets (2025+) by fading extremes in chop, avoids trending markets.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need sufficient data for calculations
+    if n < 50:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -27,108 +27,102 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate 1w EMA34 for trend filter
+    # Calculate 1w KAMA for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 30:  # Need sufficient data for KAMA
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # KAMA(ER=10, fast=2, slow=30)
+    def kama(close, er_period=10, fast=2, slow=30):
+        n = len(close)
+        kama_vals = np.full(n, np.nan)
+        if n < er_period + 1:
+            return kama_vals
+        change = np.abs(np.diff(close, n=er_period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama_vals[er_period] = close[er_period]
+        for i in range(er_period + 1, n):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        return kama_vals
     
-    # Calculate 1d Williams fractals for confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    kama_1w = kama(close_1w)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Calculate RSI(2) on 1d
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=2, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).rolling(window=2, min_periods=2).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi2 = 100 - (100 / (1 + rs))
     
-    # Calculate Williams Alligator on 4h timeframe
-    jaw_period = 13
-    jaw_shift = 8
-    teeth_period = 8
-    teeth_shift = 5
-    lips_period = 5
-    lips_shift = 3
+    # Calculate Choppiness Index(14) on 1d
+    def chop(high, low, close, window=14):
+        n = len(close)
+        chop_vals = np.full(n, np.nan)
+        atr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
+        atr[0] = high[0] - low[0]
+        sum_atr = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
+        highest_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
+        lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        range_ = highest_high - lowest_low
+        chop_vals = 100 * np.log10(sum_atr / range_) / np.log10(window)
+        return chop_vals
     
-    # Jaw: SMA(13) shifted 8 bars ahead
-    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean().values
-    jaw = np.roll(jaw, -jaw_shift)  # shift left (future)
-    jaw[:jaw_shift] = np.nan  # fill shifted values with NaN
-    
-    # Teeth: SMA(8) shifted 5 bars ahead
-    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean().values
-    teeth = np.roll(teeth, -teeth_shift)
-    teeth[:teeth_shift] = np.nan
-    
-    # Lips: SMA(5) shifted 3 bars ahead
-    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean().values
-    lips = np.roll(lips, -lips_shift)
-    lips[:lips_shift] = np.nan
-    
-    # Calculate Elder Ray on 4h timeframe
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    chop_vals = chop(high, low, close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(jaw_shift, teeth_period, lips_period, 13)  # Need sufficient data
+    start_idx = max(30, 2)  # Need 30 for KAMA, 2 for RSI2
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or
-            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi2[i]) or np.isnan(chop_vals[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
+        curr_rsi2 = rsi2[i]
+        curr_chop = chop_vals[i]
+        curr_kama = kama_1w_aligned[i]
         
-        # Alligator alignment: Lips > Teeth > Jaw for bullish, Lips < Teeth < Jaw for bearish
-        bullish_alligator = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alligator = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # KAMA trend: compare current KAMA to previous KAMA
+        kama_up = curr_kama > kama_1w_aligned[i-1] if i > 0 else False
+        kama_down = curr_kama < kama_1w_aligned[i-1] if i > 0 else False
         
-        # Elder Ray: Bull Power > 0 for bullish bias, Bear Power < 0 for bearish bias
-        bullish_elder = bull_power[i] > 0
-        bearish_elder = bear_power[i] < 0
+        # Choppiness regime: CHOP > 61.8 = range (good for mean reversion)
+        in_range = curr_chop > 61.8
         
-        # Fractal confirmation: 1d Williams fractals require confirmation
-        bullish_fractal = bullish_fractal_aligned[i] == 1
-        bearish_fractal = bearish_fractal_aligned[i] == 1
-        
-        # Exit conditions: opposite Alligator alignment or power signal reversal
+        # Exit conditions: RSI(2) mean reversion
         if position != 0:
-            # Exit long: bearish Alligator alignment or bearish Elder Ray
+            # Exit long: RSI(2) > 50
             if position == 1:
-                if bearish_alligator or not bullish_elder:
+                if curr_rsi2 > 50:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: bullish Alligator alignment or bullish Elder Ray
+            # Exit short: RSI(2) < 50
             elif position == -1:
-                if bullish_alligator or not bearish_elder:
+                if curr_rsi2 < 50:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Alligator alignment with Elder Ray and fractal confirmation
+        # Entry conditions: KAMA trend + RSI(2) extreme + range regime
         if position == 0:
-            # Long: bullish Alligator AND bullish Elder Ray AND bullish fractal
-            long_condition = bullish_alligator and bullish_elder and bullish_fractal
+            # Long: KAMA up, RSI(2) < 10 (oversold), and in range
+            long_condition = kama_up and curr_rsi2 < 10 and in_range
             
-            # Short: bearish Alligator AND bearish Elder Ray AND bearish fractal
-            short_condition = bearish_alligator and bearish_elder and bearish_fractal
+            # Short: KAMA down, RSI(2) > 90 (overbought), and in range
+            short_condition = kama_down and curr_rsi2 > 90 and in_range
             
             if long_condition:
                 signals[i] = 0.25
@@ -145,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_ElderRay_1dFractalConfirm_1wEMA34Trend_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI2_ChopRegime_v1"
+timeframe = "1d"
 leverage = 1.0
