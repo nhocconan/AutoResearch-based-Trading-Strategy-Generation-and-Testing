@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R reversal with 1d EMA50 trend filter and volume spike confirmation.
-- Williams %R identifies overbought/oversold conditions for mean reversion entries.
-- 1d EMA50 ensures we trade only in the direction of the daily trend.
+Hypothesis: 6h Williams %R reversal with 1d EMA50 trend filter and volume spike confirmation.
+- Williams %R identifies overbought/oversold conditions (-20/-80 thresholds).
+- 1d EMA50 ensures we trade only in the direction of the daily trend, reducing whipsaws.
 - Volume spike (>2.0x 20-bar average) confirms institutional participation.
 - Position size 0.25 balances profit and drawdown control.
-- Target trades: 80-160 total over 4 years (20-40/year) to minimize fee drag.
-- Works in bull/bear markets via daily trend filter and mean reversion logic.
+- Target trades: 60-120 total over 4 years (15-30/year) to minimize fee drag.
+- Works in bull/bear markets via daily trend filter and mean-reversion logic.
 """
 
 import numpy as np
@@ -34,9 +34,12 @@ def generate_signals(prices):
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,12 +48,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 14, 20) + 1
+    start_idx = max(50, lookback, 20) + 1  # Need enough for EMA, Williams %R, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,23 +64,23 @@ def generate_signals(prices):
         if position == 0:
             # Only trade if volume confirms
             if volume_confirm:
-                # Long reversal: Williams %R oversold (< -80) AND price above 1d EMA50
+                # Long reversal: Williams %R below -80 (oversold) AND above 1d EMA50
                 if williams_r[i] < -80 and close[i] > ema_50_1d_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short reversal: Williams %R overbought (> -20) AND price below 1d EMA50
+                # Short reversal: Williams %R above -20 (overbought) AND below 1d EMA50
                 elif williams_r[i] > -20 and close[i] < ema_50_1d_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: Williams %R crosses above -50 (momentum fading) OR price crosses below 1d EMA50
+            # Long exit: Williams %R crosses above -50 OR price crosses below 1d EMA50
             if williams_r[i] > -50 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R crosses below -50 (momentum fading) OR price crosses above 1d EMA50
+            # Short exit: Williams %R crosses below -50 OR price crosses above 1d EMA50
             if williams_r[i] < -50 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -87,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_Reversal_1dEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Reversal_1dEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
