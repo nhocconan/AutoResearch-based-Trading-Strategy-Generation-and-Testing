@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume spike confirmation.
-- Primary timeframe: 12h for lower trade frequency (~50-100/year) and better signal quality.
-- HTF: 1d EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Volume: Current 12h volume > 2.0 * 20-period 1d volume MA to capture institutional interest.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 4h for lower trade frequency and better signal quality.
+- HTF: 1d EMA34 for trend direction (bullish if close > EMA34, bearish if close < EMA34).
+- Volume: Current 4h volume > 2.0 * 20-period volume MA to capture institutional interest.
 - Camarilla: H3 and L3 levels calculated from prior day's range (H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4).
-- Entry: Long when price breaks above H3 AND 1d EMA50 bullish AND volume spike.
-         Short when price breaks below L3 AND 1d EMA50 bearish AND volume spike.
-- Exit: Price reverts to prior day's close (typical price as pivot) or loss of volume confirmation.
+- Entry: Long when price breaks above H3 AND 1d EMA34 bullish AND volume spike.
+         Short when price breaks below L3 AND 1d EMA34 bearish AND volume spike.
+- Exit: Price reverts to prior day's close (typical price pivot) or loss of volume confirmation.
 - Signal size: 0.25 discrete to balance return and drawdown.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-This strategy combines institutional volume confirmation with Camarilla pivot breakouts,
-filtered by daily trend to avoid counter-trend trades. Works in both bull and bear markets
-by only taking trades in the direction of the 1d trend, with volume spikes confirming
-participation. Camarilla levels provide natural support/resistance for mean reversion exits.
+- Target: 100-200 total trades over 4 years (25-50/year) for 4h timeframe.
+This strategy focuses on the more reliable Camarilla H3/L3 levels (vs R3/S3) with volume confirmation and daily trend filter to avoid overtrading and improve test generalization.
 """
 
 import numpy as np
@@ -31,14 +28,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA50
+    # Get 1d data for Camarilla levels and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     df_1d_close = df_1d['close'].values
-    ema_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d = pd.Series(df_1d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate 20-period 1d volume MA
     df_1d_volume = df_1d['volume'].values
@@ -56,21 +53,21 @@ def generate_signals(prices):
     camarilla_l3 = c1d - 1.1 * (h1d - l1d) / 4
     camarilla_pivot = (h1d + l1d + c1d) / 3  # Typical price as pivot
     
-    # Align HTF indicators to 12h
+    # Align HTF indicators to 4h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Volume confirmation: current 12h volume > 2.0 * 20-period 1d volume MA (aligned)
+    # Volume confirmation: current 4h volume > 2.0 * 20-period 1d volume MA (aligned)
     volume_spike = volume > (2.0 * vol_ma_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need enough bars for EMA50 and volume MA
+    start_idx = max(34, 20)  # Need enough bars for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -89,11 +86,11 @@ def generate_signals(prices):
         if position == 0:
             # Check for breakout signals with volume spike
             if volume_spike[i]:
-                # Bullish breakout: price > H3 AND 1d EMA50 bullish (close > EMA)
+                # Bullish breakout: price > H3 AND 1d EMA34 bullish (close > EMA)
                 if curr_close > camarilla_h3_aligned[i] and curr_close > ema_1d_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price < L3 AND 1d EMA50 bearish (close < EMA)
+                # Bearish breakout: price < L3 AND 1d EMA34 bearish (close < EMA)
                 elif curr_close < camarilla_l3_aligned[i] and curr_close < ema_1d_aligned[i]:
                     signals[i] = -0.25
                     position = -1
@@ -114,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
