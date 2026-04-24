@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams Alligator + 1d ATR volume spike + 1w EMA50 trend filter.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1w for EMA50 trend filter and 1d for ATR volume spike filter.
-- Entry: Long when Alligator jaw < teeth < lips (bullish alignment) AND ATR ratio > 2.0 AND price > 1w EMA50.
-         Short when Alligator jaw > teeth > lips (bearish alignment) AND ATR ratio > 2.0 AND price < 1w EMA50.
-- Exit: Opposite Alligator alignment OR price crosses 1w EMA50 in opposite direction.
+Hypothesis: 1d Williams %R extreme reversal with 1w EMA50 trend filter and 1d ATR volume confirmation.
+- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
+- HTF: 1w for EMA50 trend filter.
+- Entry: Long when Williams %R < -80 (oversold) AND ATR ratio > 1.5 AND price > 1w EMA50.
+         Short when Williams %R > -20 (overbought) AND ATR ratio > 1.5 AND price < 1w EMA50.
+- Exit: Opposite Williams %R extreme OR price crosses 1w EMA50 in opposite direction.
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- ATR ratio (current ATR/20-period ATR) > 2.0 confirms significant volatility expansion to avoid false breakouts.
-- Williams Alligator (SMAs with specific offsets) provides trend direction and alignment confirmation.
-- 1w EMA50 provides higher timeframe trend filter to avoid counter-trend trades.
-- Works in bull markets (buy in bullish alignment during uptrend) and bear markets (sell in bearish alignment during downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on strict alignment and volatility requirements.
+- Williams %R identifies exhaustion points; ATR ratio > 1.5 confirms volatility expansion to avoid false reversals.
+- 1w EMA50 provides trend filter to avoid counter-trend trades in ranging markets.
+- Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend).
+- Estimated trades: ~60 total over 4 years (~15/year) based on extreme reversal frequency with strict filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def sma(values, period):
-    """Calculate Simple Moving Average."""
-    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
 
 def ema(values, period):
     """Calculate Exponential Moving Average."""
@@ -35,21 +30,12 @@ def atr(high, low, close, period):
     true_range[0] = high_low[0]  # First period
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def alligator(high, low, close):
-    """Calculate Williams Alligator lines: Jaw, Teeth, Lips."""
-    # Jaw: Blue line (13-period SMMA smoothed by 8 bars)
-    jaw_raw = sma((high + low) / 2.0, 13)
-    jaw = sma(jaw_raw, 8)  # Smoothed by 8 periods
-    
-    # Teeth: Red line (8-period SMMA smoothed by 5 bars)
-    teeth_raw = sma((high + low) / 2.0, 8)
-    teeth = sma(teeth_raw, 5)  # Smoothed by 5 periods
-    
-    # Lips: Green line (5-period SMMA smoothed by 3 bars)
-    lips_raw = sma((high + low) / 2.0, 5)
-    lips = sma(lips_raw, 3)  # Smoothed by 3 periods
-    
-    return jaw, teeth, lips
+def williams_r(high, low, close, period):
+    """Calculate Williams %R."""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    return wr.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -74,24 +60,24 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
+    atr_14 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
     atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
-    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
+    atr_ratio = atr_current / (atr_14 + 1e-10)  # Avoid division by zero
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
     
-    # Calculate Williams Alligator on 4h data
-    jaw, teeth, lips = alligator(high, low, close)
+    # Williams %R (14-period)
+    wr_14 = williams_r(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 100  # Need sufficient data for all indicators
+    start_idx = 60  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or
+            np.isnan(wr_14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,33 +85,29 @@ def generate_signals(prices):
         
         curr_close = close[i]
         
-        # Check Alligator alignment
-        bullish_alignment = jaw[i] < teeth[i] and teeth[i] < lips[i]
-        bearish_alignment = jaw[i] > teeth[i] and teeth[i] > lips[i]
-        
-        # Exit conditions: opposite Alligator alignment OR price crosses 1w EMA50 in opposite direction
+        # Exit conditions: opposite Williams %R extreme OR price crosses 1w EMA50 in opposite direction
         if position != 0:
-            # Exit long: bearish alignment OR price falls below 1w EMA50
+            # Exit long: Williams %R > -20 (overbought) OR price falls below 1w EMA50
             if position == 1:
-                if bearish_alignment or curr_close < ema50_1w_aligned[i]:
+                if wr_14[i] > -20 or curr_close < ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: bullish alignment OR price rises above 1w EMA50
+            # Exit short: Williams %R < -80 (oversold) OR price rises above 1w EMA50
             elif position == -1:
-                if bullish_alignment or curr_close > ema50_1w_aligned[i]:
+                if wr_14[i] < -80 or curr_close > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Alligator alignment with volatility confirmation and trend filter
+        # Entry conditions: Williams %R extreme with volatility confirmation and trend filter
         if position == 0:
-            # Long: bullish Alligator alignment AND ATR ratio > 2.0 AND bullish 1w trend
-            if bullish_alignment and atr_ratio_aligned[i] > 2.0 and curr_close > ema50_1w_aligned[i]:
+            # Long: Williams %R < -80 (oversold) AND ATR ratio > 1.5 AND bullish 1w trend
+            if wr_14[i] < -80 and atr_ratio_aligned[i] > 1.5 and curr_close > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish Alligator alignment AND ATR ratio > 2.0 AND bearish 1w trend
-            elif bearish_alignment and atr_ratio_aligned[i] > 2.0 and curr_close < ema50_1w_aligned[i]:
+            # Short: Williams %R > -20 (overbought) AND ATR ratio > 1.5 AND bearish 1w trend
+            elif wr_14[i] > -20 and atr_ratio_aligned[i] > 1.5 and curr_close < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -137,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dATR_VolumeSpike_1wEMA50_TrendFilter_v1"
-timeframe = "4h"
+name = "1d_WilliamsR_ExtremeReversal_1wEMA50_TrendFilter_1dATR_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
