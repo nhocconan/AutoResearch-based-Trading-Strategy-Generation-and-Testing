@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian breakout with 1d trend filter, volume spike, and choppiness regime.
-- Primary timeframe: 4h for lower trade frequency and reduced fee drag.
-- HTF: 1d EMA34 for trend direction (bullish if close > EMA34, bearish if close < EMA34).
-- Volume: Current 4h volume > 2.0 * 20-period volume MA to confirm institutional interest.
-- Donchian: 20-period upper/lower bands for breakout signals.
-- Choppiness: CHOP(14) > 61.8 for ranging market (mean reversion), < 38.2 for trending.
-- Entry: Long when price breaks above Donchian(20) upper band AND 1d EMA34 bullish AND volume spike AND CHOP < 38.2 (trending).
-         Short when price breaks below Donchian(20) lower band AND 1d EMA34 bearish AND volume spike AND CHOP < 38.2 (trending).
-- Exit: Opposite Donchian band touch or loss of volume confirmation or regime shift to chop (CHOP > 61.8).
+Hypothesis: 6h Williams %R extreme + 1d EMA50 trend filter + volume spike confirmation.
+- Primary timeframe: 6h for balanced trade frequency and noise reduction.
+- HTF: 1d EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Williams %R(14): extreme oversold (< -80) for long, extreme overbought (> -20) for short.
+- Volume: Current 6h volume > 2.0 * 24-period 6h volume MA to capture institutional interest.
+- Entry: Long when Williams %R < -80 AND 1d EMA50 bullish AND volume spike.
+         Short when Williams %R > -20 AND 1d EMA50 bearish AND volume spike.
+- Exit: Opposite Williams %R level (Williams %R > -20 for long, Williams %R < -80 for short).
 - Signal size: 0.25 discrete to balance return and drawdown.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-This strategy captures strong trending moves with volume confirmation while avoiding choppy markets,
-providing robustness in both bull and bear regimes by only trading in the direction of the 1d trend.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+This strategy captures mean reversion during extreme momentum exhaustion in the direction of the daily trend,
+with volume confirmation to avoid false signals. Works in both bull and bear markets by only taking trades
+aligned with the 1d trend, avoiding counter-trend whipsaws.
 """
 
 import numpy as np
@@ -30,81 +30,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian(20) channels
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Calculate 6h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 4h volume MA(20)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Calculate 4h Choppiness Index(14)
-    chop_window = 14
-    atr = pd.Series(np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))).rolling(window=chop_window, min_periods=1).mean().values
-    atr[0] = high[0] - low[0]  # fix first value
-    sum_atr = pd.Series(atr).rolling(window=chop_window, min_periods=chop_window).sum().values
-    highest_high = pd.Series(high).rolling(window=chop_window, min_periods=chop_window).max().values
-    lowest_low = pd.Series(low).rolling(window=chop_window, min_periods=chop_window).min().values
-    chop = 100 * np.log10(sum_atr / np.log10(chop_window)) / np.log10((highest_high - lowest_low) + 1e-10)
-    
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 1d EMA50
     df_1d_close = df_1d['close'].values
-    ema_1d = pd.Series(df_1d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF indicators to 4h
+    # Calculate 24-period 6h volume MA
+    vol_ma_6h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    
+    # Align HTF indicators to 6h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume confirmation: current 6h volume > 2.0 * 24-period 6h volume MA
+    volume_spike = volume > (2.0 * vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 20, 34, chop_window)  # Need enough bars for all indicators
+    start_idx = max(50, 24, 14)  # Need enough bars for EMA50, volume MA, and Williams %R
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(williams_r[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        dch_high = donchian_high[i]
-        dch_low = donchian_low[i]
+        curr_williams_r = williams_r[i]
         ema_val = ema_1d_aligned[i]
-        chop_val = chop[i]
         
         if position == 0:
-            # Check for entry signals with volume spike and trending regime (CHOP < 38.2)
-            if volume_spike[i] and chop_val < 38.2:
-                # Bullish: break above Donchian upper band AND 1d EMA34 bullish (close > EMA)
-                if curr_high > dch_high and curr_close > ema_val:
+            # Check for entry signals with volume spike
+            if volume_spike[i]:
+                # Bullish: Williams %R < -80 (extremely oversold) AND 1d EMA50 bullish (close > EMA)
+                if curr_williams_r < -80.0 and curr_close > ema_val:
                     signals[i] = 0.25
                     position = 1
-                # Bearish: break below Donchian lower band AND 1d EMA34 bearish (close < EMA)
-                elif curr_low < dch_low and curr_close < ema_val:
+                # Bearish: Williams %R > -20 (extremely overbought) AND 1d EMA50 bearish (close < EMA)
+                elif curr_williams_r > -20.0 and curr_close < ema_val:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: touch Donchian lower band OR loss of volume confirmation OR regime shift to chop (CHOP > 61.8)
-            if curr_low <= dch_low or not volume_spike[i] or chop_val > 61.8:
+            # Long exit: Williams %R > -20 (overbought) OR loss of volume confirmation
+            if curr_williams_r > -20.0 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: touch Donchian upper band OR loss of volume confirmation OR regime shift to chop (CHOP > 61.8)
-            if curr_high >= dch_high or not volume_spike[i] or chop_val > 61.8:
+            # Short exit: Williams %R < -80 (oversold) OR loss of volume confirmation
+            if curr_williams_r < -80.0 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
