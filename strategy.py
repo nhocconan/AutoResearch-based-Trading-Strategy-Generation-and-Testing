@@ -1,20 +1,39 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Power + 12h ADX regime filter for trend strength.
-- Primary timeframe: 6h to target 50-150 total trades over 4 years (12-37/year).
-- HTF: 12h ADX(14) to filter trending (ADX > 25) vs ranging (ADX < 20) markets.
-- Elder Ray: Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low.
-- Entry: Long when Bull Power > 0 AND Bear Power < 0 AND 12h ADX > 25 (strong uptrend).
-         Short when Bull Power < 0 AND Bear Power > 0 AND 12h ADX > 25 (strong downtrend).
-- Exit: Reverse signal or when 12h ADX < 20 (trend weakening).
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d HMA21 trend filter and volume spike confirmation.
+- Primary timeframe: 4h to target 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d HMA21 for trend direction (bullish if close > HMA21, bearish if close < HMA21).
+- Camarilla levels: H3 and L3 from prior 1d session (using prior close to avoid look-ahead).
+- Entry: Long when price breaks above prior H3 AND 1d HMA21 bullish AND volume > 2.0 * volume MA(20).
+         Short when price breaks below prior L3 AND 1d HMA21 bearish AND volume > 2.0 * volume MA(20).
+- Exit: Close-based reversal - exit long when price crosses below 1d HMA21,
+        exit short when price crosses above 1d HMA21.
 - Signal size: 0.25 discrete to balance return and drawdown.
-This strategy captures trend momentum with institutional power metrics and avoids 
-whipsaws in ranging markets via ADX regime filter, working in both bull and bear.
+This strategy targets institutional pivot levels with trend and volume confirmation,
+designed to work in both bull and bear markets by aligning with the 1d trend.
+HMA provides smoother trend with less lag than EMA, improving signal quality.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_hma(arr, period):
+    """Calculate Hull Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA of half period
+    wma_half = pd.Series(arr).ewm(span=half_period, adjust=False, min_periods=half_period).mean().values
+    # WMA of full period
+    wma_full = pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    # Final HMA: WMA of raw_hma with sqrt_period
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean().values
+    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,91 +44,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for ADX regime filter and EMA13
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for HMA21 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA13 for Elder Ray Power
-    df_12h_close = df_12h['close'].values
-    ema_12h = pd.Series(df_12h_close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d HMA21 for trend filter
+    df_1d_close = df_1d['close'].values
+    hma_1d = calculate_hma(df_1d_close, 21)
     
-    # Calculate 12h ADX(14) for trend strength
-    # True Range
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
-    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate prior 1d Camarilla H3 and L3 levels
+    # Typical price = (high + low + close) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    typical_price_vals = typical_price.values
+    range_ = df_1d['high'].values - df_1d['low'].values
     
-    # Directional Movement
-    up_move = df_12h['high'] - df_12h['high'].shift(1)
-    down_move = df_12h['low'].shift(1) - df_12h['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Camarilla H3 = close + (high - low) * 1.1/2
+    # Camarilla L3 = close - (high - low) * 1.1/2
+    camarilla_h3 = df_1d['close'].values + range_ * 1.1 / 2
+    camarilla_l3 = df_1d['close'].values - range_ * 1.1 / 2
     
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate volume MA(20) for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Elder Ray Power: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = df_12h['high'].values - ema_12h
-    bear_power = ema_12h - df_12h['low'].values
-    
-    # Align HTF indicators to 6h
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
+    # Align HTF indicators to 4h
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 14)  # Need enough bars for ADX and EMA13
+    start_idx = max(50, 30)  # Need enough bars for HMA21 and Vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals with ADX > 25 (strong trend)
-            strong_trend = adx_aligned[i] > 25
+            # Check for entry signals with volume confirmation (2.0x threshold)
+            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
             
-            # Long: Bull Power > 0 AND Bear Power < 0 AND strong uptrend
-            if bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and strong_trend:
+            # Long: Price breaks above prior Camarilla H3 AND 1d HMA21 bullish AND volume confirmed
+            if curr_close > camarilla_h3_aligned[i] and curr_close > hma_1d_aligned[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull Power < 0 AND Bear Power > 0 AND strong downtrend
-            elif bull_power_aligned[i] < 0 and bear_power_aligned[i] > 0 and strong_trend:
+            # Short: Price breaks below prior Camarilla L3 AND 1d HMA21 bearish AND volume confirmed
+            elif curr_close < camarilla_l3_aligned[i] and curr_close < hma_1d_aligned[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when trend weakens (ADX < 20) or reverse signal
-            if adx_aligned[i] < 20 or (bull_power_aligned[i] < 0 and bear_power_aligned[i] > 0):
+            # Exit long when price crosses below 1d HMA21 (trend change)
+            if curr_close < hma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when trend weakens (ADX < 20) or reverse signal
-            if adx_aligned[i] < 20 or (bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0):
+            # Exit short when price crosses above 1d HMA21 (trend change)
+            if curr_close > hma_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Power_12hADX_Regime_v1"
-timeframe = "6h"
+name = "4h_Camarilla_H3L3_1dHMA21_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
