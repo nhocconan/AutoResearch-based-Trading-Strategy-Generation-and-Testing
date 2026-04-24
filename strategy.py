@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d volume regime filter and ATR-based stops.
-- Primary timeframe: 4h for execution, HTF: 1d for volume regime (high/low volume days).
-- Volume regime: 1d volume > 1.5 * 20-day volume MA = high conviction day (trend likely to continue).
-                 1d volume < 0.5 * 20-day volume MA = low conviction day (avoid new entries).
-- Entry: Long when price closes above Donchian(20) upper AND 1d volume regime = high.
-         Short when price closes below Donchian(20) lower AND 1d volume regime = high.
-- Exit: Opposite Donchian breakout or 1d volume regime shifts to low.
-- Volume confirmation on 4h: current 4h volume > 1.2 * 20-period 4h volume MA (to avoid false breakouts).
+Hypothesis: 6h Elder Ray Index with 1d/1w regime filter and volume confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for EMA trend, 1w for higher-timeframe trend filter.
+- Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13) (using 13-period EMA on 6h).
+- Regime: 1d price > 1d EMA50 = bullish regime (favor longs), 1d price < 1d EMA50 = bearish regime (favor shorts).
+          Additionally, require 1w price > 1w EMA34 for long bias, 1w price < 1w EMA34 for short bias.
+- Entry: Long when Bull Power > 0 AND 1d regime bullish AND 1w regime bullish AND volume > 1.5 * 20-period volume MA.
+         Short when Bear Power < 0 AND 1d regime bearish AND 1w regime bearish AND volume > 1.5 * 20-period volume MA.
+- Exit: Opposite Elder Ray signal (Bull Power < 0 for long exit, Bear Power > 0 for short exit) OR regime shift.
+- Volume confirmation: avoids low-volume false signals.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -27,81 +28,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume regime
+    # Get 1d data for EMA50 (trend regime)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d volume regime: ratio of current volume to 20-day volume MA
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = vol_1d / (vol_ma_1d + 1e-10)  # Avoid division by zero
+    # Get 1w data for EMA34 (higher-timeframe trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # Align 1d volume ratio to 4h
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Calculate 1d EMA50
+    close_1d = pd.Series(df_1d['close'])
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Donchian channels (20-period) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Calculate 1w EMA34
+    close_1w = pd.Series(df_1w['close'])
+    ema34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume confirmation on 4h: current volume > 1.2 * 20-period volume MA
-    volume_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_4h = volume > (1.2 * volume_ma_4h)
+    # Align 1d and 1w EMAs to 6h
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Elder Ray: 13-period EMA on 6h close
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
+    
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 6h)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, lookback, 20)  # Need enough 1d bars for volume MA and lookback for Donchian
+    start_idx = max(50, 34, 13, 20)  # Need enough bars for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_ratio_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike_4h[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = vol_ratio_aligned[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        prev_close = close[i-1]
+        ema50_val = ema50_1d_aligned[i]
+        ema34_val = ema34_1w_aligned[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         
         if position == 0:
-            # Check for entry signals - only in high volume conviction days
-            if vol_ratio > 1.5 and volume_spike_4h[i]:  # High conviction day + 4h volume spike
-                # Bullish breakout: price closes above upper Donchian
-                if curr_close > highest_high[i]:
+            # Check for entry signals
+            if volume_spike[i]:
+                # Long conditions: Bull Power > 0 AND 1d bullish regime AND 1w bullish regime
+                if bull_val > 0 and curr_close > ema50_val and curr_close > ema34_val:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price closes below lower Donchian
-                elif curr_close < lowest_low[i]:
+                # Short conditions: Bear Power < 0 AND 1d bearish regime AND 1w bearish regime
+                elif bear_val < 0 and curr_close < ema50_val and curr_close < ema34_val:
                     signals[i] = -0.25
                     position = -1
-            # Optional: mean reversion in low conviction days (commented out to reduce trades)
-            # elif vol_ratio < 0.5:  # Low conviction day
-            #     # Long when price touches lower Donchian and shows reversal
-            #     if curr_low <= lowest_low[i] and curr_close > curr_low:
-            #         signals[i] = 0.15
-            #         position = 1
-            #     # Short when price touches upper Donchian and shows reversal
-            #     elif curr_high >= highest_high[i] and curr_close < curr_high:
-            #         signals[i] = -0.15
-            #         position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian mid OR volume regime drops to low conviction
-            if curr_close < donchian_mid[i] or vol_ratio < 0.8:
+            # Long exit: Bull Power < 0 OR regime shifts to bearish (price < 1d EMA50 OR price < 1w EMA34)
+            if bull_val < 0 or curr_close < ema50_val or curr_close < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Donchian mid OR volume regime drops to low conviction
-            if curr_close > donchian_mid[i] or vol_ratio < 0.8:
+            # Short exit: Bear Power > 0 OR regime shifts to bullish (price > 1d EMA50 OR price > 1w EMA34)
+            if bear_val > 0 or curr_close > ema50_val or curr_close > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dVolRegime_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1d1wEMA_Regime_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
