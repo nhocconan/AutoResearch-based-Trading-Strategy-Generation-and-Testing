@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d Volume Regime Filter.
-- Identifies low volatility periods (BB Width < 20th percentile) on 6h
-- Breakout triggers when price closes outside BB(20,2) AND 6h volume > 2.0 * 20-period average
-- 1d volume regime filter: only trade when 1d volume is above its 50-period median (high conviction)
-- Long when close > upper band, Short when close < lower band
-- Exit when price returns to middle band (mean reversion) or squeeze ends (BB Width > 50th percentile)
-- Works in both bull and bear markets by trading volatility expansion after contraction
-- Signal size: 0.25 discrete levels
+Hypothesis: 12h Williams Alligator with 1w trend filter and volume confirmation.
+- Williams Alligator: Jaw (EMA13, 8-period shift), Teeth (EMA8, 5-period shift), Lips (EMA5, 3-period shift)
+- Long when Lips > Teeth > Jaw (bullish alignment) AND 1w EMA34 > 1w EMA89 (long-term uptrend) AND volume > 2.0 * 20-period average
+- Short when Lips < Teeth < Jaw (bearish alignment) AND 1w EMA34 < 1w EMA89 (long-term downtrend) AND volume > 2.0 * 20-period average
+- Exit when Alligator alignment breaks (Lips crosses Teeth or Jaw) OR volume < 1.0 * 20-period average
+- Uses 12h primary with 1w HTF for trend filter to avoid whipsaws in ranging markets
+- Alligator identifies trend phases; 1w EMA filter ensures alignment with higher timeframe trend; volume confirms conviction
+- Designed to work in both bull (bullish Alligator alignment) and bear (bearish Alligator alignment) markets
+- Signal size: 0.25 discrete levels to minimize fee churn
 - Target: 50-150 total trades over 4 years (12-37/year)
 """
 
@@ -20,75 +21,85 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on 6h
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean().values
-    dev = close_s.rolling(window=20, min_periods=20).std().values
-    upper_band = basis + (2.0 * dev)
-    lower_band = basis - (2.0 * dev)
-    bb_width = (upper_band - lower_band) / basis  # Normalized width
+    # Calculate Williams Alligator components on 12h data
+    # Jaw: EMA13 of median price, shifted 8 bars
+    median_price = (high + low) / 2
+    jaw_raw = pd.Series(median_price).ewm(span=13, adjust=False, min_periods=13).mean().values
+    jaw = np.roll(jaw_raw, 8)  # Shift 8 bars forward
+    jaw[:8] = np.nan  # First 8 values invalid due to shift
     
-    # Bollinger Band Squeeze detection: low volatility regime
-    # Squeeze when BB Width is below 20th percentile of last 100 periods
-    bb_width_series = pd.Series(bb_width)
-    bb_width_pct = bb_width_series.rolling(window=100, min_periods=100).quantile(0.20).values
-    squeeze_on = bb_width < bb_width_pct
-    squeeze_off = bb_width > (bb_width_series.rolling(window=100, min_periods=100).quantile(0.50).values)
+    # Teeth: EMA8 of median price, shifted 5 bars
+    teeth_raw = pd.Series(median_price).ewm(span=8, adjust=False, min_periods=8).mean().values
+    teeth = np.roll(teeth_raw, 5)  # Shift 5 bars forward
+    teeth[:5] = np.nan  # First 5 values invalid due to shift
     
-    # Volume confirmation on 6h: volume > 2.0 * 20-period average
-    vol_ma = close_s.rolling(window=20, min_periods=20).mean().values  # Using close series for rolling
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    # Lips: EMA5 of median price, shifted 3 bars
+    lips_raw = pd.Series(median_price).ewm(span=5, adjust=False, min_periods=5).mean().values
+    lips = np.roll(lips_raw, 3)  # Shift 3 bars forward
+    lips[:3] = np.nan  # First 3 values invalid due to shift
     
-    # 1d volume regime filter: high conviction when 1d volume above 50-period median
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Calculate 1w EMA34 and EMA89 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 100:  # Need enough data for EMA calculation
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_median_1d = pd.Series(volume_1d).rolling(window=50, min_periods=50).median().values
-    vol_median_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_median_1d)
-    volume_regime = volume_1d > vol_median_1d_aligned  # High volume conviction regime
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_1w = pd.Series(close_1w).ewm(span=89, adjust=False, min_periods=89).mean().values
+    
+    # Align 1w EMAs to 12h timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ema89_1w_aligned = align_htf_to_ltf(prices, df_1w, ema89_1w)
+    
+    # Trend filter: bullish if EMA34 > EMA89, bearish if EMA34 < EMA89
+    bullish_trend = ema34_1w_aligned > ema89_1w_aligned
+    bearish_trend = ema34_1w_aligned < ema89_1w_aligned
+    
+    # Volume confirmation: volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_ma)
+    volume_exit = volume < (1.0 * vol_ma)  # Exit when volume drops below average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 100) + 1
+    start_idx = max(13, 20) + 8  # Need Alligator components (with shifts) and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(basis[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(squeeze_on[i]) or np.isnan(volume_confirm[i]) or np.isnan(volume_regime[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(ema89_1w_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: squeeze breaking upward with volume confirmation in high conviction regime
-            if squeeze_on[i] and close[i] > upper_band[i] and volume_confirm[i] and volume_regime[i]:
+            # Long: Lips > Teeth > Jaw (bullish alignment) AND bullish trend AND volume confirmation
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and bullish_trend[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: squeeze breaking downward with volume confirmation in high conviction regime
-            elif squeeze_on[i] and close[i] < lower_band[i] and volume_confirm[i] and volume_regime[i]:
+            # Short: Lips < Teeth < Jaw (bearish alignment) AND bearish trend AND volume confirmation
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and bearish_trend[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to middle band OR squeeze ends (volatility expansion)
-            if close[i] <= basis[i] or squeeze_off[i]:
+            # Long exit: Alligator alignment breaks (Lips <= Teeth or Teeth <= Jaw) OR volume exit
+            if lips[i] <= teeth[i] or teeth[i] <= jaw[i] or volume_exit[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to middle band OR squeeze ends
-            if close[i] >= basis[i] or squeeze_off[i]:
+            # Short exit: Alligator alignment breaks (Lips >= Teeth or Teeth >= Jaw) OR volume exit
+            if lips[i] >= teeth[i] or teeth[i] >= jaw[i] or volume_exit[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BollingerSqueeze_1dVolumeRegime_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMATrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
