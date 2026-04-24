@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud breakout with 1w trend filter and volume confirmation.
-- Primary timeframe: 6h for execution, HTF: 1d for Ichimoku components, 1w for ADX trend strength.
-- Ichimoku components (Tenkan-sen, Kijun-sen, Senkou Span A/B) calculated on 1d data.
-- Long when price breaks above Kumo (cloud) AND Tenkan > Kijun (bullish TK cross) AND 1w ADX > 25.
-- Short when price breaks below Kumo AND Tenkan < Kijun (bearish TK cross) AND 1w ADX > 25.
-- In ranging markets (1w ADX < 20): fade at cloud edges with TK cross reversal.
-- Volume confirmation: current volume > 1.3 * 20-period volume MA to avoid false breakouts.
-- Discrete signal size: 0.25 to balance return and drawdown.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike and 1w ADX regime filter.
+- Primary timeframe: 12h for execution, HTF: 1d for Camarilla pivots, 1w for ADX trend strength.
+- ADX > 25 indicates trending market (breakout strategy), ADX < 20 indicates ranging (mean reversion at H3/L3).
+- Entry: Long when price breaks above H3 AND ADX > 25 (bullish breakout in trend).
+         Short when price breaks below L3 AND ADX > 25 (bearish breakout in trend).
+         In ranging (ADX < 20): Long when price touches L3 AND reverses up (close > low).
+                                Short when price touches H3 AND reverses down (close < high).
+- Exit: Opposite Camarilla breakout or ADX regime shift to ranging.
+- Volume confirmation: current volume > 1.5 * 20-period volume MA (to avoid false breakouts).
+- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 """
 
 import numpy as np
@@ -26,29 +28,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 1d
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max()
-    period9_low = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min()
-    tenkan_sen = (period9_high + period9_low) / 2.0
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max()
-    period26_low = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min()
-    kijun_sen = (period26_high + period26_low) / 2.0
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2.0)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max()
-    period52_low = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min()
-    senkou_span_b = ((period52_high + period52_low) / 2.0)
+    # Calculate Camarilla levels (H3, L3) on 1d
+    # Typical Price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    # Camarilla width = (H - L) * 1.1 / 8
+    width = (df_1d['high'] - df_1d['low']) * 1.1 / 8.0
+    # H3 = C + width * 1.1
+    camarilla_h3 = df_1d['close'].values + width * 1.1
+    # L3 = C - width * 1.1
+    camarilla_l3 = df_1d['close'].values - width * 1.1
     
     # Get 1w data for ADX
     df_1w = get_htf_data(prices, '1w')
@@ -81,28 +74,25 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 6h
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    # Align HTF indicators to 12h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 6h)
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 12h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * volume_ma)
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(60, 30, 20)  # Need enough bars for Ichimoku (52), ADX (30), volume MA (20)
+    start_idx = max(30, 20)  # Need enough 1w bars for ADX and 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(tenkan_aligned[i]) or 
-            np.isnan(kijun_aligned[i]) or np.isnan(senkou_a_aligned[i]) or 
-            np.isnan(senkou_b_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,46 +104,40 @@ def generate_signals(prices):
         curr_low = low[i]
         prev_close = close[i-1]
         
-        tenkan = tenkan_aligned[i]
-        kijun = kijun_aligned[i]
-        senkou_a = senkou_a_aligned[i]
-        senkou_b = senkou_b_aligned[i]
-        
-        # Kumo (cloud) boundaries
-        upper_kumo = max(senkou_a, senkou_b)
-        lower_kumo = min(senkou_a, senkou_b)
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
         
         if position == 0:
             # Check for entry signals
             if volume_spike[i]:
                 if adx_val > 25:  # Trending regime: breakout strategy
-                    # Bullish breakout: price closes above Kumo AND bullish TK cross
-                    if curr_close > upper_kumo and tenkan > kijun:
+                    # Bullish breakout: price closes above H3
+                    if curr_close > h3:
                         signals[i] = 0.25
                         position = 1
-                    # Bearish breakout: price closes below Kumo AND bearish TK cross
-                    elif curr_close < lower_kumo and tenkan < kijun:
+                    # Bearish breakout: price closes below L3
+                    elif curr_close < l3:
                         signals[i] = -0.25
                         position = -1
-                else:  # Ranging regime (ADX < 20): mean reversion at cloud edges
-                    # Long when price touches lower Kumo AND bullish TK cross (tenkan > kijun)
-                    if curr_low <= lower_kumo and tenkan > kijun:
+                else:  # Ranging regime (ADX < 20): mean reversion at extremes
+                    # Long when price touches L3 and shows reversal (close > low)
+                    if curr_low <= l3 and curr_close > curr_low:
                         signals[i] = 0.25
                         position = 1
-                    # Short when price touches upper Kumo AND bearish TK cross (tenkan < kijun)
-                    elif curr_high >= upper_kumo and tenkan < kijun:
+                    # Short when price touches H3 and shows reversal (close < high)
+                    elif curr_high >= h3 and curr_close < curr_high:
                         signals[i] = -0.25
                         position = -1
         elif position == 1:
-            # Long exit: price closes below Kumo OR TK cross turns bearish OR ADX drops to ranging
-            if curr_close < lower_kumo or tenkan < kijun or adx_val < 20:
+            # Long exit: price closes below L3 OR ADX drops to ranging
+            if curr_close < l3 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Kumo OR TK cross turns bullish OR ADX drops to ranging
-            if curr_close > upper_kumo or tenkan > kijun or adx_val < 20:
+            # Short exit: price closes above H3 OR ADX drops to ranging
+            if curr_close > h3 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -161,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_TKCross_1wADXRegime_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_1dVolumeSpike_1wADXRegime_v1"
+timeframe = "12h"
 leverage = 1.0
