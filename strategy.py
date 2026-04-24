@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud with 1d trend filter and volume confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for EMA34 trend filter (price > EMA34 = bull trend, price < EMA34 = bear trend).
-- Ichimoku Components (6h):
-  * Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-  * Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-  * Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-  * Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-  * Kumo (Cloud): between Senkou Span A and Senkou Span B
-- Entry: Long when price > Cloud AND Tenkan > Kijun AND 1d bull trend AND volume > 1.5 * 20-period average volume.
-         Short when price < Cloud AND Tenkan < Kijun AND 1d bear trend AND volume > 1.5 * 20-period average volume.
-- Exit: Opposite Tenkan/Kijun cross (Tenkan < Kijun for long exit, Tenkan > Kijun for short exit).
+Hypothesis: 12h Donchian(10) breakout with 1d volume spike and ATR regime filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for volume confirmation (2.0x 20-period average volume) and ATR(10)/ATR(30) ratio for regime detection.
+- Donchian(10): Upper/lower bands from 10-period high/low on 12h chart.
+- Regime: ATR(10)/ATR(30) > 1.2 = trending (favor breakouts), < 0.8 = choppy (avoid entries).
+- Entry: Long when price > Upper Band AND trending regime AND volume > 2.0 * 20-period average volume.
+         Short when price < Lower Band AND trending regime AND volume > 2.0 * 20-period average volume.
+- Exit: Opposite Donchian breakout (price < Upper Band for long exit, price > Lower Band for short exit).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in bull markets via long cloud breaks and in bear markets via short cloud breaks, with 1d trend filter preventing counter-trend whipsaws.
+- Works in both bull and bear markets by only trading breakouts in trending regimes, avoiding whipsaws in chop.
+- Uses actual Binance 12h and 1d data via mtf_data helper to ensure correct alignment and no look-ahead.
 """
 
 import numpy as np
@@ -22,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need sufficient data for calculations
+    if n < 40:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -31,47 +28,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d ATR(10) and ATR(30) for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need sufficient data for EMA34
+    if len(df_1d) < 30:  # Need sufficient data for ATR30
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 6h Ichimoku components
-    # Tenkan-sen (Conversion Line): 9-period high/low
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2.0
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # Align length
     
-    # Kijun-sen (Base Line): 26-period high/low
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2.0
+    # ATR(10) and ATR(30)
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2.0
+    # ATR ratio for regime: >1.2 = trending, <0.8 = choppy
+    atr_ratio = atr10 / atr30
     
-    # Senkou Span B (Leading Span B): 52-period high/low
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2.0
+    # Align ATR ratio to 12h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Calculate 6h volume average for confirmation (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d volume average for confirmation (20-period)
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Calculate 12h Donchian(10) bands
+    donchian_window = 10
+    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(52, 34)  # Need 52 for Senkou B, 34 for 1d EMA
+    start_idx = max(donchian_window, 30)  # Need 10 for Donchian, 30 for ATR30
     
     for i in range(start_idx, n):
-        # Skip if data not ready (check for NaN)
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if data not ready (check for NaN from alignment or calculations)
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,48 +84,37 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Determine cloud boundaries (Senkou Span A/B)
-        upper_cloud = max(senkou_a[i], senkou_b[i])
-        lower_cloud = min(senkou_a[i], senkou_b[i])
+        # Regime filter: only trade breakouts in trending markets (ATR ratio > 1.2)
+        trending_regime = atr_ratio_aligned[i] > 1.2
         
-        # 1d trend filter: price > EMA34 = bull trend, price < EMA34 = bear trend
-        bull_trend = close[i] > ema34_1d_aligned[i]
-        bear_trend = close[i] < ema34_1d_aligned[i]
+        # Volume confirmation: current volume > 2.0 * 20-period average volume
+        volume_confirm = curr_volume > 2.0 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
         
-        # Volume confirmation: current volume > 1.5 * 20-period average volume
-        volume_confirm = curr_volume > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
-        
-        # Ichimoku signals: Tenkan/Kijun cross
-        tenkan_above_kijun = tenkan[i] > kijun[i]
-        tenkan_below_kijun = tenkan[i] < kijun[i]
-        
-        # Exit conditions: opposite Tenkan/Kijun cross
+        # Exit conditions: opposite Donchian breakout
         if position != 0:
-            # Exit long: Tenkan < Kijun
+            # Exit long: price < Upper Band
             if position == 1:
-                if tenkan_below_kijun:
+                if curr_close < upper_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Tenkan > Kijun
+            # Exit short: price > Lower Band
             elif position == -1:
-                if tenkan_above_kijun:
+                if curr_close > lower_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Cloud breakout with trend and volume filters
+        # Entry conditions: Donchian breakout with regime and volume filters
         if position == 0:
-            # Long: price > Upper Cloud AND Tenkan > Kijun AND bull trend AND volume confirmation
-            long_condition = (curr_close > upper_cloud and 
-                            tenkan_above_kijun and
-                            bull_trend and
+            # Long: price > Upper Band AND trending regime AND volume confirmation
+            long_condition = (curr_close > upper_band[i] and 
+                            trending_regime and
                             volume_confirm)
             
-            # Short: price < Lower Cloud AND Tenkan < Kijun AND bear trend AND volume confirmation
-            short_condition = (curr_close < lower_cloud and 
-                             tenkan_below_kijun and
-                             bear_trend and
+            # Short: price < Lower Band AND trending regime AND volume confirmation
+            short_condition = (curr_close < lower_band[i] and 
+                             trending_regime and
                              volume_confirm)
             
             if long_condition:
@@ -139,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_1dEMA34Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian10_Breakout_1dATRRegime_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
