@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 12h volume spike and 1d ADX regime filter.
-- Primary timeframe: 4h for execution, HTF: 12h for volume confirmation, 1d for ADX trend strength.
-- ADX > 25 indicates trending market (breakout strategy), ADX < 20 indicates ranging (mean reversion at H3/L3).
-- Entry: Long when price breaks above H3 AND ADX > 25 (bullish breakout in trend).
-         Short when price breaks below L3 AND ADX > 25 (bearish breakout in trend).
-         In ranging (ADX < 20): Long when price touches L3 AND reverses up (close > low).
-                                Short when price touches H3 AND reverses down (close < high).
-- Exit: Opposite Camarilla breakout or ADX regime shift to ranging.
-- Volume confirmation: current volume > 1.5 * 20-period volume MA (on 12h).
-- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Hypothesis: 1h Donchian channel breakout with 4h volume spike and 1d EMA trend filter.
+- Primary timeframe: 1h for execution, HTF: 4h for volume confirmation, 1d for EMA trend.
+- EMA50 > EMA200 on 1d indicates bullish trend (long bias), EMA50 < EMA200 indicates bearish trend (short bias).
+- Entry: Long when price breaks above Donchian(20) high AND 4h volume > 1.5 * 20-period MA AND EMA50 > EMA200.
+         Short when price breaks below Donchian(20) low AND 4h volume > 1.5 * 20-period MA AND EMA50 < EMA200.
+- Exit: Opposite Donchian breakout or EMA trend flip.
+- Volume confirmation avoids false breakouts in low-volatility periods.
+- Discrete signal size: 0.20 to limit drawdown and reduce fee churn.
+- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+- Session filter: 08-20 UTC to avoid low-volume Asian session noise.
 """
 
 import numpy as np
@@ -28,126 +27,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and ADX
+    # Get 4h data for volume confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Calculate 4h volume MA (20-period)
+    volume_4h = df_4h['volume'].values
+    volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_spike_4h = volume_4h > (1.5 * volume_ma_4h)
+    volume_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h)
+    
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels (H3, L3) on 1d
-    # Typical Price = (H + L + C) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    # Camarilla width = (H - L) * 1.1 / 8
-    width = (df_1d['high'] - df_1d['low']) * 1.1 / 8.0
-    # H3 = C + width * 1.1
-    camarilla_h3 = df_1d['close'].values + width * 1.1
-    # L3 = C - width * 1.1
-    camarilla_l3 = df_1d['close'].values - width * 1.1
+    # Calculate 1d EMA50 and EMA200
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_bullish = ema50_1d > ema200_1d  # Bullish trend when EMA50 > EMA200
+    ema_bearish = ema50_1d < ema200_1d  # Bearish trend when EMA50 < EMA200
+    ema_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish)
+    ema_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish)
     
-    # Calculate ADX (14-period) on 1d
-    # True Range
-    tr1 = pd.Series(df_1d['high']).diff().abs()
-    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
-    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 1h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    up_move = pd.Series(df_1d['high']).diff()
-    down_move = -pd.Series(df_1d['low']).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Get 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # Align HTF indicators to 4h
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 12h)
-    volume_12h = df_12h['volume'].values
-    volume_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_spike_12h = volume_12h > (1.5 * volume_ma)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, 20)  # Need enough 1d bars for ADX/Camarilla and 20 for volume MA
+    start_idx = max(30, 20, 50, 20)  # 4h vol MA, Donchian, 1d EMA200
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        # Skip if not in trading session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
+        # Skip if data not ready
+        if (np.isnan(volume_spike_4h_aligned[i]) or np.isnan(ema_bullish_aligned[i]) or 
+            np.isnan(ema_bearish_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        prev_close = close[i-1]
         
-        h3 = camarilla_h3_aligned[i]
-        l3 = camarilla_l3_aligned[i]
-        vol_spike = volume_spike_aligned[i]
+        vol_spike = volume_spike_4h_aligned[i]
+        ema_bull = ema_bullish_aligned[i]
+        ema_bear = ema_bearish_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         
         if position == 0:
             # Check for entry signals
             if vol_spike:
-                if adx_val > 25:  # Trending regime: breakout strategy
-                    # Bullish breakout: price closes above H3
-                    if curr_close > h3:
-                        signals[i] = 0.25
-                        position = 1
-                    # Bearish breakout: price closes below L3
-                    elif curr_close < l3:
-                        signals[i] = -0.25
-                        position = -1
-                else:  # Ranging regime (ADX < 20): mean reversion at extremes
-                    # Long when price touches L3 and shows reversal (close > low)
-                    if curr_low <= l3 and curr_close > curr_low:
-                        signals[i] = 0.25
-                        position = 1
-                    # Short when price touches H3 and shows reversal (close < high)
-                    elif curr_high >= h3 and curr_close < curr_high:
-                        signals[i] = -0.25
-                        position = -1
+                # Bullish breakout in bullish trend
+                if ema_bull and curr_high > upper:
+                    signals[i] = 0.20
+                    position = 1
+                # Bearish breakout in bearish trend
+                elif ema_bear and curr_low < lower:
+                    signals[i] = -0.20
+                    position = -1
         elif position == 1:
-            # Long exit: price closes below L3 OR ADX drops to ranging
-            if curr_close < l3 or adx_val < 20:
+            # Long exit: price breaks below Donchian low OR trend turns bearish
+            if curr_low < lower or ema_bear:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price closes above H3 OR ADX drops to ranging
-            if curr_close > h3 or adx_val < 20:
+            # Short exit: price breaks above Donchian high OR trend turns bullish
+            if curr_high > upper or ema_bull:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_H3L3_12hVolumeSpike_1dADXRegime_v1"
-timeframe = "4h"
+name = "1h_Donchian20_4hVolumeSpike_1dEMATrend_v1"
+timeframe = "1h"
 leverage = 1.0
