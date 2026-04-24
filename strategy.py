@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 12h EMA50 for trend direction (bullish when close > EMA50, bearish when close < EMA50).
-- Entry: Long when price breaks above 6h Donchian upper channel in 12h bull trend with volume > 2.0 * 6h volume MA(20); Short when price breaks below 6h Donchian lower channel in 12h bear trend with volume > 2.0 * 6h volume MA(20).
-- Exit: ATR-based trailing stop (2.5 * ATR(14)) or opposite Donchian breakout.
+Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d ADX(14) for regime filter (ADX > 25 = trending, ADX < 20 = ranging).
+- Entry: Long when price breaks above Donchian upper channel in trending 1d regime with volume > 1.5 * 4h volume MA(20); Short when price breaks below Donchian lower channel in trending 1d regime with volume > 1.5 * 4h volume MA(20).
+- Exit: ATR-based trailing stop (2.0 * ATR(14)) or opposite Donchian breakout.
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Designed for BTC/ETH: Donchian channels capture trends, EMA50 filter avoids counter-trend trades, volume spike confirms institutional participation, works in both bull and bear markets via trend-following logic.
+- Designed for BTC/ETH: Donchian channels provide clear breakout levels, ADX filter avoids false breakouts in ranging markets, volume confirmation ensures institutional participation, works in both bull and bear markets via trend-following logic.
 """
 
 import numpy as np
@@ -24,24 +24,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Donchian calculation and volume
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 4h data for Donchian calculation and volume
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend
-    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Calculate 1d ADX(14) for regime filter
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
+    tr3 = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate 6h volume MA(20) for confirmation
-    volume_6h = df_6h['volume'].values
-    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
+    # Directional Movement
+    up_move = df_1d['high'] - np.roll(df_1d['high'], 1)
+    down_move = np.roll(df_1d['low'], 1) - df_1d['low']
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 4h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h volume MA(20) for confirmation
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     # Calculate ATR(14) for trailing stop
     tr1 = high - low
@@ -52,22 +83,18 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 6h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = 0
     lowest_since_entry = 0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 14)
+    start_idx = max(20, 20, 14, 14+14)  # Donchian20, volMA20, ATR14, ADX14+14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_6h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_4h_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,34 +105,33 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: 2.0x threshold (stricter to reduce trades)
-        vol_confirmed = curr_volume > 2.0 * vol_ma_6h_aligned[i]
+        # Volume confirmation: 1.5x threshold (balanced to reduce trades)
+        vol_confirmed = curr_volume > 1.5 * vol_ma_4h_aligned[i]
         
-        # Determine 12h EMA50 trend: bullish if close > EMA50, bearish if close < EMA50
-        trend_bullish = close[i] > ema_50_aligned[i]
-        trend_bearish = close[i] < ema_50_aligned[i]
+        # Regime filter: ADX > 25 = trending market (good for breakouts)
+        trending_regime = adx_aligned[i] > 25
         
-        # Donchian breakout levels
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
+        # Donchian breakout levels from previous bar
+        upper_breakout = high_20[i-1] if i > 0 else high_20[i]
+        lower_breakout = low_20[i-1] if i > 0 else low_20[i]
         
         if position == 0:
             # Check for entry signals
-            # Long: price breaks above upper channel in 12h bull trend with volume confirmation
-            if curr_close > upper_channel and trend_bullish and vol_confirmed:
+            # Long: price breaks above upper Donchian in trending regime with volume confirmation
+            if curr_close > upper_breakout and trending_regime and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
-            # Short: price breaks below lower channel in 12h bear trend with volume confirmation
-            elif curr_close < lower_channel and trend_bearish and vol_confirmed:
+            # Short: price breaks below lower Donchian in trending regime with volume confirmation
+            elif curr_close < lower_breakout and trending_regime and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
         elif position == 1:
             # Long position: update highest and check exit conditions
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit: ATR trailing stop or opposite breakout
-            if curr_low <= highest_since_entry - 2.5 * atr[i] or curr_close < lower_channel:
+            # Exit: ATR trailing stop (2.0) or opposite Donchian breakout
+            if curr_low <= highest_since_entry - 2.0 * atr[i] or curr_close < lower_breakout:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,8 +139,8 @@ def generate_signals(prices):
         elif position == -1:
             # Short position: update lowest and check exit conditions
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit: ATR trailing stop or opposite breakout
-            if curr_high >= lowest_since_entry + 2.5 * atr[i] or curr_close > upper_channel:
+            # Exit: ATR trailing stop (2.0) or opposite Donchian breakout
+            if curr_high >= lowest_since_entry + 2.0 * atr[i] or curr_close > upper_breakout:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dADX_TrendRegime_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
