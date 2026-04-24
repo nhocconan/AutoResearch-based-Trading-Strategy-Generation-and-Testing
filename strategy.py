@@ -1,150 +1,99 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h EMA crossover with 4h ADX trend filter and session filter (08-20 UTC).
-- Uses 1h timeframe (primary) and 4h HTF for ADX trend strength confirmation.
-- Entry: Fast EMA(9) crosses above/below Slow EMA(21) with 4h ADX > 25.
-- Exit: Opposite EMA crossover or ADX drops below 20 (trend weakening).
-- Session filter: Only trade during 08-20 UTC to avoid low-volume Asian session.
-- Discrete signal size: 0.20 to minimize fee churn and manage drawdown.
-- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
-- Works in bull/bear: ADX filter ensures we only trade strong trends, avoiding whipsaws in ranging markets.
+Hypothesis: 6h Williams Fractal breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Uses 6h timeframe (primary) and 1d HTF for EMA34 trend alignment.
+- Williams Fractals identify swing highs/lows from 1d data (requires 2-bar confirmation).
+- Breakout logic: long when price closes above latest bullish fractal with volume spike and uptrend,
+                  short when price closes below latest bearish fractal with volume spike and downtrend.
+- Trend filter: only long when 6h close > 1d EMA34, only short when 6h close < 1d EMA34.
+- Volume confirmation: current 6h volume > 2.0 * 20-period 6h volume MA (strict to reduce trades).
+- Discrete signal size: 0.25 to balance reward and risk, minimizing fee churn.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+- Works in both bull/bear: trend filter avoids counter-trend trades, fractal breakouts capture momentum in all regimes.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Extract price data
+    # Extract price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 4h ADX for trend strength filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:  # Need sufficient data for ADX calculation
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate True Range (TR)
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Calculate Williams Fractals from 1d data (requires 2 extra bars for confirmation)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
     
-    # Calculate Directional Movement (+DM, -DM)
-    up_move = high_4h[1:] - high_4h[:-1]
-    down_move = low_4h[:-1] - low_4h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # Align fractals to 6h timeframe with additional 2-bar delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilder_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1]/period) + data[i]
-        return result
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA (strict)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * volume_ma)
     
-    period = 14
-    tr_smooth = wilder_smoothing(tr, period)
-    plus_dm_smooth = wilder_smoothing(plus_dm, period)
-    minus_dm_smooth = wilder_smoothing(minus_dm, period)
-    
-    # Calculate +DI and -DI
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = np.full_like(dx, np.nan)
-    # First ADX value is simple average of first 'period' DX values
-    if len(dx) >= 2*period:
-        adx[2*period-1] = np.nanmean(dx[period:2*period])
-        # Subsequent ADX values: smoothed = prev_adx - (prev_adx/period) + current_dx
-        for i in range(2*period, len(dx)):
-            adx[i] = adx[i-1] - (adx[i-1]/period) + dx[i]
-    
-    # Align 4h ADX to 1h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # Calculate 1h EMAs for entry signals
-    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Calculate EMA crossover signals
-    ema_crossover = np.zeros(n, dtype=int)  # 1 for bullish cross, -1 for bearish cross, 0 otherwise
-    ema_crossover[1:] = np.where(
-        (ema_fast[1:] > ema_slow[1:]) & (ema_fast[:-1] <= ema_slow[:-1]), 1,
-        np.where((ema_fast[1:] < ema_slow[1:]) & (ema_fast[:-1] >= ema_slow[:-1]), -1, 0)
-    )
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    in_session = (hours >= 8) & (hours <= 20)
+    # Trend filter: 6h close vs 1d EMA34
+    uptrend = close > ema_34_1d_aligned
+    downtrend = close < ema_34_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 2*14 + 21)  # Need ADX (2*14) and slow EMA (21)
+    start_idx = max(100, 34)  # Need 1d EMA34 and sufficient volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(ema_fast[i]) or 
-            np.isnan(ema_slow[i]) or np.isnan(ema_crossover[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session check
-        if not in_session[i]:
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: bullish EMA crossover AND strong trend (ADX > 25)
-            if ema_crossover[i] == 1 and adx_aligned[i] > 25:
-                signals[i] = 0.20
+            # Long: price closes above bullish fractal AND uptrend AND volume spike
+            if close[i] > bullish_fractal_aligned[i] and uptrend[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: bearish EMA crossover AND strong trend (ADX > 25)
-            elif ema_crossover[i] == -1 and adx_aligned[i] > 25:
-                signals[i] = -0.20
+            # Short: price closes below bearish fractal AND downtrend AND volume spike
+            elif close[i] < bearish_fractal_aligned[i] and downtrend[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: bearish EMA crossover OR trend weakening (ADX < 20)
-            if ema_crossover[i] == -1 or adx_aligned[i] < 20:
+            # Long exit: price reverts to bearish fractal level or reverse signal
+            if close[i] <= bearish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: bullish EMA crossover OR trend weakening (ADX < 20)
-            if ema_crossover[i] == 1 or adx_aligned[i] < 20:
+            # Short exit: price reverts to bullish fractal level or reverse signal
+            if close[i] >= bullish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA9_21_4hADX25_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_WilliamsFractal_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
