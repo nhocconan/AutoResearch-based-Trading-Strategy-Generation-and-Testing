@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1w ADX trend filter and volume confirmation.
-- Uses 6h timeframe (primary) and 1w HTF for ADX trend alignment (novel: weekly ADX as regime filter)
-- Donchian breakout: long when price crosses above upper band, short when crosses below lower band
-- Trend filter: only trade when weekly ADX > 25 (trending market) to avoid whipsaws in ranging markets
-- Volume confirmation: current volume > 1.5 * 20-period volume MA to filter low-quality breakouts
-- Exit: reverse signal or when price crosses the midpoint of the Donchian channel (mean reversion)
-- Discrete signal size: 0.25 to balance return and risk while minimizing fee churn
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe as per research
-- Works in both bull/bear: ADX filter ensures we only trade strong trends, Donchian captures momentum
-- Novel edge: Weekly ADX as regime filter has not been saturated in 6h strategies (per experiment history)
+Hypothesis: 12h Donchian(20) breakout with 1d ATR filter and volume confirmation.
+- Primary timeframe: 12h, HTF: 1d for ATR-based volatility regime filter
+- Donchian channels calculated from prior 12h OHLC: upper = max(high, 20), lower = min(low, 20)
+- Breakout logic: long when price crosses above upper band with volume confirmation, short when price crosses below lower band
+- Volatility filter: only trade when 1d ATR(14) > 20-period 1d ATR MA (avoid low-volatility chop)
+- Volume confirmation: current 12h volume > 1.5 * 20-period 12h volume MA
+- Exit: reverse signal or when price reverts to prior 12h close (mean reversion)
+- Discrete signal size: 0.25 to balance return and risk
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe as per research
+- Works in both bull/bear: volatility filter avoids chop, Donchian breakouts capture momentum in all regimes
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -27,99 +27,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channels on 6h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
-    
-    # Calculate 1w ADX for trend filter (novel: weekly ADX as regime filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:  # Need at least 14 periods for ADX calculation
+    # Calculate 1d ATR(14) for volatility regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate True Range (TR)
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First bar: no previous close
+    tr2[0] = high_1d[0] - close_1d[0]  # Approximation for first bar
+    tr3[0] = close_1d[0] - low_1d[0]   # Approximation for first bar
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    volatility_filter = atr_14 > atr_ma_20  # High volatility regime
     
-    # Calculate Directional Movement (+DM and -DM)
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    volatility_filter_aligned = align_htf_to_ltf(prices, df_1d, volatility_filter)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Calculate prior 12h Donchian channels (20-period)
+    # Need to resample to 12h first using mtf_data
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    atr_1w = wilders_smoothing(tr, 14)
-    plus_di_1w = 100 * wilders_smoothing(plus_dm, 14) / atr_1w
-    minus_di_1w = 100 * wilders_smoothing(minus_dm, 14) / atr_1w
-    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
-    adx_1w = wilders_smoothing(dx_1w, 14)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Align HTF indicators to LTF
-    donchian_mid_aligned = align_htf_to_ltf(prices, prices, donchian_mid)  # Already LTF
-    highest_high_aligned = align_htf_to_ltf(prices, prices, highest_high)
-    lowest_low_aligned = align_htf_to_ltf(prices, prices, lowest_low)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Donchian channels: 20-period high/low
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * volume_ma)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     
-    # Trend filter: weekly ADX > 25 indicates trending market
-    strong_trend = adx_1w_aligned > 25
+    # Volume confirmation: current 12h volume > 1.5 * 20-period 12h volume MA
+    volume_12h = df_12h['volume'].values
+    volume_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_12h = volume_12h > (1.5 * volume_ma_20)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_12h, volume_confirm_12h)
+    
+    # Mean reversion exit: price reverts to prior 12h close
+    prev_close_12h = df_12h['close'].shift(1).values
+    prev_close_aligned = align_htf_to_ltf(prices, df_12h, prev_close_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20)  # Need Donchian(20) and volume MA(20)
+    start_idx = max(34, 20)  # Need ATR(14)+MA(20) and Donchian(20) and volume MA(20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high_aligned[i]) or np.isnan(lowest_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_confirm[i]) or
-            np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(volatility_filter_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or np.isnan(volume_confirm_aligned[i]) or
+            np.isnan(prev_close_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above upper Donchian band AND strong trend AND volume confirmation
-            if close[i] > highest_high_aligned[i] and close[i-1] <= highest_high_aligned[i-1] and strong_trend[i] and volume_confirm[i]:
+            # Long: price crosses above upper band AND volatility filter AND volume confirmation
+            if close[i] > donchian_upper_aligned[i] and close[i-1] <= donchian_upper_aligned[i-1] and volatility_filter_aligned[i] and volume_confirm_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below lower Donchian band AND strong trend AND volume confirmation
-            elif close[i] < lowest_low_aligned[i] and close[i-1] >= lowest_low_aligned[i-1] and strong_trend[i] and volume_confirm[i]:
+            # Short: price crosses below lower band AND volatility filter AND volume confirmation
+            elif close[i] < donchian_lower_aligned[i] and close[i-1] >= donchian_lower_aligned[i-1] and volatility_filter_aligned[i] and volume_confirm_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian midpoint (mean reversion) or reverse signal
-            if close[i] < donchian_mid_aligned[i]:
+            # Long exit: price reverts to prior 12h close (mean reversion) or reverse signal
+            if close[i] <= prev_close_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian midpoint (mean reversion) or reverse signal
-            if close[i] > donchian_mid_aligned[i]:
+            # Short exit: price reverts to prior 12h close (mean reversion) or reverse signal
+            if close[i] >= prev_close_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1wADX_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dATR_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
