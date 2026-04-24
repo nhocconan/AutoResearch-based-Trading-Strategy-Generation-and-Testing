@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w ADX regime filter and volume confirmation.
-- Primary timeframe: 1d for execution, HTF: 1w for ADX trend strength.
-- ADX > 25 indicates trending market (breakout strategy), ADX < 20 indicates ranging (mean reversion at Donchian mid).
-- Entry: Long when price breaks above Donchian(20) upper AND ADX > 25 (bullish breakout in trend).
-         Short when price breaks below Donchian(20) lower AND ADX > 25 (bearish breakout in trend).
-         In ranging (ADX < 20): Long when price touches Donchian lower AND reverses up (close > low).
-                                Short when price touches Donchian upper AND reverses down (close < high).
-- Exit: Opposite Donchian breakout or ADX regime shift to ranging.
-- Volume confirmation: current volume > 1.3 * 20-period volume MA (to avoid false breakouts).
+Hypothesis: 6h Camarilla pivot breakout with 1d EMA34 trend filter and volume confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for EMA trend direction.
+- EMA34 > EMA89 on 1d indicates bullish trend, EMA34 < EMA89 indicates bearish trend.
+- In bullish trend: Long when price breaks above Camarilla R3 level with volume confirmation.
+- In bearish trend: Short when price breaks below Camarilla S3 level with volume confirmation.
+- Camarilla levels calculated from previous 1d OHLC: 
+  R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+- Volume confirmation: current volume > 1.5 * 20-period volume MA (6h).
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+- Target: 75-200 total trades over 4 years (19-50/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -28,102 +27,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for Camarilla levels and EMAs
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 90:  # Need enough for EMA89
         return np.zeros(n)
     
-    # Calculate ADX (14-period) on 1w
-    # True Range
-    tr1 = pd.Series(df_1w['high']).diff().abs()
-    tr2 = (pd.Series(df_1w['high']) - pd.Series(df_1w['low'].shift())).abs()
-    tr3 = (pd.Series(df_1w['low']) - pd.Series(df_1w['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 1d EMAs for trend filter
+    ema_fast = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_slow = pd.Series(df_1d['close']).ewm(span=89, adjust=False, min_periods=89).mean().values
+    trend_bullish = ema_fast > ema_slow  # True for bullish trend
     
-    # Directional Movement
-    up_move = pd.Series(df_1w['high']).diff()
-    down_move = -pd.Series(df_1w['low']).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla levels use previous day's OHLC
+    prev_close = pd.Series(df_1d['close']).shift(1).values
+    prev_high = pd.Series(df_1d['high']).shift(1).values
+    prev_low = pd.Series(df_1d['low']).shift(1).values
     
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate the range
+    rang = prev_high - prev_low
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
+    # Camarilla levels
+    R4 = prev_close + 1.5 * rang
+    R3 = prev_close + 1.1 * rang
+    R2 = prev_close + 0.55 * rang
+    R1 = prev_close + 0.275 * rang
+    S1 = prev_close - 0.275 * rang
+    S2 = prev_close - 0.55 * rang
+    S3 = prev_close - 1.1 * rang
+    S4 = prev_close - 1.5 * rang
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align 1d indicators to 6h
+    ema_fast_aligned = align_htf_to_ltf(prices, df_1d, ema_fast)
+    ema_slow_aligned = align_htf_to_ltf(prices, df_1d, ema_slow)
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish.astype(float))
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Align 1w ADX to 1d
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Donchian channels (20-period) on 1d
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
-    
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 1d)
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 6h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * volume_ma)
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, lookback, 20)  # Need enough 1w bars for ADX and lookback for Donchian
+    start_idx = max(90, 20)  # Need enough 1d bars for EMA89 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_fast_aligned[i]) or np.isnan(ema_slow_aligned[i]) or 
+            np.isnan(trend_bullish_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
+        is_bullish_trend = trend_bullish_aligned[i] > 0.5
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        prev_close = close[i-1]
         
         if position == 0:
             # Check for entry signals
             if volume_spike[i]:
-                if adx_val > 25:  # Trending regime: breakout strategy
-                    # Bullish breakout: price closes above upper Donchian
-                    if curr_close > highest_high[i]:
+                if is_bullish_trend:
+                    # Bullish trend: Long breakout above R3
+                    if curr_high > R3_aligned[i]:
                         signals[i] = 0.25
                         position = 1
-                    # Bearish breakout: price closes below lower Donchian
-                    elif curr_close < lowest_low[i]:
-                        signals[i] = -0.25
-                        position = -1
-                else:  # Ranging regime (ADX < 20): mean reversion at extremes
-                    # Long when price touches lower Donchian and shows reversal (close > low)
-                    if curr_low <= lowest_low[i] and curr_close > curr_low:
-                        signals[i] = 0.25
-                        position = 1
-                    # Short when price touches upper Donchian and shows reversal (close < high)
-                    elif curr_high >= highest_high[i] and curr_close < curr_high:
+                else:
+                    # Bearish trend: Short breakdown below S3
+                    if curr_low < S3_aligned[i]:
                         signals[i] = -0.25
                         position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian mid OR ADX drops to ranging
-            if curr_close < donchian_mid[i] or adx_val < 20:
+            # Long exit: price closes below R1 OR trend turns bearish
+            if curr_close < R1_aligned[i] or is_bullish_trend == False:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Donchian mid OR ADX drops to ranging
-            if curr_close > donchian_mid[i] or adx_val < 20:
+            # Short exit: price closes above S1 OR trend turns bullish
+            if curr_close > S1_aligned[i] or is_bullish_trend == True:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wADXRegime_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_1dEMA34_89Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
