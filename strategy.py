@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
-- Primary timeframe: 4h to target 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d ADX(14) for trend strength (trending if ADX > 25) and 1d EMA50 for direction.
-- Donchian channels: Upper = 20-period high, Lower = 20-period low (from prior 4h bars).
-- Entry: Long when price breaks above Donchian Upper AND 1d ADX > 25 AND 1d close > EMA50 AND volume > 1.5 * volume MA(20).
-         Short when price breaks below Donchian Lower AND 1d ADX > 25 AND 1d close < EMA50 AND volume > 1.5 * volume MA(20).
-- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 3.0*ATR,
-        exit short when price > lowest_low_since_entry + 3.0*ATR.
+Hypothesis: 12h TRIX with volume spike and choppiness regime filter for ETH/BTC.
+- Primary timeframe: 12h to target 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for TRIX calculation and 1w for choppiness regime.
+- TRIX(12): Triple EMA momentum oscillator. Long when TRIX crosses above zero AND rising.
+         Short when TRIX crosses below zero AND falling.
+- Volume confirmation: Current volume > 2.0 * volume MA(50) on 12h.
+- Choppiness regime: Only trade when CHOP(14) on 1w < 38.2 (trending market).
 - Signal size: 0.25 discrete to minimize fee churn.
-This strategy captures strong breakouts in established trends with volume confirmation,
-using wider ATR trailing stops to let winners run while controlling risk. Works in both bull and bear markets
-by requiring strong trend (ADX>25) and trading only in direction of 1d EMA50.
+- ATR-based trailing stop: Exit when price moves against position by 2.5 * ATR(20).
+This strategy captures strong momentum moves in trending markets with volume confirmation,
+avoiding choppy regimes where TRIX whipsaws. Works in both bull and bear markets by
+only taking trades in the direction of TRIX momentum with proper regime filtering.
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price data
@@ -29,73 +29,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter and EMA50 direction
+    # Get 1d data for TRIX calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend direction
+    # Get 1w data for choppiness regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate TRIX(12) on 1d: Triple EMA of close, then 1-period ROC
     df_1d_close = df_1d['close'].values
-    ema_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema1 = pd.Series(df_1d_close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX = 100 * (ema3_today - ema3_yesterday) / ema3_yesterday
+    trix_raw = np.zeros_like(ema3)
+    trix_raw[1:] = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
+    trix_raw[0] = 0.0  # first value undefined
     
-    # Calculate 1d ADX(14) for trend strength
-    # ADX requires +DI, -DI, and DX calculations
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w Choppiness Index: CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high)-min(low))))
+    df_1w_high = df_1w['high'].values
+    df_1w_low = df_1w['low'].values
+    df_1w_close = df_1w['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # True Range for 1w
+    tr1 = np.abs(df_1w_high[1:] - df_1w_low[:-1])
+    tr2 = np.abs(df_1w_high[1:] - df_1w_close[:-1])
+    tr3 = np.abs(df_1w_low[1:] - df_1w_close[:-1])
+    tr_1w = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
     
-    # +DM and -DM
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Choppiness Index for 1w
+    chop_raw = np.full(len(df_1w), np.nan)
+    for i in range(14, len(df_1w)):
+        sum_atr = np.sum(atr_1w[i-13:i+1])  # sum of last 14 ATR values
+        max_high = np.max(df_1w_high[i-13:i+1])
+        min_low = np.min(df_1w_low[i-13:i+1])
+        if max_high > min_low:
+            chop_raw[i] = 100 * np.log10(sum_atr) / (np.log10(14) * np.log10(max_high - min_low))
+        else:
+            chop_raw[i] = 50.0  # neutral when no range
     
-    # Smoothed TR, +DM, -DM (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Calculate ATR(20) for 12h trailing stop
+    tr1 = np.abs(high[1:] - low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    atr_1d = wilders_smoothing(tr_1d, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    # Calculate volume MA(50) for 12h confirmation
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
-    # +DI and -DI
-    plus_di = 100 * dm_plus_smooth / atr_1d
-    minus_di = 100 * dm_minus_smooth / atr_1d
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Calculate Donchian channels (20-period) from prior 4h bars
-    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Calculate ATR(20) for trailing stop (4h)
-    tr1_4h = np.abs(high[1:] - low[:-1])
-    tr2_4h = np.abs(high[1:] - close[:-1])
-    tr3_4h = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[np.max([tr1_4h[0], tr2_4h[0], tr3_4h[0]])], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
-    atr_4h = pd.Series(tr_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate volume MA(20) for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to 4h
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align HTF indicators to 12h
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_raw, additional_delay_bars=0)  # CHOP is contemporaneous
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -104,13 +93,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need enough bars for EMA50/ADX and Donchian/ATR/Vol MA
+    start_idx = max(50, 50, 20)  # Need enough bars for TRIX, CHOP, ATR/Vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or 
-            np.isnan(atr_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -121,22 +109,27 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
+        # TRIX signals: zero cross with slope
+        trix_now = trix_aligned[i]
+        trix_prev = trix_aligned[i-1] if i > 0 else 0.0
+        trix_rising = trix_now > trix_prev
+        trix_falling = trix_now < trix_prev
+        
         if position == 0:
-            # Check for entry signals with volume confirmation
-            vol_confirmed = curr_volume > 1.5 * vol_ma[i]
-            trending = adx_aligned[i] > 25
+            # Volume confirmation
+            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
+            # Choppiness regime: only trade when CHOP < 38.2 (trending)
+            chop_regime = chop_aligned[i] < 38.2
             
-            # Long: Price breaks above Donchian Upper AND trending AND bullish bias AND volume confirmed
-            if (curr_close > donch_upper[i] and trending and 
-                curr_close > ema_1d_aligned[i] and vol_confirmed):
+            # Long: TRIX crosses above zero AND rising AND volume confirmed AND trending regime
+            if trix_now > 0 and trix_prev <= 0 and trix_rising and vol_confirmed and chop_regime:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_high
                 lowest_since_entry = curr_low
-            # Short: Price breaks below Donchian Lower AND trending AND bearish bias AND volume confirmed
-            elif (curr_close < donch_lower[i] and trending and 
-                  curr_close < ema_1d_aligned[i] and vol_confirmed):
+            # Short: TRIX crosses below zero AND falling AND volume confirmed AND trending regime
+            elif trix_now < 0 and trix_prev >= 0 and trix_falling and vol_confirmed and chop_regime:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -145,8 +138,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit when price < highest_high - 3.0*ATR
-            if curr_close < highest_since_entry - 3.0 * atr_4h[i]:
+            # ATR trailing stop: exit when price < highest_high - 2.5*ATR
+            if curr_close < highest_since_entry - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -154,8 +147,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit when price > lowest_low + 3.0*ATR
-            if curr_close > lowest_since_entry + 3.0 * atr_4h[i]:
+            # ATR trailing stop: exit when price > lowest_low + 2.5*ATR
+            if curr_close > lowest_since_entry + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -163,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dADX_EMA50_Trend_VolumeConfirmation_v1"
-timeframe = "4h"
+name = "12h_TRIX_VolumeSpike_ChopRegime_v1"
+timeframe = "12h"
 leverage = 1.0
