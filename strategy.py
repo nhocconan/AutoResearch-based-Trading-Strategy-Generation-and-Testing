@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for ATR-based regime detection (choppy vs trending) and volume spike filter.
-- Donchian(20): Upper/lower bands from 20-period high/low.
-- Regime: ATR(10)/ATR(30) ratio > 1.2 = trending (favor breakouts), < 0.8 = choppy (favor mean reversion).
-- Entry: Long when price > Upper Band AND trending regime AND volume > 2.0 * 20-period average volume.
-         Short when price < Lower Band AND trending regime AND volume > 2.0 * 20-period average volume.
-- Exit: Opposite Donchian breakout (price < Upper Band for long exit, price > Lower Band for short exit).
+Hypothesis: 12h Williams %R mean reversion with 1d EMA trend filter and volume confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA trend filter (avoid counter-trend trades).
+- Williams %R(14): Oversold < -80 for long, overbought > -20 for short.
+- Trend filter: EMA(34) on 1d - price above EMA = uptrend (long bias), below = downtrend (short bias).
+- Volume confirmation: current volume > 1.5 * 20-period average volume.
+- Exit: Opposite Williams %R level (long exit when %R > -50, short exit when %R < -50).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in both bull and bear markets by only trading breakouts in trending regimes, avoiding whipsaws in chop.
+- Works in bull markets by taking longs in uptrend, in bear markets by taking shorts in downtrend.
 """
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need sufficient data for calculations
+    if n < 50:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -27,31 +26,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR(10) and ATR(30) for regime filter
+    # Calculate 1d EMA(34) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need sufficient data for ATR30
+    if len(df_1d) < 34:  # Need sufficient data for EMA34
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    tr = np.concatenate([[np.nan], tr])  # Align length
-    
-    # ATR(10) and ATR(30)
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
-    
-    # ATR ratio for regime: >1.2 = trending, <0.8 = choppy
-    atr_ratio = atr10 / atr30
-    
-    # Align ATR ratio to 4h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Calculate 1d volume average for confirmation (20-period)
     if len(df_1d) < 20:
@@ -60,21 +42,28 @@ def generate_signals(prices):
     vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 4h Donchian(20) bands
-    donchian_window = 20
-    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Calculate Williams %R(14) on 12h timeframe
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        ((highest_high - close) / (highest_high - lowest_low)) * -100,
+        -50  # neutral when range is zero
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 30)  # Need 20 for Donchian, 30 for ATR30
+    start_idx = max(lookback, 34)  # Need 14 for Williams %R, 34 for EMA34
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
+        if (np.isnan(ema34_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(williams_r[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,38 +71,40 @@ def generate_signals(prices):
         
         curr_close = close[i]
         curr_volume = volume[i]
+        curr_wr = williams_r[i]
         
-        # Regime filter: only trade breakouts in trending markets (ATR ratio > 1.2)
-        trending_regime = atr_ratio_aligned[i] > 1.2
+        # Trend filter: price above EMA34 = uptrend (long bias), below = downtrend (short bias)
+        uptrend = curr_close > ema34_aligned[i]
+        downtrend = curr_close < ema34_aligned[i]
         
-        # Volume confirmation: current volume > 2.0 * 20-period average volume
-        volume_confirm = curr_volume > 2.0 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
+        # Volume confirmation: current volume > 1.5 * 20-period average volume
+        volume_confirm = curr_volume > 1.5 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
         
-        # Exit conditions: opposite Donchian breakout
+        # Exit conditions: opposite Williams %R level
         if position != 0:
-            # Exit long: price < Upper Band
+            # Exit long: Williams %R > -50 (exiting oversold territory)
             if position == 1:
-                if curr_close < upper_band[i]:
+                if curr_wr > -50:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price > Lower Band
+            # Exit short: Williams %R < -50 (exiting overbought territory)
             elif position == -1:
-                if curr_close > lower_band[i]:
+                if curr_wr < -50:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with regime and volume filters
+        # Entry conditions: Williams %R extreme with trend and volume filters
         if position == 0:
-            # Long: price > Upper Band AND trending regime AND volume confirmation
-            long_condition = (curr_close > upper_band[i] and 
-                            trending_regime and
+            # Long: Williams %R < -80 (oversold) AND uptrend AND volume confirmation
+            long_condition = (curr_wr < -80 and 
+                            uptrend and
                             volume_confirm)
             
-            # Short: price < Lower Band AND trending regime AND volume confirmation
-            short_condition = (curr_close < lower_band[i] and 
-                             trending_regime and
+            # Short: Williams %R > -20 (overbought) AND downtrend AND volume confirmation
+            short_condition = (curr_wr > -20 and 
+                             downtrend and
                              volume_confirm)
             
             if long_condition:
@@ -131,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dATRRegime_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_WilliamsR_MeanReversion_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
