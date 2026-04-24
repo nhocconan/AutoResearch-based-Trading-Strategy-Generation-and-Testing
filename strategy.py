@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout + 1d EMA34 trend + volume spike.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d EMA34 for trend filter (price > EMA34 = uptrend, price < EMA34 = downtrend).
-- Entry: Long when close breaks above Camarilla H3 AND price > 1d EMA34 AND volume > 2.0 * 4h volume MA(20);
-         Short when close breaks below Camarilla L3 AND price < 1d EMA34 AND volume > 2.0 * 4h volume MA(20).
-- Exit: Close below/above Camarilla pivot level (H4/L4 for longs/shorts) or ATR-based stoploss (2.0 * ATR(14)).
+Hypothesis: 12h Camarilla H3/L3 breakout + 1d EMA50 trend + volume confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
+- Entry: Long when close breaks above Camarilla H3 AND price > 1d EMA50 AND volume > 1.5 * 12h volume MA(20);
+         Short when close breaks below Camarilla L3 AND price < 1d EMA50 AND volume > 1.5 * 12h volume MA(20).
+- Exit: Close below/above Camarilla pivot point (PP) for profit-taking, ATR-based stoploss (2.5 * ATR(20)).
 - Signal size: 0.25 discrete to control fee drag.
-- Uses Camarilla pivot levels for structure, volume confirmation for participation,
-  EMA34 trend filter to avoid counter-trend trades, and ATR for risk management.
-- Works in bull (breakouts with trend) and bear (mean reversion at extremes) regimes.
+- Uses Camarilla levels from 1d OHLC for structure, volume confirmation for participation,
+  EMA50 trend filter to avoid counter-trend trades, and ATR for risk management.
+- Designed to work in both bull and bear markets by only taking trades in direction of 1d trend.
 """
 
 import numpy as np
@@ -27,77 +27,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot calculation (prior completed 4h bar)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 12h data for Camarilla levels (using prior completed 12h bar)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels from prior 4h bar (H3, L3, H4, L4, Pivot)
-    # Camarilla formulas based on prior day's range
-    high_prev = high_4h[:-1]  # previous 4h bar high
-    low_prev = low_4h[:-1]    # previous 4h bar low
-    close_prev = close_4h[:-1] # previous 4h bar close
+    # Calculate Camarilla levels from prior 12h OHLC
+    # Camarilla: PP = (H+L+C)/3, Range = H-L
+    # H3 = C + (H-L) * 1.1/4, L3 = C - (H-L) * 1.1/4
+    pp_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
+    h3_12h = close_12h + range_12h * 1.1 / 4.0
+    l3_12h = close_12h - range_12h * 1.1 / 4.0
     
-    # Calculate pivot and ranges
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    range_prev = high_prev - low_prev
+    # Align 12h Camarilla levels to 12h timeframe (no shift needed as we use prior completed 12h bar)
+    h3_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
+    l3_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
+    pp_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
     
-    # Camarilla levels
-    h3 = pivot + (range_prev * 1.1 / 4)
-    l3 = pivot - (range_prev * 1.1 / 4)
-    h4 = pivot + (range_prev * 1.1 / 2)
-    l4 = pivot - (range_prev * 1.1 / 2)
-    
-    # Align Camarilla levels to 4h timeframe (using prior completed bar)
-    h3_aligned = align_htf_to_ltf(prices, df_4h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_4h, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_4h, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_4h, l4)
-    pivot_aligned = align_htf_to_ltf(prices, df_4h, pivot)
-    
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align 1d EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Get 4h data for volume MA(20)
+    # Get 12h data for volume MA(20)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(20) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[high[0] - low[0]], tr])  # first TR is high-low
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 14)  # EMA34 needs 34, volume MA needs 20, ATR needs 14
+    start_idx = max(50, 20, 20)  # EMA50 needs 50, volume MA needs 20, ATR needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or 
             np.isnan(h3_aligned[i]) or 
             np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or 
             np.isnan(vol_ma[i]) or 
-            np.isnan(atr14[i])):
+            np.isnan(atr20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -106,30 +94,30 @@ def generate_signals(prices):
         
         curr_close = close[i]
         curr_volume = volume[i]
-        curr_atr = atr14[i]
+        curr_atr = atr20[i]
         
-        # Volume confirmation: 2.0x threshold for strict entry
-        vol_confirm = curr_volume > 2.0 * vol_ma[i]
+        # Volume confirmation: 1.5x threshold for strict entry
+        vol_confirm = curr_volume > 1.5 * vol_ma[i]
         
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: Close breaks above Camarilla H3 AND price > 1d EMA34 (uptrend)
-                if curr_close > h3_aligned[i] and curr_close > ema_34_aligned[i]:
+                # Long: Close breaks above Camarilla H3 AND price > 1d EMA50 (uptrend)
+                if curr_close > h3_aligned[i] and curr_close > ema_50_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Short: Close breaks below Camarilla L3 AND price < 1d EMA34 (downtrend)
-                elif curr_close < l3_aligned[i] and curr_close < ema_34_aligned[i]:
+                # Short: Close breaks below Camarilla L3 AND price < 1d EMA50 (downtrend)
+                elif curr_close < l3_aligned[i] and curr_close < ema_50_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         elif position == 1:
             # Long position: check exit conditions
-            # Stoploss: 2.0 * ATR below entry
-            stoploss = entry_price - 2.0 * curr_atr
-            # Profit take: close below Camarilla H4 (or L4 for mean reversion)
-            if curr_close < stoploss or curr_close < h4_aligned[i]:
+            # Stoploss: 2.5 * ATR below entry
+            stoploss = entry_price - 2.5 * curr_atr
+            # Profit take: close below Camarilla pivot point
+            if curr_close < stoploss or curr_close < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -137,10 +125,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Short position: check exit conditions
-            # Stoploss: 2.0 * ATR above entry
-            stoploss = entry_price + 2.0 * curr_atr
-            # Profit take: close above Camarilla L4 (or H4 for mean reversion)
-            if curr_close > stoploss or curr_close > l4_aligned[i]:
+            # Stoploss: 2.5 * ATR above entry
+            stoploss = entry_price + 2.5 * curr_atr
+            # Profit take: close above Camarilla pivot point
+            if curr_close > stoploss or curr_close > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -149,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
