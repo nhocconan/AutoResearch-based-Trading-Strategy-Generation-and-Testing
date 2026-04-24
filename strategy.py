@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian channel breakout with 1d EMA34 trend filter and volume confirmation.
-- Primary timeframe: 12h for lower trade frequency and reduced fee drag.
-- HTF: 1d EMA34 for trend direction (bullish if close > EMA34, bearish if close < EMA34).
-- Donchian: 20-period upper/lower bands on 12h for breakout signals.
-- Volume: Current 12h volume > 1.5 * 20-period 12h volume MA to confirm institutional interest.
-- Entry: Long when price breaks above Donchian upper AND 1d EMA34 bullish AND volume spike.
-         Short when price breaks below Donchian lower AND 1d EMA34 bearish AND volume spike.
-- Exit: Opposite Donchian band touch (long exits at lower band, short exits at upper band).
-- Signal size: 0.25 discrete to balance return and drawdown.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-This strategy captures medium-term trends with clear structure, uses volume to filter false breakouts,
-and avoids counter-trend trades via 1d EMA34 filter. Works in bull markets via long breakouts and
-in bear markets via short breakouts, with volume confirmation reducing whipsaws.
+Hypothesis: 4h Donchian breakout with 12h EMA50 trend filter and volume confirmation.
+- Primary timeframe: 4h for structure and lower fee drag.
+- HTF: 12h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Donchian: 20-period high/low breakout for momentum entries.
+- Volume: Current 4h volume > 1.8 * 20-period volume MA to filter weak breakouts.
+- Signal: Long on Donchian high breakout + 12h EMA50 bullish + volume spike.
+          Short on Donchian low breakdown + 12h EMA50 bearish + volume spike.
+- Exit: Opposite Donchian breakout (long exits on low break, short exits on high break) or loss of volume/trend.
+- Signal size: 0.25 discrete to balance reward and risk while minimizing fee churn.
+- Target: 100-180 total trades over 4 years (25-45/year) for 4h timeframe.
+This captures strong momentum moves in the direction of the 12h trend, filtered by volume to avoid false breakouts.
+Works in bull markets (long bias) and bear markets (short bias) by following the 12h EMA50 trend.
 """
 
 import numpy as np
@@ -30,39 +29,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate 4h Donchian channels (20-period)
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    df_1d_close = df_1d['close'].values
-    ema_1d = pd.Series(df_1d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 12h EMA50
+    df_12h_close = df_12h['close'].values
+    ema_12h = pd.Series(df_12h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate 20-period 12h volume MA
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    df_12h_volume = df_12h['volume'].values
+    vol_ma_12h = pd.Series(df_12h_volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 12h
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align HTF indicators to 4h
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
-    # Volume confirmation: current 12h volume > 1.5 * 20-period 12h volume MA
-    volume_spike = volume > (1.5 * vol_ma_12h)
+    # Volume confirmation: current 4h volume > 1.8 * 20-period 12h volume MA (aligned)
+    volume_spike = volume > (1.8 * vol_ma_12h_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 34, 20)  # Need enough bars for Donchian, EMA34, and volume MA
+    start_idx = max(donchian_window, 50, 20)  # Need enough bars for Donchian, EMA50, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,31 +72,29 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        donchian_upper = highest_high[i]
-        donchian_lower = lowest_low[i]
-        ema_val = ema_1d_aligned[i]
+        ema_val = ema_12h_aligned[i]
         
         if position == 0:
             # Check for entry signals with volume spike
             if volume_spike[i]:
-                # Bullish breakout: price above upper Donchian AND 1d EMA34 bullish (close > EMA)
-                if curr_close > donchian_upper and curr_close > ema_val:
+                # Bullish: Break above Donchian high AND 12h EMA50 bullish (close > EMA)
+                if curr_high > donchian_high[i] and curr_close > ema_val:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price below lower Donchian AND 1d EMA34 bearish (close < EMA)
-                elif curr_close < donchian_lower and curr_close < ema_val:
+                # Bearish: Break below Donchian low AND 12h EMA50 bearish (close < EMA)
+                elif curr_low < donchian_low[i] and curr_close < ema_val:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price touches or breaks below lower Donchian band
-            if curr_low <= donchian_lower:
+            # Long exit: Break below Donchian low OR loss of volume confirmation OR loss of trend
+            if curr_low < donchian_low[i] or not volume_spike[i] or curr_close < ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price touches or breaks above upper Donchian band
-            if curr_high >= donchian_upper:
+            # Short exit: Break above Donchian high OR loss of volume confirmation OR loss of trend
+            if curr_high > donchian_high[i] or not volume_spike[i] or curr_close > ema_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
