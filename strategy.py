@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for EMA34 trend filter.
-- Entry: Long when price breaks above Camarilla R1 AND 1d EMA34 rising AND volume > 2.0 * 4h volume MA(20);
-         Short when price breaks below Camarilla S1 AND 1d EMA34 falling AND volume > 2.0 * 4h volume MA(20).
-- Exit: Close-based reversal (opposite signal) or trend change (signal=0 when EMA34 slope changes sign).
+Hypothesis: 6h Williams %R Extreme Reversal with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA34 trend filter and volume context.
+- Entry: Long when Williams %R(14) < -80 (oversold) AND price > 6h EMA50 AND 1d EMA34 > 1d EMA34(previous) (uptrend) AND volume > 2.0 * 6h volume MA(50);
+         Short when Williams %R(14) > -20 (overbought) AND price < 6h EMA50 AND 1d EMA34 < 1d EMA34(previous) (downtrend) AND volume > 2.0 * 6h volume MA(50).
+- Exit: Close-based reversal (opposite signal) or trend change (signal=0 when 1d EMA34 slope changes sign against position).
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Camarilla levels from daily pivot provide institutional structure; EMA34 trend filter ensures we trade with the dominant trend; volume confirmation (2.0x) avoids false breakouts.
-- Works in bull markets (buy R1 breakouts in uptrend) and bear markets (sell S1 breakdowns in downtrend) with trend filter to avoid counter-trend whipsaws.
-- Estimated trades: ~100 total over 4 years (~25/year) based on Camarilla breakout frequency with filters.
+- Williams %R identifies extreme momentum exhaustion; EMA34 trend filter ensures we trade with the daily trend; volume spike (2.0x) confirms institutional participation.
+- Works in bull markets (buy oversold dips in uptrend) and bear markets (sell overbought rallies in downtrend) with trend filter to avoid counter-trend whipsaws.
+- Estimated trades: ~80 total over 4 years (~20/year) based on Williams %R extreme frequency with filters.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Extract price data
@@ -27,56 +27,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter and Camarilla calculation
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate EMA34 on 1d data
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_slope = ema_34_1d - np.roll(ema_34_1d, 1)
     ema_34_slope[0] = 0
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_range = high_1d - low_1d
-    camarilla_r1 = close_1d + (1.1 * camarilla_range / 12)
-    camarilla_s1 = close_1d - (1.1 * camarilla_range / 12)
+    # Calculate Williams %R(14) on primary 6h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate volume MA on 4h data
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h EMA50 for dynamic support/resistance
+    ema_50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all 1d indicators to 4h timeframe
+    # Volume confirmation: 2.0x 50-period MA
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    
+    # Align all indicators to primary 6h timeframe
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     ema_34_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_34_slope)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    vol_ma_50_aligned = align_htf_to_ltf(prices, prices, vol_ma_50)  # same timeframe
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for EMA34 and volume MA
+    start_idx = 60  # Need sufficient data for Williams %R(14) and EMA50
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_34_slope_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma_4h[i])):
+            np.isnan(williams_r[i]) or np.isnan(ema_50_6h[i]) or np.isnan(vol_ma_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
         
-        # Exit: trend change (EMA34 slope changes sign)
+        # Exit: trend change (1d EMA34 slope changes sign against position)
         if position != 0:
             if position == 1 and ema_34_slope_aligned[i] <= 0:
                 signals[i] = 0.0
@@ -87,26 +85,28 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Entry conditions with volume confirmation and Camarilla breakout
-        bullish_breakout = curr_high > camarilla_r1_aligned[i]  # Break above R1
-        bearish_breakout = curr_low < camarilla_s1_aligned[i]    # Break below S1
+        # Entry conditions with volume confirmation and Williams %R extremes
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        above_ema50 = curr_close > ema_50_6h[i]
+        below_ema50 = curr_close < ema_50_6h[i]
         
         # Trend filter: only trade in direction of 1d EMA34 slope
         uptrend = ema_34_slope_aligned[i] > 0
         downtrend = ema_34_slope_aligned[i] < 0
         
         # Volume confirmation (2.0x average volume)
-        vol_confirm = curr_volume > 2.0 * vol_ma_4h[i]
+        vol_confirm = curr_volume > 2.0 * vol_ma_50_aligned[i]
         
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: Price breaks above Camarilla R1 AND uptrend
-                if bullish_breakout and uptrend:
+                # Long: Williams %R oversold AND price above EMA50 AND uptrend
+                if oversold and above_ema50 and uptrend:
                     signals[i] = 0.25
                     position = 1
-                # Short: Price breaks below Camarilla S1 AND downtrend
-                elif bearish_breakout and downtrend:
+                # Short: Williams %R overbought AND price below EMA50 AND downtrend
+                elif overbought and below_ema50 and downtrend:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_Reversal_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
