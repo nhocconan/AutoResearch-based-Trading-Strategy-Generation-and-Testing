@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter, volume spike (>2.0x 24-bar avg), and ATR regime filter (ATR > 0.7x 50-bar avg).
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter, volume confirmation, and ATR regime filter.
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Volume confirmation ensures conviction; ATR regime avoids low-momentum whipsaws.
+- Volume confirmation requires >2.0x 24-period average to ensure conviction.
+- ATR regime filter (current ATR > 0.7x 50-period average) avoids low-momentum whipsaws.
 - Exits on Donchian(20) midpoint retest or EMA50 trend violation.
-- Designed for 15-25 trades/year (60-100 total over 4 years) to stay within fee-efficient range.
+- Designed for 12-25 trades/year (50-100 total over 4 years) to stay within fee-efficient range.
 - Combines proven elements: Donchian structure + trend filter + volume/volatility confirmation.
+- Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
 """
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,7 +34,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].shift(1).values
     close_1d = df_1d['close'].shift(1).values
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
     low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
@@ -40,6 +42,11 @@ def generate_signals(prices):
     # 1d EMA50 trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Donchian(20) channels from prior 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
     # Volume confirmation: > 2.0x 24-period average
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -57,16 +64,11 @@ def generate_signals(prices):
     atr_ma_long = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     atr_ratio = atr / np.where(atr_ma_long > 0, atr_ma_long, 1)
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 24, atr_period, 20)
+    start_idx = max(50, 20, 24, atr_period, 50) + 20  # extra for Donchian lookback
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -108,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeATR_Filter_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeATR_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
