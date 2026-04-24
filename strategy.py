@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and ATR-based volatility filter.
-- Donchian channels (20-period high/low) calculated from previous completed 1d bar
-- Long when price breaks above upper Donchian AND price > 1w EMA50 (uptrend filter) AND ATR(14) > 0.3 * ATR(50)
-- Short when price breaks below lower Donchian AND price < 1w EMA50 (downtrend filter) AND ATR(14) > 0.3 * ATR(50)
-- Exit when price reverts to midpoint of Donchian channel OR volatility drops below threshold
-- Designed to capture breakouts with trend alignment and volatility filter in both bull and bear markets
-- Signal size: 0.25 discrete levels to minimize fee churn
-- Target: 30-100 total trades over 4 years (7-25/year)
+Hypothesis: 6h Williams %R extreme + 1d ADX trend filter + volume spike confirmation.
+- Williams %R(14) from 6h: long when < -80 (oversold), short when > -20 (overbought)
+- 1d ADX(14) > 25 confirms strong trend (avoid whipsaw in ranging markets)
+- Volume spike: current 6h volume > 1.5 * 20-period 6h volume average
+- Entry only in direction of 1d trend (ADX + DI+ > DI- for long, DI- > DI+ for short)
+- Exit when Williams %R returns to -50 (mean reversion) or trend weakens (ADX < 20)
+- Designed to catch extreme reversals in strong trends with institutional volume
+- Signal size: 0.25 discrete levels
+- Target: 75-175 total trades over 4 years (19-44/year)
 """
 
 import numpy as np
@@ -24,85 +25,118 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d OHLC for Donchian channels (using previous completed 1d bar)
+    # Calculate 1d OHLC for ADX and DI (using previous completed 1d bar)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough data for Donchian(20)
+    if len(df_1d) < 30:  # Need enough data for ADX calculation
         return np.zeros(n)
     
-    # 1d OHLC arrays
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) from previous 1d bar
-    # Upper channel = highest high of last 20 days
-    # Lower channel = lowest low of last 20 days
-    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    midpoint = (upper_channel + lower_channel) / 2  # Midpoint for exit
+    # Calculate 1d ADX and DI
+    # True Range
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr1 = np.maximum(tr1, np.abs(low_1d[1:] - close_1d[:-1]))
+    tr1 = np.concatenate([[np.maximum(high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]))], tr1])
     
-    # Align Donchian levels to 1d timeframe (previous day's levels available at open)
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint)
+    tr2 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(tr2, np.abs(low_1d[1:] - close_1d[:-1]))
+    tr2 = np.concatenate([[np.maximum(high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]))], tr2])
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough data for EMA50
-        return np.zeros(n)
+    tr3 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr3 = np.maximum(tr3, np.abs(low_1d[1:] - close_1d[:-1]))
+    tr3 = np.concatenate([[np.maximum(high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]))], tr3])
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Actually, simpler approach: use pandas for 1d calculations
+    df_1d_copy = df_1d.copy()
+    # Calculate +DM and -DM
+    plus_dm = df_1d_copy['high'].diff()
+    minus_dm = df_1d_copy['low'].diff().multiply(-1)
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+    # Fix first row
+    plus_dm.iloc[0] = 0
+    minus_dm.iloc[0] = 0
     
-    # Trend filter: price above/below 1w EMA50
-    uptrend = close > ema_50_1w_aligned
-    downtrend = close < ema_50_1w_aligned
+    # True Range for 1d
+    tr_temp = pd.DataFrame()
+    tr_temp['h-l'] = df_1d_copy['high'] - df_1d_copy['low']
+    tr_temp['h-pc'] = np.abs(df_1d_copy['high'] - df_1d_copy['close'].shift(1))
+    tr_temp['l-pc'] = np.abs(df_1d_copy['low'] - df_1d_copy['close'].shift(1))
+    tr_temp['tr'] = tr_temp.max(axis=1)
+    tr_temp.iloc[0, tr_temp.columns.get_loc('tr')] = df_1d_copy['high'].iloc[0] - df_1d_copy['low'].iloc[0]
     
-    # ATR-based volatility filter: ATR(14) > 0.3 * ATR(50)
-    # True Range calculation
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    volatility_filter = atr_14 > (0.3 * atr_50)
+    # Wilder's smoothing
+    period = 14
+    atr_1d = tr_temp['tr'].ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    plus_di_1d = 100 * (plus_dm.ewm(alpha=1/period, adjust=False, min_periods=period).mean() / atr_1d)
+    minus_di_1d = 100 * (minus_dm.ewm(alpha=1/period, adjust=False, min_periods=period).mean() / atr_1d)
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = dx_1d.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    
+    # Values and alignment
+    adx_1d_vals = adx_1d.values
+    plus_di_1d_vals = plus_di_1d.values
+    minus_di_1d_vals = minus_di_1d.values
+    
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_vals)
+    plus_di_1d_aligned = align_htf_to_ltf(prices, df_1d, plus_di_1d_vals)
+    minus_di_1d_aligned = align_htf_to_ltf(prices, df_1d, minus_di_1d_vals)
+    
+    # 6h Williams %R(14)
+    def calc_williams_r(high_arr, low_arr, close_arr, lookback):
+        highest_high = pd.Series(high_arr).rolling(window=lookback, min_periods=lookback).max()
+        lowest_low = pd.Series(low_arr).rolling(window=lookback, min_periods=lookback).min()
+        wr = -100 * (highest_high - close_arr) / (highest_high - lowest_low)
+        return wr.fillna(-50).values  # Neutral when not enough data
+    
+    wr_6h = calc_williams_r(high, low, close, 14)
+    
+    # 6h volume average
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_6h)
+    
+    # Trend conditions
+    uptrend_1d = (adx_1d_aligned > 25) & (plus_di_1d_aligned > minus_di_1d_aligned)
+    downtrend_1d = (adx_1d_aligned > 25) & (minus_di_1d_aligned > plus_di_1d_aligned)
+    weak_trend = adx_1d_aligned < 20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 50)  # Need Donchian(20), 1w EMA50, ATR data
+    start_idx = max(34, 20, 30)  # Williams %R needs 14, volume MA needs 20, 1d ADX needs 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or 
-            np.isnan(midpoint_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(volatility_filter[i])):
+        if (np.isnan(wr_6h[i]) or np.isnan(vol_ma_6h[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(plus_di_1d_aligned[i]) or 
+            np.isnan(minus_di_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Donchian AND uptrend AND sufficient volatility
-            if close[i] > upper_channel_aligned[i] and uptrend[i] and volatility_filter[i]:
+            # Long: Williams %R oversold (< -80) AND uptrend AND volume spike
+            if wr_6h[i] < -80 and uptrend_1d[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian AND downtrend AND sufficient volatility
-            elif close[i] < lower_channel_aligned[i] and downtrend[i] and volatility_filter[i]:
+            # Short: Williams %R overbought (> -20) AND downtrend AND volume spike
+            elif wr_6h[i] > -20 and downtrend_1d[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverts to midpoint OR volatility drops
-            if close[i] < midpoint_aligned[i] or not volatility_filter[i]:
+            # Long exit: Williams %R returns to -50 OR trend weakens
+            if wr_6h[i] >= -50 or weak_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverts to midpoint OR volatility drops
-            if close[i] > midpoint_aligned[i] or not volatility_filter[i]:
+            # Short exit: Williams %R returns to -50 OR trend weakens
+            if wr_6h[i] <= -50 or weak_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_VolatilityFilter_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_1dADXTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
