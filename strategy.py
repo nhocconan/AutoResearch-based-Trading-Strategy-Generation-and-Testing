@@ -1,38 +1,56 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 1d volume spike and ATR regime filter.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for volume average and ATR calculation.
-- Donchian Channel: identifies breakouts from 20-period high/low.
-- Entry: Long when price breaks above 20-period high AND volume > 2.0 * 1d average volume AND ATR(14) < ATR(50) (low volatility regime).
-         Short when price breaks below 20-period low AND volume > 2.0 * 1d average volume AND ATR(14) < ATR(50).
-- Exit: Opposite Donchian breakout signal.
+Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for trend (price > Kumo) and volume average.
+- Ichimoku Components:
+  * Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+  * Kijun-sen (Base Line): (26-period high + 26-period low)/2
+  * Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 plotted 26 periods ahead
+  * Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+  * Kumo (Cloud): between Senkou Span A and B
+- Entry: Long when price breaks above Kumo AND Tenkan > Kijun (bullish TK cross) AND volume > 1.5 * 1d average volume.
+         Short when price breaks below Kumo AND Tenkan < Kijun (bearish TK cross) AND volume > 1.5 * 1d average volume.
+- Exit: Opposite Ichimoku signal (price breaks Kumo in opposite direction).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Donchian breakouts capture strong momentum moves.
-- Volume confirmation ensures breakout legitimacy.
-- ATR regime filter avoids high-volatility choppy markets where breakouts fail.
-- Works in both bull and bear markets as it captures volatility expansion after contraction.
+- Ichimoku Cloud acts as dynamic support/resistance; breakouts with TK cross confirm momentum.
+- Volume confirmation filters weak breakouts.
+- Works in bull markets (catching trends) and bear markets (shorting breakdowns).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def atr(high, low, close, period):
-    """Calculate Average True Range with proper min_periods."""
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku Cloud components."""
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_values = tr.ewm(span=period, adjust=False, min_periods=period).mean().values
-    return atr_values
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    tenkan = (high_series.rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
+              low_series.rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    kijun = (high_series.rolling(window=period_kijun, min_periods=period_kijun).max() + 
+             low_series.rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    period_senkou_b = 52
+    senkou_b = (high_series.rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
+                low_series.rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2
+    
+    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need sufficient data for calculations
+    if n < 80:  # Need sufficient data for Ichimoku calculations
         return np.zeros(n)
     
     # Extract price data
@@ -49,30 +67,19 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate 1d ATR for regime filter
-    if len(df_1d) < 50:  # Need sufficient data for ATR(50)
-        return np.zeros(n)
-    
-    atr_14_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_50_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 50)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
-    
-    # Calculate Donchian Channel from 4h data (20-period)
-    donchian_period = 20
-    donchian_high = pd.Series(close).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(close).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate Ichimoku from 6h data
+    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_period, 20, 50)  # Need 20 for Donchian, 20 for volume MA, 50 for ATR(50)
+    start_idx = 52  # Need 52 for Senkou Span B calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(atr_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,39 +89,57 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        prev_close = close[i-1]
         
-        # Exit conditions: opposite Donchian breakout
+        # Kumo (Cloud) boundaries: Senkou Span A and B shifted forward 26 periods
+        # For current period i, we need Senkou values from i-26 (already plotted)
+        idx_kumo = i - 26
+        if idx_kumo < 0:
+            # Not enough data to plot cloud yet
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        senkou_a_kumo = senkou_a[idx_kumo]
+        senkou_b_kumo = senkou_b[idx_kumo]
+        
+        # Cloud top and bottom
+        cloud_top = max(senkou_a_kumo, senkou_b_kumo)
+        cloud_bottom = min(senkou_a_kumo, senkou_b_kumo)
+        
+        # TK Cross conditions
+        tk_bullish = tenkan[i] > kijun[i]
+        tk_bearish = tenkan[i] < kijun[i]
+        
+        # Volume confirmation
+        volume_confirm = curr_volume > 1.5 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
+        
+        # Exit conditions: opposite Ichimoku signal (price breaks Kumo in opposite direction)
         if position != 0:
-            # Exit long: price breaks below Donchian low
+            # Exit long: price breaks below cloud bottom
             if position == 1:
-                if curr_low <= donchian_low[i]:
+                if curr_low < cloud_bottom:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Donchian high
+            # Exit short: price breaks above cloud top
             elif position == -1:
-                if curr_high >= donchian_high[i]:
+                if curr_high > cloud_top:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with volume confirmation and ATR regime filter
+        # Entry conditions: Ichimoku breakout with TK cross and volume confirmation
         if position == 0:
-            # Donchian breakout signals
-            breakout_up = curr_high >= donchian_high[i] and prev_close < donchian_high[i-1]
-            breakout_down = curr_low <= donchian_low[i] and prev_close > donchian_low[i-1]
+            # Bullish breakout: price breaks above cloud top + bullish TK cross
+            bullish_breakout = curr_high > cloud_top and close[i-1] <= cloud_top and tk_bullish
+            # Bearish breakout: price breaks below cloud bottom + bearish TK cross
+            bearish_breakout = curr_low < cloud_bottom and close[i-1] >= cloud_bottom and tk_bearish
             
-            # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
-            volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
-            
-            # ATR regime filter: ATR(14) < ATR(50) (low volatility regime)
-            atr_regime = atr_14_1d_aligned[i] < atr_50_1d_aligned[i]
-            
-            if breakout_up and volume_confirm and atr_regime:
+            if bullish_breakout and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            elif breakout_down and volume_confirm and atr_regime:
+            elif bearish_breakout and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -126,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dVolumeSpike_ATRRegime_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_TK_Cross_CloudBreakout_1dVolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
