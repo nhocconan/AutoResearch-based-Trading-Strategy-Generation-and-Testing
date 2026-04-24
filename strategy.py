@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1d ADX regime filter.
-- Primary timeframe: 4h for execution, HTF: 1d for volume spike and ADX.
-- Donchian breakout: Long when price > highest high of last 20 periods, Short when price < lowest low.
-- Regime filter: ADX(14) > 25 = trending (trade breakouts in trend direction), ADX < 20 = ranging (fade breakouts).
-- Volume confirmation: 1d volume > 2.0x 20-period volume MA to ensure institutional participation.
-- Discrete signal size: 0.30 to balance profit potential and drawdown control.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend, and fading false breakouts in ranges.
+Hypothesis: 6h Elder Ray Power + 1d ADX regime + volume confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for ADX regime filter.
+- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+- Regime filter: ADX(14) > 25 = trending (trade with Elder Ray), ADX < 20 = ranging (fade Elder Ray extremes).
+- Volume confirmation: current volume > 1.5x 20-period volume MA.
+- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+- Works in bull via buying strong Bull Power in uptrend, in bear via selling strong Bear Power in downtrend, and fading extremes in ranges.
 """
 
 import numpy as np
@@ -27,13 +27,12 @@ def generate_signals(prices):
     
     # Calculate 1d ADX(14) for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for ADX smoothing + EMA
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # True Range
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
@@ -61,35 +60,31 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d ADX to 4h timeframe (completed 1d bar only)
+    # Align 1d ADX to 6h timeframe (completed 1d bar only)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 1d EMA34 for trend direction
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA13 for Elder Ray (on 6h)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 1d volume spike: volume > 2.0 * 20-period volume MA
-    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (2.0 * volume_ma_20)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Elder Ray Power
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Donchian channels on 4h
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 50)  # Donchian(20) + ADX buffer
+    start_idx = max(13, 34, 20)  # EMA13 + ADX buffer + volume MA(20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,46 +93,42 @@ def generate_signals(prices):
         if position == 0:
             # Regime: ADX > 25 = trending, ADX < 20 = ranging
             if adx_aligned[i] > 25:
-                # Trending regime: trade breakouts in trend direction
-                if i > 0 and not np.isnan(ema_34_1d_aligned[i-1]):
-                    ema34_slope = ema_34_1d_aligned[i] - ema_34_1d_aligned[i-1]
-                    if close[i] > highest_high[i] and ema34_slope > 0 and volume_spike_aligned[i]:
-                        # Uptrend: buy on upside breakout
-                        signals[i] = 0.30
-                        position = 1
-                    elif close[i] < lowest_low[i] and ema34_slope < 0 and volume_spike_aligned[i]:
-                        # Downtrend: sell on downside breakdown
-                        signals[i] = -0.30
-                        position = -1
-            elif adx_aligned[i] < 20:
-                # Ranging regime: fade breakouts (mean reversion)
-                if close[i] > highest_high[i] and volume_spike_aligned[i]:
-                    # Price broke above Donchian high in range: sell expecting reversion
-                    signals[i] = -0.30
+                # Trending regime: trade with Elder Ray power
+                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and volume_spike[i]:
+                    # Strong and increasing Bull Power: buy
+                    signals[i] = 0.25
+                    position = 1
+                elif bear_power[i] < 0 and bear_power[i] < bear_power[i-1] and volume_spike[i]:
+                    # Strong and increasing Bear Power (more negative): sell
+                    signals[i] = -0.25
                     position = -1
-                elif close[i] < lowest_low[i] and volume_spike_aligned[i]:
-                    # Price broke below Donchian low in range: buy expecting reversion
-                    signals[i] = 0.30
+            elif adx_aligned[i] < 20:
+                # Ranging regime: fade Elder Ray extremes
+                if bull_power[i] > 0 and bull_power[i] > 2 * np.std(bull_power[max(0, i-50):i]) and volume_spike[i]:
+                    # Extremely bullish in range: sell expecting reversion
+                    signals[i] = -0.25
+                    position = -1
+                elif bear_power[i] < 0 and bear_power[i] < -2 * np.std(bear_power[max(0, i-50):i]) and volume_spike[i]:
+                    # Extremely bearish in range: buy expecting reversion
+                    signals[i] = 0.25
                     position = 1
         elif position == 1:
-            # Long exit: price returns to midline or opposite breakout
-            midline = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] < midline or close[i] < lowest_low[i]:
+            # Long exit: Bull Power turns negative or weakens
+            if bull_power[i] <= 0 or (bull_power[i] < bull_power[i-1] and bull_power[i-1] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to midline or opposite breakout
-            midline = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] > midline or close[i] > highest_high[i]:
+            # Short exit: Bear Power turns positive or weakens
+            if bear_power[i] >= 0 or (bear_power[i] > bear_power[i-1] and bear_power[i-1] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_1dADX_VolumeSpike_Regime_v1"
-timeframe = "4h"
+name = "6h_ElderRay_Power_1dADX_Regime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
