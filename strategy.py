@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w EMA34 for trend direction (bullish when close > EMA34, bearish when close < EMA34).
-- Entry: Long when price breaks above Donchian upper channel (20-day high) in 1w bull trend with volume > 1.5 * 20-day volume MA; Short when price breaks below Donchian lower channel (20-day low) in 1w bear trend with volume > 1.5 * 20-day volume MA.
-- Exit: ATR-based trailing stop (2.0 * ATR(14)) or opposite Donchian breakout.
+Hypothesis: 6h Williams %R extreme with 1d EMA34 trend filter and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d EMA34 for trend direction (bullish when close > EMA34, bearish when close < EMA34).
+- Entry: Long when Williams %R(14) crosses above -20 from below in 1d bull trend with volume > 1.5 * 6h volume MA(20); 
+         Short when Williams %R(14) crosses below -80 from above in 1d bear trend with volume > 1.5 * 6h volume MA(20).
+- Exit: ATR-based trailing stop (2.0 * ATR(14)) or opposite Williams %R signal.
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Designed for BTC/ETH: Donchian channels provide clear breakout levels, 1w EMA34 filter avoids counter-trend trades, volume confirmation ensures institutional participation, works in both bull and bear markets via trend-following logic.
+- Designed for BTC/ETH: Williams %R identifies overbought/oversold extremes, EMA34 filter avoids counter-trend trades, 
+  volume confirmation ensures institutional participation, works in both bull and bear markets via mean-reversion logic at extremes.
 """
 
 import numpy as np
@@ -24,24 +26,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation and volume
+    # Get 6h data for Williams %R calculation and volume
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # Calculate 1d EMA34 for trend
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 1w EMA34 for trend
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Calculate 20-day volume MA for confirmation
-    volume_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Calculate 6h volume MA(20) for confirmation
+    volume_6h = df_6h['volume'].values
+    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
     
     # Calculate ATR(14) for trailing stop
     tr1 = high - low
@@ -52,9 +54,12 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-day high/low)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R(14) on 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,8 +71,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_6h_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(williams_r[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,33 +84,39 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         # Volume confirmation: 1.5x threshold
-        vol_confirmed = curr_volume > 1.5 * vol_ma_20_aligned[i]
+        vol_confirmed = curr_volume > 1.5 * vol_ma_6h_aligned[i]
         
-        # Determine 1w EMA34 trend: bullish if close > EMA34, bearish if close < EMA34
-        trend_bullish = close[i] > ema_34_1w_aligned[i]
-        trend_bearish = close[i] < ema_34_1w_aligned[i]
+        # Determine 1d EMA34 trend: bullish if close > EMA34, bearish if close < EMA34
+        trend_bullish = close[i] > ema_34_aligned[i]
+        trend_bearish = close[i] < ema_34_aligned[i]
         
-        # Donchian breakout levels
-        upper_breakout = high_20[i]
-        lower_breakout = low_20[i]
+        # Williams %R signals
+        williams_r_curr = williams_r[i]
+        williams_r_prev = williams_r[i-1] if i > 0 else williams_r[i]
+        
+        # Long signal: Williams %R crosses above -20 from below (oversold to normal)
+        long_signal = (williams_r_prev <= -20 and williams_r_curr > -20 and 
+                      trend_bullish and vol_confirmed)
+        # Short signal: Williams %R crosses below -80 from above (overbought to normal)
+        short_signal = (williams_r_prev >= -80 and williams_r_curr < -80 and 
+                       trend_bearish and vol_confirmed)
         
         if position == 0:
             # Check for entry signals
-            # Long: price breaks above upper Donchian level in 1w bull trend with volume confirmation
-            if curr_close > upper_breakout and trend_bullish and vol_confirmed:
+            if long_signal:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
-            # Short: price breaks below lower Donchian level in 1w bear trend with volume confirmation
-            elif curr_close < lower_breakout and trend_bearish and vol_confirmed:
+            elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
         elif position == 1:
             # Long position: update highest and check exit conditions
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit: ATR trailing stop or opposite breakout
-            if curr_low <= highest_since_entry - 2.0 * atr[i] or curr_close < lower_breakout:
+            # Exit: ATR trailing stop or opposite Williams %R signal
+            if (curr_low <= highest_since_entry - 2.0 * atr[i] or 
+                (williams_r_prev >= -80 and williams_r_curr < -80)):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -113,8 +124,9 @@ def generate_signals(prices):
         elif position == -1:
             # Short position: update lowest and check exit conditions
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit: ATR trailing stop or opposite breakout
-            if curr_high >= lowest_since_entry + 2.0 * atr[i] or curr_close > upper_breakout:
+            # Exit: ATR trailing stop or opposite Williams %R signal
+            if (curr_high >= lowest_since_entry + 2.0 * atr[i] or 
+                (williams_r_prev <= -20 and williams_r_curr > -20)):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
