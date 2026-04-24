@@ -1,35 +1,22 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1w EMA50 trend filter and volume confirmation.
-- Williams Alligator: Jaw (13-period SMMA smoothed 8), Teeth (8-period SMMA smoothed 5), Lips (5-period SMMA smoothed 3)
-- Long when Lips > Teeth > Jaw (bullish alignment) and close > 1w EMA50 (bullish HTF trend)
-- Short when Lips < Teeth < Jaw (bearish alignment) and close < 1w EMA50 (bearish HTF trend)
-- Volume must be > 2.0x 20-period average for conviction to avoid choppy markets
-- ATR-based trailing stop: exit when price moves 2.5x ATR against position from extreme
-- Uses 1w HTF for trend filter (more stable than 1d) to reduce whipsaw in bear markets
-- Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-- Designed to work in both bull and bear markets via HTF trend filter and Alligator alignment
+Hypothesis: 4h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume confirmation.
+- Long when price breaks above Camarilla H3 and close > 1w EMA50 (bullish trend)
+- Short when price breaks below Camarilla L3 and close < 1w EMA50 (bearish trend)
+- Volume must be > 2.0x 20-period average for high-conviction breakouts
+- ATR-based trailing stop: exit when price moves 2.5x ATR from extreme since entry
+- Uses 1w HTF for trend filter (more stable than daily) to reduce whipsaw and capture major trend
+- Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+- Designed to work in both bull and bear markets via strong trend filter and breakout structure
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(source, period):
-    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
-    if len(source) < period:
-        return np.full(len(source), np.nan)
-    result = np.full(len(source), np.nan)
-    # First value is simple average
-    result[period-1] = np.mean(source[:period])
-    # Subsequent values: (prev * (period-1) + current) / period
-    for i in range(period, len(source)):
-        result[i] = (result[i-1] * (period-1) + source[i]) / period
-    return result
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,13 +24,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator components
-    jaw = smma(close, 13)  # Jaw: 13-period SMMA
-    jaw = smma(jaw, 8)     # Smoothed again by 8 periods
-    teeth = smma(close, 8) # Teeth: 8-period SMMA
-    teeth = smma(teeth, 5) # Smoothed again by 5 periods
-    lips = smma(close, 5)  # Lips: 5-period SMMA
-    lips = smma(lips, 3)   # Smoothed again by 3 periods
+    # Calculate Camarilla pivot levels (based on previous bar's OHLC)
+    camarilla_h3 = np.full(n, np.nan)
+    camarilla_l3 = np.full(n, np.nan)
+    for i in range(1, n):
+        # Use previous bar's OHLC to calculate current bar's Camarilla levels
+        c = (high[i-1] + low[i-1] + close[i-1]) / 3
+        r = high[i-1] - low[i-1]
+        camarilla_h3[i] = c + (r * 1.1 / 2)  # H3 level
+        camarilla_l3[i] = c - (r * 1.1 / 2)  # L3 level
     
     # Get 1w data ONCE before loop for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -54,7 +43,7 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 12h timeframe
+    # Align 1w EMA50 to 4h timeframe
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: > 2.0x 20-period average volume
@@ -74,11 +63,11 @@ def generate_signals(prices):
     lowest_low_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 50, 20, 14) + 1
+    start_idx = max(20, 50, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
             np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,19 +77,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Bullish alignment: Lips > Teeth > Jaw
-            bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-            # Bearish alignment: Lips < Teeth < Jaw
-            bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-            
-            # Long: bullish alignment, HTF trend up (close > EMA50), volume spike
-            if bullish_alignment and close[i] > ema_50_1w_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: price breaks above Camarilla H3, trend up (close > EMA50), volume spike
+            if close[i] > camarilla_h3[i] and close[i] > ema_50_1w_aligned[i] and volume_spike[i]:
+                signals[i] = 0.30
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: bearish alignment, HTF trend down (close < EMA50), volume spike
-            elif bearish_alignment and close[i] < ema_50_1w_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: price breaks below Camarilla L3, trend down (close < EMA50), volume spike
+            elif close[i] < camarilla_l3[i] and close[i] < ema_50_1w_aligned[i] and volume_spike[i]:
+                signals[i] = -0.30
                 position = -1
                 lowest_low_since_entry = low[i]
         elif position == 1:
@@ -112,7 +96,7 @@ def generate_signals(prices):
                 position = 0
                 highest_high_since_entry = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
@@ -122,10 +106,10 @@ def generate_signals(prices):
                 position = 0
                 lowest_low_since_entry = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Williams_Alligator_1wEMA50_VolumeSpike_ATRTrailingStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1wEMA50_VolumeSpike_ATRTrailingStop_v1"
+timeframe = "4h"
 leverage = 1.0
