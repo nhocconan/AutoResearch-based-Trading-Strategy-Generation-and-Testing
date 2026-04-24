@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R Extreme + 1d Supertrend Trend Filter + Volume Spike.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+Hypothesis: 12h Bollinger Band Squeeze + Volume Spike + 1d Supertrend Trend Filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
 - HTF: 1d Supertrend (ATR=10, mult=3) for trend filter (price > Supertrend = uptrend, price < Supertrend = downtrend).
-- Entry: Long when Williams %R(14) crosses above -20 (exiting oversold) AND price > 1d Supertrend AND volume > 2.0 * 4h volume MA(20);
-         Short when Williams %R(14) crosses below -80 (exiting overbought) AND price < 1d Supertrend AND volume > 2.0 * 4h volume MA(20).
-- Exit: Long exits when Williams %R crosses below -80; Short exits when Williams %R crosses above -20.
+- Entry: Long when Bollinger Band Width < 20th percentile (squeeze) AND price breaks above upper BB AND volume > 1.5 * 12h volume MA(50) AND price > 1d Supertrend;
+         Short when Bollinger Band Width < 20th percentile (squeeze) AND price breaks below lower BB AND volume > 1.5 * 12h volume MA(50) AND price < 1d Supertrend.
+- Exit: Long exits when price crosses below middle BB (20 SMA); Short exits when price crosses above middle BB.
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Williams %R captures momentum exhaustion/reversal; Supertrend filters higher-timeframe trend; volume spike confirms conviction.
-- Works in bull (buying oversold bounces in uptrend) and bear (selling overbought rejections in downtrend) with reduced whipsaws.
+- Bollinger Squeeze captures low volatility contraction before expansion; volume spike confirms breakout conviction; Supertrend filters higher-timeframe trend.
+- Works in bull (buying breakouts in uptrend) and bear (selling breakdowns in downtrend) with reduced whipsaws.
 """
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price data
@@ -25,6 +25,23 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Bollinger Bands on 12h (20, 2)
+    bb_length = 20
+    bb_mult = 2.0
+    basis = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
+    dev = bb_mult * pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
+    upper_bb = basis + dev
+    lower_bb = basis - dev
+    bb_width = (upper_bb - lower_bb) / basis * 100  # Percentage width
+    
+    # Bollinger Band Width percentile (20th) for squeeze detection
+    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=50).rank(pct=True).values * 100
+    squeeze = bb_width_percentile < 20  # Below 20th percentile
+    
+    # Volume confirmation: 1.5x threshold on 12h volume MA(50)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    vol_confirm = volume > 1.5 * vol_ma
     
     # Get 1d data for Supertrend trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -67,28 +84,21 @@ def generate_signals(prices):
             supertrend[i] = basic_lb[i]
             direction[i] = -1
     
-    # Align Supertrend and direction to 4h timeframe
+    # Align Supertrend and direction to 12h timeframe
     supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
     direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
-    
-    # Williams %R on 4h (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    
-    # Get 4h data for volume MA(20)
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(14, 10)  # Williams %R needs 14, Supertrend needs 10
+    start_idx = max(bb_length, 50, 10)  # BB needs 20, vol MA needs 50, Supertrend needs 10
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(vol_ma_4h[i])):
+        if (np.isnan(basis[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
+            np.isnan(squeeze[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,37 +108,33 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        prev_williams_r = williams_r[i-1] if i > 0 else -50
         
         # Trend filter from 1d Supertrend
         uptrend = direction_aligned[i] == 1
         downtrend = direction_aligned[i] == -1
         
-        # Volume confirmation: 2.0x threshold
-        vol_confirm = curr_volume > 2.0 * vol_ma_4h[i]
-        
         if position == 0:
             # Check for entry signals
-            if uptrend and vol_confirm:
-                # Long: Williams %R crosses above -20 (exiting oversold)
-                if prev_williams_r <= -20 and williams_r[i] > -20:
+            if uptrend and vol_confirm and squeeze[i]:
+                # Long: price breaks above upper Bollinger Band
+                if curr_high > upper_bb[i]:
                     signals[i] = 0.25
                     position = 1
-            elif downtrend and vol_confirm:
-                # Short: Williams %R crosses below -80 (exiting overbought)
-                if prev_williams_r >= -80 and williams_r[i] < -80:
+            elif downtrend and vol_confirm and squeeze[i]:
+                # Short: price breaks below lower Bollinger Band
+                if curr_low < lower_bb[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long position: exit when Williams %R crosses below -80
-            if prev_williams_r > -80 and williams_r[i] <= -80:
+            # Long position: exit when price crosses below middle BB (20 SMA)
+            if curr_close < basis[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when Williams %R crosses above -20
-            if prev_williams_r < -20 and williams_r[i] >= -20:
+            # Short position: exit when price crosses above middle BB
+            if curr_close > basis[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_Extreme_1dSupertrend_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_BBand_Squeeze_VolumeSpike_1dSupertrend_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
