@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Uses 1d EMA34 as HTF trend filter (proven effective on BTC/ETH) to capture medium-term trend.
-- H3/L3 breakouts on 12h timeframe require strong momentum, reducing false signals.
-- Volume confirmation (>2.0x 20-bar average) ensures institutional participation.
-- Position size 0.25 balances profit and drawdown control.
-- Target trades: 50-150 total over 4 years (12-37/year) to minimize fee drag.
-- Works in bull/bear markets via 1d trend filter and high-probability breakout logic.
+Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+- Uses 1w EMA34 as HTF trend filter to capture major trend direction and avoid counter-trend trades.
+- Donchian(20) breakouts on 1d timeframe provide clean entry/exit signals with low frequency.
+- Volume confirmation (>1.5x 20-bar average) ensures institutional participation and reduces false breakouts.
+- Position size 0.25 balances profit potential and drawdown control.
+- Target trades: 30-80 total over 4 years (7-20/year) to minimize fee drag on 1d timeframe.
+- Works in bull/bear markets via 1w trend filter and high-probability breakout logic.
+- Avoids overtrading by using strict 1d timeframe and multiple confluence conditions.
 """
 
 import numpy as np
@@ -23,69 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data ONCE before loop for EMA filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA34 trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla pivot levels from prior 12h bar
+    # Calculate Donchian channels (20-period) from prior 1d bar
     prev_high = pd.Series(high).shift(1).values
     prev_low = pd.Series(low).shift(1).values
     prev_close = pd.Series(close).shift(1).values
     
-    # Camarilla formulas
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    h3 = pivot + (range_hl * 1.25 / 4)  # H3 level
-    l3 = pivot - (range_hl * 1.25 / 4)  # L3 level
+    # Donchian(20) upper/lower bands from prior 20 periods
+    donchian_upper = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(prev_low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: > 2.0x 20-period average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20) + 1  # Need enough for EMA and Camarilla
+    start_idx = max(34, 20) + 1  # Need enough for EMA and Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3[i]) or np.isnan(l3[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
             # Only trade if volume confirms
             if volume_confirm:
-                # Long breakout: price above H3 AND above 1d EMA34
-                if close[i] > h3[i] and close[i] > ema_34_1d_aligned[i]:
+                # Long breakout: price above Donchian upper AND above 1w EMA34
+                if close[i] > donchian_upper[i] and close[i] > ema_34_1w_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short breakout: price below L3 AND below 1d EMA34
-                elif close[i] < l3[i] and close[i] < ema_34_1d_aligned[i]:
+                # Short breakout: price below Donchian lower AND below 1w EMA34
+                elif close[i] < donchian_lower[i] and close[i] < ema_34_1w_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price breaks below L3 OR crosses below 1d EMA34
-            if close[i] < l3[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: price breaks below Donchian lower OR crosses below 1w EMA34
+            if close[i] < donchian_lower[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above H3 OR crosses above 1d EMA34
-            if close[i] > h3[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: price breaks above Donchian upper OR crosses above 1w EMA34
+            if close[i] > donchian_upper[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wEMA34_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
