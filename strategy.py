@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 12h for EMA50 trend direction (bull/bear regime).
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (13-period EMA on 6h).
-- Regime: 12h EMA50 upward = bull regime (favor longs), downward = bear regime (favor shorts).
-- Entry: Long when Bull Power > 0 AND bull regime AND volume > 1.5 * 20-period average volume.
-         Short when Bear Power < 0 AND bear regime AND volume > 1.5 * 20-period average volume.
-- Exit: Opposite Elder Ray signal (Bull Power < 0 for long exit, Bear Power > 0 for short exit).
+Hypothesis: 12h Donchian(20) breakout with 1w ATR regime filter and volume confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for ATR-based regime detection (choppy vs trending) and 1d for volume spike filter.
+- Donchian(20): Upper/lower bands from 20-period high/low on 12h chart.
+- Regime: ATR(10)/ATR(30) ratio > 1.2 = trending (favor breakouts), < 0.8 = choppy (avoid breakouts).
+- Volume: Current 12h volume > 2.0 * 20-period average 1d volume (scaled to 12h).
+- Entry: Long when price > Upper Band AND trending regime AND volume confirmation.
+         Short when price < Lower Band AND trending regime AND volume confirmation.
+- Exit: Opposite Donchian breakout (price < Upper Band for long exit, price > Lower Band for short exit).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in bull markets via longs in bull regime, and in bear markets via shorts in bear regime.
+- Works in both bull and bear markets by only trading breakouts in trending regimes, avoiding whipsaws in chop.
 """
 
 import numpy as np
@@ -18,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need sufficient data for calculations
+    if n < 60:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -27,73 +28,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:  # Need sufficient data for EMA50
+    # Calculate 1w ATR(10) and ATR(30) for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need sufficient data for ATR30
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA50 slope for trend direction (bullish if rising)
-    ema50_slope = np.diff(ema50_12h_aligned, prepend=ema50_12h_aligned[0])
-    bull_regime = ema50_slope > 0  # Rising EMA50 = bull regime
-    bear_regime = ema50_slope < 0  # Falling EMA50 = bear regime
+    # True Range calculation
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # Align length
     
-    # Calculate 6h volume average for confirmation (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ATR(10) and ATR(30)
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
+    
+    # ATR ratio for regime: >1.2 = trending, <0.8 = choppy
+    atr_ratio = atr10 / atr30
+    
+    # Align ATR ratio to 12h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
+    
+    # Calculate 1d volume average for confirmation (20-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Scale 1d average volume to 12h equivalent (12h = 0.5 days)
+    vol_ma_20_12h_equiv = vol_ma_20_1d_aligned * 0.5
+    
+    # Calculate 12h Donchian(20) bands
+    donchian_window = 20
+    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 13)  # Need 20 for volume MA, 13 for EMA13
+    start_idx = max(donchian_window, 30)  # Need 20 for Donchian, 30 for ATR30
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_slope[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20_12h_equiv[i]) or
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Exit conditions: opposite Elder Ray signal
+        curr_close = close[i]
+        curr_volume = volume[i]
+        
+        # Regime filter: only trade breakouts in trending markets (ATR ratio > 1.2)
+        trending_regime = atr_ratio_aligned[i] > 1.2
+        
+        # Volume confirmation: current volume > 2.0 * scaled 20-period average volume
+        volume_confirm = curr_volume > 2.0 * vol_ma_20_12h_equiv[i] if not np.isnan(vol_ma_20_12h_equiv[i]) else False
+        
+        # Exit conditions: opposite Donchian breakout
         if position != 0:
-            # Exit long: Bull Power < 0 (momentum fading)
+            # Exit long: price < Upper Band
             if position == 1:
-                if bull_power[i] < 0:
+                if curr_close < upper_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Bear Power > 0 (selling pressure fading)
+            # Exit short: price > Lower Band
             elif position == -1:
-                if bear_power[i] > 0:
+                if curr_close > lower_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period average volume
-        volume_confirm = volume[i] > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
-        
-        # Entry conditions: Elder Ray with regime and volume filters
+        # Entry conditions: Donchian breakout with regime and volume filters
         if position == 0:
-            # Long: Bull Power > 0 AND bull regime AND volume confirmation
-            long_condition = (bull_power[i] > 0 and 
-                            bull_regime[i] and
+            # Long: price > Upper Band AND trending regime AND volume confirmation
+            long_condition = (curr_close > upper_band[i] and 
+                            trending_regime and
                             volume_confirm)
             
-            # Short: Bear Power < 0 AND bear regime AND volume confirmation
-            short_condition = (bear_power[i] < 0 and 
-                             bear_regime[i] and
+            # Short: price < Lower Band AND trending regime AND volume confirmation
+            short_condition = (curr_close < lower_band[i] and 
+                             trending_regime and
                              volume_confirm)
             
             if long_condition:
@@ -111,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_12hEMA50Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1wATRRegime_1dVolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
