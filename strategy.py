@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1d EMA34 for trend filter (price > EMA34 = uptrend, price < EMA34 = downtrend).
-- Entry: Long when price breaks above Camarilla H3 AND price > 1d EMA34 AND volume > 2.0 * 12h volume MA(20);
-         Short when price breaks below Camarilla L3 AND price < 1d EMA34 AND volume > 2.0 * 12h volume MA(20).
+- Entry: Long when price breaks above Camarilla H3 AND price > 1d EMA34 AND volume > 2.0 * 4h volume MA(20);
+         Short when price breaks below Camarilla L3 AND price < 1d EMA34 AND volume > 2.0 * 4h volume MA(20).
 - Exit: ATR-based trailing stop (2.5 * ATR(14)) from highest high/lowest low since entry.
 - Signal size: 0.25 discrete to control fee drag.
 - Uses Camarilla pivot levels for structure, 1d EMA34 for trend alignment, volume confirmation for participation,
-  and ATR for risk management. Designed to capture trends in both bull and bear markets with minimal overtrading.
+  and ATR for risk management. Designed to capture trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -26,40 +26,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for volume MA(20)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    volume_12h = df_12h['volume'].values
-    
-    # Calculate 12h volume MA(20)
-    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    
-    # Get 1d data for EMA34 trend filter and Camarilla pivot levels (H3, L3)
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Get 1d data for Camarilla pivot levels (H3, L3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate Camarilla pivot levels for 1d timeframe
     # Camarilla: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate ATR(14) for 12h timeframe
+    # Calculate volume MA(20) for 4h timeframe
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate ATR(14) for 4h timeframe
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -81,7 +76,7 @@ def generate_signals(prices):
         if (np.isnan(ema_34_aligned[i]) or 
             np.isnan(camarilla_h3_aligned[i]) or 
             np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(vol_ma_12h_aligned[i]) or 
+            np.isnan(vol_ma_4h[i]) or 
             np.isnan(atr14[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -98,7 +93,7 @@ def generate_signals(prices):
         curr_atr = atr14[i]
         
         # Volume confirmation: 2.0x threshold for strict entry
-        vol_confirm = curr_volume > 2.0 * vol_ma_12h_aligned[i]
+        vol_confirm = curr_volume > 2.0 * vol_ma_4h[i]
         
         if position == 0:
             # Check for entry signals
@@ -150,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
