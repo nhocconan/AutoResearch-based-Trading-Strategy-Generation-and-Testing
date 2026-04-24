@@ -1,76 +1,36 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator + Elder Ray combination with volume confirmation and chop regime filter.
-- Primary timeframe: 12h for lower trade frequency and better signal quality.
-- HTF: 1d for Williams Alligator (JAW/TEETH/LIPS) and Elder Ray (Bull/Bear Power).
-- Williams Alligator: JAW=SMMA(13,8), TEETH=SMMA(8,5), LIPS=SMMA(5,3). Trend when LIPS > TEETH > JAW (bull) or LIPS < TEETH < JAW (bear).
-- Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13). Confirms trend strength.
-- Volume confirmation: current volume > 1.5 * 20-period volume MA.
-- Chop regime filter: Choppiness Index(14) < 61.8 to avoid ranging markets.
-- Entry: Long when Alligator bullish AND Bull Power > 0 AND volume spike AND chop < 61.8.
-         Short when Alligator bearish AND Bear Power < 0 AND volume spike AND chop < 61.8.
-- Exit: When Alligator reverses (LIPS crosses TEETH) or opposite signal appears.
-- Works in bull via buying strong uptrends, in bear via selling strong downtrends.
+Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume spike confirmation.
+- Primary timeframe: 4h for execution, HTF: 12h for HMA trend.
+- Donchian channels calculated from 20-period high/low on 4h.
+- Entry: Long when price breaks above upper Donchian with volume spike and close > 12h HMA21 (uptrend).
+         Short when price breaks below lower Donchian with volume spike and close < 12h HMA21 (downtrend).
+- Exit: When price returns to the opposite Donchian level (mean reversion) or ATR-based stoploss.
+- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(source, length):
-    """Smoothed Moving Average (SMMA) aka Wilder's Moving Average"""
-    if length < 1:
-        return source
-    result = np.full_like(source, np.nan, dtype=np.float64)
-    if len(source) < length:
-        return result
-    # First value is simple SMA
-    result[length-1] = np.mean(source[:length])
-    # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CURRENT) / length
-    for i in range(length, len(source)):
-        result[i] = (result[i-1] * (length-1) + source[i]) / length
-    return result
-
-def calculate_choppiness(high, low, close, length=14):
-    """Choppiness Index: higher = ranging, lower = trending"""
-    if len(high) < length * 2:
-        return np.full_like(high, np.nan)
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=np.float64)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    atr = np.zeros_like(high)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    
-    # ATR calculation using Wilder's smoothing
-    atr[length-1] = np.mean(tr[:length])
-    for i in range(length, len(tr)):
-        atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
-    
-    # Sum of ATR over length period
-    atr_sum = np.zeros_like(high)
-    for i in range(length-1, len(high)):
-        atr_sum[i] = np.sum(atr[i-length+1:i+1])
-    
-    # Highest high and lowest low over length period
-    hh = np.zeros_like(high)
-    ll = np.zeros_like(low)
-    for i in range(length-1, len(high)):
-        hh[i] = np.max(high[i-length+1:i+1])
-        ll[i] = np.min(low[i-length+1:i+1])
-    
-    # Choppiness Index formula
-    chop = np.zeros_like(high)
-    for i in range(length-1, len(high)):
-        if hh[i] != ll[i]:
-            chop[i] = 100 * np.log10(atr_sum[i] / (hh[i] - ll[i])) / np.log10(length)
-        else:
-            chop[i] = 50  # Neutral when range is zero
-    
-    return chop
+    # WMA of half period
+    wma_half = pd.Series(series).ewm(span=half_period, adjust=False, min_periods=half_period).mean()
+    # WMA of full period
+    wma_full = pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean()
+    # Raw HMA
+    raw_hma = 2 * wma_half - wma_full
+    # Final HMA
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean()
+    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -83,78 +43,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator and Elder Ray
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:  # Need enough for SMMA(13) and EMA(13)
+    # Get 12h data for HMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Calculate Williams Alligator components (SMMA)
-    jaw = smma(df_1d['close'].values, 13)  # SMMA(13,8)
-    teeth = smma(df_1d['close'].values, 8)  # SMMA(8,5)
-    lips = smma(df_1d['close'].values, 5)   # SMMA(5,3)
+    # Calculate 12h HMA21 for trend filter
+    hma_21 = calculate_hma(df_12h['close'], 21)
     
-    # Calculate Elder Ray components
-    ema_13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = df_1d['high'].values - ema_13
-    bear_power = df_1d['low'].values - ema_13
+    # Align 12h HMA to 4h
+    hma_21_aligned = align_htf_to_ltf(prices, df_12h, hma_21)
     
-    # Calculate Choppiness Index for regime filter
-    chop = calculate_choppiness(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    # Donchian channels (20-period) on 4h
+    lookback = 20
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Align 1d indicators to 12h
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 12h)
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA (on 4h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    volume_spike = volume > (2.0 * volume_ma)
+    
+    # ATR for stoploss (optional - using mean reversion exit instead)
+    # atr_period = 14
+    # tr1 = pd.Series(high).rolling(window=2).max() - pd.Series(low).rolling(window=2).min()
+    # tr2 = abs(pd.Series(high) - pd.Series(close).shift(1))
+    # tr3 = abs(pd.Series(low) - pd.Series(close).shift(1))
+    # tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # atr = tr.rolling(window=atr_period, min_periods=atr_period).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(21, 20, 14)  # Need enough for Alligator, EMA, volume MA, chop
+    start_idx = max(lookback, 20)  # Need enough bars for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(hma_21_aligned[i]) or np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator trend conditions
-        alligator_bullish = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        alligator_bearish = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-        
         if position == 0:
-            # Check for entry signals with volume spike and regime filter
-            if volume_spike[i] and chop_aligned[i] < 61.8:  # Avoid ranging markets
-                # Bullish entry: Alligator bullish AND Bull Power positive
-                if alligator_bullish and bull_power_aligned[i] > 0:
+            # Check for breakout signals with volume spike and trend filter
+            if volume_spike[i]:
+                # Bullish breakout: price > upper Donchian and close > HMA21
+                if close[i] > upper[i] and close[i] > hma_21_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: Alligator bearish AND Bear Power negative
-                elif alligator_bearish and bear_power_aligned[i] < 0:
+                # Bearish breakdown: price < lower Donchian and close < HMA21
+                elif close[i] < lower[i] and close[i] < hma_21_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: Alligator reverses (lips crosses below teeth) or opposite signal
-            if lips_aligned[i] < teeth_aligned[i]:  # Alligator turning bearish
+            # Long exit: price returns to lower Donchian (mean reversion)
+            if close[i] <= lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator reverses (lips crosses above teeth) or opposite signal
-            if lips_aligned[i] > teeth_aligned[i]:  # Alligator turning bullish
+            # Short exit: price returns to upper Donchian (mean reversion)
+            if close[i] >= upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -162,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ElderRay_VolumeSpike_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hHMA21_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
