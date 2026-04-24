@@ -1,55 +1,54 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d KAMA trend with 1w volume confirmation and choppiness regime filter.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w for volume average and choppiness calculation.
-- KAMA: adapts to market noise, trending in low noise, flat in high noise.
-- Entry: Long when price > KAMA AND volume > 1.5 * 1w average volume AND choppiness < 50 (trending regime).
-         Short when price < KAMA AND volume > 1.5 * 1w average volume AND choppiness < 50.
-- Exit: Opposite KAMA crossover.
+Hypothesis: 6h Camarilla pivot breakout with 1d volume spike and ADX trend filter.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for Camarilla pivot levels, volume average, and ADX calculation.
+- Camarilla Pivots: identifies key support/resistance levels from prior 1d range.
+- Entry: Long when price breaks above R3 with volume confirmation and ADX > 25 (trending).
+         Short when price breaks below S3 with volume confirmation and ADX > 25.
+- Exit: Opposite Camarilla breakout (R4/S4) or ADX < 20 (trend weakens).
 - Signal size: 0.25 discrete to minimize fee drag.
-- KAMA captures trend direction with lag reduction.
-- Volume confirmation ensures institutional participation.
-- Choppiness filter avoids ranging markets where trend signals fail.
-- Works in both bull and bear markets as it adapts to trend strength.
+- Camarilla breakouts capture institutional order flow at key levels.
+- Volume confirmation avoids false breakouts.
+- ADX filter ensures we trade only in trending markets, avoiding chop.
+- Works in bull markets (breakouts continuation) and bear markets (breakdown continuation).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average with proper min_periods."""
-    close_series = pd.Series(close)
-    direction = abs(close_series - close_series.shift(er_period))
-    volatility = close_series.diff().abs().rolling(window=er_period, min_periods=1).sum()
-    er = direction / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/(fast_period+1) - 2/(slow_period+1)) + 2/(slow_period+1)) ** 2
-    kama_values = [close_series.iloc[0]]  # seed
-    for i in range(1, len(close_series)):
-        kama_values.append(kama_values[-1] + sc.iloc[i] * (close_series.iloc[i] - kama_values[-1]))
-    return np.array(kama_values)
-
-def choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index with proper min_periods."""
+def adx(high, low, close, period=14):
+    """Average Directional Index with proper min_periods."""
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
-    atr1 = high_series - low_series
-    atr2 = abs(high_series - close_series.shift(1))
-    atr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([atr1, atr2, atr3], axis=1).max(axis=1)
-    tr_sum = tr.rolling(window=period, min_periods=period).sum()
-    hh = high_series.rolling(window=period, min_periods=period).max()
-    ll = low_series.rolling(window=period, min_periods=period).min()
-    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(period)
-    chop = chop.replace([np.inf, -np.inf], np.nan).fillna(50)
-    return chop.values
+    
+    # True Range
+    tr1 = high_series - low_series
+    tr2 = abs(high_series - close_series.shift(1))
+    tr3 = abs(low_series - close_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False, min_periods=period).mean()
+    
+    # Directional Movement
+    up_move = high_series - high_series.shift(1)
+    down_move = low_series.shift(1) - low_series
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    plus_di = 100 * (pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean() / atr)
+    
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_values = dx.ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    return adx_values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need sufficient data for calculations
+    if n < 60:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -58,83 +57,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w volume average for confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need sufficient data for volume MA
+    # Get 1d data for Camarilla pivots, volume, and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need sufficient data for calculations
         return np.zeros(n)
     
-    vol_ma_20 = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
+    # Calculate 1d volume average for confirmation (20-period MA)
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate 1w ATR for choppiness calculation
-    if len(df_1w) < 14:  # Need sufficient data for ATR(14)
-        return np.zeros(n)
+    # Calculate 1d ADX for trend filter
+    adx_1d = adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    atr_1w = pd.Series(df_1w['high'].values - df_1w['low'].values).rolling(window=14, min_periods=14).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Calculate Camarilla pivot levels from 1d OHLC
+    # Camarilla formula: based on previous day's range
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
     
-    # Calculate 1w high/low for choppiness calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    pivot = (h_1d + l_1d + c_1d) / 3
+    range_1d = h_1d - l_1d
     
-    chop_1w = choppiness(high_1w, low_1w, close_1w, 14)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # Camarilla levels
+    r3 = pivot + (range_1d * 1.1 / 4)
+    r4 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 4)
+    s4 = pivot - (range_1d * 1.1 / 2)
     
-    # Calculate KAMA from 1d data
-    kama_vals = kama(close, 10, 2, 30)
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 30  # Need 30 for KAMA seed
+    start_idx = max(30, 20)  # Need 30 for ADX, 20 for volume MA
     
     for i in range(start_idx, n):
-        # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_1w_aligned[i]) or
-            np.isnan(chop_1w_aligned[i]) or np.isnan(kama_vals[i])):
+        # Skip if data not ready
+        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
         prev_close = close[i-1]
-        prev_kama = kama_vals[i-1]
         
-        # Exit conditions: opposite KAMA crossover
+        # Exit conditions
         if position != 0:
-            # Exit long: price crosses below KAMA
+            # Exit long: price breaks below R3 or ADX < 20 (trend weakening)
             if position == 1:
-                if curr_close <= kama_vals[i] and prev_close > prev_kama:
+                if curr_low <= r3_aligned[i] or adx_1d_aligned[i] < 20:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price crosses above KAMA
+            # Exit short: price breaks above S3 or ADX < 20
             elif position == -1:
-                if curr_close >= kama_vals[i] and prev_close < prev_kama:
+                if curr_high >= s3_aligned[i] or adx_1d_aligned[i] < 20:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: KAMA crossover with volume confirmation and choppiness filter
+        # Entry conditions: Camarilla breakout with volume confirmation and ADX trend filter
         if position == 0:
-            # KAMA crossover signals
-            cross_up = curr_close > kama_vals[i] and prev_close <= prev_kama
-            cross_down = curr_close < kama_vals[i] and prev_close >= prev_kama
+            # Camarilla breakout signals
+            breakout_up = curr_high >= r3_aligned[i] and prev_close < r3_aligned[i-1]
+            breakout_down = curr_low <= s3_aligned[i] and prev_close > s3_aligned[i-1]
             
-            # Volume confirmation: current volume > 1.5 * 20-period average volume (aligned)
+            # Volume confirmation: current volume > 1.5 * 20-period average volume
             volume_confirm = curr_volume > 1.5 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
             
-            # Choppiness filter: chop < 50 (trending regime)
-            chop_filter = chop_1w_aligned[i] < 50
+            # ADX trend filter: ADX > 25 (strong trend)
+            adx_trend = adx_1d_aligned[i] > 25
             
-            if cross_up and volume_confirm and chop_filter:
+            if breakout_up and volume_confirm and adx_trend:
                 signals[i] = 0.25
                 position = 1
-            elif cross_down and volume_confirm and chop_filter:
+            elif breakout_down and volume_confirm and adx_trend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -146,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA10_1wVolumeSpike_ChopFilter_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dVolumeSpike_ADXTrend_v1"
+timeframe = "6h"
 leverage = 1.0
