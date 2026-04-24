@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla pivot breakout with 12h EMA34 trend filter and volume spike confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 12h EMA34 for trend direction (bullish if close > EMA34, bearish if close < EMA34).
-- Camarilla pivot: Calculated from prior 6h OHLC (using prior bar's high/low/close).
-- Entry: Long when price breaks above R3 AND 12h EMA34 bullish AND volume > 2.0 * volume MA(20).
-         Short when price breaks below S3 AND 12h EMA34 bearish AND volume > 2.0 * volume MA(20).
-- Exit: Close-based reversal - exit long when price crosses below S3,
-        exit short when price crosses above R3.
-- Signal size: 0.25 discrete to balance profit potential and drawdown control.
-Designed to work in both bull and bear markets via trend filter and mean-reversion exits.
-Proven pattern from DB: Camarilla breakouts with volume and trend filters show strong test performance.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and ATR-based stoploss.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Donchian channel: 20-period high/low on 4h data.
+- Entry: Long when price breaks above upper Donchian AND 1d EMA50 bullish.
+         Short when price breaks below lower Donchian AND 1d EMA50 bearish.
+- Exit: ATR-based trailing stop (3*ATR) or Donchian opposite breakout.
+- Signal size: 0.25 discrete to minimize fee churn and control drawdown.
+Designed to capture trends while limiting losses in sideways/choppy markets via trend filter and volatility-based stops.
+Proven pattern from DB: Donchian breakouts with trend filters show strong test performance on SOL/ETH.
 """
 
 import numpy as np
@@ -19,103 +18,117 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for trend filter
-    df_12h_close = df_12h['close'].values
-    ema_12h = pd.Series(df_12h_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA50 for trend filter
+    df_1d_close = df_1d['close'].values
+    ema_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 6h data for Camarilla pivot calculation (prior bar OHLC)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 2:
-        return np.zeros(n)
+    # Calculate ATR(14) for volatility-based stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla pivot levels from prior bar
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Calculate Donchian channel (20-period) on 4h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla calculations (using prior bar)
-    pivot = (high_6h + low_6h + close_6h) / 3.0
-    range_6h = high_6h - low_6h
-    
-    # Resistance levels
-    r3 = pivot + (range_6h * 1.1 / 2)
-    r4 = pivot + (range_6h * 1.1)
-    
-    # Support levels
-    s3 = pivot - (range_6h * 1.1 / 2)
-    s4 = pivot - (range_6h * 1.1)
-    
-    # Align HTF indicators to 6h
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    r3_aligned = align_htf_to_ltf(prices, df_6h, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_6h, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_6h, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_6h, s4)
-    
-    # Calculate volume MA(20) for confirmation (using 6h data)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align HTF indicators to 4h
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 34, 2, 20)  # Need enough bars for EMA34, Camarilla, and volume MA
+    start_idx = max(50, 20, 14)  # Need enough bars for EMA50, Donchian20, ATR14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation (2.0x threshold)
-            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
-            
-            # Long: Price breaks above R3 AND 12h EMA34 bullish AND volume confirmed
-            if curr_close > r3_aligned[i] and curr_close > ema_12h_aligned[i] and vol_confirmed:
+            # Check for entry signals
+            # Long: Price breaks above upper Donchian AND 1d EMA50 bullish
+            if curr_close > donchian_high[i] and curr_close > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 AND 12h EMA34 bearish AND volume confirmed
-            elif curr_close < s3_aligned[i] and curr_close < ema_12h_aligned[i] and vol_confirmed:
+                entry_price = curr_close
+                highest_since_entry = curr_close
+            # Short: Price breaks below lower Donchian AND 1d EMA50 bearish
+            elif curr_close < donchian_low[i] and curr_close < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
+                lowest_since_entry = curr_close
         elif position == 1:
-            # Exit long when price crosses below S3 (reversion to mean)
-            if curr_close < s3_aligned[i]:
+            # Update highest high since entry
+            highest_since_entry = max(highest_since_entry, curr_high)
+            # ATR-based trailing stop: exit if price drops 3*ATR from highest since entry
+            if curr_close < highest_since_entry - 3.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+            # Alternative exit: Donchian opposite breakout (lower band)
+            elif curr_close < donchian_low[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price crosses above R3 (reversion to mean)
-            if curr_close > r3_aligned[i]:
+            # Update lowest low since entry
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+            # ATR-based trailing stop: exit if price rises 3*ATR from lowest since entry
+            if curr_close > lowest_since_entry + 3.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+            # Alternative exit: Donchian opposite breakout (upper band)
+            elif curr_close > donchian_high[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_12hEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_Trend_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
