@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike.
-- Primary timeframe: 1d for execution, HTF: 1w for EMA50 trend filter.
-- Entry: Price breaks above Donchian upper (long) or below Donchian lower (short) on 1d close, with volume > 2.0x 20-period volume MA.
-- Direction filter: only long when 1d close > 1w EMA50, only short when 1d close < 1w EMA50.
-- Donchian channels provide strong structural support/resistance; EMA50 filters for weekly trend alignment.
-- Volume confirmation reduces false breakouts.
-- Exit: Price returns to Donchian midpoint or trend filter reversal.
+Hypothesis: 12h Williams Alligator with 1d ATR Regime Filter and Volume Spike.
+- Primary timeframe: 12h for execution, HTF: 1d for ATR regime and Williams Alligator.
+- Entry: Williams Alligator signals bullish/bearish alignment (jaw/teeth/lips) with volume > 2.0x 20-period volume MA.
+- Regime filter: Only trade when 1d ATR(14) > 1.5 * ATR(50) (high volatility regime) to avoid chop.
+- Williams Alligator: Jaw (SMA13 of median price, shifted 8), Teeth (SMA8 of median price, shifted 5), Lips (SMA5 of median price, shifted 3).
+- Bullish: Lips > Teeth > Jaw. Bearish: Lips < Teeth < Jaw.
+- Exit: Reverse Alligator signal or volatility contraction (ATR ratio < 1.0).
 - Discrete signal size: 0.25 to balance return and drawdown control.
-- Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
-- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Works in bull via buying Alligator alignment in high vol, in bear via selling alignment in high vol.
+- Avoids overtrading by requiring strong volatility regime and clear Alligator alignment.
 """
 
 import numpy as np
@@ -27,20 +28,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d ATR for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    # We need to use rolling window on daily data, but we are on 1d timeframe so direct calculation
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
+    
+    # ATR(14) and ATR(50)
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_50  # > 1.5 indicates high volatility regime
+    
+    # Align ATR ratio to 12h timeframe (completed 1d bar only)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Williams Alligator on 1d: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    # Median price = (high + low) / 2
+    median_price_1d = (high_1d + low_1d) / 2
+    
+    # Jaw: SMA13 of median price, shifted 8 bars
+    jaw_1d = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().values
+    jaw_1d = np.concatenate([np.full(8, np.nan), jaw_1d[:-8]])  # shift right by 8
+    
+    # Teeth: SMA8 of median price, shifted 5 bars
+    teeth_1d = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().values
+    teeth_1d = np.concatenate([np.full(5, np.nan), teeth_1d[:-5]])  # shift right by 5
+    
+    # Lips: SMA5 of median price, shifted 3 bars
+    lips_1d = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().values
+    lips_1d = np.concatenate([np.full(3, np.nan), lips_1d[:-3]])  # shift right by 3
+    
+    # Align Alligator lines to 12h timeframe (completed 1d bar only)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
     # Volume confirmation: current volume > 2.0 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,38 +81,44 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 1w EMA50, Donchian(20), volume MA(20)
+    start_idx = max(50, 20, 13+8, 8+5, 5+3) + 1  # Need ATR50, volume MA, Alligator shifts
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(jaw_1d_aligned[i]) or 
+            np.isnan(teeth_1d_aligned[i]) or np.isnan(lips_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Regime filter: only trade in high volatility (ATR ratio > 1.5)
+        in_high_vol = atr_ratio_aligned[i] > 1.5
+        
         if position == 0:
-            # Long: Price breaks above Donchian upper with volume spike AND uptrend (close > 1w EMA50)
-            if (close[i] > donchian_upper[i] and volume_spike[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: Bullish Alligator alignment (Lips > Teeth > Jaw) + volume spike + high vol
+            if (lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i] and 
+                volume_spike[i] and in_high_vol):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower with volume spike AND downtrend (close < 1w EMA50)
-            elif (close[i] < donchian_lower[i] and volume_spike[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: Bearish Alligator alignment (Lips < Teeth < Jaw) + volume spike + high vol
+            elif (lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i] and 
+                  volume_spike[i] and in_high_vol):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price returns to Donchian midpoint or trend reversal
-            if (close[i] < donchian_mid[i] or close[i] < ema_50_1w_aligned[i]):
+            # Long exit: Bearish Alligator alignment OR volatility contraction (ATR ratio < 1.0)
+            if (lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i] or 
+                atr_ratio_aligned[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price returns to Donchian midpoint or trend reversal
-            if (close[i] > donchian_mid[i] or close[i] > ema_50_1w_aligned[i]):
+            # Short exit: Bullish Alligator alignment OR volatility contraction (ATR ratio < 1.0)
+            if (lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i] or 
+                atr_ratio_aligned[i] < 1.0):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_Williams_Alligator_1dATRRegime_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
