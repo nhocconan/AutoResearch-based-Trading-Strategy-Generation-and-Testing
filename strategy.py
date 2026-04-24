@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Long when price breaks above Camarilla H3 AND close > 1d EMA34 (bullish trend)
-- Short when price breaks below Camarilla L3 AND close < 1d EMA34 (bearish trend)
-- Volume must be > 2.0 * median volume of last 20 bars (volume spike filter to avoid fakeouts)
-- Exit on opposite Camarilla breakout or trend reversal (close crosses 1d EMA34)
-- Uses 12h primary timeframe with 1d HTF to target 50-150 total trades over 4 years (12-37/year)
-- Camarilla H3/L3 are stronger levels than R1/S1, reducing false breakouts in choppy markets
-- 1d EMA34 ensures alignment with higher timeframe trend to avoid whipsaws in bear markets like 2022
-- Volume spike filter adapts to changing market conditions, reducing false breakouts
-- Designed for BTC/ETH edge in both trending and ranging markets with tight entry conditions
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA50 trend filter and ATR-based volatility filter.
+- Long when price breaks above Camarilla H3 AND close > 1d EMA50 AND ATR(14) > median ATR(50) (high volatility regime)
+- Short when price breaks below Camarilla L3 AND close < 1d EMA50 AND ATR(14) > median ATR(50)
+- Exit on opposite Camarilla breakout or trend reversal (close crosses 1d EMA50)
+- Uses 4h primary timeframe with 1d HTF to target 75-200 total trades over 4 years (19-50/year)
+- Camarilla H3/L3 levels provide stronger support/resistance than R1/S1, reducing false breakouts
+- 1d EMA50 ensures alignment with higher timeframe trend to avoid whipsaws
+- ATR volatility filter ensures trades occur only in sufficient volatility regimes, reducing chop losses
 """
 
 import numpy as np
@@ -38,56 +36,64 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
     camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
+    # Get 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 1d EMA50
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA34 to 12h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike filter: volume > 2.0 * median volume of last 20 bars
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
-    volume_spike = volume > (2.0 * vol_median)
+    # ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Median ATR(50) for volatility regime filter
+    median_atr_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).median().values
+    high_volatility = atr_14 > median_atr_50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34) + 1
+    start_idx = max(20, 50, 50) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_median[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_volatility[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla H3, trend up (close > EMA34), volume spike
-            if close[i] > camarilla_h3[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            # Long: price breaks above Camarilla H3, trend up (close > EMA50), high volatility
+            if close[i] > camarilla_h3[i] and close[i] > ema_50_1d_aligned[i] and high_volatility[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3, trend down (close < EMA34), volume spike
-            elif close[i] < camarilla_l3[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            # Short: price breaks below Camarilla L3, trend down (close < EMA50), high volatility
+            elif close[i] < camarilla_l3[i] and close[i] < ema_50_1d_aligned[i] and high_volatility[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Camarilla L3 OR trend reversal (close < EMA34)
-            if close[i] < camarilla_l3[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: price breaks below Camarilla L3 OR trend reversal (close < EMA50)
+            if close[i] < camarilla_l3[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Camarilla H3 OR trend reversal (close > EMA34)
-            if close[i] > camarilla_h3[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: price breaks above Camarilla H3 OR trend reversal (close > EMA50)
+            if close[i] > camarilla_h3[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dEMA50_ATRVolFilter_v1"
+timeframe = "4h"
 leverage = 1.0
