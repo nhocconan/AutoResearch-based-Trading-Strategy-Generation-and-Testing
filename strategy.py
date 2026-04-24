@@ -1,22 +1,47 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot (R1/S1) breakout with 1d volume spike and choppiness regime filter.
+Hypothesis: 4h Camarilla pivot (R1/S1) breakout with 1d volume spike and chop regime filter.
 - Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for Camarilla pivot calculation (based on prior day OHLC), volume average and choppiness.
+- HTF: 1d for Camarilla pivot calculation (based on prior day OHLC), volume average and choppiness index.
 - Camarilla Pivots: identifies key support/resistance levels from prior 1d range.
-- Entry: Long when price breaks above R1 AND volume > 2.0 * 20-period average volume AND Choppiness > 61.8 (range regime).
-         Short when price breaks below S1 AND volume > 2.0 * 20-period average volume AND Choppiness > 61.8 (range regime).
+- Entry: Long when price breaks above R1 AND volume > 1.8 * 20-period average volume AND CHOP(14) > 61.8 (range regime).
+         Short when price breaks below S1 AND volume > 1.8 * 20-period average volume AND CHOP(14) > 61.8.
 - Exit: Opposite Camarilla breakout (price crosses back below R1 for longs, above S1 for shorts).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Camarilla breakouts capture strong momentum moves after testing key levels.
+- Camarilla breakouts capture mean-reversion bounces from key levels in ranging markets.
 - Volume confirmation ensures breakout legitimacy.
-- Choppiness regime filter (>61.8) ensures we trade in ranging markets where mean reversion at pivots works best.
-- Works in both bull and bear markets as it captures volatility expansion after contraction in ranging regimes.
+- Choppiness regime filter avoids trending markets where mean reversion fails.
+- Works in both bull and bear markets as it captures volatility expansion from range contractions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def choppiness_index(high, low, close, period):
+    """Calculate Choppiness Index with proper min_periods."""
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    close_series = pd.Series(close)
+    
+    # True Range
+    tr1 = high_series - low_series
+    tr2 = abs(high_series - close_series.shift(1))
+    tr3 = abs(low_series - close_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Sum of True Range over period
+    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum()
+    
+    # Highest high and lowest low over period
+    hh = high_series.rolling(window=period, min_periods=period).max()
+    ll = low_series.rolling(window=period, min_periods=period).min()
+    
+    # Choppiness Index
+    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(period)
+    # Handle division by zero when hh == ll
+    chop = np.where((hh - ll) == 0, 50.0, chop.values)
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
@@ -58,40 +83,24 @@ def generate_signals(prices):
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Sum of TR over 14 periods
-    tr_sum_14 = tr.rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_14 = df_1d['high'].rolling(window=14, min_periods=14).max().values
-    ll_14 = df_1d['low'].rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum(tr14) / (hh14 - ll14)) / log10(14)
-    # Avoid division by zero
-    hl_range = hh_14 - ll_14
-    chop_ratio = np.where(hl_range > 0, tr_sum_14 / hl_range, 100)  # Set to 100 if range is zero
-    chop_ratio = np.log10(chop_ratio)
-    chop_ratio = np.where(np.isfinite(chop_ratio), chop_ratio, 0)
-    log14 = np.log10(14)
-    chop = 100.0 * chop_ratio / log14
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    chop_14_1d = choppiness_index(
+        df_1d['high'].values, 
+        df_1d['low'].values, 
+        df_1d['close'].values, 
+        14
+    )
+    chop_14_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_14_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14)  # Need 20 for volume MA, 14 for chop
+    start_idx = max(20, 14)  # Need 20 for volume MA, 14 for CHOP
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(chop_aligned[i])):
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(chop_14_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -118,17 +127,17 @@ def generate_signals(prices):
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volume confirmation and choppiness regime filter
+        # Entry conditions: Camarilla breakout with volume confirmation and chop regime filter
         if position == 0:
             # Camarilla breakout signals
             breakout_up = curr_high >= camarilla_r1_aligned[i] and prev_close < camarilla_r1_aligned[i-1]
             breakout_down = curr_low <= camarilla_s1_aligned[i] and prev_close > camarilla_s1_aligned[i-1]
             
-            # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
-            volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
+            # Volume confirmation: current volume > 1.8 * 20-period average volume (aligned)
+            volume_confirm = curr_volume > 1.8 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
             
-            # Choppiness regime filter: Chop > 61.8 (range regime)
-            chop_regime = chop_aligned[i] > 61.8
+            # Chop regime filter: CHOP(14) > 61.8 (range regime)
+            chop_regime = chop_14_1d_aligned[i] > 61.8
             
             if breakout_up and volume_confirm and chop_regime:
                 signals[i] = 0.25
