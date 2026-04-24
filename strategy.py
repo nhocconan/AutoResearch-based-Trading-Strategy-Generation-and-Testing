@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d volume spike and ATR regime filter.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for Donchian channel calculation (based on prior day OHLC), volume average and ATR.
-- Donchian Channel: identifies key support/resistance levels from prior 20-day range.
-- Entry: Long when price breaks above upper band AND volume > 2.0 * 20-period average volume AND ATR(14) < ATR(50) (low volatility regime).
-         Short when price breaks below lower band AND volume > 2.0 * 20-period average volume AND ATR(14) < ATR(50).
-- Exit: Opposite Donchian breakout (price crosses back below upper band for longs, above lower band for shorts).
+Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR regime filter.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d for volume average and ATR regime filter.
+- Donchian breakout captures volatility expansion after contraction.
+- Volume confirmation ensures breakout legitimacy (current volume > 2.0 * 20-day average volume).
+- ATR regime filter: ATR(14) < ATR(50) (low volatility regime) to avoid choppy markets.
 - Signal size: 0.25 discrete to minimize fee drag.
-- Donchian breakouts capture strong momentum moves after testing key levels.
-- Volume confirmation ensures breakout legitimacy.
-- ATR regime filter avoids high-volatility choppy markets where breakouts fail.
-- Works in both bull and bear markets as it captures volatility expansion after contraction.
+- Works in both bull and bear markets as it captures breakouts after low volatility periods.
 """
 
 import numpy as np
@@ -41,18 +37,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian channels (20-period) from prior 1d OHLC
+    # Calculate 1d Donchian channels (20-period) from prior 1d data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:  # Need at least 21 days for 20-period calculation
+    if len(df_1d) < 20:  # Need at least 20 days for Donchian calculation
         return np.zeros(n)
     
-    # Prior 20-day high and low for Donchian calculation
-    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
+    # Prior day data for Donchian calculation (to avoid look-ahead)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # Donchian channels: 20-period high/low of prior data
+    donchian_high = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(prev_low).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Calculate 1d volume average for confirmation (20-period)
     if len(df_1d) < 20:
@@ -74,7 +74,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50)  # Need 20 for volume MA, 50 for ATR(50)
+    start_idx = max(20, 50)  # Need 20 for Donchian, 50 for ATR(50)
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
@@ -92,15 +92,15 @@ def generate_signals(prices):
         curr_volume = volume[i]
         prev_close = close[i-1]
         
-        # Exit conditions: price crosses back below upper band for longs, above lower band for shorts
+        # Exit conditions: price crosses back below Donchian high for longs, above Donchian low for shorts
         if position != 0:
-            # Exit long: price crosses below upper band
+            # Exit long: price crosses below Donchian high
             if position == 1:
                 if curr_close < donchian_high_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price crosses above lower band
+            # Exit short: price crosses above Donchian low
             elif position == -1:
                 if curr_close > donchian_low_aligned[i]:
                     signals[i] = 0.0
@@ -113,7 +113,7 @@ def generate_signals(prices):
             breakout_up = curr_high >= donchian_high_aligned[i] and prev_close < donchian_high_aligned[i-1]
             breakout_down = curr_low <= donchian_low_aligned[i] and prev_close > donchian_low_aligned[i-1]
             
-            # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
+            # Volume confirmation: current volume > 2.0 * 20-day average volume (aligned)
             volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
             
             # ATR regime filter: ATR(14) < ATR(50) (low volatility regime)
@@ -134,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dVolumeSpike_ATRRegime_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dVolumeSpike_ATRRegime_v1"
+timeframe = "4h"
 leverage = 1.0
