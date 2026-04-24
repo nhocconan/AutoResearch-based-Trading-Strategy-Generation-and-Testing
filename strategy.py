@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud with 1d TK Cross and Volume Confirmation.
-- Primary timeframe: 6h for entries/exits.
-- HTF: 1d Ichimoku components (Tenkan, Kijun, Senkou Span A/B) for trend and cloud filter.
-- Entry: Long when price > cloud AND Tenkan > Kijun (bullish TK cross) on 1d AND 6h volume > 1.5 * 20-period volume MA.
-         Short when price < cloud AND Tenkan < Kijun (bearish TK cross) on 1d AND 6h volume > 1.5 * 20-period volume MA.
-- Exit: Opposite TK cross on 1d OR price re-enters cloud.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume spike confirmation.
+- Primary timeframe: 4h for entries/exits.
+- HTF: 1d EMA(34) for trend direction (bullish if price > EMA34, bearish if price < EMA34).
+- Volume: Current 4h volume > 1.8 * 20-period volume MA to avoid false breakouts.
+- Entry: Long when price breaks above Camarilla R3 AND 1d EMA34 trend bullish AND volume spike.
+         Short when price breaks below Camarilla S3 AND 1d EMA34 trend bearish AND volume spike.
+- Exit: Opposite Camarilla breakout (R3/S3) or loss of volume confirmation.
 - Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-- Ichimoku works in both bull/bear: cloud acts as dynamic support/resistance, TK cross captures momentum.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -26,91 +26,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku
+    # Calculate Camarilla levels (based on previous day's OHLC)
+    # For intraday, we use prior 4h bar's high/low/close as proxy for daily
+    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    # But we'll use standard R3/S3: R3 = C + 1.1*(H-L)/2, S3 = C - 1.1*(H-L)/2
+    # Using prior bar to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # Get 1d data for EMA(34) trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 for Senkou Span B (26*2)
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA(34) on 1d close
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Align HTF indicators to 4h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Align HTF Ichimoku components to 6h
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # 6h volume confirmation: current 6h volume > 1.5 * 20-period volume MA
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_6h)
+    # Volume confirmation: current 4h volume > 1.8 * 20-period volume MA
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 52  # Need 52 periods for Senkou Span B
+    start_idx = max(34, 20)  # Need enough bars for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_s3[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        tenkan_val = tenkan_aligned[i]
-        kijun_val = kijun_aligned[i]
-        senkou_a_val = senkou_a_aligned[i]
-        senkou_b_val = senkou_b_aligned[i]
+        ema_34_val = ema_34_aligned[i]
         curr_close = close[i]
-        
-        # Determine cloud boundaries (Senkou Span A/B)
-        upper_cloud = max(senkou_a_val, senkou_b_val)
-        lower_cloud = min(senkou_a_val, senkou_b_val)
+        curr_high = high[i]
+        curr_low = low[i]
+        r3_level = camarilla_r3[i]
+        s3_level = camarilla_s3[i]
         
         if position == 0:
             # Check for entry signals with volume spike
             if volume_spike[i]:
-                # Bullish: price above cloud AND Tenkan > Kijun (bullish TK cross)
-                if curr_close > upper_cloud and tenkan_val > kijun_val:
+                # Bullish breakout: price breaks above R3 AND 1d EMA34 bullish (price > EMA34)
+                if curr_high > r3_level and curr_close > ema_34_val:
                     signals[i] = 0.25
                     position = 1
-                # Bearish: price below cloud AND Tenkan < Kijun (bearish TK cross)
-                elif curr_close < lower_cloud and tenkan_val < kijun_val:
+                # Bearish breakout: price breaks below S3 AND 1d EMA34 bearish (price < EMA34)
+                elif curr_low < s3_level and curr_close < ema_34_val:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price re-enters cloud OR bearish TK cross (Tenkan < Kijun)
-            if curr_close < upper_cloud or tenkan_val < kijun_val:
+            # Long exit: price breaks below S3 OR loss of volume confirmation
+            if curr_low < s3_level or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price re-enters cloud OR bullish TK cross (Tenkan > Kijun)
-            if curr_close > lower_cloud or tenkan_val > kijun_val:
+            # Short exit: price breaks above R3 OR loss of volume confirmation
+            if curr_high > r3_level or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IchimokuCloud_1dTKCross_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_1dEMA34Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
