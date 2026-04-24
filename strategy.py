@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume spike confirmation.
-- Uses Donchian channel (20-period high/low) from prior completed 1d candles for breakout detection.
+Hypothesis: 6h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+- Uses Donchian channel breakouts from prior completed 6h candles (20-bar high/low).
 - Breakout above upper band or below lower band with volume > 2.0x 20-bar average signals strong momentum.
-- Trend filter: price must be above/below 1w EMA34 to align with higher timeframe direction.
-- Designed for 1d timeframe to capture medium-term breakouts in both bull and bear markets.
+- Trend filter: price must be above/below 12h EMA50 to align with higher timeframe direction.
+- Designed for 6h timeframe to capture medium-term breakouts in both bull and bear markets.
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 20-50 trades/year (80-200 total over 4 years) to stay fee-efficient.
+- Targets 12-37 trades/year (50-150 total over 4 years) to stay fee-efficient.
 - Based on proven pattern: Donchian breakout + volume + trend filter showed strong performance in DB.
 """
 
@@ -24,32 +24,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Donchian levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Get 1w data ONCE before loop for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate Donchian channels (20-period) from prior completed 6h candles
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Prior completed 1d candle for Donchian calculation
-    high_1d = df_1d['high'].shift(1).values
-    low_1d = df_1d['low'].shift(1).values
-    
-    # Calculate Donchian upper and lower bands (20-period)
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 1d timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    
-    # 1w EMA34 trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 12h EMA50 trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,24 +62,24 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above Donchian upper AND price above 1w EMA34 AND volume confirmation
-            if close[i] > donchian_upper_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume_confirm:
+            # Long: breakout above Donchian high AND price above 12h EMA50 AND volume confirmation
+            if close[i] > donchian_high[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below Donchian lower AND price below 1w EMA34 AND volume confirmation
-            elif close[i] < donchian_lower_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume_confirm:
+            # Short: breakout below Donchian low AND price below 12h EMA50 AND volume confirmation
+            elif close[i] < donchian_low[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below Donchian lower OR price below 1w EMA34
-            if close[i] < donchian_lower_aligned[i] or close[i] < ema_34_1w_aligned[i]:
+            # Long exit: close below Donchian low OR price below 12h EMA50
+            if close[i] < donchian_low[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above Donchian upper OR price above 1w EMA34
-            if close[i] > donchian_upper_aligned[i] or close[i] > ema_34_1w_aligned[i]:
+            # Short exit: close above Donchian high OR price above 12h EMA50
+            if close[i] > donchian_high[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -98,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA34_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Donchian20_Breakout_12hEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
