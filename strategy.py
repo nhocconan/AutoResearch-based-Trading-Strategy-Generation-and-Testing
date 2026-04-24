@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume spike confirmation.
-- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h for trend filter (price above/below EMA50).
-- Entry: Long when price breaks above R1 with volume spike AND 4h EMA50 uptrend.
-         Short when price breaks below S1 with volume spike AND 4h EMA50 downtrend.
-- Exit: Opposite breakout (price crosses back below R1 for longs, above S1 for shorts).
-- Signal size: 0.20 discrete to minimize fee drag.
-- Camarilla levels provide intraday support/resistance; breakouts with volume indicate institutional participation.
-- 4h EMA50 filter ensures trading with the higher timeframe trend.
-- Session filter: 08-20 UTC to avoid low-liquidity hours.
-- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on breakout frequency with filters.
+Hypothesis: 6h Elder Ray + 1w/1d regime filter.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for bull/bear regime (price above/below 50w EMA) and 1d for trend filter (price above/below 200d EMA).
+- Entry: Long when Elder Ray bull power > 0 AND 1w regime bullish (price > 50w EMA) AND 1d trend bullish (price > 200d EMA).
+         Short when Elder Ray bear power < 0 AND 1w regime bearish (price < 50w EMA) AND 1d trend bearish (price < 200d EMA).
+- Exit: Opposite Elder Ray signal OR price crosses 200d EMA in opposite direction.
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- Elder Ray measures bull/bear power behind the move (bull power = high - EMA13, bear power = low - EMA13).
+- Weekly regime filter avoids fighting the long-term trend; daily trend filter ensures intermediate alignment.
+- Works in bull markets (buy when all bullish aligned) and bear markets (sell when all bearish aligned).
+- Estimated trades: ~100 total over 4 years (~25/year) based on Elder Ray signal frequency with dual timeframe filter.
 """
 
 import numpy as np
@@ -24,103 +23,92 @@ def ema(values, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 4h trend filter: EMA50
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate 1w regime filter: EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    ema50_4h = ema(df_4h['close'].values, 50)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    ema50_1w = ema(df_1w['close'].values, 50)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w, additional_delay_bars=1)
     
-    # Calculate Camarilla levels on 1h (based on previous day's range)
-    # We'll use rolling window of 24 periods (1 day of 1h data) to simulate daily OHLC
-    lookback = 24  # 24 * 1h = 1 day
-    if n < lookback:
+    # Calculate 1d trend filter: EMA200
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 210:
         return np.zeros(n)
     
-    # Calculate rolling daily OHLC
-    daily_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    daily_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    daily_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).last().values
+    ema200_1d = ema(df_1d['close'].values, 200)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d, additional_delay_bars=1)
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    rng = daily_high - daily_low
-    r1 = daily_close + rng * 1.1 / 12
-    s1 = daily_close - rng * 1.1 / 12
+    # Elder Ray on 6h (bull power = high - EMA13, bear power = low - EMA13)
+    ema13 = ema(close, 13)
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Volume spike: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Regime and trend conditions
+    regime_bullish = close > ema50_1w_aligned  # Above 50w EMA = bull regime
+    regime_bearish = close < ema50_1w_aligned  # Below 50w EMA = bear regime
+    trend_bullish = close > ema200_1d_aligned  # Above 200d EMA = bull trend
+    trend_bearish = close < ema200_1d_aligned  # Below 200d EMA = bear trend
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 20)  # Ensure Camarilla and volume MA are ready
+    start_idx = 210  # Need sufficient data for 200d EMA
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or
-            np.isnan(vol_ma[i])):
+        # Skip if data not ready (check for NaN from alignment or calculations)
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema200_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_in_session = in_session[i]
         
-        # Exit conditions: price crosses back below R1 for longs, above S1 for shorts
+        # Exit conditions: opposite Elder Ray signal OR price crosses 200d EMA in opposite direction
         if position != 0:
-            # Exit long: price falls back below R1
+            # Exit long: Elder Ray turns bearish OR price falls below 200d EMA
             if position == 1:
-                if curr_close < r1[i]:
+                if bear_power[i] < 0 or curr_close < ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price rises back above S1
+            # Exit short: Elder Ray turns bullish OR price rises above 200d EMA
             elif position == -1:
-                if curr_close > s1[i]:
+                if bull_power[i] > 0 or curr_close > ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: breakout with volume spike and trend filter, only in session
-        if position == 0 and curr_in_session:
-            # Long: price breaks above R1 with volume spike AND 4h EMA50 uptrend
-            if (curr_close > r1[i] and 
-                volume_spike[i] and 
-                close[i] > ema50_4h_aligned[i]):
-                signals[i] = 0.20
+        # Entry conditions: All aligned in same direction
+        if position == 0:
+            # Long: Elder Ray bullish AND bullish regime AND bullish trend
+            if bull_power[i] > 0 and regime_bullish[i] and trend_bullish[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike AND 4h EMA50 downtrend
-            elif (curr_close < s1[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema50_4h_aligned[i]):
-                signals[i] = -0.20
+            # Short: Elder Ray bearish AND bearish regime AND bearish trend
+            elif bear_power[i] < 0 and regime_bearish[i] and trend_bearish[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.20
+            signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA50_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_ElderRay_1w50EMA_Regime_1d200EMA_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
