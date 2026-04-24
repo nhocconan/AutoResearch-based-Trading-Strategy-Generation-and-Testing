@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for EMA34 trend filter (stable trend filter for slower timeframe).
-- Entry: Long when price breaks above Camarilla H3 AND price > 1d EMA34 AND volume > 2.0 * 12h volume MA(20);
-         Short when price breaks below Camarilla L3 AND price < 1d EMA34 AND volume > 2.0 * 12h volume MA(20).
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d for EMA34 trend filter (more stable for BTC/ETH trend identification).
+- Entry: Long when price breaks above Camarilla H3 AND price > 1d EMA34 AND volume > 2.0 * 4h volume MA(20);
+         Short when price breaks below Camarilla L3 AND price < 1d EMA34 AND volume > 2.0 * 4h volume MA(20).
 - Exit: Close-based reversal (opposite signal) or stoploss via trend filter (signal=0 when price closes below/above 1d EMA34).
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Uses 1d EMA34 for better trend filtering in both bull and bear markets, reducing whipsaw on 12h chart.
+- Uses 1d EMA34 for better trend filtering in both bull and bear markets, reducing whipsaw.
 - Camarilla levels provide intraday support/resistance; 1d EMA34 filters counter-trend breakouts.
 """
 
@@ -52,19 +52,19 @@ def generate_signals(prices):
     # Calculate EMA(34) on 1d
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Get 12h data for volume MA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for volume MA
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    volume_12h = df_12h['volume'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate volume MA(20) on 12h
-    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume MA(20) on 4h
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to primary 12h timeframe
+    # Align all indicators to primary 4h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
