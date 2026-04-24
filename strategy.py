@@ -1,111 +1,135 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Williams %R reversal with 1w EMA34 trend filter and volume confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w for EMA34 trend filter.
-- Entry: Long when Williams %R(14) crosses above -80 (oversold) AND 1w EMA34 rising AND volume > 1.5 * 1d volume MA(20);
-         Short when Williams %R(14) crosses below -20 (overbought) AND 1w EMA34 falling AND volume > 1.5 * 1d volume MA(20).
-- Exit: Close-based reversal (opposite signal) or trend change (signal=0 when 1w EMA34 slope changes sign).
+Hypothesis: 6h Ichimoku Cloud with TK Cross and 1d trend filter.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for trend filter (price above/below Kumo cloud).
+- Entry: Long when Tenkan-sen crosses above Kijun-sen AND price above Kumo (bullish bias);
+         Short when Tenkan-sen crosses below Kijun-sen AND price below Kumo (bearish bias).
+- Exit: Opposite TK cross OR price crosses Kumo in opposite direction.
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Williams %R captures mean reversion in bear markets; 1w EMA34 trend filter ensures we trade with the weekly trend to avoid counter-trend whipsaws; volume confirmation avoids false signals.
-- Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend) with trend filter.
-- Estimated trades: ~50 total over 4 years (~12/year) based on Williams %R reversal frequency with filters.
+- Ichimoku provides dynamic support/resistance (Kumo cloud) and momentum (TK cross).
+- Works in bull markets (buy TK crosses above cloud) and bear markets (sell TK crosses below cloud).
+- Estimated trades: ~100 total over 4 years (~25/year) based on TK cross frequency with cloud filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
+    """Calculate Ichimoku components."""
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max().values
+    period9_low = pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=kijun, min_periods=kijun).max().values
+    period26_low = pd.Series(low).rolling(window=kijun, min_periods=kijun).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=senkou, min_periods=senkou).max().values
+    period52_low = pd.Series(low).rolling(window=senkou, min_periods=senkou).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for signals)
+    
+    return tenkan_sen, kijun_sen, senkou_a, senkou_b
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Calculate 1d trend filter: price above/below Kumo cloud
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_slope = ema_34_1w - np.roll(ema_34_1w, 1)
-    ema_34_slope[0] = 0
+    # Calculate Ichimoku on 1d data for trend filter
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
+    )
     
-    # Calculate 1d volume MA(20) for confirmation
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Kumo cloud boundaries (Senkou Span A and B)
+    # The cloud is between Senkou A and Senkou B
+    kumo_top_1d = np.maximum(senkou_a_1d, senkou_b_1d)
+    kumo_bottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
     
-    # Calculate Williams %R(14) on 1d timeframe
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Trend filter: price above cloud = bullish, price below cloud = bearish
+    close_1d = df_1d['close'].values
+    bullish_trend = close_1d > kumo_top_1d
+    bearish_trend = close_1d < kumo_bottom_1d
     
-    # Calculate Williams %R crossovers
-    williams_r_prev = np.roll(williams_r, 1)
-    williams_r_prev[0] = williams_r[0]  # Initialize first value
-    williams_r_cross_above_80 = (williams_r_prev <= -80) & (williams_r > -80)  # Cross above -80 (oversold)
-    williams_r_cross_below_20 = (williams_r_prev >= -20) & (williams_r < -20)  # Cross below -20 (overbought)
+    # Align 1d indicators to 6h timeframe
+    bullish_trend_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend, additional_delay_bars=1)
+    bearish_trend_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend, additional_delay_bars=1)
+    kumo_top_aligned = align_htf_to_ltf(prices, df_1d, kumo_top_1d, additional_delay_bars=1)
+    kumo_bottom_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom_1d, additional_delay_bars=1)
     
-    # Align all indicators to primary 1d timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    ema_34_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_34_slope)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, prices, vol_ma_1d)
-    williams_r_aligned = align_htf_to_ltf(prices, prices, williams_r)
-    williams_r_cross_above_80_aligned = align_htf_to_ltf(prices, prices, williams_r_cross_above_80.astype(float))
-    williams_r_cross_below_20_aligned = align_htf_to_ltf(prices, prices, williams_r_cross_below_20.astype(float))
+    # Calculate Ichimoku on 6h data for entry signals (TK cross)
+    tenkan_6h, kijun_6h, _, _ = calculate_ichimoku(high, low, close)
+    
+    # TK cross signals
+    tk_cross_above = (tenkan_6h > kijun_6h) & (np.roll(tenkan_6h, 1) <= np.roll(kijun_6h, 1))
+    tk_cross_below = (tenkan_6h < kijun_6h) & (np.roll(tenkan_6h, 1) >= np.roll(kijun_6h, 1))
+    
+    # Handle first element for roll
+    tk_cross_above[0] = False
+    tk_cross_below[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 34  # Need sufficient data for EMA34 and Williams %R
+    start_idx = 60  # Need sufficient data for Ichimoku (max period 52)
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(ema_34_slope_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(williams_r_aligned[i]) or
-            np.isnan(williams_r_cross_above_80_aligned[i]) or np.isnan(williams_r_cross_below_20_aligned[i])):
+        if (np.isnan(bullish_trend_aligned[i]) or np.isnan(bearish_trend_aligned[i]) or 
+            np.isnan(kumo_top_aligned[i]) or np.isnan(kumo_bottom_aligned[i]) or
+            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
         
-        # Exit: trend change (1w EMA34 slope changes sign)
+        # Exit conditions: opposite TK cross OR price crosses Kumo in opposite direction
         if position != 0:
-            if position == 1 and ema_34_slope_aligned[i] <= 0:
-                signals[i] = 0.0
-                position = 0
-                continue
-            elif position == -1 and ema_34_slope_aligned[i] >= 0:
-                signals[i] = 0.0
-                position = 0
-                continue
+            # Exit long: TK cross below OR price falls below Kumo bottom
+            if position == 1:
+                if tk_cross_below[i] or curr_close < kumo_bottom_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
+            # Exit short: TK cross above OR price rises above Kumo top
+            elif position == -1:
+                if tk_cross_above[i] or curr_close > kumo_top_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    continue
         
-        # Entry conditions with volume confirmation and Williams %R reversal
-        vol_confirm = curr_volume > 1.5 * vol_ma_1d_aligned[i]
-        
+        # Entry conditions: TK cross in direction of 1d trend filter
         if position == 0:
-            # Check for entry signals
-            if vol_confirm:
-                # Long: Williams %R crosses above -80 (oversold) AND weekly uptrend
-                if williams_r_cross_above_80_aligned[i] > 0.5 and ema_34_slope_aligned[i] > 0:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Williams %R crosses below -20 (overbought) AND weekly downtrend
-                elif williams_r_cross_below_20_aligned[i] > 0.5 and ema_34_slope_aligned[i] < 0:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: TK cross above AND bullish 1d trend (price above cloud)
+            if tk_cross_above[i] and bullish_trend_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: TK cross below AND bearish 1d trend (price below cloud)
+            elif tk_cross_below[i] and bearish_trend_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
             # Long position: maintain signal
             signals[i] = 0.25
@@ -115,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_Reversal_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_TK_Cross_1dTrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
