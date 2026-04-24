@@ -1,43 +1,29 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d ATR filter + volume confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for ATR-based volatility regime filter (only trade when ATR(14) > 1d ATR(50) percentile 60).
-- Entry: Long when price breaks above Donchian(20) high AND volume > 1.5x 20-bar average volume.
-         Short when price breaks below Donchian(20) low AND volume > 1.5x 20-bar average volume.
-- Exit: Opposite Donchian breakout (price crosses midline) OR ATR volatility drops below percentile 40.
+Hypothesis: 6h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA34 trend filter and Camarilla pivot levels from prior day.
+- Entry: Long when price breaks above H3 with volume spike AND price > 1d EMA34.
+         Short when price breaks below L3 with volume spike AND price < 1d EMA34.
+- Exit: Opposite Camarilla break (price < L3 for long, price > H3 for short) OR EMA34 cross in opposite direction.
 - Signal size: 0.25 discrete to minimize fee drag.
-- Donchian channels provide clear breakout levels with built-in trend following.
-- ATR filter avoids low-volatility choppy markets where breakouts fail.
-- Volume confirmation ensures breakouts have conviction.
-- Works in bull markets (buy breakouts) and bear markets (sell breakdowns).
-- Estimated trades: ~100 total over 4 years (~25/year) based on filtered breakout frequency.
+- Camarilla levels provide institutional support/resistance. Breakouts with volume confirm institutional participation.
+- EMA34 filter ensures trading with higher timeframe trend.
+- Works in bull markets (buy H3 breakouts in uptrend) and bear markets (sell L3 breakdowns in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on Camarilla breakout frequency with filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def donchian_channels(high, low, period):
-    """Calculate Donchian channels: upper=highest(high, period), lower=lowest(low, period)."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def atr(high, low, close, period):
-    """Calculate Average True Range."""
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    high_close[0] = high_low[0]  # First value
-    low_close[0] = high_low[0]   # First value
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_vals = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    return atr_vals
+def ema(values, period):
+    """Calculate Exponential Moving Average."""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -46,84 +32,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR filter: ATR(14) vs ATR(50) percentile
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    atr14_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr50_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 50)
+    ema34_1d = ema(df_1d['close'].values, 34)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d, additional_delay_bars=1)
     
-    # Calculate percentile rank of ATR14 relative to ATR50 (60% threshold for high vol regime)
-    atr_ratio = atr14_1d / (atr50_1d + 1e-10)  # Avoid division by zero
-    # Use rolling percentile: when ATR14 is above 60th percentile of ATR50, regime is favorable
-    atr_percentile = pd.Series(atr_ratio).rolling(window=50, min_periods=20).apply(
-        lambda x: np.percentile(x, 60) if len(x) == 50 else np.nan, raw=True
-    ).values
-    vol_regime_favorable = atr_ratio > atr_percentile  # High volatility regime
+    # Calculate prior day's Camarilla levels (H3, L3) from 1d data
+    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    # Use prior day's values to avoid look-ahead
+    df_1d_close = df_1d['close'].values
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
     
-    vol_regime_favorable_aligned = align_htf_to_ltf(prices, df_1d, vol_regime_favorable, additional_delay_bars=1)
+    camarilla_h3 = df_1d_close + 1.1 * (df_1d_high - df_1d_low) / 4
+    camarilla_l3 = df_1d_close - 1.1 * (df_1d_high - df_1d_low) / 4
     
-    # Donchian(20) on 4h
-    donch_period = 20
-    upper, lower = donchian_channels(high, low, donch_period)
-    midline = (upper + lower) / 2
+    # Align Camarilla levels to 6h timeframe (prior day's levels available after 1d close)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3, additional_delay_bars=1)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3, additional_delay_bars=1)
     
-    # Volume confirmation: volume > 1.5x 20-bar average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    # Volume spike: current volume > 1.5 * 20-period EMA of volume
+    volume_ema20 = ema(volume, 20)
+    volume_spike = volume > 1.5 * volume_ema20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 60  # Need sufficient data for Donchian/ATR/volume
+    start_idx = 30  # Need sufficient data for EMA and volume
     
     for i in range(start_idx, n):
-        # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(vol_regime_favorable_aligned[i])):
+        # Skip if data not ready
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
-        # Exit conditions: opposite Donchian breakout OR volatility regime turns unfavorable
+        # Exit conditions
         if position != 0:
-            # Exit long: price falls below midline OR volatility regime unfavorable
-            if position == 1:
-                if curr_close < midline[i] or not vol_regime_favorable_aligned[i]:
+            if position == 1:  # Long position
+                # Exit if price breaks below L3 OR closes below EMA34
+                if curr_low < camarilla_l3_aligned[i] or curr_close < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price rises above midline OR volatility regime unfavorable
-            elif position == -1:
-                if curr_close > midline[i] or not vol_regime_favorable_aligned[i]:
+            elif position == -1:  # Short position
+                # Exit if price breaks above H3 OR closes above EMA34
+                if curr_high > camarilla_h3_aligned[i] or curr_close > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout + volume confirmation + favorable volatility regime
+        # Entry conditions
         if position == 0:
-            # Long: price breaks above upper Donchian band AND volume confirms AND favorable vol regime
-            if curr_close > upper[i] and volume_confirm[i] and vol_regime_favorable_aligned[i]:
+            # Long: price breaks above H3 with volume spike AND bullish trend
+            if curr_high > camarilla_h3_aligned[i] and volume_spike[i] and curr_close > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band AND volume confirms AND favorable vol regime
-            elif curr_close < lower[i] and volume_confirm[i] and vol_regime_favorable_aligned[i]:
+            # Short: price breaks below L3 with volume spike AND bearish trend
+            elif curr_low < camarilla_l3_aligned[i] and volume_spike[i] and curr_close < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long position: maintain signal
+            # Maintain long signal
             signals[i] = 0.25
         elif position == -1:
-            # Short position: maintain signal
+            # Maintain short signal
             signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_ATR_Volume_Regime_Breakout_v1"
-timeframe = "4h"
+name = "6h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
