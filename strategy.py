@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-- Uses 6h timeframe (primary) and 1d HTF for EMA50 trend alignment.
-- Donchian channels calculated from prior 6h high/low over 20 periods.
-- Breakout logic: long when price closes above upper band with volume spike and uptrend,
-                  short when price closes below lower band with volume spike and downtrend.
-- Trend filter: only long when 6h close > 1d EMA50, only short when 6h close < 1d EMA50.
-- Volume confirmation: current 6h volume > 2.0 * 20-period 6h volume MA (strict to reduce trades).
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+- Uses 12h timeframe (primary) and 1d HTF for EMA50 trend alignment.
+- Camarilla pivot levels calculated from prior 1d high/low/close.
+- Breakout logic: long when price closes above H3 with volume spike and uptrend,
+                  short when price closes below L3 with volume spike and downtrend.
+- Trend filter: only long when 12h close > 1d EMA50, only short when 12h close < 1d EMA50.
+- Volume confirmation: current 12h volume > 2.0 * 20-period 12h volume MA (strict to reduce trades).
 - Discrete signal size: 0.25 to balance reward and risk, minimizing fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-- Works in both bull/bear: trend filter avoids counter-trend trades, Donchian breakouts capture momentum in all regimes.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Works in both bull/bear: trend filter avoids counter-trend trades, Camarilla breakouts capture momentum in all regimes.
 """
 
 import numpy as np
@@ -36,18 +36,26 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels from prior 20 periods (6h timeframe)
-    # Using rolling window on 6h data, shifted by 1 to avoid look-ahead
-    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    upper_band = high_ma
-    lower_band = low_ma
+    # Calculate Camarilla levels from prior 1d OHLC (using mtf_data for 1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Align 1d data to 12h timeframe
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    
+    # Camarilla calculations (based on prior 1d range)
+    camarilla_range = high_1d_aligned - low_1d_aligned
+    camarilla_H3 = close_1d_aligned + camarilla_range * 1.1 / 4
+    camarilla_L3 = close_1d_aligned - camarilla_range * 1.1 / 4
     
     # Volume confirmation: current volume > 2.0 * 20-period volume MA (strict)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * volume_ma)
     
-    # Trend filter: 6h close vs 1d EMA50
+    # Trend filter: 12h close vs 1d EMA50
     uptrend = close > ema_50_1d_aligned
     downtrend = close < ema_50_1d_aligned
     
@@ -55,38 +63,38 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 20)  # Need Donchian and sufficient volume MA
+    start_idx = max(100, 50)  # Need 1d EMA50 and sufficient volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_H3[i]) or 
+            np.isnan(camarilla_L3[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price closes above upper band AND uptrend AND volume spike
-            if close[i] > upper_band[i] and uptrend[i] and volume_spike[i]:
+            # Long: price closes above H3 AND uptrend AND volume spike
+            if close[i] > camarilla_H3[i] and uptrend[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price closes below lower band AND downtrend AND volume spike
-            elif close[i] < lower_band[i] and downtrend[i] and volume_spike[i]:
+            # Short: price closes below L3 AND downtrend AND volume spike
+            elif close[i] < camarilla_L3[i] and downtrend[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverts to midpoint of Donchian channels or reverse signal
-            midpoint = (upper_band[i] + lower_band[i]) / 2
-            if close[i] <= midpoint:
+            # Long exit: price reverts to midpoint of Camarilla levels or reverse signal
+            camarilla_mid = (camarilla_H3[i] + camarilla_L3[i]) / 2
+            if close[i] <= camarilla_mid:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverts to midpoint of Donchian channels or reverse signal
-            midpoint = (upper_band[i] + lower_band[i]) / 2
-            if close[i] >= midpoint:
+            # Short exit: price reverts to midpoint of Camarilla levels or reverse signal
+            camarilla_mid = (camarilla_H3[i] + camarilla_L3[i]) / 2
+            if close[i] >= camarilla_mid:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3_L3_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
