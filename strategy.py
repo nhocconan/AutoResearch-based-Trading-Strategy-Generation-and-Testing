@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H4/L4 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Primary timeframe: 4h, HTF: 1d for EMA34 trend.
-- Camarilla pivot levels from prior 1d: long at H4 breakout, short at L4 breakdown.
-- Trend filter: only long when 4h close > 1d EMA34, only short when 4h close < 1d EMA34.
-- Volume confirmation: current 4h volume > 2.5 * 20-period 4h volume MA (stricter filter to reduce trades).
+Hypothesis: 1d Camarilla H3/L3 breakout with 1w EMA34 trend filter and volume spike.
+- Primary timeframe: 1d, HTF: 1w for EMA34 trend alignment.
+- Camarilla pivot levels from prior 1w: long at H3 breakout, short at L3 breakdown.
+- Trend filter: only long when 1d close > 1w EMA34, only short when 1d close < 1w EMA34.
+- Volume confirmation: current 1d volume > 2.0 * 20-period 1d volume MA (strict filter).
 - Discrete signal size: 0.25 to minimize fee churn and control drawdown.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Exit: price reverts to Camarilla pivot point (PP) from prior 1d.
-- Designed to work in both bull and bear markets via trend filter and volume confirmation.
+- Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+- Exit: price reverts to Camarilla pivot point (PP) from prior 1w.
 """
 
 import numpy as np
@@ -26,62 +25,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla levels from prior 1d (use completed 1d bar)
+    # Calculate Camarilla levels from prior 1w (use completed 1w bar)
     # PP = (H + L + C) / 3
-    # H4 = PP + (H - L) * 1.1
-    # L4 = PP - (H - L) * 1.1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # H3 = PP + (H - L) * 1.1 / 2
+    # L3 = PP - (H - L) * 1.1 / 2
+    df_1w_prior = get_htf_data(prices, '1w')  # Same data, will be aligned with delay
+    if len(df_1w_prior) < 1:
+        return np.zeros(n)
     
-    pp = (high_1d + low_1d + close_1d_arr) / 3.0
-    h4 = pp + (high_1d - low_1d) * 1.1
-    l4 = pp - (high_1d - low_1d) * 1.1
+    high_1w = df_1w_prior['high'].values
+    low_1w = df_1w_prior['low'].values
+    close_1w_arr = df_1w_prior['close'].values
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    pp = (high_1w + low_1w + close_1w_arr) / 3.0
+    h3 = pp + (high_1w - low_1w) * 1.1 / 2.0
+    l3 = pp - (high_1w - low_1w) * 1.1 / 2.0
     
-    # Volume confirmation: current volume > 2.5 * 20-period volume MA (stricter)
+    # Align Camarilla levels to 1d timeframe (completed 1w bar only)
+    h3_aligned = align_htf_to_ltf(prices, df_1w_prior, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w_prior, l3)
+    pp_aligned = align_htf_to_ltf(prices, df_1w_prior, pp)
+    
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * volume_ma)
+    volume_spike = volume > (2.0 * volume_ma)
     
-    # Trend filter: 4h close vs 1d EMA34
-    uptrend = close > ema_34_1d_aligned
-    downtrend = close < ema_34_1d_aligned
+    # Trend filter: 1d close vs 1w EMA34
+    uptrend = close > ema_34_1w_aligned
+    downtrend = close < ema_34_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 34, 20)  # Need 1d EMA34, volume MA
+    start_idx = max(100, 34, 20)  # Need 1w EMA34, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price closes above H4 AND uptrend AND volume spike
-            if close[i] > h4_aligned[i] and uptrend[i] and volume_spike[i]:
+            # Long: price closes above H3 AND uptrend AND volume spike
+            if close[i] > h3_aligned[i] and uptrend[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price closes below L4 AND downtrend AND volume spike
-            elif close[i] < l4_aligned[i] and downtrend[i] and volume_spike[i]:
+            # Short: price closes below L3 AND downtrend AND volume spike
+            elif close[i] < l3_aligned[i] and downtrend[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -101,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H4L4_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Camarilla_H3L3_1wEMA34_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
