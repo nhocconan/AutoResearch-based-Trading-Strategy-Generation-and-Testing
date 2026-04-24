@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and volume spike confirmation.
+Hypothesis: 1h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
 - Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h EMA(50) for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- RSI(14): oversold <30 for long, overbought >70 for short on 1h.
-- Volume confirmation: current volume > 2.0 * 20-period volume MA to avoid chop.
-- Entry: Long when RSI<30 AND 4h trend bullish AND volume confirmed.
-         Short when RSI>70 AND 4h trend bearish AND volume confirmed.
-- Exit: RSI crosses back to 50 (mean reversion completion).
+- HTF: 1d EMA34 for trend direction (bullish if close > EMA34, bearish if close < EMA34).
+- Camarilla levels: calculated from prior 1h OHLC; long on break above H3, short on break below L3.
+- Volume confirmation: current volume > 1.8 * 20-period volume MA to ensure participation.
+- Session filter: 08:00-20:00 UTC to avoid low-liquidity hours.
+- Exit: opposite Camarilla level touch (L3 for long, H3 for short) or EMA trend reversal.
 - Signal size: 0.20 discrete to minimize fee churn and control drawdown.
-Designed to work in both bull and bear markets via 4h trend filter and volatility-adjusted entries.
+Designed to work in both bull and bear markets via 1d trend filter and volatility-adjusted breakouts.
 """
 
 import numpy as np
@@ -22,32 +21,23 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Extract price data
-    close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50)
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA(34)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF EMA50 to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align HTF EMA34 to 1h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate volume MA(20) for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,48 +46,70 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 50, 14, 20)  # Need enough bars for EMA50, RSI, and volume MA
+    start_idx = max(100, 34, 20)  # Need enough bars for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Session filter: 08:00-20:00 UTC
+        hour = prices.index[i].hour
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Calculate Camarilla levels from prior 1h bar
+        if i == 0:
+            continue  # skip first bar
+        prior_high = high[i-1]
+        prior_low = low[i-1]
+        prior_close = close[i-1]
+        prior_range = prior_high - prior_low
+        
+        if prior_range <= 0:
+            continue  # skip invalid range
+        
+        camarilla_h3 = prior_close + prior_range * 1.1 / 4
+        camarilla_l3 = prior_close - prior_range * 1.1 / 4
+        
         curr_close = close[i]
         curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation (2.0x threshold)
-            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
+            # Check for entry signals with volume confirmation (1.8x threshold)
+            vol_confirmed = curr_volume > 1.8 * vol_ma[i]
             
-            # Determine 4h trend: bullish if close > EMA50, bearish if close < EMA50
-            htf_close_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
+            # Determine 1d trend: bullish if close > EMA34, bearish if close < EMA34
+            htf_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
             htf_close = htf_close_aligned[i]
             
-            trend_bullish = htf_close > ema_50_4h_aligned[i]
-            trend_bearish = htf_close < ema_50_4h_aligned[i]
+            trend_bullish = htf_close > ema_34_1d_aligned[i]
+            trend_bearish = htf_close < ema_34_1d_aligned[i]
             
-            # Long: RSI<30 AND 4h trend bullish AND volume confirmed
-            if rsi_values[i] < 30 and trend_bullish and vol_confirmed:
+            # Long: break above H3 AND 1d trend bullish AND volume confirmed
+            if curr_close > camarilla_h3 and trend_bullish and vol_confirmed:
                 signals[i] = 0.20
                 position = 1
-            # Short: RSI>70 AND 4h trend bearish AND volume confirmed
-            elif rsi_values[i] > 70 and trend_bearish and vol_confirmed:
+            # Short: break below L3 AND 1d trend bearish AND volume confirmed
+            elif curr_close < camarilla_l3 and trend_bearish and vol_confirmed:
                 signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long when RSI crosses back to 50 (mean reversion)
-            if rsi_values[i] > 50:
+            # Exit long when price touches L3 or trend turns bearish
+            if curr_close < camarilla_l3 or htf_close < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:
-            # Exit short when RSI crosses back to 50 (mean reversion)
-            if rsi_values[i] < 50:
+            # Exit short when price touches H3 or trend turns bullish
+            if curr_close > camarilla_h3 or htf_close > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI14_4hEMA50_Trend_VolumeConfirm_v1"
+name = "1h_Camarilla_H3L3_1dEMA34_Trend_VolumeConfirm_v1"
 timeframe = "1h"
 leverage = 1.0
