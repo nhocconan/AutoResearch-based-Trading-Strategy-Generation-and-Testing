@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d volume spike and ATR-based stoploss.
-- Primary timeframe: 12h for execution, HTF: 1d for volume confirmation.
-- Volume confirmation: current 12h volume > 1.5 * 20-period volume MA on 1d data (aligned to 12h).
-- Entry: Long when price closes above Donchian(20) upper with volume confirmation.
-         Short when price closes below Donchian(20) lower with volume confirmation.
-- Exit: Opposite Donchian breakout or ATR-based trailing stop (2.5 * ATR from extreme).
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d volatility regime filter and volume spike confirmation.
+- Primary timeframe: 4h for execution, HTF: 1d for ATR-based volatility regime.
+- High volatility (ATR(20) > 1.5 * ATR(50)) favors breakout strategy; low volatility favors mean reversion at Camarilla H3/L3 levels.
+- Entry: Long when price breaks above Camarilla R3 AND high volatility regime (bullish breakout in high vol).
+         Short when price breaks below Camarilla S3 AND high volatility regime (bearish breakout in high vol).
+         In low volatility regime: Long when price touches Camarilla S3 AND reverses up (close > low).
+                                 Short when price touches Camarilla R3 AND reverses down (close < high).
+- Exit: Opposite Camarilla breakout (R3/S3) or volatility regime shift.
+- Volume confirmation: current volume > 2.0 * 20-period volume MA (to avoid false breakouts).
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-- Works in bull via breakouts, in bear via short breakdowns with volume confirmation.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -26,97 +28,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation (using same Donchian lookback)
+    # Get 1d data for ATR and Camarilla
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate volume MA (20-period) on 1d
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (1.5 * volume_ma_1d)
-    
-    # Align 1d volume spike to 12h
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
-    
-    # Donchian channels (20-period) on 12h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
-    
-    # ATR for dynamic stoploss (14-period) on 12h
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = np.abs(high[0] - close[0])  # First bar: use close instead of previous close
-    tr3.iloc[0] = np.abs(low[0] - close[0])
+    # Calculate ATR (20-period and 50-period) on 1d for volatility regime
+    tr1 = pd.Series(df_1d['high']).diff().abs()
+    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
+    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
+    # Volatility regime: high vol when ATR(20) > 1.5 * ATR(50)
+    vol_regime_high = atr_20 > (1.5 * atr_50)
+    
+    # Calculate Camarilla pivot levels (R3, S3) on 1d
+    # Camarilla: based on previous day's OHLC
+    prev_close = pd.Series(df_1d['close']).shift(1)
+    prev_high = pd.Series(df_1d['high']).shift(1)
+    prev_low = pd.Series(df_1d['low']).shift(1)
+    
+    # Camarilla R3 and S3
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align 1d indicators to 4h
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime_high.astype(float))
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
+    
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA (on 4h)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    long_stop = 0.0
-    short_stop = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(30, lookback, 20)  # Need enough 1d bars for volume MA and lookback for Donchian
+    start_idx = max(50, 20)  # Need enough 1d bars for ATR(50) and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(vol_regime_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_spike = volume_spike_aligned[i]
+        vol_high = vol_regime_aligned[i] > 0.5  # True if high volatility regime
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        prev_close = close[i-1]
         
         if position == 0:
-            # Check for entry signals with volume confirmation
-            if vol_spike:
-                # Bullish breakout: price closes above upper Donchian
-                if curr_close > highest_high[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = curr_close
-                    long_stop = curr_low - 2.5 * atr[i]  # Initial stop below entry
-                # Bearish breakout: price closes below lower Donchian
-                elif curr_close < lowest_low[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = curr_close
-                    short_stop = curr_high + 2.5 * atr[i]  # Initial stop above entry
+            # Check for entry signals
+            if volume_spike[i]:
+                if vol_high:  # High volatility regime: breakout strategy
+                    # Bullish breakout: price closes above Camarilla R3
+                    if curr_close > camarilla_r3_aligned[i]:
+                        signals[i] = 0.25
+                        position = 1
+                    # Bearish breakout: price closes below Camarilla S3
+                    elif curr_close < camarilla_s3_aligned[i]:
+                        signals[i] = -0.25
+                        position = -1
+                else:  # Low volatility regime: mean reversion at extremes
+                    # Long when price touches Camarilla S3 and shows reversal (close > low)
+                    if curr_low <= camarilla_s3_aligned[i] and curr_close > curr_low:
+                        signals[i] = 0.25
+                        position = 1
+                    # Short when price touches Camarilla R3 and shows reversal (close < high)
+                    elif curr_high >= camarilla_r3_aligned[i] and curr_close < curr_high:
+                        signals[i] = -0.25
+                        position = -1
         elif position == 1:
-            # Long position management
-            signals[i] = 0.25
-            
-            # Update trailing stop: move stop up as price makes new highs
-            long_stop = max(long_stop, curr_low - 2.5 * atr[i])
-            
-            # Exit conditions: opposite breakout or stoploss hit
-            if curr_close < lowest_low[i] or curr_close < long_stop:
+            # Long exit: price closes below Camarilla S3 OR volatility regime shifts to low vol
+            if curr_close < camarilla_s3_aligned[i] or not vol_high:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = 0.25
         elif position == -1:
-            # Short position management
-            signals[i] = -0.25
-            
-            # Update trailing stop: move stop down as price makes new lows
-            short_stop = min(short_stop, curr_high + 2.5 * atr[i])
-            
-            # Exit conditions: opposite breakout or stoploss hit
-            if curr_close > highest_high[i] or curr_close > short_stop:
+            # Short exit: price closes above Camarilla R3 OR volatility regime shifts to low vol
+            if curr_close > camarilla_r3_aligned[i] or not vol_high:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Donchian20_1dVolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dVolRegime_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
