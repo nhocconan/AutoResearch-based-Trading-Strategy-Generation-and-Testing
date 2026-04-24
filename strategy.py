@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1w ADX trend filter and 1d volume confirmation.
-- Primary timeframe: 6h for moderate trade frequency (~15-35 trades/year/symbol).
-- HTF: 1w ADX(14) > 25 for strong trend regime (avoid choppy markets).
-- Volume: Current 6h volume > 1.5 * 20-period 6h volume MA for institutional participation.
-- Donchian: 20-period high/low breakouts for momentum entries.
-- Entry: Long when price breaks above Donchian(20) high AND 1w ADX > 25 AND volume spike.
-         Short when price breaks below Donchian(20) low AND 1w ADX > 25 AND volume spike.
-- Exit: Opposite Donchian(10) breakout (e.g., long exits when price < Donchian(10) low).
-- Signal size: 0.25 discrete to balance return and drawdown.
-- Target: 60-120 total trades over 4 years (15-30/year) for 6h timeframe.
-This strategy captures strong trend momentum filtered by weekly trend strength, avoiding
-false breakouts in ranging markets. Volume confirmation ensures breakouts have conviction.
-Works in bull markets (long bias) and bear markets (short bias) by only trading in the
-direction of the weekly trend, with Donchian providing objective entry/exit levels.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d ATR trend filter and volume spike confirmation.
+- Primary timeframe: 12h for lower trade frequency (~20-50 trades/year) and better signal quality.
+- HTF: 1d ATR for volatility regime filter (high ATR = trending market, low ATR = range-bound).
+- Volume: Current 12h volume > 1.8 * 20-period volume MA to capture institutional interest.
+- Camarilla: H3 and L3 levels calculated from prior day's range.
+- Entry: Long when price breaks above H3 AND 1d ATR > 20-period ATR MA AND volume spike.
+         Short when price breaks below L3 AND 1d ATR > 20-period ATR MA AND volume spike.
+- Exit: Price reverts to prior day's close (typical price) or loss of volume confirmation.
+- Signal size: 0.25 discrete to minimize fee churn.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+This strategy combines volatility regime filtering with Camarilla pivot breakouts,
+using ATR to identify trending markets where breakouts are more likely to succeed.
+Volume spikes confirm institutional participation. Works in both bull and bear markets
+by only taking breakout trades in high volatility regimes, avoiding false breakouts
+in low volatility/choppy conditions.
 """
 
 import numpy as np
@@ -22,7 +23,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -31,82 +32,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    # Calculate 1w ADX(14) for trend strength filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    # Directional Movement
-    up_move = high_1w[1:] - high_1w[:-1]
-    down_move = low_1w[:-1] - low_1w[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed TR, +DM, -DM (Wilder's smoothing = alpha=1/period)
-    def wilde_rma(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr_1w = wilde_rma(tr, 14)
-    plus_di_1w = 100 * wilde_rma(plus_dm, 14) / atr_1w
-    minus_di_1w = 100 * wilde_rma(minus_dm, 14) / atr_1w
-    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
-    adx_1w = wilde_rma(dx_1w, 14)
-    
-    # Get 1d data for volume confirmation (more responsive than 1w volume)
+    # Get 1d data for Camarilla levels and ATR
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
+    # Calculate 1d ATR(14) for volatility regime filter
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
+    
+    # True Range calculation
+    tr1 = df_1d_high - df_1d_low
+    tr2 = np.abs(df_1d_high - np.roll(df_1d_close, 1))
+    tr3 = np.abs(df_1d_low - np.roll(df_1d_close, 1))
+    tr1[0] = df_1d_high[0] - df_1d_low[0]  # First bar
+    tr2[0] = np.abs(df_1d_high[0] - df_1d_close[0])
+    tr3[0] = np.abs(df_1d_low[0] - df_1d_close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 20-period 1d ATR MA for regime filter
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    
     # Calculate 20-period 1d volume MA
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    df_1d_volume = df_1d['volume'].values
+    vol_ma_1d = pd.Series(df_1d_volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 6h
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Calculate Camarilla levels from prior day's OHLC
+    # H3 = close + 1.1 * (high - low) / 4
+    # L3 = close - 1.1 * (high - low) / 4
+    # Typical price (used as pivot/close reference) = (high + low + close) / 3
+    h1d = df_1d['high'].values
+    l1d = df_1d['low'].values
+    c1d = df_1d['close'].values
+    
+    camarilla_h3 = c1d + 1.1 * (h1d - l1d) / 4
+    camarilla_l3 = c1d - 1.1 * (h1d - l1d) / 4
+    camarilla_close = (h1d + l1d + c1d) / 3  # Typical price as reference
+    
+    # Align HTF indicators to 12h
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_close_aligned = align_htf_to_ltf(prices, df_1d, camarilla_close)
     
-    # Calculate Donchian channels on 6h data
-    def donchian_channel(high, low, period):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
+    # Volatility regime filter: ATR > ATR MA (trending market)
+    vol_regime = atr_1d_aligned > atr_ma_1d_aligned
     
-    donchian_20_upper, donchian_20_lower = donchian_channel(high, low, 20)
-    donchian_10_upper, donchian_10_lower = donchian_channel(high, low, 10)
-    
-    # Volume confirmation: current 6h volume > 1.5 * 20-period 1d volume MA (aligned)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    # Volume confirmation: current 12h volume > 1.8 * 20-period 1d volume MA
+    volume_spike = volume > (1.8 * vol_ma_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34)  # Need enough bars for Donchian20 and ADX (~34 for Wilder)
+    start_idx = max(34, 20)  # Need ATR(14)+20 MA for ATR, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(donchian_20_upper[i]) or np.isnan(donchian_20_lower[i]) or
-            np.isnan(donchian_10_upper[i]) or np.isnan(donchian_10_lower[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma_1d_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(camarilla_h3_aligned[i]) or
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_close_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -116,30 +105,29 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: only trade when weekly ADX > 25 (strong trend)
-        strong_trend = adx_1w_aligned[i] > 25
-        
         if position == 0:
-            # Check for breakout signals with volume spike and strong trend
-            if volume_spike[i] and strong_trend:
-                # Bullish breakout: price > Donchian(20) upper
-                if curr_close > donchian_20_upper[i]:
+            # Check for breakout signals with volume spike and volatility regime
+            if volume_spike[i] and vol_regime[i]:
+                # Bullish breakout: price > H3 AND volatility regime (trending)
+                if curr_close > camarilla_h3_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price < Donchian(20) lower
-                elif curr_close < donchian_20_lower[i]:
+                # Bearish breakout: price < L3 AND volatility regime (trending)
+                elif curr_close < camarilla_l3_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price < Donchian(10) lower (stop and reverse or exit)
-            if curr_close < donchian_10_lower[i]:
+            # Long exit: price reverts to typical price OR loss of volume confirmation OR volatility regime
+            if (curr_close <= camarilla_close_aligned[i] or 
+                not volume_spike[i] or not vol_regime[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price > Donchian(10) upper (stop and reverse or exit)
-            if curr_close > donchian_10_upper[i]:
+            # Short exit: price reverts to typical price OR loss of volume confirmation OR volatility regime
+            if (curr_close >= camarilla_close_aligned[i] or 
+                not volume_spike[i] or not vol_regime[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -147,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1wADX_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dATR_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
