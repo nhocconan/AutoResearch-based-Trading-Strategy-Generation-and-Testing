@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w Supertrend trend filter and volume confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w Supertrend (ATR=10, mult=3.0) for trend filter (defines bull/bear regime).
-- Entry: Long when price breaks above Donchian upper channel in bull regime with volume > 1.5 * 1d volume MA(20);
-         Short when price breaks below Donchian lower channel in bear regime with volume > 1.5 * 1d volume MA(20).
-- Exit: ATR trailing stop (3.0 * ATR(14)) or opposite Donchian breakout.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d EMA34 for trend filter (bull/bear regime).
+- Entry: Long when price breaks above Camarilla R3 in bull regime with volume > 1.5 * 4h volume MA(20);
+         Short when price breaks below Camarilla S3 in bear regime with volume > 1.5 * 4h volume MA(20).
+- Exit: Opposite Camarilla breakout (below S3 for long, above R3 for short).
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Donchian channels provide clear structure; Supertrend adapts to volatility; volume confirms conviction.
+- Camarilla levels provide precise intraday support/resistance; EMA34 adapts to trend; volume confirms conviction.
 - Works in bull (breakouts with trend) and bear (strong moves after regime shifts).
 """
 
@@ -26,87 +26,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation and volume
+    # Get 4h data for Camarilla calculation and volume
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Get 1d data for EMA34 calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get 1w data for Supertrend calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate 1w ATR(10) for Supertrend
-    tr1_w = df_1w['high'] - df_1w['low']
-    tr2_w = np.abs(df_1w['high'] - np.roll(df_1w['close'], 1))
-    tr3_w = np.abs(df_1w['low'] - np.roll(df_1w['close'], 1))
-    tr2_w[0] = 0
-    tr3_w[0] = 0
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    atr_w = pd.Series(tr_w).rolling(window=10, min_periods=10).mean().values
-    
-    # Calculate 1w Supertrend
-    hl2_w = (df_1w['high'] + df_1w['low']) / 2
-    upper_band_w = hl2_w + (3.0 * atr_w)
-    lower_band_w = hl2_w - (3.0 * atr_w)
-    
-    supertrend_w = np.zeros(len(df_1w))
-    direction_w = np.ones(len(df_1w))  # 1 for uptrend, -1 for downtrend
-    
-    supertrend_w[0] = upper_band_w[0]
-    direction_w[0] = 1
-    
-    for i in range(1, len(df_1w)):
-        close_prev = df_1w['close'].iloc[i-1]
-        supertrend_prev = supertrend_w[i-1]
-        direction_prev = direction_w[i-1]
-        
-        if direction_prev == 1:
-            supertrend_w[i] = max(lower_band_w[i], supertrend_prev) if close_prev > supertrend_prev else lower_band_w[i]
-            direction_w[i] = -1 if df_1w['close'].iloc[i] < supertrend_w[i] else 1
-        else:
-            supertrend_w[i] = min(upper_band_w[i], supertrend_prev) if close_prev < supertrend_prev else upper_band_w[i]
-            direction_w[i] = 1 if df_1w['close'].iloc[i] > supertrend_w[i] else -1
-    
-    # Align Supertrend and direction to 1d timeframe
-    supertrend_w_aligned = align_htf_to_ltf(prices, df_1w, supertrend_w)
-    direction_w_aligned = align_htf_to_ltf(prices, df_1w, direction_w)
-    
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 4h Camarilla levels (based on previous day's OHLC)
+    # We need to calculate Camarilla for each 4h bar using prior 1d data
+    # For simplicity, we'll use the prior completed 1d bar's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d volume MA(20) for confirmation
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_r3 = np.zeros(len(df_1d))
+    camarilla_s3 = np.zeros(len(df_1d))
+    camarilla_r4 = np.zeros(len(df_1d))  # for exit
+    camarilla_s4 = np.zeros(len(df_1d))  # for exit
     
-    # Calculate 1d ATR(14) for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    for i in range(len(df_1d)):
+        h = high_1d[i]
+        l = low_1d[i]
+        c = close_1d[i]
+        camarilla_r3[i] = c + (h - l) * 1.1 / 4
+        camarilla_s3[i] = c - (h - l) * 1.1 / 4
+        camarilla_r4[i] = c + (h - l) * 1.1 / 2
+        camarilla_s4[i] = c - (h - l) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Calculate 4h volume MA(20) for confirmation
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = 0
-    lowest_since_entry = 0
     
     # Start from index where all indicators are ready
-    start_idx = max(30, 20, 20, 14, 1)  # Supertrend needs 30, Donchian needs 20, volume MA needs 20, ATR needs 14
+    start_idx = max(34, 20, 1)  # EMA34 needs 34, volume MA needs 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(supertrend_w_aligned[i]) or np.isnan(direction_w_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(vol_ma_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -117,39 +95,33 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volume confirmation: 1.5x threshold (balanced to reduce trades)
-        vol_confirm = curr_volume > 1.5 * vol_ma_1d_aligned[i]
+        # Volume confirmation: 1.5x threshold
+        vol_confirm = curr_volume > 1.5 * vol_ma_4h_aligned[i]
         
-        # Trend filter: Supertrend direction
-        bull_regime = direction_w_aligned[i] == 1
-        bear_regime = direction_w_aligned[i] == -1
+        # Trend filter: EMA34 direction
+        bull_regime = curr_close > ema_34_aligned[i]
+        bear_regime = curr_close < ema_34_aligned[i]
         
         if position == 0:
             # Check for entry signals
-            # Long: price breaks above Donchian high in bull regime with volume confirmation
-            if curr_close > donchian_high_aligned[i] and bull_regime and vol_confirm:
+            # Long: price breaks above Camarilla R3 in bull regime with volume confirmation
+            if curr_close > camarilla_r3_aligned[i] and bull_regime and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry = curr_high
-            # Short: price breaks below Donchian low in bear regime with volume confirmation
-            elif curr_close < donchian_low_aligned[i] and bear_regime and vol_confirm:
+            # Short: price breaks below Camarilla S3 in bear regime with volume confirmation
+            elif curr_close < camarilla_s3_aligned[i] and bear_regime and vol_confirm:
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry = curr_low
         elif position == 1:
-            # Long position: update highest and check exit conditions
-            highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit: ATR trailing stop or opposite breakout (below Donchian low)
-            if curr_low <= highest_since_entry - 3.0 * atr[i] or curr_close < donchian_low_aligned[i]:
+            # Long position: check exit (price breaks below Camarilla S3)
+            if curr_close < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: update lowest and check exit conditions
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit: ATR trailing stop or opposite breakout (above Donchian high)
-            if curr_high >= lowest_since_entry + 3.0 * atr[i] or curr_close > donchian_high_aligned[i]:
+            # Short position: check exit (price breaks above Camarilla R3)
+            if curr_close > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -157,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wSupertrend_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
