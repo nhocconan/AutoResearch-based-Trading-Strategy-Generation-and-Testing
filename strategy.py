@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Bull/Bear Power with 12h EMA trend filter and ATR-based exits.
-- Primary timeframe: 6h to reduce trade frequency and fee drag.
-- HTF: 12h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 6h data).
-- Entry: Long when Bull Power > 0 AND Bear Power < 0 AND 12h EMA50 bullish.
-         Short when Bear Power < 0 AND Bull Power > 0 AND 12h EMA50 bearish.
-         (Note: This condition simplifies to Bull Power > Bear Power for long, Bear Power > Bull Power for short)
-- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 2.5*ATR,
-        exit short when price > lowest_low_since_entry + 2.5*ATR.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d ATR trend filter and volume confirmation.
+- Primary timeframe: 12h to target 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d ATR(14) for trend filter (bullish if ATR rising, bearish if ATR falling).
+- Camarilla levels: Calculate H3, L3, H4, L4 from prior 1d session.
+- Entry: Long when close crosses above H3 with volume > 1.5x 20-period average AND 1d ATR rising.
+         Short when close crosses below L3 with volume > 1.5x 20-period average AND 1d ATR falling.
+- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 2.0*ATR,
+        exit short when price > lowest_low_since_entry + 2.0*ATR.
 - Signal size: 0.25 discrete to balance return and drawdown.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-This strategy measures bull/bear power relative to EMA13, filtered by 12h trend to avoid counter-trend trades.
-ATR trailing stops allow trends to run while controlling risk. Works in both bull and bear markets
-by only taking trades in the direction of the 12h trend, with Elder Power confirming momentum.
+- Works in both bull and bear markets by using ATR trend (volatility expansion) as regime filter.
+- Camarilla levels provide institutional support/resistance with high probability breakouts.
 """
 
 import numpy as np
@@ -29,32 +26,47 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla levels and ATR trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h_close = df_12h['close'].values
-    ema_12h = pd.Series(df_12h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ATR(14) for trend filter
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
+    tr1 = np.abs(df_1d_high[1:] - df_1d_low[:-1])
+    tr2 = np.abs(df_1d_high[1:] - df_1d_close[:-1])
+    tr3 = np.abs(df_1d_low[1:] - df_1d_close[:-1])
+    tr_1d = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # ATR trend: rising if current > previous, falling if current < previous
+    atr_rising = np.concatenate([[False], atr_1d[1:] > atr_1d[:-1]])
+    atr_falling = np.concatenate([[False], atr_1d[1:] < atr_1d[:-1]])
     
-    # Calculate EMA13 for Elder Ray (on 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate prior 1d Camarilla levels (H3, L3, H4, L4)
+    # H4 = Close + 1.5*(High - Low)
+    # L4 = Close - 1.5*(High - Low)
+    # H3 = Close + 1.125*(High - Low)
+    # L3 = Close - 1.125*(High - Low)
+    df_1d_range = df_1d_high - df_1d_low
+    camarilla_h4 = df_1d_close + 1.5 * df_1d_range
+    camarilla_l4 = df_1d_close - 1.5 * df_1d_range
+    camarilla_h3 = df_1d_close + 1.125 * df_1d_range
+    camarilla_l3 = df_1d_close - 1.125 * df_1d_range
     
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = low - ema_13   # Bear Power = Low - EMA13
+    # Align HTF indicators to 12h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    atr_rising_aligned = align_htf_to_ltf(prices, df_1d, atr_rising)
+    atr_falling_aligned = align_htf_to_ltf(prices, df_1d, atr_falling)
     
-    # Calculate ATR(20) for trailing stop
-    tr1 = np.abs(high[1:] - low[:-1])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to 6h
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 20-period volume average for volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,12 +75,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 13, 20)  # Need enough bars for EMA50, EMA13, and ATR
+    start_idx = max(20, 20)  # Need enough bars for ATR and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr_rising_aligned[i]) or np.isnan(atr_falling_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,18 +89,25 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals
-            # Long: Bull Power > Bear Power AND 12h EMA50 bullish (close > EMA)
-            if bull_power[i] > bear_power[i] and curr_close > ema_12h_aligned[i]:
+            # Check for entry signals with volume confirmation
+            # Long: close crosses above H3 AND volume > 1.5x average AND ATR rising
+            if (curr_close > camarilla_h3_aligned[i] and 
+                close[i-1] <= camarilla_h3_aligned[i-1] and
+                curr_volume > 1.5 * vol_ma[i] and
+                atr_rising_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_high
                 lowest_since_entry = curr_low
-            # Short: Bear Power > Bull Power AND 12h EMA50 bearish (close < EMA)
-            elif bear_power[i] > bull_power[i] and curr_close < ema_12h_aligned[i]:
+            # Short: close crosses below L3 AND volume > 1.5x average AND ATR falling
+            elif (curr_close < camarilla_l3_aligned[i] and 
+                  close[i-1] >= camarilla_l3_aligned[i-1] and
+                  curr_volume > 1.5 * vol_ma[i] and
+                  atr_falling_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -97,8 +116,26 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit when price < highest_high - 2.5*ATR
-            if curr_close < highest_since_entry - 2.5 * atr[i]:
+            # ATR trailing stop: exit when price < highest_high - 2.0*ATR
+            # Calculate current ATR for stoploss (using 14-period ATR on 12h data)
+            if i >= 14:
+                tr1 = np.abs(high[i] - low[i])
+                tr2 = np.abs(high[i] - close[i-1])
+                tr3 = np.abs(low[i] - close[i-1])
+                tr = max(tr1, tr2, tr3)
+                # Simplified ATR calculation for stop - using recent volatility
+                if i >= 28:
+                    atr_stop = np.mean([
+                        np.abs(high[i-13:i+1] - low[i-13:i+1]),
+                        np.abs(high[i-13:i+1] - close[i-14:i]),
+                        np.abs(low[i-13:i+1] - close[i-14:i])
+                    ]).mean() if hasattr(np.mean([np.abs(high[i-13:i+1] - low[i-13:i+1]), np.abs(high[i-13:i+1] - close[i-14:i]), np.abs(low[i-13:i+1] - close[i-14:i])]), 'mean') else np.abs(high[i] - low[i])
+                else:
+                    atr_stop = np.abs(high[i] - low[i])
+            else:
+                atr_stop = np.abs(high[i] - low[i])
+            
+            if curr_close < highest_since_entry - 2.0 * atr_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,8 +143,24 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit when price > lowest_low + 2.5*ATR
-            if curr_close > lowest_since_entry + 2.5 * atr[i]:
+            # ATR trailing stop: exit when price > lowest_low + 2.0*ATR
+            if i >= 14:
+                tr1 = np.abs(high[i] - low[i])
+                tr2 = np.abs(high[i] - close[i-1])
+                tr3 = np.abs(low[i] - close[i-1])
+                tr = max(tr1, tr2, tr3)
+                if i >= 28:
+                    atr_stop = np.mean([
+                        np.abs(high[i-13:i+1] - low[i-13:i+1]),
+                        np.abs(high[i-13:i+1] - close[i-14:i]),
+                        np.abs(low[i-13:i+1] - close[i-14:i])
+                    ]).mean() if hasattr(np.mean([np.abs(high[i-13:i+1] - low[i-13:i+1]), np.abs(high[i-13:i+1] - close[i-14:i]), np.abs(low[i-13:i+1] - close[i-14:i])]), 'mean') else np.abs(high[i] - low[i])
+                else:
+                    atr_stop = np.abs(high[i] - low[i])
+            else:
+                atr_stop = np.abs(high[i] - low[i])
+            
+            if curr_close > lowest_since_entry + 2.0 * atr_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +168,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_12hEMA50_Trend_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dATR_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
