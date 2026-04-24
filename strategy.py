@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter, volume confirmation, and ATR regime filter.
-- Primary timeframe: 12h (slower to reduce trade frequency, target 12-37 trades/year).
-- Donchian breakout provides clear structure-based entries.
-- 1d EMA50 ensures alignment with daily trend to avoid counter-trend whipsaws.
-- Volume confirmation (>2.0x 24-period average) ensures conviction.
-- ATR regime filter (current ATR > 0.7x 50-period average) avoids low-momentum chop.
-- Discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Designed for BTC/ETH resilience in both bull and bear markets via trend + volatility filters.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter, volume spike (>2.0x 24-bar average), and ATR regime filter (current ATR > 0.7x 50-bar average).
+- Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
+- Targets 20-30 trades/year (80-120 total over 4 years) to stay fee-efficient.
+- Combines Camarilla structure + 1d trend filter + volume/volatility confirmation.
+- Works in bull/bear: trend filter ensures alignment with higher timeframe direction; volume/volatility filters avoid low-conviction entries.
 """
 
 import numpy as np
@@ -16,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,27 +31,18 @@ def generate_signals(prices):
     low_1d = df_1d['low'].shift(1).values
     close_1d = df_1d['close'].shift(1).values
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
     low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = high_1d_aligned + 0  # placeholder for alignment, will compute below
-    donchian_low = low_1d_aligned + 0
+    # Calculate Camarilla levels
+    camarilla_h3 = close_1d_aligned + 1.1 * (high_1d_aligned - low_1d_aligned) / 4
+    camarilla_l3 = close_1d_aligned - 1.1 * (high_1d_aligned - low_1d_aligned) / 4
     
-    # Actually compute Donchian on 1d then align
-    high_1d_series = pd.Series(high_1d)
-    low_1d_series = pd.Series(low_1d)
-    donchian_high_1d = high_1d_series.rolling(window=20, min_periods=20).max().values
-    donchian_low_1d = low_1d_series.rolling(window=20, min_periods=20).min().values
-    
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
-    
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: > 2.0x 24-period average
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -76,12 +64,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 24, atr_period, 50)
+    start_idx = max(34, 24, atr_period, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
             np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -93,24 +81,24 @@ def generate_signals(prices):
         vol_regime = atr_ratio[i] > 0.7
         
         if position == 0:
-            # Long: Close > Donchian High AND price above 1d EMA50 AND volume confirmation AND vol regime
-            if close[i] > donchian_high_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm and vol_regime:
+            # Long: Close > H3 AND price above 1d EMA34 AND volume confirmation AND vol regime
+            if close[i] > camarilla_h3[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm and vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Donchian Low AND price below 1d EMA50 AND volume confirmation AND vol regime
-            elif close[i] < donchian_low_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm and vol_regime:
+            # Short: Close < L3 AND price below 1d EMA34 AND volume confirmation AND vol regime
+            elif close[i] < camarilla_l3[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm and vol_regime:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < Donchian Low OR price crosses below 1d EMA50
-            if close[i] < donchian_low_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: Close < L3 OR price crosses below 1d EMA34
+            if close[i] < camarilla_l3[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > Donchian High OR price crosses above 1d EMA50
-            if close[i] > donchian_high_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: Close > H3 OR price crosses above 1d EMA34
+            if close[i] > camarilla_h3[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA50_VolumeATR_Filter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeATR_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
