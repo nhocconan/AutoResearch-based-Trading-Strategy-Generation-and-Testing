@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and volume spike confirmation.
 - Primary timeframe: 4h for execution, HTF: 1d for EMA trend direction.
-- EMA34 > EMA89 indicates bullish trend (favor long breakouts), EMA34 < EMA89 indicates bearish trend (favor short breakouts).
-- Entry: Long when price breaks above Donchian(20) upper AND EMA34 > EMA89 (bullish breakout in uptrend).
-         Short when price breaks below Donchian(20) lower AND EMA34 < EMA89 (bearish breakout in downtrend).
-- Exit: Opposite Donchian breakout or EMA trend reversal.
+- EMA(34) > EMA(89) on 1d indicates bullish trend; EMA(34) < EMA(89) indicates bearish trend.
+- Entry: Long when price breaks above Donchian(20) upper AND EMA(34) > EMA(89) (bullish breakout in uptrend).
+         Short when price breaks below Donchian(20) lower AND EMA(34) < EMA(89) (bearish breakout in downtrend).
+         No entries in sideways markets (EMA(34) and EMA(89) close together).
+- Exit: Opposite Donchian breakout or EMA cross flip.
 - Volume confirmation: current volume > 1.5 * 20-period volume MA (to avoid false breakouts).
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
 - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Works in both bull (favor longs) and bear (favor shorts) via EMA trend filter.
+- Works in both bull and bear by only taking breakouts in the direction of the 1d trend.
 """
 
 import numpy as np
@@ -18,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -27,14 +28,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 90:
         return np.zeros(n)
     
-    # Calculate EMAs (34 and 89) on 1d
-    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89 = pd.Series(df_1d['close']).ewm(span=89, adjust=False, min_periods=89).mean().values
+    # Calculate EMAs on 1d
+    close_1d = pd.Series(df_1d['close'])
+    ema_34 = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_89 = close_1d.ewm(span=89, adjust=False, min_periods=89).mean().values
     
     # Align 1d EMAs to 4h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
@@ -54,7 +56,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(90, lookback, 20)  # Need enough 1d bars for EMA89 and lookback for Donchian
+    start_idx = max(90, lookback, 20)  # Need enough 1d bars for EMA(89) and lookback for Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -73,27 +75,29 @@ def generate_signals(prices):
         curr_low = low[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation
+            # Check for entry signals
             if volume_spike[i]:
-                if ema_34_val > ema_89_val:  # Bullish trend: favor longs
+                # Only take breakouts in the direction of the 1d trend
+                if ema_34_val > ema_89_val:  # Bullish trend on 1d
                     # Bullish breakout: price closes above upper Donchian
                     if curr_close > highest_high[i]:
                         signals[i] = 0.25
                         position = 1
-                else:  # Bearish trend: favor shorts
+                elif ema_34_val < ema_89_val:  # Bearish trend on 1d
                     # Bearish breakout: price closes below lower Donchian
                     if curr_close < lowest_low[i]:
                         signals[i] = -0.25
                         position = -1
+                # If EMAs are close (sideways market), no entries
         elif position == 1:
-            # Long exit: price closes below Donchian mid OR trend turns bearish
+            # Long exit: price closes below Donchian mid OR EMA cross flips to bearish
             if curr_close < donchian_mid[i] or ema_34_val < ema_89_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Donchian mid OR trend turns bullish
+            # Short exit: price closes above Donchian mid OR EMA cross flips to bullish
             if curr_close > donchian_mid[i] or ema_34_val > ema_89_val:
                 signals[i] = 0.0
                 position = 0
