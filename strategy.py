@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla H3/L3 breakout with 12h EMA34 trend filter and volume confirmation.
-- Long when price breaks above Camarilla H3 level and close > 12h EMA34 (bullish trend)
-- Short when price breaks below Camarilla L3 level and close < 12h EMA34 (bearish trend)
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+- Long when price breaks above Camarilla H3 level and close > 1d EMA34 (bullish trend)
+- Short when price breaks below Camarilla L3 level and close < 1d EMA34 (bearish trend)
 - Volume must be > 2.0x 20-period average for high-conviction breakouts
 - ATR(14) trailing stop: exit when price moves 2.5x ATR from extreme since entry
-- Uses 12h HTF for trend filter (proven effective in 6h timeframe)
-- Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+- Uses 1d HTF for trend filter (proven effective in 4h timeframe)
+- Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
 - Designed to work in both bull and bear markets via strong trend filter and breakout structure
 """
 
@@ -45,17 +45,17 @@ def generate_signals(prices):
         camarilla_h4[i] = pc + range_val * 1.1 / 2.0
         camarilla_l4[i] = pc - range_val * 1.1 / 2.0
     
-    # Get 12h data ONCE before loop for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA34
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA34
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h EMA34 to 6h timeframe
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Align 1d EMA34 to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: > 2.0x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -79,7 +79,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -89,13 +89,13 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above Camarilla H3, trend up (close > EMA34), volume spike
-            if close[i] > camarilla_h3[i] and close[i] > ema_34_12h_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
+            if close[i] > camarilla_h3[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+                signals[i] = 0.30
                 position = 1
                 highest_high_since_entry = high[i]
             # Short: price breaks below Camarilla L3, trend down (close < EMA34), volume spike
-            elif close[i] < camarilla_l3[i] and close[i] < ema_34_12h_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
+            elif close[i] < camarilla_l3[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+                signals[i] = -0.30
                 position = -1
                 lowest_low_since_entry = low[i]
         elif position == 1:
@@ -107,7 +107,7 @@ def generate_signals(prices):
                 position = 0
                 highest_high_since_entry = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
@@ -117,10 +117,10 @@ def generate_signals(prices):
                 position = 0
                 lowest_low_since_entry = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "6h_Camarilla_H3L3_12hEMA34_VolumeSpike_ATRTrailingStop_v1"
-timeframe = "6h"
+name = "4h_Camarilla_H3L3_1dEMA34_VolumeSpike_ATRTrailingStop_v1"
+timeframe = "4h"
 leverage = 1.0
