@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h EMA(21) + 4h Supertrend(10,3) + Volume Spike + Session Filter
-- Uses 4h Supertrend for HTF trend direction (works in bull/bear via ATR adaptive bands)
-- 1h EMA(21) for entry timing precision (avoid whipsaws)
-- Volume spike > 2.0 * 20-period MA to confirm momentum
-- Session filter 08-20 UTC to avoid low-liquidity hours
-- Discrete signal size: 0.20 to minimize fee churn
-- Target: 60-150 total trades over 4 years (15-37/year)
+Hypothesis: 6h Donchian(20) breakout with 1w trend filter and volume confirmation.
+- Uses 1w timeframe for HTF trend alignment (more stable for 6h entries)
+- Donchian breakout from previous 6h bar: upper = max(high[-20:]), lower = min(low[-20:])
+- Long when price breaks above upper AND price > 1w EMA50 (uptrend) AND volume > 1.5 * volume MA(20)
+- Short when price breaks below lower AND price < 1w EMA50 (downtrend) AND volume > 1.5 * volume MA(20)
+- Exit when price reverts to mid-band of Donchian channel
+- Discrete signal size: 0.25 to minimize fee churn
+- Target: 75-200 total trades over 4 years (19-50/year) - within 6h limits
 """
 
 import numpy as np
@@ -23,122 +24,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) - prices.index is DatetimeIndex
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Calculate 4h Supertrend for HTF trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:  # Need enough data for ATR and Supertrend
+    # Calculate 1w OHLC for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need enough data for EMA50
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
     
-    # ATR(10) for Supertrend
-    tr1 = pd.Series(high_4h - low_4h)
-    tr2 = pd.Series(np.abs(high_4h - pd.Series(close_4h).shift(1)))
-    tr3 = pd.Series(np.abs(low_4h - pd.Series(close_4h).shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_10 = tr.ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Basic Upper and Lower Bands
-    hl2 = (high_4h + low_4h) / 2
-    upper_band = hl2 + (3.0 * atr_10)
-    lower_band = hl2 - (3.0 * atr_10)
-    
-    # Initialize Supertrend
-    supertrend = np.full_like(close_4h, np.nan, dtype=float)
-    direction = np.full_like(close_4h, 1, dtype=int)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_4h)):
-        if np.isnan(atr_10[i-1]) or np.isnan(upper_band[i-1]) or np.isnan(lower_band[i-1]):
-            continue
-            
-        # Upper band logic
-        if close_4h[i-1] <= upper_band[i-1]:
-            upper_band[i] = min(upper_band[i], upper_band[i-1])
-        else:
-            upper_band[i] = upper_band[i]
-            
-        # Lower band logic
-        if close_4h[i-1] >= lower_band[i-1]:
-            lower_band[i] = max(lower_band[i], lower_band[i-1])
-        else:
-            lower_band[i] = lower_band[i]
-        
-        # Supertrend logic
-        if supertrend[i-1] == upper_band[i-1]:
-            if close_4h[i] <= upper_band[i]:
-                supertrend[i] = upper_band[i]
-            else:
-                supertrend[i] = lower_band[i]
-                direction[i] = -1
-        else:
-            if close_4h[i] >= lower_band[i]:
-                supertrend[i] = lower_band[i]
-            else:
-                supertrend[i] = upper_band[i]
-                direction[i] = 1
-    
-    # Align Supertrend direction to 1h timeframe
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_4h, direction.astype(float))
-    
-    # 1h EMA(21) for entry timing
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    volume_confirm = volume > (1.5 * volume_ma)
+    
+    # Calculate Donchian channels from previous completed 6h bar
+    # We need to calculate this on 6h data, but we don't have direct access
+    # Instead, we'll use the current prices to approximate with lookback
+    # Using rolling window on the primary timeframe (6h)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, 21, 20)  # Need 4h Supertrend, EMA21, volume MA
+    start_idx = max(50, 20)  # Need 1w EMA50, Donchian channels
     
     for i in range(start_idx, n):
-        # Skip if not in trading session or data not ready
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        if (np.isnan(supertrend_direction_aligned[i]) or np.isnan(ema_21[i]) or 
-            np.isnan(volume_spike[i])):
+        # Skip if data not ready
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Supertrend uptrend AND price > EMA21 AND volume spike
-            if supertrend_direction_aligned[i] == 1 and close[i] > ema_21[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: price breaks above upper Donchian AND uptrend AND volume confirmation
+            if close[i] > donchian_upper[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Supertrend downtrend AND price < EMA21 AND volume spike
-            elif supertrend_direction_aligned[i] == -1 and close[i] < ema_21[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: price breaks below lower Donchian AND downtrend AND volume confirmation
+            elif close[i] < donchian_lower[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Supertrend turns down OR price < EMA21
-            if supertrend_direction_aligned[i] == -1 or close[i] < ema_21[i]:
+            # Long exit: price reverts to mid-band
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: Supertrend turns up OR price > EMA21
-            if supertrend_direction_aligned[i] == 1 or close[i] > ema_21[i]:
+            # Short exit: price reverts to mid-band
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_EMA21_4hSupertrend_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_Donchian20_1wEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
