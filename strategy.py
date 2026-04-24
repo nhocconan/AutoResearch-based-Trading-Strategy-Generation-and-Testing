@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA34 trend filter and volume spike confirmation.
-- Uses Camarilla pivot levels (H3, L3) from 4h timeframe as strong support/resistance.
-- Breakout above H3 with volume > 2.0x 20-bar average = long signal.
-- Breakdown below L3 with volume > 2.0x 20-bar average = short signal.
-- Trend filter: price must be above/below 4h EMA34 to align with 4h trend.
-- Designed for 1h timeframe to capture swings with higher probability entries.
-- Uses discrete position size 0.20 to limit drawdown and reduce fee churn.
-- Targets 15-37 trades/year (60-150 total over 4 years) to stay fee-efficient.
-- Volume confirmation reduces false breakouts in choppy markets.
-- Session filter (08-20 UTC) to avoid low-liquidity periods.
-- Novelty: Uses H3/L3 levels (stronger breakout levels than H4/L4) and 4h EMA34 on 1h timeframe.
+Hypothesis: 6h Elder Ray + ADX regime filter with volume confirmation.
+- Uses Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) to measure trend strength.
+- Regime filter: ADX(14) > 25 for trending markets (only trade in strong trends).
+- Volume confirmation: breakout requires volume > 1.5x 20-bar average.
+- Long when Bull Power > 0 and ADX > 25 and volume confirms.
+- Short when Bear Power < 0 and ADX > 25 and volume confirms.
+- Uses 1d EMA34 as additional trend filter: price must be above/below 1d EMA34.
+- Designed for 6h timeframe to capture medium-term trends with low trade frequency.
+- Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
+- Targets 12-37 trades/year (50-150 total over 4 years) to stay fee-efficient.
 """
 
 import numpy as np
@@ -26,85 +25,103 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Precompute session hours (08-20 UTC) once before loop
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Get 4h data ONCE before loop for Camarilla levels and EMA
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1d data ONCE before loop for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for 4h timeframe
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate 1d EMA34
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    camarilla_h3 = close_4h + 1.1 * (high_4h - low_4h) / 4  # H3 level
-    camarilla_l3 = close_4h - 1.1 * (high_4h - low_4h) / 4  # L3 level
+    # Calculate Elder Ray components (Bull/Bear Power) on 6h timeframe
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = low - ema_13   # Low - EMA13
     
-    # Align Camarilla levels to 1h timeframe (wait for 4h bar to close)
-    h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
+    # Calculate ADX(14) on 6h timeframe
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # 4h EMA34 trend filter
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Volume confirmation: > 2.0x 20-period average
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    def ma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] + (arr[i] - result[i-1]) / period
+        return result
+    
+    atr = ma(tr, 14)
+    plus_di = 100 * ma(plus_dm, 14) / atr
+    minus_di = 100 * ma(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = ma(dx, 14)
+    
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # Need enough for EMA and volume MA
+    start_idx = max(50, 34, 20)  # Need enough for EMA, ADX, and volume MA
     
     for i in range(start_idx, n):
-        # Session filter: only trade between 08:00 and 20:00 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         # Skip if data not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Only trade if volume confirms breakout AND in session
-            if volume_confirm and in_session:
-                # Long: price breaks above H3 AND above 4h EMA34
-                if close[i] > h3_aligned[i] and close[i] > ema_34_4h_aligned[i]:
-                    signals[i] = 0.20
+            # Only trade if volume confirms and ADX indicates trend
+            if volume_confirm and adx[i] > 25:
+                # Long: Bull Power positive AND price above 1d EMA34
+                if bull_power[i] > 0 and close[i] > ema_34_1d_aligned[i]:
+                    signals[i] = 0.25
                     position = 1
-                # Short: price breaks below L3 AND below 4h EMA34
-                elif close[i] < l3_aligned[i] and close[i] < ema_34_4h_aligned[i]:
-                    signals[i] = -0.20
+                # Short: Bear Power negative AND price below 1d EMA34
+                elif bear_power[i] < 0 and close[i] < ema_34_1d_aligned[i]:
+                    signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price crosses below L3 OR below 4h EMA34 OR outside session
-            if close[i] < l3_aligned[i] or close[i] < ema_34_4h_aligned[i] or not in_session:
+            # Long exit: Bull Power turns negative OR price crosses below 1d EMA34 OR ADX weakens
+            if bull_power[i] <= 0 or close[i] < ema_34_1d_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above H3 OR above 4h EMA34 OR outside session
-            if close[i] > h3_aligned[i] or close[i] > ema_34_4h_aligned[i] or not in_session:
+            # Short exit: Bear Power turns positive OR price crosses above 1d EMA34 OR ADX weakens
+            if bear_power[i] >= 0 or close[i] > ema_34_1d_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_Breakout_4hEMA34_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_ElderRay_ADX_Regime_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
