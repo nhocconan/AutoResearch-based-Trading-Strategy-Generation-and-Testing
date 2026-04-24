@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 12h for EMA50 trend direction.
-- EMA50 > EMA50_prev indicates bullish trend, EMA50 < EMA50_prev indicates bearish trend.
-- Entry: Long when price breaks above Donchian(20) upper AND EMA50 trending up (bullish breakout in uptrend).
-         Short when price breaks below Donchian(20) lower AND EMA50 trending down (bearish breakout in downtrend).
-- Exit: Opposite Donchian breakout.
-- Volume confirmation: current volume > 1.3 * 20-period volume MA (to avoid false breakouts).
-- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Uses HTF 12h data loaded ONCE via mtf_data.get_htf_data before loop.
+Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and session timing.
+- Primary timeframe: 1h for execution, HTF: 4h for trend direction.
+- In 4h uptrend (close > EMA50): look for 1h RSI(2) < 10 for long entries.
+- In 4h downtrend (close < EMA50): look for 1h RSI(2) > 90 for short entries.
+- Only trade during active session (08-20 UTC) to avoid low-liquidity hours.
+- Volume confirmation: current 1h volume > 1.5 * 20-period volume MA.
+- Exit: RSI(2) crosses back above 60 (long) or below 40 (short) OR opposing signal.
+- Discrete signal size: 0.20 to control drawdown and minimize fee churn.
+- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 """
 
 import numpy as np
@@ -27,75 +26,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 55:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate EMA50 on 12h
-    ema_50 = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA(50) for trend direction
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Align 12h EMA50 to 4h
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Calculate 1h RSI(2) for mean reversion signals
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Donchian channels (20-period) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
-    
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 4h)
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * volume_ma)
+    volume_spike = volume > (1.5 * volume_ma)
+    
+    # Session filter: 08-20 UTC (already datetime64 index)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(55, lookback, 20)  # Need enough 12h bars for EMA50 and lookback for Donchian
+    start_idx = max(50, 2)  # Need EMA50 and RSI(2) warmup
     
     for i in range(start_idx, n):
+        # Skip if not in active session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        ema50 = ema50_4h_aligned[i]
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        prev_close = close[i-1]
+        curr_rsi = rsi[i]
+        prev_rsi = rsi[i-1]
         
         if position == 0:
             # Check for entry signals
-            if volume_spike[i]:
-                # Bullish breakout: price closes above upper Donchian AND EMA50 trending up
-                if curr_close > highest_high[i] and ema_50_aligned[i] > ema_50_aligned[i-1]:
-                    signals[i] = 0.25
-                    position = 1
-                # Bearish breakout: price closes below lower Donchian AND EMA50 trending down
-                elif curr_close < lowest_low[i] and ema_50_aligned[i] < ema_50_aligned[i-1]:
-                    signals[i] = -0.25
-                    position = -1
+            if volume_spike[i] and in_session[i]:
+                if curr_close > ema50:  # 4h uptrend: look for long at RSI(2) < 10
+                    if curr_rsi < 10:
+                        signals[i] = 0.20
+                        position = 1
+                elif curr_close < ema50:  # 4h downtrend: look for short at RSI(2) > 90
+                    if curr_rsi > 90:
+                        signals[i] = -0.20
+                        position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian mid
-            if curr_close < donchian_mid[i]:
+            # Long exit: RSI(2) > 60 or 4h trend turns down
+            if curr_rsi > 60 or curr_close < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price closes above Donchian mid
-            if curr_close > donchian_mid[i]:
+            # Short exit: RSI(2) < 40 or 4h trend turns up
+            if curr_rsi < 40 or curr_close > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA50Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1h_RSI2_4hEMA50Trend_Session_VolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
