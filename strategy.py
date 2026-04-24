@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter, volume spike (>2.5x 24-bar average), and ATR regime filter (current ATR > 0.8x 50-bar average).
+Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter, volume spike (>2.0x 20-bar average), and ATR regime filter (current ATR > 0.8x 50-bar average).
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 20-30 trades/year (80-120 total over 4 years) to stay fee-efficient.
-- Combines price channel breakout + higher timeframe trend + volume/volatility confirmation.
-- Works in bull/bear: 12h EMA50 ensures alignment with higher timeframe direction; volume/volatility filters avoid low-conviction entries.
-- ATR stoploss implemented via signal=0 when price closes below/above opposite Donchian band.
+- Targets 15-25 trades/year (60-100 total over 4 years) to stay fee-efficient.
+- Combines Donchian structure + 1w trend filter + volume/volatility confirmation.
+- Works in bull/bear: trend filter ensures alignment with higher timeframe direction; volume/volatility filters avoid low-conviction entries.
 """
 
 import numpy as np
@@ -22,28 +21,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Prior 12h close for EMA (completed 12h bar)
-    close_12h = df_12h['close'].shift(1).values
+    # Prior 1w OHLC (completed 1w bar)
+    high_1w = df_1w['high'].shift(1).values
+    low_1w = df_1w['low'].shift(1).values
+    close_1w = df_1w['close'].shift(1).values
     
-    # Align to 4h timeframe
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    # Align to 1d timeframe
+    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
+    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
-    # 12h EMA50 trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Donchian levels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Donchian(20) channels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # 1w EMA50 trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: > 2.5x 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for volatility regime filter
     atr_period = 14
@@ -62,41 +64,41 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, lookback, 24, atr_period, 50)
+    start_idx = max(20, 50, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]) or 
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
             np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.5x average) + ATR ratio > 0.8 (avoid low vol)
-        volume_confirm = volume[i] > 2.5 * vol_ma[i]
+        # Volume confirmation (> 2.0x average) + ATR ratio > 0.8 (avoid low vol)
+        volume_confirm = volume[i] > 2.0 * vol_ma[i]
         vol_regime = atr_ratio[i] > 0.8
         
         if position == 0:
-            # Long: Close > Upper Donchian AND price above 12h EMA50 AND volume confirmation AND vol regime
-            if close[i] > highest_high[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm and vol_regime:
+            # Long: Close > highest_high AND price above 1w EMA50 AND volume confirmation AND vol regime
+            if close[i] > highest_high[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm and vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Lower Donchian AND price below 12h EMA50 AND volume confirmation AND vol regime
-            elif close[i] < lowest_low[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm and vol_regime:
+            # Short: Close < lowest_low AND price below 1w EMA50 AND volume confirmation AND vol regime
+            elif close[i] < lowest_low[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm and vol_regime:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < Lower Donchian OR price crosses below 12h EMA50
-            if close[i] < lowest_low[i] or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: Close < lowest_low OR price crosses below 1w EMA50
+            if close[i] < lowest_low[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > Upper Donchian OR price crosses above 12h EMA50
-            if close[i] > highest_high[i] or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: Close > highest_high OR price crosses above 1w EMA50
+            if close[i] > highest_high[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hEMA50_VolumeATR_Filter_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_VolumeATR_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
