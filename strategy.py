@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Bollinger Band Squeeze Breakout with 12h Donchian(20) trend filter and volume confirmation.
-- Primary timeframe: 6h for execution, HTF: 12h for Donchian trend and squeeze detection.
-- Bollinger Band Squeeze: BB Width < 20th percentile of last 50 periods indicates low volatility (6h).
-- Breakout: Close > Upper BB (long) or Close < Lower BB (short) with volume > 1.5x 20-period volume MA.
-- Trend filter: Only trade breakouts in direction of 12h Donchian(20) (long if price > upper, short if price < lower).
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 4h for execution, HTF: 1d for EMA trend.
+- Camarilla pivot levels: H3 (resistance 3) and L3 (support 3) from prior 1d OHLC.
+- Breakout: Close > H3 (long) or Close < L3 (short) with volume > 2.0x 20-period volume MA.
+- Trend filter: Only trade breakouts in direction of 1d EMA34 (long if close > EMA34, short if close < EMA34).
 - Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -25,76 +25,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for Camarilla pivots and EMA trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate prior 1d OHLC for Camarilla levels (H3, L3)
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    h3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low'])
+    l3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low'])
     
-    # Calculate 12h Donchian(20) channels
-    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_upper_12h = highest_20
-    donchian_lower_12h = lowest_20
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h Donchian levels to 6h
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper_12h)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower_12h)
+    # Align 1d indicators to 4h
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3.values)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3.values)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Bollinger Bands (20, 2) on 6h
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    bb_width = (upper_bb - lower_bb) / sma_20
-    
-    # Bollinger Band Squeeze: BB Width < 20th percentile of last 50 periods
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).quantile(0.20).values
-    squeeze = bb_width < bb_width_percentile
-    
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # BB width percentile + BB + volume MA
+    start_idx = max(34, 20)  # EMA34 + volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
-            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(squeeze[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Check for Bollinger Band breakout with volume spike
+            # Check for Camarilla breakout with volume spike and trend filter
             if volume_spike[i]:
-                # Long breakout: close > upper BB and price > 12h Donchian upper (uptrend)
-                if close[i] > upper_bb[i] and close[i] > donchian_upper_aligned[i]:
+                # Long breakout: close > H3 and close > 1d EMA34 (uptrend)
+                if close[i] > h3_aligned[i] and close[i] > ema_34_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short breakdown: close < lower BB and price < 12h Donchian lower (downtrend)
-                elif close[i] < lower_bb[i] and close[i] < donchian_lower_aligned[i]:
+                # Short breakdown: close < L3 and close < 1d EMA34 (downtrend)
+                elif close[i] < l3_aligned[i] and close[i] < ema_34_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price re-enters Bollinger Bands or opposite signal
-            if close[i] < sma_20[i]:  # Exit when price falls below middle BB
+            # Long exit: price re-enters Camarilla levels or opposite signal
+            if close[i] < l3_aligned[i]:  # Exit when price falls below L3
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price re-enters Bollinger Bands or opposite signal
-            if close[i] > sma_20[i]:  # Exit when price rises above middle BB
+            # Short exit: price re-enters Camarilla levels or opposite signal
+            if close[i] > h3_aligned[i]:  # Exit when price rises above H3
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BB_Squeeze_Donchian_Trend_Volume_v1"
-timeframe = "6h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
