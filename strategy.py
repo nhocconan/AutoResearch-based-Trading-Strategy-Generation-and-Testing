@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX regime filter.
-- Primary timeframe: 4h for structure and execution.
-- HTF: 1d for ADX trend strength (regime filter) and Donchian calculation.
-- Donchian(20): Upper = 20-period high, Lower = 20-period low on 1d.
-- ADX > 25: Trending market → trade breakouts in direction of trend.
-- ADX < 20: Ranging market → fade Donchian touches (mean reversion).
-- Volume confirmation: current 4h volume > 1.8 * 20-period volume MA.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and ADX regime filter.
+- Primary timeframe: 4h for execution, HTF: 1d for volume confirmation and ADX.
+- Camarilla levels calculated from previous 1d OHLC: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4.
+- Volume confirmation: current 4h volume > 2.0 * 20-period volume MA (on 4h).
+- ADX > 25 indicates trending market (breakout continuation), ADX < 20 indicates ranging (fade breakouts).
+- Entry: Long when close > H3 and volume spike and ADX > 25.
+         Short when close < L3 and volume spike and ADX > 25.
+         In ranging (ADX < 20): Long when close < L3 and volume spike (mean reversion at support),
+                                Short when close > H3 and volume spike (mean reversion at resistance).
+- Exit: Opposite Camarilla level touch (close crosses back below H3 for long, above L3 for short) or ADX regime shift.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
 - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
@@ -26,24 +29,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian and ADX
+    # Get 1d data for Camarilla calculation and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
-    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 1d ADX (14-period)
-    # True Range
+    # Calculate 1d True Range for ADX
     tr1 = pd.Series(df_1d['high']).diff().abs()
     tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
     tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
+    # Directional Movement for ADX
     up_move = pd.Series(df_1d['high']).diff()
     down_move = -pd.Series(df_1d['low']).diff()
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
@@ -61,24 +59,29 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # Calculate Camarilla levels from previous 1d OHLC
+    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_h3 = df_1d['close'].values + 1.1 * (df_1d['high'].values - df_1d['low'].values) / 4
+    camarilla_l3 = df_1d['close'].values - 1.1 * (df_1d['high'].values - df_1d['low'].values) / 4
+    
     # Align 1d indicators to 4h
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume confirmation: current 4h volume > 1.8 * 20-period volume MA
+    # Volume confirmation: current 4h volume > 2.0 * 20-period volume MA (on 4h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * volume_ma)
+    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, 20)  # Need enough 1d bars for ADX/Donchian
+    start_idx = max(30, 20)  # Need enough 1d bars for ADX
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(adx_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -86,39 +89,39 @@ def generate_signals(prices):
             continue
         
         adx_val = adx_aligned[i]
-        upper = donch_high_aligned[i]
-        lower = donch_low_aligned[i]
+        h3_val = camarilla_h3_aligned[i]
+        l3_val = camarilla_l3_aligned[i]
+        close_val = close[i]
         
         if position == 0:
             # Check for entry signals
             if volume_spike[i]:
-                if adx_val > 25:  # Trending regime
-                    # Breakout in direction of trend (use 1d close as trend proxy)
-                    trend_up = df_1d['close'].iloc[-1] > df_1d['open'].iloc[-1] if len(df_1d) > 0 else True
-                    if close[i] > upper and trend_up:
+                if adx_val > 25:  # Trending regime: breakout continuation
+                    # Breakout entries: follow the break
+                    if close_val > h3_val:
                         signals[i] = 0.25
                         position = 1
-                    elif close[i] < lower and not trend_up:
+                    elif close_val < l3_val:
                         signals[i] = -0.25
                         position = -1
-                else:  # Ranging regime (ADX < 20)
-                    # Mean reversion: fade Donchian touches
-                    if close[i] <= lower and close[i-1] > lower:  # Touch lower band
+                else:  # Ranging regime (ADX < 20): fade breakouts
+                    # Mean reversion: fade extreme moves
+                    if close_val < l3_val:
                         signals[i] = 0.25
                         position = 1
-                    elif close[i] >= upper and close[i-1] < upper:  # Touch upper band
+                    elif close_val > h3_val:
                         signals[i] = -0.25
                         position = -1
         elif position == 1:
-            # Long exit: price returns to middle of channel or opposite touch
-            if close[i] < (upper + lower) / 2 or close[i] >= upper:
+            # Long exit: price crosses back below H3 or ADX drops to ranging
+            if close_val < h3_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to middle of channel or opposite touch
-            if close[i] > (upper + lower) / 2 or close[i] <= lower:
+            # Short exit: price crosses back above L3 or ADX drops to ranging
+            if close_val > l3_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -126,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dADXRegime_VolumeConfirm_v1"
+name = "4h_Camarilla_H3L3_Breakout_1dADX_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
