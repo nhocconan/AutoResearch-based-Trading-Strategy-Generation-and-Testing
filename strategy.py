@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
-- Primary timeframe: 12h for execution, HTF: 1d for ADX trend strength.
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h ADX regime filter.
+- Primary timeframe: 4h for execution, HTF: 12h for ADX trend strength.
 - ADX > 25 indicates trending market (breakout strategy), ADX < 20 indicates ranging (mean reversion at Donchian mid).
 - Entry: Long when price breaks above Donchian(20) upper AND ADX > 25 (bullish breakout in trend).
          Short when price breaks below Donchian(20) lower AND ADX > 25 (bearish breakout in trend).
@@ -10,7 +10,7 @@ Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confi
 - Exit: Opposite Donchian breakout or ADX regime shift to ranging.
 - Volume confirmation: current volume > 1.3 * 20-period volume MA (to avoid false breakouts).
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -28,22 +28,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for ADX
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate ADX (14-period) on 1d
+    # Calculate ADX (14-period) on 12h
     # True Range
-    tr1 = pd.Series(df_1d['high']).diff().abs()
-    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
-    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
+    tr1 = pd.Series(df_12h['high']).diff().abs()
+    tr2 = (pd.Series(df_12h['high']) - pd.Series(df_12h['low'].shift())).abs()
+    tr3 = (pd.Series(df_12h['low']) - pd.Series(df_12h['close'].shift())).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Directional Movement
-    up_move = pd.Series(df_1d['high']).diff()
-    down_move = -pd.Series(df_1d['low']).diff()
+    up_move = pd.Series(df_12h['high']).diff()
+    down_move = -pd.Series(df_12h['low']).diff()
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
@@ -59,16 +59,16 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d ADX to 12h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 12h ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
-    # Donchian channels (20-period) on 12h
+    # Donchian channels (20-period) on 4h
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 12h)
+    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 4h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.3 * volume_ma)
     
@@ -76,7 +76,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, lookback, 20)  # Need enough 1d bars for ADX and lookback for Donchian
+    start_idx = max(30, lookback, 20)  # Need enough 12h bars for ADX and lookback for Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -131,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dADXRegime_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hADXRegime_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
