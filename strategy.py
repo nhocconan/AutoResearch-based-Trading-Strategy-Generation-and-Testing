@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume spike confirmation.
-- Uses Donchian channel (20-period high/low) from prior completed 4h candles for structure.
-- Breakout above upper band or below lower band with volume > 1.5x 20-bar average signals momentum.
-- Trend filter: 1d ATR(14) must be expanding (current ATR > ATR 5 periods ago) to ensure volatile market.
-- Designed for 4h timeframe to capture breakouts in both bull and bear markets, avoiding choppy regimes.
+Hypothesis: 4h Williams %R reversal with 1d EMA34 trend filter and volume spike confirmation.
+- Williams %R(14) identifies overbought/oversold conditions: < -80 = oversold, > -20 = overbought.
+- Long when %R crosses above -80 from below with price > 1d EMA34 and volume > 2.0x 20-bar average.
+- Short when %R crosses below -20 from above with price < 1d EMA34 and volume > 2.0x 20-bar average.
+- Trend filter ensures alignment with higher timeframe direction to avoid counter-trend whipsaws.
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 20-40 trades/year (80-160 total over 4 years) to stay fee-efficient.
-- Based on proven pattern: Donchian breakout + volume + ATR filter showed SOL performance in DB.
+- Targets 20-50 trades/year (80-200 total over 4 years) to stay fee-efficient.
+- Williams %R is effective in ranging and trending markets, making it suitable for both bull and bear conditions.
 """
 
 import numpy as np
@@ -26,85 +26,59 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d EMA34 trend filter
+    close_1d_series = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d_series).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first period
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])  # first period
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])   # first period
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Williams %R(14) on 4h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    atr_14 = np.zeros_like(tr)
-    atr_14[13] = np.mean(tr[1:14])  # first ATR value
-    for i in range(14, len(tr)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-    
-    # ATR expansion filter: current ATR > ATR 5 periods ago
-    atr_expanding = np.zeros_like(atr_14, dtype=bool)
-    atr_expanding[5:] = atr_14[5:] > atr_14[:-5]
-    
-    # Align HTF indicators to LTF
-    atr_expanding_aligned = align_htf_to_ltf(prices, df_1d, atr_expanding)
-    
-    # Donchian(20) from prior completed 4h candles (using 4h data from prices)
-    # We need to compute Donchian on 4h close, but since we only have LTF prices,
-    # we'll use rolling window on the 4h-equivalent bars
-    # For 4h timeframe, each 4h bar = 16 * 15m bars, but we're on 4h chart so direct rolling
-    # Since prices is already 4h timeframe, we can compute directly
-    donchian_window = 20
-    high_roll = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    low_roll = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
-    # Volume confirmation: > 1.5x 20-period average
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 20)  # Donchian(20) and vol MA(20)
+    start_idx = max(50, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_expanding_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (> 2.0x average)
+        volume_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above upper Donchian band AND ATR expanding AND volume confirmation
-            if close[i] > high_roll[i] and atr_expanding_aligned[i] and volume_confirm:
+            # Long: Williams %R crosses above -80 (oversold recovery) AND price above 1d EMA34 AND volume confirmation
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and close[i] > ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower Donchian band AND ATR expanding AND volume confirmation
-            elif close[i] < low_roll[i] and atr_expanding_aligned[i] and volume_confirm:
+            # Short: Williams %R crosses below -20 (overbought rejection) AND price below 1d EMA34 AND volume confirmation
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and close[i] < ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below lower Donchian band OR ATR contracting
-            if close[i] < low_roll[i] or not atr_expanding_aligned[i]:
+            # Long exit: Williams %R crosses below -50 (momentum loss) OR price below 1d EMA34
+            if williams_r[i] < -50 and williams_r[i-1] >= -50 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above upper Donchian band OR ATR contracting
-            if close[i] > high_roll[i] or not atr_expanding_aligned[i]:
+            # Short exit: Williams %R crosses above -50 (momentum loss) OR price above 1d EMA34
+            if williams_r[i] > -50 and williams_r[i-1] <= -50 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -112,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dATRFilter_VolumeSpike_v1"
+name = "4h_WilliamsR_Reversal_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
