@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume spike confirmation.
-- Long when price breaks above Camarilla H3 AND close > 1d EMA50 (bullish trend) AND volume > 2.0 * median volume of last 24 bars
-- Short when price breaks below Camarilla L3 AND close < 1d EMA50 (bearish trend) AND volume > 2.0 * median volume of last 24 bars
-- Exit on opposite Camarilla breakout or trend reversal (close crosses 1d EMA50)
-- Uses 12h primary timeframe with 1d HTF to target 50-150 total trades over 4 years (12-37/year)
-- Camarilla H3/L3 levels provide stronger support/resistance than R1/S1, reducing false breakouts
-- 1d EMA50 ensures alignment with higher timeframe trend to avoid whipsaws in ranging markets
-- Volume spike filter (>2.0x median) ensures momentum confirmation, reducing noise and fakeouts
-- Designed for BTC/ETH with edge in both trending (breakout continuation) and ranging (mean reversion at extremes) markets
-- Volume confirmation uses 24-bar median (~12 days on 12h timeframe) for stability
+Hypothesis: 4h Donchian channel breakout with 12h volume-weighted trend filter and adaptive ATR position sizing.
+- Long when price breaks above Donchian(20) upper band AND 12h VWAP > 12h EMA50 (bullish regime)
+- Short when price breaks below Donchian(20) lower band AND 12h VWAP < 12h EMA50 (bearish regime)
+- Position size scaled by ATR volatility (0.20 in low vol, 0.30 in high vol) to manage drawdown
+- Exit on opposite Donchian breakout or trend regime change (VWAP/EMA50 crossover)
+- Uses 4h primary with 12h HTF to target 75-200 trades over 4 years (19-50/year)
+- Donchian provides objective breakout levels; VWAP/EMA50 combo filters chop and confirms institutional flow
+- Adaptive sizing reduces exposure during high volatility periods (e.g., 2022 crash) while maintaining upside
 """
 
 import numpy as np
@@ -26,75 +24,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels (based on previous bar's range)
-    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Donchian(20) channels
+    lookback = 20
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # ATR(14) for volatility-based position sizing
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Get 1d data ONCE before loop for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data ONCE before loop for regime filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h VWAP and EMA50
+    vwap_12h = (df_12h['close'] * df_12h['volume']).expanding().sum() / df_12h['volume'].expanding().sum()
+    vwap_12h = vwap_12h.values
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 12h indicators to 4h timeframe
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume confirmation: volume > 2.0 * median volume of last 24 bars
-    vol_median = pd.Series(volume).rolling(window=24, min_periods=24).median().values
-    volume_spike = volume > (2.0 * vol_median)
+    # Regime: bullish if VWAP > EMA50, bearish if VWAP < EMA50
+    bullish_regime = vwap_12h_aligned > ema_50_12h_aligned
+    bearish_regime = vwap_12h_aligned < ema_50_12h_aligned
+    
+    # ATR-based position sizing: normalize ATR to [0,1] over 50-period, scale size 0.20-0.30
+    atr_ratio = pd.Series(atr).rolling(window=50, min_periods=10).apply(
+        lambda x: (x[-1] - np.nanmin(x)) / (np.nanmax(x) - np.nanmin(x) + 1e-10), raw=False
+    ).values
+    atr_ratio = np.nan_to_num(atr_ratio, nan=0.5)
+    position_size = 0.20 + 0.10 * atr_ratio  # 0.20 to 0.30
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(24, 50) + 1
+    start_idx = max(lookback, 14, 50) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_median[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(vwap_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(position_size[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla H3, trend up (close > EMA50), volume spike
-            if close[i] > camarilla_h3[i] and close[i] > ema_50_1d_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # Long: break above upper band AND bullish regime
+            if close[i] > upper[i] and bullish_regime[i]:
+                signals[i] = position_size[i]
                 position = 1
-            # Short: price breaks below Camarilla L3, trend down (close < EMA50), volume spike
-            elif close[i] < camarilla_l3[i] and close[i] < ema_50_1d_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # Short: break below lower band AND bearish regime
+            elif close[i] < lower[i] and bearish_regime[i]:
+                signals[i] = -position_size[i]
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Camarilla L3 OR trend reversal (close < EMA50)
-            if close[i] < camarilla_l3[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: break below lower band OR regime turns bearish
+            if close[i] < lower[i] or bearish_regime[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = position_size[i]
         elif position == -1:
-            # Short exit: price breaks above Camarilla H3 OR trend reversal (close > EMA50)
-            if close[i] > camarilla_h3[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: break above upper band OR regime turns bullish
+            if close[i] > upper[i] or bullish_regime[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -position_size[i]
     
     return signals
 
-name = "12h_Camarilla_H3L3_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hVWAP_EMA50_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
