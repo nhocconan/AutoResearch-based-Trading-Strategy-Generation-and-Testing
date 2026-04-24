@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w for EMA34 trend filter.
-- Entry: Long when price breaks above Donchian upper(20) AND 1w EMA34 > 1w EMA34(previous) (uptrend) AND volume > 1.5 * 1d volume MA(20);
-         Short when price breaks below Donchian lower(20) AND 1w EMA34 < 1w EMA34(previous) (downtrend) AND volume > 1.5 * 1d volume MA(20).
-- Exit: Close-based reversal (opposite signal) or trend change (signal=0 when EMA34 slope changes sign).
+Hypothesis: 6h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA34 trend filter and 12h for Camarilla pivot calculation.
+- Entry: Long when price breaks above Camarilla H3 AND 1d EMA34 > 1d EMA34(previous) (uptrend) AND volume > 1.8 * 6h volume MA(20);
+         Short when price breaks below Camarilla L3 AND 1d EMA34 < 1d EMA34(previous) (downtrend) AND volume > 1.8 * 6h volume MA(20).
+- Exit: Close-based reversal (opposite signal) or trend change (signal=0 when 1d EMA34 slope changes sign).
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Donchian channels provide clear structure; EMA34 trend filter ensures we trade with the weekly trend; volume confirmation avoids false breakouts.
+- Camarilla levels provide precise intraday support/resistance; EMA34 trend filter ensures we trade with the daily trend; volume confirmation avoids false breakouts.
 - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend) with trend filter to avoid counter-trend whipsaws.
-- Estimated trades: ~75 total over 4 years (~19/year) based on Donchian(20) breakout frequency with filters.
+- Estimated trades: ~100 total over 4 years (~25/year) based on Camarilla H3/L3 breakout frequency with filters.
 """
 
 import numpy as np
@@ -27,47 +27,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_slope = ema_34_1w - np.roll(ema_34_1w, 1)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_slope = ema_34_1d - np.roll(ema_34_1d, 1)
     ema_34_slope[0] = 0
     
-    # Get 1d data for Donchian channels and volume MA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for Camarilla pivot calculation (using previous day's OHLC)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla levels (H3, L3) from previous 12h bar's typical price
+    # Camarilla: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+    typical_range = high_12h - low_12h
+    camarilla_h3 = close_12h + 1.1 * typical_range / 2
+    camarilla_l3 = close_12h - 1.1 * typical_range / 2
     
-    # Align all indicators to primary 1d timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    ema_34_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_34_slope)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Get 6h data for volume MA
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    volume_6h = df_6h['volume'].values
+    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to primary 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_34_slope)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for EMA34 and Donchian(20)
+    start_idx = 50  # Need sufficient data for EMA34 and other indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(ema_34_slope_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_34_slope_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma_6h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,7 +87,7 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Exit: trend change (EMA34 slope changes sign)
+        # Exit: trend change (1d EMA34 slope changes sign)
         if position != 0:
             if position == 1 and ema_34_slope_aligned[i] <= 0:
                 signals[i] = 0.0
@@ -89,25 +98,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Entry conditions with volume confirmation and Donchian breakout
-        bullish_breakout = curr_high > donchian_high_aligned[i]  # Break above upper channel
-        bearish_breakout = curr_low < donchian_low_aligned[i]    # Break below lower channel
+        # Entry conditions with volume confirmation and Camarilla breakout
+        bullish_breakout = curr_high > camarilla_h3_aligned[i]  # Break above H3
+        bearish_breakout = curr_low < camarilla_l3_aligned[i]   # Break below L3
         
-        # Trend filter: only trade in direction of 1w EMA34 slope
+        # Trend filter: only trade in direction of 1d EMA34 slope
         uptrend = ema_34_slope_aligned[i] > 0
         downtrend = ema_34_slope_aligned[i] < 0
         
         # Volume confirmation
-        vol_confirm = curr_volume > 1.5 * vol_ma_1d_aligned[i]
+        vol_confirm = curr_volume > 1.8 * vol_ma_6h_aligned[i]
         
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: Price breaks above Donchian upper AND uptrend
+                # Long: Price breaks above Camarilla H3 AND uptrend
                 if bullish_breakout and uptrend:
                     signals[i] = 0.25
                     position = 1
-                # Short: Price breaks below Donchian lower AND downtrend
+                # Short: Price breaks below Camarilla L3 AND downtrend
                 elif bearish_breakout and downtrend:
                     signals[i] = -0.25
                     position = -1
@@ -120,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_EMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Camarilla_H3L3_EMA34_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
