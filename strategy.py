@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + volume spike + ATR filter.
-- Long when price breaks above upper Donchian(20) AND volume > 2.0 * 20-period average AND ATR(14) < 0.03 * close
-- Short when price breaks below lower Donchian(20) AND volume > 2.0 * 20-period average AND ATR(14) < 0.03 * close
-- Exit when price crosses opposite Donchian band or ATR(14) > 0.05 * close (volatility expansion)
-- Uses 4h primary timeframe for optimal trade frequency (target: 20-50 trades/year)
-- Donchian channels provide clear structure, volume confirms conviction, ATR filter avoids choppy markets
-- Works in both bull markets (breakouts continuation) and bear markets (breakdown continuation)
-- Signal size: 0.30 discrete levels
-- Target: 75-200 total trades over 4 years (19-50/year)
+Hypothesis: 6h Williams %R with 1d EMA trend filter and volume spike confirmation.
+- Williams %R(14): measures overbought/oversold levels (-100 to 0)
+- Long when %R crosses above -80 from below AND price > 1d EMA50 (uptrend) AND volume > 2.0 * 20-period average
+- Short when %R crosses below -20 from above AND price < 1d EMA50 (downtrend) AND volume > 2.0 * 20-period average
+- Exit when %R reaches opposite extreme (%R >= -20 for long, %R <= -80 for short) OR volume drops below average
+- Uses 6h primary with 1d HTF for EMA50 trend filter to avoid counter-trend trades
+- Williams %R is effective in both bull (buying oversold dips) and bear (selling overbought rallies) markets
+- Volume spike confirms conviction on breakouts from extremes
+- Signal size: 0.25 discrete levels to minimize fee churn
+- Target: 80-180 total trades over 4 years (20-45/year)
 """
 
 import numpy as np
@@ -25,88 +26,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
+    # Calculate Williams %R(14)
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    williams_r = np.where(denominator != 0, -100 * (highest_high - close) / denominator, -50)
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    upper_donchian = rolling_max(high, 20)
-    lower_donchian = rolling_min(low, 20)
-    
-    # Calculate ATR(14) for volatility filter
-    def calculate_atr(high, low, close, period):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr1[0] = 0
-        tr2[0] = 0
-        tr3[0] = 0
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        
-        atr = np.zeros_like(tr)
-        atr[period-1] = np.mean(tr[:period])
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
-    
-    atr_14 = calculate_atr(high, low, close, 14)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
-    
-    # ATR filter: avoid high volatility environments
-    atr_filter = atr_14 < (0.03 * close)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14, 20)  # Donchian(20), ATR(14), volume MA(20)
+    start_idx = max(period, 20, 50) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Donchian AND volume confirmation AND ATR filter
-            if close[i] > upper_donchian[i] and volume_confirm[i] and atr_filter[i]:
-                signals[i] = 0.30
+            # Long: Williams %R crosses above -80 from below AND uptrend AND volume spike
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                close[i] > ema_50_1d_aligned[i] and volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian AND volume confirmation AND ATR filter
-            elif close[i] < lower_donchian[i] and volume_confirm[i] and atr_filter[i]:
-                signals[i] = -0.30
+            # Short: Williams %R crosses below -20 from above AND downtrend AND volume spike
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                  close[i] < ema_50_1d_aligned[i] and volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below lower Donchian OR ATR expansion (volatility > 5% of price)
-            if close[i] < lower_donchian[i] or atr_14[i] > (0.05 * close[i]):
+            # Long exit: Williams %R reaches -20 or above OR volume drops below average
+            if williams_r[i] >= -20 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above upper Donchian OR ATR expansion
-            if close[i] > upper_donchian[i] or atr_14[i] > (0.05 * close[i]):
+            # Short exit: Williams %R reaches -80 or below OR volume drops below average
+            if williams_r[i] <= -80 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_VolumeSpike_ATRFilter_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
