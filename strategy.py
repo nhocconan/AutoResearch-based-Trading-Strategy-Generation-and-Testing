@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and ATR regime filter.
 - Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for ATR-based regime detection (choppy vs trending) and volume spike filter.
-- Donchian(20): Upper/lower bands from 20-period high/low.
-- Regime: ATR(10)/ATR(30) ratio > 1.2 = trending (favor breakouts), < 0.8 = choppy (favor mean reversion).
-- Entry: Long when price > Upper Band AND trending regime AND volume > 2.0 * 20-period average volume.
-         Short when price < Lower Band AND trending regime AND volume > 2.0 * 20-period average volume.
-- Exit: Opposite Donchian breakout (price < Upper Band for long exit, price > Lower Band for short exit).
+- HTF: 1d for ATR-based regime detection (trending vs choppy) and volume spike confirmation.
+- Camarilla levels: Calculated from previous 1d OHLC (H3, L3, H4, L4).
+- Regime: ATR(10)/ATR(30) > 1.2 = trending (favor breakouts), < 0.8 = choppy (avoid trading).
+- Entry: Long when price > H3 AND trending regime AND volume > 1.5 * 20-period average volume.
+         Short when price < L3 AND trending regime AND volume > 1.5 * 20-period average volume.
+- Exit: Opposite Camarilla level (price < H3 for long exit, price > L3 for short exit).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in both bull and bear markets by only trading breakouts in trending regimes, avoiding whipsaws in chop.
+- Works in both bull and bear markets by only trading breakouts in trending regimes.
 """
 
 import numpy as np
@@ -60,21 +60,30 @@ def generate_signals(prices):
     vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 4h Donchian(20) bands
-    donchian_window = 20
-    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Calculate 1d Camarilla levels (based on previous day OHLC)
+    # H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low)
+    # L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
+    camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)
+    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    
+    # Align Camarilla levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 30)  # Need 20 for Donchian, 30 for ATR30
+    start_idx = max(30, 20)  # Need 30 for ATR30, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
         if (np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,33 +95,33 @@ def generate_signals(prices):
         # Regime filter: only trade breakouts in trending markets (ATR ratio > 1.2)
         trending_regime = atr_ratio_aligned[i] > 1.2
         
-        # Volume confirmation: current volume > 2.0 * 20-period average volume
-        volume_confirm = curr_volume > 2.0 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
+        # Volume confirmation: current volume > 1.5 * 20-period average volume
+        volume_confirm = curr_volume > 1.5 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
         
-        # Exit conditions: opposite Donchian breakout
+        # Exit conditions: opposite Camarilla level
         if position != 0:
-            # Exit long: price < Upper Band
+            # Exit long: price < H3
             if position == 1:
-                if curr_close < upper_band[i]:
+                if curr_close < h3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price > Lower Band
+            # Exit short: price > L3
             elif position == -1:
-                if curr_close > lower_band[i]:
+                if curr_close > l3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with regime and volume filters
+        # Entry conditions: Camarilla breakout with regime and volume filters
         if position == 0:
-            # Long: price > Upper Band AND trending regime AND volume confirmation
-            long_condition = (curr_close > upper_band[i] and 
+            # Long: price > H3 AND trending regime AND volume confirmation
+            long_condition = (curr_close > h3_aligned[i] and 
                             trending_regime and
                             volume_confirm)
             
-            # Short: price < Lower Band AND trending regime AND volume confirmation
-            short_condition = (curr_close < lower_band[i] and 
+            # Short: price < L3 AND trending regime AND volume confirmation
+            short_condition = (curr_close < l3_aligned[i] and 
                              trending_regime and
                              volume_confirm)
             
@@ -131,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dATRRegime_VolumeConfirm_v1"
+name = "4h_Camarilla_H3L3_Breakout_1dATRRegime_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
