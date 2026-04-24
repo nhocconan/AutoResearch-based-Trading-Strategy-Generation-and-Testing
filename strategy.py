@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla pivot breakout with 1d volume spike and ATR regime filter.
-- Long when price breaks above Camarilla H3 level AND 1d volume > 1.5x ATR(10)*close (volatility regime) AND ATR(14) > ATR(50) (trending regime)
-- Short when price breaks below Camarilla L3 level AND same filters
-- Exits when price reverts to Camarilla H4/L4 levels or ATR regime shifts to choppy
-- Uses 6h primary timeframe with 1d HTF for pivot calculation and volume/ATR regime
-- Camarilla levels from 1d provide intraday support/resistance that work in both trending and ranging markets
-- Volume spike filter ensures breakouts occur with conviction
-- ATR regime filter avoids false breakouts in choppy markets
-- Designed for BTC/ETH with edge in breakout continuations and mean reversion at extremes
+Hypothesis: 12h Williams %R mean reversion with 1d ADX regime filter and volume confirmation.
+- Long when Williams %R(14) < -80 (oversold) AND ADX(14) < 25 (ranging market) AND volume > 1.5x SMA20 volume
+- Short when Williams %R(14) > -20 (overbought) AND ADX(14) < 25 (ranging market) AND volume > 1.5x SMA20 volume
+- Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+- Uses 12h primary timeframe with 1d HTF for ADX regime to target 50-150 trades over 4 years (12-37/year)
+- Williams %R identifies extreme price levels for mean reversion in ranging markets
+- ADX filter ensures we only mean revert in low-trend environments, avoiding whipsaws in strong trends
+- Volume confirmation reduces false signals by requiring participation
+- Designed for BTC/ETH with edge in ranging markets (2022-2024, 2025) where mean reversion works
 """
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,90 +25,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla pivots, volume, and ATR regime
+    # Calculate Williams %R(14) using previous period (no look-ahead)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().shift(1).values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    
+    # Get 1d data ONCE before loop for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
+    # Calculate 1d ADX(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous day's range
-    # H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), etc.
-    # L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
-    range_1d = high_1d - low_1d
-    camarilla_h3 = close_1d + 1.1 * range_1d
-    camarilla_l3 = close_1d - 1.1 * range_1d
-    camarilla_h4 = close_1d + 1.5 * range_1d
-    camarilla_l4 = close_1d - 1.5 * range_1d
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align 1d Camarilla levels to 6h timeframe (wait for completed 1d bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate 1d volume and ATR for regime filters
-    volume_1d = df_1d['volume'].values
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # 1d ATR(10) for volume threshold
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    high_close_1d[0] = np.nan
-    low_close_1d[0] = np.nan
-    tr_1d = np.maximum(np.maximum(high_low_1d, high_close_1d), low_close_1d)
-    atr_10_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
     
-    # 1d ATR(50) for regime filter (trending vs choppy)
-    atr_50_1d = pd.Series(tr_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume spike condition: 1d volume > 1.5 * ATR(10) * close (volatility-adjusted)
-    vol_threshold_1d = 1.5 * atr_10_1d_aligned * close
-    volume_spike = volume_1d > vol_threshold_1d  # This is already aligned via align_htf_to_ltf
+    # Align 1d ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # ATR regime: trending when ATR(14) > ATR(50) (using 1d ATR)
-    atr_regime_trending = atr_10_1d_aligned > atr_50_1d_aligned
+    # Volume confirmation: volume > 1.5x SMA20 volume
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    volume_confirm = volume > 1.5 * volume_sma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 10) + 1  # Need 50 for ATR(50), 10 for ATR(10)
+    start_idx = max(14, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr_regime_trending[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_sma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla H3, volume spike, trending regime
-            if close[i] > camarilla_h3_aligned[i] and volume_spike[i] and atr_regime_trending[i]:
+            # Long: Williams %R oversold (< -80), ranging market (ADX < 25), volume confirmation
+            if williams_r[i] < -80 and adx_aligned[i] < 25 and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3, volume spike, trending regime
-            elif close[i] < camarilla_l3_aligned[i] and volume_spike[i] and atr_regime_trending[i]:
+            # Short: Williams %R overbought (> -20), ranging market (ADX < 25), volume confirmation
+            elif williams_r[i] > -20 and adx_aligned[i] < 25 and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches Camarilla H4 (take profit) OR regime shifts to choppy
-            if close[i] >= camarilla_h4_aligned[i] or not atr_regime_trending[i]:
+            # Long exit: Williams %R crosses above -50 (mean reversion complete)
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches Camarilla L4 (take profit) OR regime shifts to choppy
-            if close[i] <= camarilla_l4_aligned[i] or not atr_regime_trending[i]:
+            # Short exit: Williams %R crosses below -50 (mean reversion complete)
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3L3_Breakout_1dVolSpike_ATRRegime_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_MeanReversion_1dADXRegime_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
