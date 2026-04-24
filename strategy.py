@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 1d ATR regime filter and volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 1d for ATR-based regime detection.
-- Donchian breakout: Long when price > 20-period high, Short when price < 20-period low.
-- Regime filter: Only trade when 1d ATR(14) > 20-period SMA of ATR (high volatility regime).
-- Volume confirmation: current volume > 1.5 * 20-period volume MA.
+Hypothesis: 6h Camarilla H3/L3 breakout with 1d Williams %R extreme filter and volume confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for Williams %R extremes.
+- Camarilla pivot levels (H3, L3) from prior 1d: Long when price > H3, Short when price < L3.
+- Williams %R filter: Only trade when 1d Williams %R < -80 (oversold) for longs or > -20 (overbought) for shorts.
+- Volume confirmation: current volume > 2.0x 20-period volume MA to ensure strong participation.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Works in bull via buying breakouts in high volatility uptrends, in bear via selling breakdowns in high volatility downtrends.
-- ATR regime filter avoids low-volatility choppy markets where breakouts fail.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+- Works in bull via buying breakouts from oversold, in bear via selling breakdowns from overbought.
+- Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100 over 14 periods.
 """
 
 import numpy as np
@@ -26,74 +26,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR regime filter
+    # Get 1d data for Camarilla pivots and Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr = np.concatenate([[np.nan], tr2])  # First TR is undefined
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Camarilla levels from prior 1d bar
+    # H3 = High + 1.1*(Low - Close)/4, L3 = Low - 1.1*(High - Close)/4
+    camarilla_H3 = high_1d + 1.1 * (low_1d - close_1d) / 4
+    camarilla_L3 = low_1d - 1.1 * (high_1d - close_1d) / 4
     
-    # 20-period SMA of 1d ATR for regime filter
-    atr_ma = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    high_vol_regime = atr_14 > atr_ma  # True when volatility is above average
+    # Align to 6h: use prior 1d's levels (already completed bar)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
     
-    # Align regime filter to 4h
-    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime)
+    # 1d Williams %R (14-period)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Donchian channel (20-period) on 4h data
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20)  # Donchian + volume MA
+    start_idx = max(14, 20)  # Williams %R + volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(high_vol_regime_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or
+            np.isnan(williams_r_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Only trade in high volatility regime
-            if high_vol_regime_aligned[i]:
-                if close[i] > highest_20[i] and volume_spike[i]:
-                    # Buy on Donchian breakout in high vol regime
+            # Only trade on Williams %R extremes
+            if williams_r_aligned[i] < -80:  # Oversold
+                if close[i] > camarilla_H3_aligned[i] and volume_spike[i]:
+                    # Buy on H3 breakout from oversold
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < lowest_20[i] and volume_spike[i]:
-                    # Sell on Donchian breakdown in high vol regime
+            elif williams_r_aligned[i] > -20:  # Overbought
+                if close[i] < camarilla_L3_aligned[i] and volume_spike[i]:
+                    # Sell on L3 breakdown from overbought
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price returns to midpoint of Donchian channel
-            midpoint = (highest_20[i] + lowest_20[i]) / 2
-            if close[i] < midpoint:
+            # Long exit: price returns to Camarilla H3/L3 level or Williams %R normalizes
+            if close[i] < camarilla_H3_aligned[i] or williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to midpoint of Donchian channel
-            midpoint = (highest_20[i] + lowest_20[i]) / 2
-            if close[i] > midpoint:
+            # Short exit: price returns to Camarilla H3/L3 level or Williams %R normalizes
+            if close[i] > camarilla_L3_aligned[i] or williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -101,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dATR_Regime_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_H3L3_1dWilliamsR_Extreme_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
