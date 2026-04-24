@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Bollinger Band Squeeze + Volume Spike + 1d Supertrend Trend Filter.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d Supertrend (ATR=10, mult=3) for trend filter (price > Supertrend = uptrend, price < Supertrend = downtrend).
-- Entry: Long when Bollinger Band Width < 20th percentile (squeeze) AND price breaks above upper BB AND volume > 1.5 * 12h volume MA(50) AND price > 1d Supertrend;
-         Short when Bollinger Band Width < 20th percentile (squeeze) AND price breaks below lower BB AND volume > 1.5 * 12h volume MA(50) AND price < 1d Supertrend.
-- Exit: Long exits when price crosses below middle BB (20 SMA); Short exits when price crosses above middle BB.
+Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA50 trend filter and volume spike confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 12h EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
+- Entry: Long when price breaks above Camarilla H3 level AND price > 12h EMA50 AND volume > 1.5 * 4h volume MA(20);
+         Short when price breaks below Camarilla L3 level AND price < 12h EMA50 AND volume > 1.5 * 4h volume MA(20).
+- Exit: Long exits when price crosses below Camarilla L3 level; Short exits when price crosses above Camarilla H3 level.
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Bollinger Squeeze captures low volatility contraction before expansion; volume spike confirms breakout conviction; Supertrend filters higher-timeframe trend.
+- Camarilla levels provide intraday support/resistance; EMA50 filters higher-timeframe trend; volume spike confirms conviction.
 - Works in bull (buying breakouts in uptrend) and bear (selling breakdowns in downtrend) with reduced whipsaws.
 """
 
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -26,115 +26,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands on 12h (20, 2)
-    bb_length = 20
-    bb_mult = 2.0
-    basis = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
-    dev = bb_mult * pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
-    upper_bb = basis + dev
-    lower_bb = basis - dev
-    bb_width = (upper_bb - lower_bb) / basis * 100  # Percentage width
-    
-    # Bollinger Band Width percentile (20th) for squeeze detection
-    bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=50).rank(pct=True).values * 100
-    squeeze = bb_width_percentile < 20  # Below 20th percentile
-    
-    # Volume confirmation: 1.5x threshold on 12h volume MA(50)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    vol_confirm = volume > 1.5 * vol_ma
-    
-    # Get 1d data for Supertrend trend filter
+    # Calculate Camarilla levels (based on previous day's OHLC)
+    # We'll use daily data to calculate Camarilla levels for the current day
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 1d Supertrend (ATR=10, mult=3)
+    # Calculate Camarilla levels for each day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first period
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Camarilla levels: H3, L3, H4, L4
+    # H3 = close + 1.1 * (high - low) / 2
+    # L3 = close - 1.1 * (high - low) / 2
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # ATR
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high_1d + low_1d) / 2 + 3.0 * atr
-    basic_lb = (high_1d + low_1d) / 2 - 3.0 * atr
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
+        return np.zeros(n)
     
-    # Supertrend
-    supertrend = np.zeros_like(close_1d)
-    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    supertrend[0] = basic_lb[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_1d)):
-        if close_1d[i] > supertrend[i-1]:
-            supertrend[i] = basic_ub[i]
-            direction[i] = 1
-        else:
-            supertrend[i] = basic_lb[i]
-            direction[i] = -1
-    
-    # Align Supertrend and direction to 12h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    # Volume confirmation: 1.5x threshold on 4h volume MA(20)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(bb_length, 50, 10)  # BB needs 20, vol MA needs 50, Supertrend needs 10
+    start_idx = max(20, 50)  # volume MA needs 20, EMA50 needs 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(basis[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
-            np.isnan(squeeze[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
         
-        # Trend filter from 1d Supertrend
-        uptrend = direction_aligned[i] == 1
-        downtrend = direction_aligned[i] == -1
+        # Trend filter from 12h EMA50
+        uptrend = curr_close > ema_50_12h_aligned[i]
+        downtrend = curr_close < ema_50_12h_aligned[i]
+        
+        # Volume confirmation: 1.5x threshold
+        vol_confirm = curr_volume > 1.5 * vol_ma_4h[i]
         
         if position == 0:
             # Check for entry signals
-            if uptrend and vol_confirm and squeeze[i]:
-                # Long: price breaks above upper Bollinger Band
-                if curr_high > upper_bb[i]:
+            if uptrend and vol_confirm:
+                # Long: price breaks above Camarilla H3
+                if curr_close > camarilla_h3_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-            elif downtrend and vol_confirm and squeeze[i]:
-                # Short: price breaks below lower Bollinger Band
-                if curr_low < lower_bb[i]:
+            elif downtrend and vol_confirm:
+                # Short: price breaks below Camarilla L3
+                if curr_close < camarilla_l3_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long position: exit when price crosses below middle BB (20 SMA)
-            if curr_close < basis[i]:
+            # Long position: exit when price crosses below Camarilla L3
+            if curr_close < camarilla_l3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price crosses above middle BB
-            if curr_close > basis[i]:
+            # Short position: exit when price crosses above Camarilla H3
+            if curr_close > camarilla_h3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -142,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_BBand_Squeeze_VolumeSpike_1dSupertrend_Trend_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_12hEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
