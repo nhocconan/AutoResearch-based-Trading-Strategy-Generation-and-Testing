@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-- Long when price breaks above Camarilla R3 and close > 1d EMA34 (bullish trend)
-- Short when price breaks below Camarilla S3 and close < 1d EMA34 (bearish trend)
-- Volume must be > 1.8x 20-period average for conviction
-- ATR-based trailing stop: exit long when price drops 2.0x ATR from highest high since entry
-- ATR-based trailing stop: exit short when price rises 2.0x ATR from lowest low since entry
-- Uses 1d HTF for trend filter (more stable than 12h) to reduce whipsaw
-- Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
-- Designed to work in both bull and bear markets via trend filter and breakout structure
+Hypothesis: 6h Williams Alligator + 1d ATR Regime + Volume Confirmation
+- Long when: Alligator bullish (jaw < teeth < lips), ATR regime = trending (ATR(7)/ATR(30) > 1.2), volume > 1.5x 20-period average
+- Short when: Alligator bearish (jaw > teeth > lips), ATR regime = trending (ATR(7)/ATR(30) > 1.2), volume > 1.5x 20-period average
+- Exit when Alligator reverses (jaws cross teeth) or ATR regime becomes choppy (ATR(7)/ATR(30) < 0.8)
+- Uses 1d HTF for ATR regime filter to avoid whipsaw in ranging markets
+- Williams Alligator: jaw=SMA(13,8), teeth=SMA(8,5), lips=SMA(5,3) - smoothed with SMMA (using EMA as proxy)
+- Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+- Designed to work in both bull and bear markets via ATR regime filter
 """
 
 import numpy as np
@@ -25,92 +24,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (based on previous bar's OHLC)
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
-    for i in range(1, n):
-        # Use previous bar's OHLC to calculate current bar's Camarilla levels
-        c = (high[i-1] + low[i-1] + close[i-1]) / 3
-        r = high[i-1] - low[i-1]
-        camarilla_r3[i] = c + (r * 1.1 / 4)  # R3 level
-        camarilla_s3[i] = c - (r * 1.1 / 4)  # S3 level
+    # Williams Alligator (using EMA as proxy for SMMA)
+    jaw = pd.Series(close).ewm(span=13, adjust=False).mean().values  # SMA(13,8) -> EMA(13)
+    teeth = pd.Series(close).ewm(span=8, adjust=False).mean().values   # SMA(8,5) -> EMA(8)
+    lips = pd.Series(close).ewm(span=5, adjust=False).mean().values    # SMA(5,3) -> EMA(5)
     
-    # Get 1d data ONCE before loop for EMA34 trend filter
+    # Get 1d data ONCE before loop for ATR regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 1d ATR(7) and ATR(30) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
+                            np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Volume confirmation: > 1.8x 20-period average volume
+    atr_7_1d = pd.Series(tr_1d).ewm(span=7, adjust=False, min_periods=7).mean().values
+    atr_30_1d = pd.Series(tr_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    
+    # ATR ratio regime: >1.2 = trending, <0.8 = choppy
+    atr_ratio_1d = atr_7_1d / atr_30_1d
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # Volume confirmation: > 1.5x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.8 * vol_ma
-    
-    # ATR(14) for volatility and trailing stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volume_spike = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34, 20, 14) + 1
+    start_idx = max(13, 8, 5, 30, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla R3, trend up (close > EMA34), volume spike
-            if close[i] > camarilla_r3[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            # Long: Alligator bullish + trending regime + volume spike
+            if jaw[i] < teeth[i] and teeth[i] < lips[i] and atr_ratio_1d_aligned[i] > 1.2 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-                highest_high_since_entry = high[i]
-            # Short: price breaks below Camarilla S3, trend down (close < EMA34), volume spike
-            elif close[i] < camarilla_s3[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            # Short: Alligator bearish + trending regime + volume spike
+            elif jaw[i] > teeth[i] and teeth[i] > lips[i] and atr_ratio_1d_aligned[i] > 1.2 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
-                lowest_low_since_entry = low[i]
         elif position == 1:
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            # Long exit: price drops 2.0x ATR from highest high since entry
-            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
+            # Long exit: Alligator reverses OR regime becomes choppy
+            if not (jaw[i] < teeth[i] and teeth[i] < lips[i]) or atr_ratio_1d_aligned[i] < 0.8:
                 signals[i] = 0.0
                 position = 0
-                highest_high_since_entry = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            # Short exit: price rises 2.0x ATR from lowest low since entry
-            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
+            # Short exit: Alligator reverses OR regime becomes choppy
+            if not (jaw[i] > teeth[i] and teeth[i] > lips[i]) or atr_ratio_1d_aligned[i] < 0.8:
                 signals[i] = 0.0
                 position = 0
-                lowest_low_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRTrailingStop_v1"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_1dATRRegime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
