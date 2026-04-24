@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Camarilla H3/L3 breakout with 1-week EMA34 trend filter and volume confirmation using 1d ATR spike.
-- Primary timeframe: 1d targeting 50-100 total trades over 4 years (12-25/year).
-- HTF: 1w for EMA34 trend filter.
-- Entry: Long when price breaks above Camarilla H3 level AND ATR ratio > 2.0 AND price > 1w EMA34.
-         Short when price breaks below Camarilla L3 level AND ATR ratio > 2.0 AND price < 1w EMA34.
-- Exit: Opposite Camarilla breakout (L4 for longs, H4 for shorts) OR price crosses 1w EMA34 in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- ATR ratio (current ATR/20-period ATR) > 2.0 confirms significant volatility expansion to avoid false breakouts.
-- 1w EMA34 provides trend filter to avoid counter-trend trades.
-- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-- Camarilla levels derived from prior day's range provide institutional support/resistance.
-- Estimated trades: ~70 total over 4 years (~17/year) based on volatility breakout frequency with strict filters.
+Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA200 trend filter and volume spike confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA200 trend filter and ATR-based volume spike.
+- Bull Power = High - EMA13, Bear Power = Low - EMA13 (13-period EMA on 6h).
+- Entry Long: Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND price > 1d EMA200 AND volume > 1.5 * 20-period average volume.
+- Entry Short: Bull Power < 0 AND Bear Power > 0 (bearish momentum) AND price < 1d EMA200 AND volume > 1.5 * 20-period average volume.
+- Exit: Opposite Elder Ray signal OR price crosses 1d EMA200 in opposite direction.
+- Signal size: 0.25 discrete to minimize fee drag.
+- Elder Ray captures momentum strength via price relative to EMA, effective in both bull (buy strength) and bear (sell weakness) markets.
+- Volume spike filter ensures participation, reducing false signals.
+- 1d EMA200 provides robust trend filter to avoid counter-trend trades.
+- Estimated trades: ~100 total over 4 years (~25/year) based on momentum shifts with volume confirmation.
 """
 
 import numpy as np
@@ -31,17 +31,6 @@ def atr(high, low, close, period):
     true_range[0] = high_low[0]  # First period
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def camarilla_levels(high, low, close):
-    """Calculate Camarilla pivot levels for intraday trading."""
-    range_val = high - low
-    h5 = close + range_val * 1.1 / 2
-    h4 = close + range_val * 1.1 / 4
-    h3 = close + range_val * 1.1 / 6
-    l3 = close - range_val * 1.1 / 6
-    l4 = close - range_val * 1.1 / 4
-    l5 = close - range_val * 1.1 / 2
-    return h3, l3, h4, l4  # Return H3, L3, H4, L4 for breakout and exit
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -51,72 +40,70 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 1w trend filter: EMA34
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
-        return np.zeros(n)
+    # Calculate 6h EMA13 for Elder Ray
+    ema13 = ema(close, 13)
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    ema34_1w = ema(df_1w['close'].values, 34)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w, additional_delay_bars=1)
-    
-    # Calculate 1d ATR for volume spike filter
+    # Calculate 1d trend filter: EMA200
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 210:
         return np.zeros(n)
     
-    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
-    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
-    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
+    ema200_1d = ema(df_1d['close'].values, 200)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d, additional_delay_bars=1)
     
-    # Calculate Camarilla levels on 1d (using prior day's OHLC)
-    camarilla_data = camarilla_levels(high, low, close)
-    camarilla_h3 = camarilla_data[0]  # H3 level
-    camarilla_l3 = camarilla_data[1]  # L3 level
-    camarilla_h4 = camarilla_data[2]  # H4 level (exit for longs)
-    camarilla_l4 = camarilla_data[3]  # L4 level (exit for shorts)
+    # Calculate 1d volume average for spike filter
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20, additional_delay_bars=1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for all indicators
+    start_idx = 210  # Need sufficient data for 1d EMA200
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_volume = volume[i]
+        vol_ma_20_val = vol_ma_20_aligned[i]
         
-        # Exit conditions: opposite Camarilla breakout OR price crosses 1w EMA34 in opposite direction
+        # Volume spike condition: current volume > 1.5 * 20-period average
+        volume_spike = curr_volume > 1.5 * vol_ma_20_val if vol_ma_20_val > 0 else False
+        
+        # Exit conditions: opposite Elder Ray signal OR price crosses 1d EMA200 in opposite direction
         if position != 0:
-            # Exit long: price breaks below Camarilla L4 OR price falls below 1w EMA34
+            # Exit long: Bear Power becomes positive (bearish momentum) OR price falls below 1d EMA200
             if position == 1:
-                if curr_close < camarilla_l4[i] or curr_close < ema34_1w_aligned[i]:
+                if bear_power[i] > 0 or curr_close < ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Camarilla H4 OR price rises above 1w EMA34
+            # Exit short: Bull Power becomes negative (bullish momentum) OR price rises above 1d EMA200
             elif position == -1:
-                if curr_close > camarilla_h4[i] or curr_close > ema34_1w_aligned[i]:
+                if bull_power[i] < 0 or curr_close > ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
+        # Entry conditions: Elder Ray momentum with trend filter and volume confirmation
         if position == 0:
-            # Long: price breaks above Camarilla H3 AND ATR ratio > 2.0 AND bullish 1w trend
-            if curr_close > camarilla_h3[i] and atr_ratio_aligned[i] > 2.0 and curr_close > ema34_1w_aligned[i]:
+            # Long: Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND price > 1d EMA200 AND volume spike
+            if bull_power[i] > 0 and bear_power[i] < 0 and curr_close > ema200_1d_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3 AND ATR ratio > 2.0 AND bearish 1w trend
-            elif curr_close < camarilla_l3[i] and atr_ratio_aligned[i] > 2.0 and curr_close < ema34_1w_aligned[i]:
+            # Short: Bull Power < 0 AND Bear Power > 0 (bearish momentum) AND price < 1d EMA200 AND volume spike
+            elif bull_power[i] < 0 and bear_power[i] > 0 and curr_close < ema200_1d_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -128,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_1wEMA34_TrendFilter_v1"
-timeframe = "1d"
+name = "6h_ElderRay_1dEMA200_TrendFilter_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
