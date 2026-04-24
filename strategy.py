@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d ADX Trend Filter and Volume Confirmation.
-- Long when price breaks above upper Bollinger Band AND 1d ADX > 25 (trending regime) AND volume > 1.5 * 20-period average
-- Short when price breaks below lower Bollinger Band AND 1d ADX > 25 (trending regime) AND volume > 1.5 * 20-period average
-- Bollinger Band squeeze (bandwidth < 20th percentile) precedes breakout for higher probability
-- Exit when price returns to middle Bollinger Band (20-period SMA)
-- Uses 6h primary with 1d HTF to target 50-150 trades over 4 years (12-37/year)
-- Bollinger Bands provide volatility-based structure; ADX filters for trending markets; volume confirms breakout strength
-- Designed to work in both bull (breakouts with trend) and bear (breakouts against trend) markets by filtering only on ADX > 25
+Hypothesis: 12h Camarilla H4/L4 breakout with 1d ATR regime filter and volume spike confirmation.
+- Long when price breaks above H4 AND 1d ATR(14) > 1d ATR(50) (high volatility regime)
+- Short when price breaks below L4 AND 1d ATR(14) > 1d ATR(50) (high volatility regime)
+- Volume confirmation: current volume > 1.5 * 24-period average volume (moderate spike)
+- Exit on opposite Camarilla level (L4 for long exit, H4 for short exit)
+- Uses 12h primary with 1d HTF to target 50-150 trades over 4 years (12-37/year)
+- Camarilla H4/L4 levels provide stronger breakout signals than H3/L3
+- ATR regime filter ensures we only trade in high volatility environments
+- Volume spike confirms momentum behind breakouts
 - Signal size: 0.25 discrete levels to minimize fee churn
+- Designed to work in both bull (breakouts with momentum) and bear (breakouts with momentum) markets
 """
 
 import numpy as np
@@ -25,102 +27,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20, 2) on 6h data
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean().values
-    dev = close_s.rolling(window=20, min_periods=20).std().values
-    upper_band = basis + 2.0 * dev
-    lower_band = basis - 2.0 * dev
+    # Calculate Camarilla levels (based on previous period) on 12h data
+    # H4 = close + 1.5 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    camarilla_h4 = np.roll(close, 1) + 1.5 * (np.roll(high, 1) - np.roll(low, 1))
+    camarilla_l4 = np.roll(close, 1) - 1.5 * (np.roll(high, 1) - np.roll(low, 1))
+    camarilla_h4[0] = np.nan
+    camarilla_l4[0] = np.nan
     
-    # Calculate Bollinger Band Width for squeeze detection
-    bb_width = (upper_band - lower_band) / basis
-    # Squeeze condition: bandwidth below 20th percentile of last 50 periods
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
-    squeeze_condition = bb_width < bb_width_percentile
-    
-    # Calculate 1d ADX for trend filter
+    # Calculate 1d ATR for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # ADX calculation (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # True Range calculation
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.roll(daily_close, 1))
+    tr3 = np.abs(daily_low - np.roll(daily_close, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # ATR(14) and ATR(50) for regime detection
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    # Regime filter: high volatility when ATR(14) > ATR(50)
+    high_vol_regime = atr_14 > atr_50
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime.astype(float)) > 0.5
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Trend filter: trending if ADX > 25
-    trending_regime = adx_aligned > 25
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5 * 24-period average
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 14+14, 20)  # Bollinger Bands, squeeze percentile, ADX, volume MA
+    start_idx = max(1, 50, 24)  # Need Camarilla (1), ATR(50), and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(basis[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(squeeze_condition[i]) or np.isnan(adx_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above upper Bollinger Band AND trending regime AND volume confirmation AND squeeze condition
-            if close[i] > upper_band[i] and trending_regime[i] and volume_confirm[i] and squeeze_condition[i]:
+            # Long: break above Camarilla H4 AND high volatility regime AND volume confirmation
+            if close[i] > camarilla_h4[i] and high_vol_regime_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Bollinger Band AND trending regime AND volume confirmation AND squeeze condition
-            elif close[i] < lower_band[i] and trending_regime[i] and volume_confirm[i] and squeeze_condition[i]:
+            # Short: break below Camarilla L4 AND high volatility regime AND volume confirmation
+            elif close[i] < camarilla_l4[i] and high_vol_regime_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: return to middle Bollinger Band (basis)
-            if close[i] >= basis[i]:
+            # Long exit: break below Camarilla L4 (opposite level)
+            if close[i] < camarilla_l4[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: return to middle Bollinger Band (basis)
-            if close[i] <= basis[i]:
+            # Short exit: break above Camarilla H4 (opposite level)
+            if close[i] > camarilla_h4[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -128,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BollingerSqueeze_ADXTrend_VolumeBreakout_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H4L4_1dATRRegime_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
