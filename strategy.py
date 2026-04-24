@@ -1,39 +1,24 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 1d EMA200 trend filter and volume confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for EMA200 trend filter (long-term trend) and ATR-based volume spike detection.
-- Donchian(20): Upper = 20-period high, Lower = 20-period low.
-- Entry: Long when close > Upper Band AND price > 1d EMA200 AND volume > 2.0 * 20-period ATR.
-         Short when close < Lower Band AND price < 1d EMA200 AND volume > 2.0 * 20-period ATR.
-- Exit: Opposite Donchian breakout OR price crosses 1d EMA200 in opposite direction.
+Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and 1d volume spike confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for volume spike confirmation and 1w for pivot-based trend direction.
+- Donchian breakout: Long when price > highest high of last 20 periods, Short when price < lowest low of last 20 periods.
+- Weekly pivot direction: Use 1w Camarilla H3/L3 levels to determine bias - only take longs above H3, shorts below L3.
+- Volume confirmation: Require 1d volume > 2.0 * 20-period average volume to ensure participation.
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Donchian breakouts capture momentum in trending markets and reversals in ranging markets.
-- 1d EMA200 provides strong trend filter to avoid counter-trend trades in bear markets.
-- Volume confirmation via ATR spike ensures breakouts have conviction, reducing false signals.
-- Estimated trades: ~100 total over 4 years (~25/year) based on Donchian breakout frequency with filters.
+- Weekly pivot filter prevents counter-trend trades in ranging markets.
+- Volume confirmation reduces false breakouts.
+- Designed to work in both bull (breakouts with volume) and bear (breakdowns with volume) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def ema(values, period):
-    """Calculate Exponential Moving Average with proper min_periods."""
-    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def atr(high, low, close, period):
-    """Calculate Average True Range."""
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr.iloc[0] = high[0] - low[0]  # First TR
-    return tr.ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -42,71 +27,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA200 trend filter
+    # Calculate 1d volume average for confirmation (20-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 210:  # Need sufficient data for EMA200
-        return np.zeros(n)
-    
-    ema200_1d = ema(df_1d['close'].values, 200)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d, additional_delay_bars=1)
-    
-    # Calculate 1d ATR(20) for volume confirmation
     if len(df_1d) < 21:
         return np.zeros(n)
     
-    atr20_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
-    atr20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr20_1d, additional_delay_bars=1)
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = df_1d['volume'].values / (vol_ma_20 + 1e-10)  # Avoid division by zero
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d, additional_delay_bars=1)
     
-    # Calculate Donchian(20) channels
-    # Upper Band: 20-period high
-    upper_raw = pd.Series(close).rolling(window=20, min_periods=20).max().values
-    # Lower Band: 20-period low
-    lower_raw = pd.Series(close).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w Camarilla pivot levels for trend direction
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Camarilla pivot calculation: based on previous week's OHLC
+    # H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
+    # H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
+    # H3 and L3 are the key levels for intraday trading
+    prev_week_high = df_1w['high'].shift(1).values  # Previous week high
+    prev_week_low = df_1w['low'].shift(1).values    # Previous week low
+    prev_week_close = df_1w['close'].shift(1).values # Previous week close
+    
+    # Calculate Camarilla H3 and L3 levels
+    diff = prev_week_high - prev_week_low
+    camarilla_h3 = prev_week_close + 1.125 * diff
+    camarilla_l3 = prev_week_close - 1.125 * diff
+    
+    # Align weekly levels to 6h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3, additional_delay_bars=1)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3, additional_delay_bars=1)
+    
+    # Calculate Donchian channels (20-period) on 6h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 210  # Need sufficient data for EMA200
+    start_idx = 20  # Need sufficient data for Donchian channels
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(atr20_1d_aligned[i]) or
-            np.isnan(upper_raw[i]) or np.isnan(lower_raw[i])):
+        if (np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_vol_ratio = vol_ratio_1d_aligned[i]  # Use 1d volume ratio
         
-        # Exit conditions: opposite Donchian breakout OR price crosses 1d EMA200 in opposite direction
+        # Exit conditions: opposite Donchian breakout OR loss of volume confirmation
         if position != 0:
-            # Exit long: price < Lower Band OR price falls below 1d EMA200
+            # Exit long: price breaks below lowest low OR volume drops below threshold
             if position == 1:
-                if curr_close < lower_raw[i] or curr_close < ema200_1d_aligned[i]:
+                if curr_low < lowest_low[i] or curr_vol_ratio < 1.5:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price > Upper Band OR price rises above 1d EMA200
+            # Exit short: price breaks above highest high OR volume drops below threshold
             elif position == -1:
-                if curr_close > upper_raw[i] or curr_close > ema200_1d_aligned[i]:
+                if curr_high > highest_high[i] or curr_vol_ratio < 1.5:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with trend filter and volume confirmation
+        # Entry conditions: Donchian breakout with pivot direction filter and volume confirmation
         if position == 0:
-            # Volume confirmation: current volume > 2.0 * ATR20
-            volume_confirm = curr_volume > (2.0 * atr20_1d_aligned[i])
-            
-            # Long: break above Upper Band AND price > 1d EMA200 AND volume confirmation
-            if curr_close > upper_raw[i] and curr_close > ema200_1d_aligned[i] and volume_confirm:
+            # Long: price breaks above highest high AND above weekly H3 AND volume confirmation
+            if (curr_high > highest_high[i] and 
+                curr_close > camarilla_h3_aligned[i] and 
+                curr_vol_ratio > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Lower Band AND price < 1d EMA200 AND volume confirmation
-            elif curr_close < lower_raw[i] and curr_close < ema200_1d_aligned[i] and volume_confirm:
+            # Short: price breaks below lowest low AND below weekly L3 AND volume confirmation
+            elif (curr_low < lowest_low[i] and 
+                  curr_close < camarilla_l3_aligned[i] and 
+                  curr_vol_ratio > 2.0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -118,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA200_TrendFilter_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_Donchian20_Breakout_1wCamarilla_PivotDirection_1dVolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
