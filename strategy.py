@@ -1,36 +1,24 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1d ATR regime filter and volume confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1d for ATR-based regime detection (choppy vs trending) and volume spike filter.
-- Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA) of median price.
-- Regime: ATR(10)/ATR(30) ratio > 1.2 = trending (favor Alligator alignment), < 0.8 = choppy (avoid trading).
-- Entry: Long when Lips > Teeth > Jaw (bullish alignment) AND trending regime AND volume > 1.5 * 20-period average volume.
-         Short when Lips < Teeth < Jaw (bearish alignment) AND trending regime AND volume > 1.5 * 20-period average volume.
-- Exit: Opposite Alligator alignment (Lips crosses Teeth) OR regime shifts to choppy (ATR ratio < 0.8).
+- Donchian(20): Upper/lower bands from 20-period high/low.
+- Regime: ATR(10)/ATR(30) ratio > 1.2 = trending (favor breakouts), < 0.8 = choppy (favor mean reversion).
+- Entry: Long when price > Upper Band AND trending regime AND volume > 2.0 * 20-period average volume.
+         Short when price < Lower Band AND trending regime AND volume > 2.0 * 20-period average volume.
+- Exit: Opposite Donchian breakout (price < Upper Band for long exit, price > Lower Band for short exit).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in both bull and bear markets by only trading strong trends, avoiding whipsaws in chop.
+- Works in both bull and bear markets by only trading breakouts in trending regimes, avoiding whipsaws in chop.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(data, period):
-    """Smoothed Moving Average (SMMA) - same as Wilder's MA or RMA"""
-    if len(data) < period:
-        return np.full(len(data), np.nan)
-    result = np.full(len(data), np.nan)
-    # First value is simple SMA
-    result[period-1] = np.mean(data[:period])
-    # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need sufficient data for calculations
+    if n < 60:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -38,9 +26,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Calculate median price for Alligator
-    median_price = (high + low) / 2
     
     # Calculate 1d ATR(10) and ATR(30) for regime filter
     df_1d = get_htf_data(prices, '1d')
@@ -65,7 +50,7 @@ def generate_signals(prices):
     # ATR ratio for regime: >1.2 = trending, <0.8 = choppy
     atr_ratio = atr10 / atr30
     
-    # Align ATR ratio to 12h timeframe
+    # Align ATR ratio to 4h timeframe
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Calculate 1d volume average for confirmation (20-period)
@@ -75,24 +60,21 @@ def generate_signals(prices):
     vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate Williams Alligator on 12h timeframe
-    # Jaw: 13-period SMMA of median price
-    jaw = smma(median_price, 13)
-    # Teeth: 8-period SMMA of median price
-    teeth = smma(median_price, 8)
-    # Lips: 5-period SMMA of median price
-    lips = smma(median_price, 5)
+    # Calculate 4h Donchian(20) bands
+    donchian_window = 20
+    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 30)  # Need 13 for Jaw, 30 for ATR30
+    start_idx = max(donchian_window, 30)  # Need 20 for Donchian, 30 for ATR30
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
         if (np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i])):
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -101,50 +83,38 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Regime filter: only trade in trending markets (ATR ratio > 1.2)
+        # Regime filter: only trade breakouts in trending markets (ATR ratio > 1.2)
         trending_regime = atr_ratio_aligned[i] > 1.2
-        # Choppy regime filter: exit if ATR ratio < 0.8
-        choppy_regime = atr_ratio_aligned[i] < 0.8
         
-        # Volume confirmation: current volume > 1.5 * 20-period average volume
-        volume_confirm = curr_volume > 1.5 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
+        # Volume confirmation: current volume > 2.0 * 20-period average volume
+        volume_confirm = curr_volume > 2.0 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
         
-        # Alligator alignment conditions
-        lips_above_teeth = lips[i] > teeth[i]
-        teeth_above_jaw = teeth[i] > jaw[i]
-        bullish_alignment = lips_above_teeth and teeth_above_jaw
-        
-        lips_below_teeth = lips[i] < teeth[i]
-        teeth_below_jaw = teeth[i] < jaw[i]
-        bearish_alignment = lips_below_teeth and teeth_below_jaw
-        
-        # Exit conditions
+        # Exit conditions: opposite Donchian breakout
         if position != 0:
-            # Exit if regime turns choppy
-            if choppy_regime:
-                signals[i] = 0.0
-                position = 0
-                continue
-            # Exit long: bullish alignment breaks
-            elif position == 1:
-                if not bullish_alignment:
+            # Exit long: price < Upper Band
+            if position == 1:
+                if curr_close < upper_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: bearish alignment breaks
+            # Exit short: price > Lower Band
             elif position == -1:
-                if not bearish_alignment:
+                if curr_close > lower_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Alligator alignment with regime and volume filters
+        # Entry conditions: Donchian breakout with regime and volume filters
         if position == 0:
-            # Long: bullish alignment AND trending regime AND volume confirmation
-            long_condition = bullish_alignment and trending_regime and volume_confirm
+            # Long: price > Upper Band AND trending regime AND volume confirmation
+            long_condition = (curr_close > upper_band[i] and 
+                            trending_regime and
+                            volume_confirm)
             
-            # Short: bearish alignment AND trending regime AND volume confirmation
-            short_condition = bearish_alignment and trending_regime and volume_confirm
+            # Short: price < Lower Band AND trending regime AND volume confirmation
+            short_condition = (curr_close < lower_band[i] and 
+                             trending_regime and
+                             volume_confirm)
             
             if long_condition:
                 signals[i] = 0.25
@@ -161,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1dATRRegime_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dATRRegime_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
