@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams Alligator with 1d ADX regime filter and volume confirmation.
-- Williams Alligator: Jaw (EMA13, 8-period shift), Teeth (EMA8, 5-period shift), Lips (EMA5, 3-period shift)
-- Long when Lips > Teeth > Jaw (bullish alignment) AND 1d ADX > 25 (strong trend) AND volume > 1.5 * 20-period average
-- Short when Lips < Teeth < Jaw (bearish alignment) AND 1d ADX > 25 AND volume > 1.5 * 20-period average
-- Exit when Alligator alignment breaks (Lips <= Teeth for long, Lips >= Teeth for short) OR ADX < 20
-- Uses 4h primary with 1d HTF for ADX regime filter to avoid whipsaws in ranging markets
-- Alligator identifies trend initiation and direction; ADX filters for trending conditions; volume confirms conviction
-- Designed to work in both bull (strong bullish alignment) and bear (strong bearish alignment) markets with trend filter
+Hypothesis: 1d Camarilla Pivot Breakout with 1w EMA50 Trend Filter and Volume Spike.
+- Long when price breaks above Camarilla R3 AND 1w EMA50 is rising AND volume > 2.0 * 20-period average
+- Short when price breaks below Camarilla S3 AND 1w EMA50 is falling AND volume > 2.0 * 20-period average
+- Exit when price returns to Camarilla pivot (PP) or volume drops below average
+- Uses 1d primary with 1w HTF for trend filter to capture multi-week moves while avoiding counter-trend trades
+- Camarilla levels provide precise intraday/resistance levels; EMA50 filter ensures direction alignment with weekly trend
+- Volume spike confirms institutional participation and reduces false breakouts
 - Signal size: 0.25 discrete levels to minimize fee churn
-- Target: 75-200 total trades over 4 years (19-50/year)
+- Target: 30-100 total trades over 4 years (7-25/year)
 """
 
 import numpy as np
@@ -26,123 +25,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator components
-    # Jaw: EMA13 of median price, shifted 8 bars
-    # Teeth: EMA8 of median price, shifted 5 bars  
-    # Lips: EMA5 of median price, shifted 3 bars
-    median_price = (high + low) / 2
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Camarilla: PP = (H+L+C)/3, R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # First bar uses current values
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    jaw_raw = pd.Series(median_price).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth_raw = pd.Series(median_price).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips_raw = pd.Series(median_price).ewm(span=5, adjust=False, min_periods=5).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2.0
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2.0
     
-    # Apply shifts (Alligator lines are shifted into the future)
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    
-    # First values after shift are invalid
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
-    # Calculate 1d ADX for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough data for ADX calculation
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:  # Need enough data for EMA50
         return np.zeros(n)
     
-    # True Range calculation for 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # True Range: max[(high-low), abs(high-close_prev), abs(low-close_prev)]
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # EMA50 slope: rising if current > previous, falling if current < previous
+    ema_50_rising = np.zeros_like(ema_50_1w_aligned, dtype=bool)
+    ema_50_falling = np.zeros_like(ema_50_1w_aligned, dtype=bool)
+    ema_50_rising[1:] = ema_50_1w_aligned[1:] > ema_50_1w_aligned[:-1]
+    ema_50_falling[1:] = ema_50_1w_aligned[1:] < ema_50_1w_aligned[:-1]
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+ and DM- using Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(values, period):
-        result = np.zeros_like(values)
-        if len(values) < period:
-            return result
-        result[period-1] = np.nansum(values[:period])  # First value is simple average
-        for i in range(period, len(values)):
-            result[i] = result[i-1] - (result[i-1] / period) + values[i]
-        return result
-    
-    period = 14
-    tr_smoothed = wilders_smoothing(tr, period)
-    dm_plus_smoothed = wilders_smoothing(dm_plus, period)
-    dm_minus_smoothed = wilders_smoothing(dm_minus, period)
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smoothed / tr_smoothed
-    di_minus = 100 * dm_minus_smoothed / tr_smoothed
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    # Handle division by zero
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    
-    # ADX is smoothed DX
-    adx_1d = wilders_smoothing(dx, period)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Trend filter: trending if ADX > 25, ranging if ADX < 20
-    strong_trend = adx_1d_aligned > 25
-    weak_trend = adx_1d_aligned < 20
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 20, 30) + 1  # Need Alligator, volume MA, and ADX data
+    start_idx = max(20, 50) + 1  # Need volume MA and EMA50 data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(pivot[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) AND strong trend AND volume confirmation
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and strong_trend[i] and volume_confirm[i]:
+            # Long: price breaks above R3 AND EMA50 rising AND volume spike
+            if close[i] > camarilla_r3[i] and ema_50_rising[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw (bearish alignment) AND strong trend AND volume confirmation
-            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and strong_trend[i] and volume_confirm[i]:
+            # Short: price breaks below S3 AND EMA50 falling AND volume spike
+            elif close[i] < camarilla_s3[i] and ema_50_falling[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Lips <= Teeth (alignment breaks) OR weak trend
-            if lips[i] <= teeth[i] or weak_trend[i]:
+            # Long exit: price returns to pivot OR volume drops below average
+            if close[i] <= pivot[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Lips >= Teeth (alignment breaks) OR weak trend
-            if lips[i] >= teeth[i] or weak_trend[i]:
+            # Short exit: price returns to pivot OR volume drops below average
+            if close[i] >= pivot[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -150,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dADX_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_1wEMA50_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
