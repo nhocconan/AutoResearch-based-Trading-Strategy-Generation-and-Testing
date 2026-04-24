@@ -1,129 +1,143 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1d ADX regime filter.
-- Primary timeframe: 4h for execution, HTF: 1d for volume confirmation and ADX trend strength.
-- Camarilla levels: calculated from prior 1d OHLC (R3, S3, R4, S4).
-- Breakout logic: Long when close > R3 and volume spike, Short when close < S3 and volume spike.
-- ADX filter: Only take breakout trades when 1d ADX > 25 (strong trend), avoid ranging markets (ADX < 20).
-- Volume confirmation: 1d volume > 1.8 * 20-period 1d volume MA (to ensure institutional participation).
-- Discrete signal size: 0.25 to balance profit potential and drawdown control.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and volume confirmation.
+- Primary timeframe: 1d for execution, HTF: 1w for trend strength (EMA50).
+- Williams Alligator: Jaw (13-period SMMA smoothed 8), Teeth (8-period SMMA smoothed 5), Lips (5-period SMMA smoothed 3).
+- Trend filter: Price > 1w EMA50 for long bias, Price < 1w EMA50 for short bias.
+- Entry: Long when Lips cross above Teeth AND price > 1w EMA50 AND volume > 1.5 * 20-period volume MA.
+         Short when Lips cross below Teeth AND price < 1w EMA50 AND volume > 1.5 * 20-period volume MA.
+- Exit: Opposite Alligator cross (Lips cross Teeth in opposite direction).
+- Volume confirmation: current volume > 1.5 * 20-period volume MA.
+- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
+- Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(values, period):
+    """Smoothed Moving Average (SMMA) - same as Wilder's EMA with alpha=1/period"""
+    if len(values) < period:
+        return np.full_like(values, np.nan, dtype=float)
+    result = np.empty_like(values, dtype=float)
+    result[:] = np.nan
+    # First value is simple average
+    result[period-1] = np.mean(values[:period])
+    # Subsequent values: SMMA = (Prev SMMA * (period-1) + Current Value) / period
+    for i in range(period, len(values)):
+        result[i] = (result[i-1] * (period-1) + values[i]) / period
+    return result
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Extract price data
+    # Extract price and volume data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels, volume, and ADX
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate Williams Alligator on 1d data
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior 1d OHLC
-    # R4 = Close + 1.1 * (High - Low) * 1.1/2
-    # R3 = Close + 1.1 * (High - Low) * 1.1/4
-    # S3 = Close - 1.1 * (High - Low) * 1.1/4
-    # S4 = Close - 1.1 * (High - Low) * 1.1/2
-    hl_range = df_1d['high'] - df_1d['low']
-    close_1d = df_1d['close']
-    r3 = close_1d + 1.1 * hl_range * (1.1/4)
-    s3 = close_1d - 1.1 * hl_range * (1.1/4)
-    r4 = close_1d + 1.1 * hl_range * (1.1/2)
-    s4 = close_1d - 1.1 * hl_range * (1.1/2)
+    # Median price = (High + Low) / 2
+    median_price = (df_1d['high'] + df_1d['low']) / 2
     
-    # Align Camarilla levels to 4h (use prior day's levels for today's trading)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
+    # Alligator components: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    jaw = smma(median_price.values, 13)
+    jaw = smma(jaw, 8)  # Smoothed again with period 8
     
-    # Calculate 1d ADX (14-period)
-    # True Range
-    tr1 = pd.Series(df_1d['high']).diff().abs()
-    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
-    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    teeth = smma(median_price.values, 8)
+    teeth = smma(teeth, 5)  # Smoothed again with period 5
     
-    # Directional Movement
-    up_move = pd.Series(df_1d['high']).diff()
-    down_move = -pd.Series(df_1d['low']).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    lips = smma(median_price.values, 5)
+    lips = smma(lips, 3)  # Smoothed again with period 3
     
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align Alligator components to 1d timeframe (already aligned via get_htf_data)
+    # But we need to align to the lower timeframe (1d prices index)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: 1d volume > 1.8 * 20-period volume MA
-    volume_ma = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > (1.8 * volume_ma)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 1d)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 30  # Need enough 1d bars for ADX/volume MA
+    start_idx = max(50, 30, 20)  # Need enough bars for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
         price = close[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        adx_val = adx_aligned[i]
-        vol_spike = volume_spike_aligned[i]
+        ema_50_val = ema_50_1w_aligned[i]
+        vol_spike = volume_spike[i]
+        
+        # Check for Alligator crossovers
+        lips_above_teeth = lips_val > teeth_val
+        lips_below_teeth = lips_val < teeth_val
+        
+        # Previous values for crossover detection
+        if i > 0:
+            lips_prev = lips_aligned[i-1]
+            teeth_prev = teeth_aligned[i-1]
+            lips_above_teeth_prev = lips_prev > teeth_prev
+            lips_below_teeth_prev = lips_prev < teeth_prev
+            
+            lips_cross_above = lips_above_teeth and not lips_above_teeth_prev
+            lips_cross_below = lips_below_teeth and not lips_below_teeth_prev
+        else:
+            lips_cross_above = False
+            lips_cross_below = False
         
         if position == 0:
-            # Check for entry signals
-            if vol_spike and adx_val > 25:  # Strong trend + volume confirmation
-                # Breakout entries
-                if price > r3_val:
+            # Check for entry signals with volume confirmation
+            if vol_spike:
+                # Long: Lips cross above Teeth AND price > 1w EMA50 (uptrend)
+                if lips_cross_above and price > ema_50_val:
                     signals[i] = 0.25
                     position = 1
-                elif price < s3_val:
+                # Short: Lips cross below Teeth AND price < 1w EMA50 (downtrend)
+                elif lips_cross_below and price < ema_50_val:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price reaches R4 (take profit) or reverses below R3 (stop loss)
-            if price >= r4_val or price < r3_val:
+            # Long exit: Lips cross below Teeth (trend weakening)
+            if lips_cross_below:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches S4 (take profit) or reverses above S3 (stop loss)
-            if price <= s4_val or price > s3_val:
+            # Short exit: Lips cross above Teeth (trend weakening)
+            if lips_cross_above:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R3S3_Breakout_1dADX_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Williams_Alligator_1wEMA50_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
