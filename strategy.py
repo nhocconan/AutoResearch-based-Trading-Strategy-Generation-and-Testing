@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d volume spike and choppiness regime filter.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike filter and ATR-based regime.
 - Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for volume spike detection (>2.0x 20-period average) and choppiness regime (CHOP > 61.8 = range, < 38.2 = trend).
-- Camarilla levels: R1, S1, R3, S3 calculated from prior 1d OHLC.
-- Entry: Long when price > R1 AND trending regime (CHOP < 38.2) AND volume > 2.0 * 20-period average volume.
-         Short when price < S1 AND trending regime AND volume confirmation.
-- Exit: Opposite Camarilla breakout (price < R1 for long exit, price > S1 for short exit) OR regime shifts to choppy (CHOP > 61.8).
+- HTF: 1d for volume spike detection (20-period average) and ATR(10)/ATR(30) regime filter.
+- Camarilla pivot levels: R3 = C + 1.1*(H-L)/2, S3 = C - 1.1*(H-L)/2 from prior 1d candle.
+- Regime: ATR(10)/ATR(30) > 1.2 = trending (favor breakouts), < 0.8 = choppy (avoid false signals).
+- Entry: Long when price > R3 AND trending regime AND volume > 2.0 * 20-period average volume.
+         Short when price < S3 AND trending regime AND volume > 2.0 * 20-period average volume.
+- Exit: Opposite Camarilla level (price < R3 for long exit, price > S3 for short exit).
 - Signal size: 0.25 discrete to minimize fee drag.
 - Works in both bull and bear markets by only trading breakouts in trending regimes, avoiding whipsaws in chop.
 """
@@ -26,73 +27,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d choppiness index and volume average
+    # Calculate 1d ATR(10) and ATR(30) for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need sufficient data for CHOP
+    if len(df_1d) < 30:  # Need sufficient data for ATR30
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
     
-    # True Range for choppiness
+    # True Range calculation
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum.reduce([tr1, tr2, tr3])
     tr = np.concatenate([[np.nan], tr])  # Align length
     
-    # ATR(14) for denominator
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # ATR(10) and ATR(30)
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
     
-    # Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (max(high)-min(low)) * sqrt(period))
-    # Using rolling window of 14 periods
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    sum_atr = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
+    # ATR ratio for regime: >1.2 = trending, <0.8 = choppy
+    atr_ratio = atr10 / atr30
     
-    # Avoid division by zero
-    range_hl = max_high - min_low
-    chop_raw = 100 * np.log10(sum_atr / range_hl * np.sqrt(14))
-    chop_raw = np.where(range_hl == 0, 50, chop_raw)  # Default to middle when no range
-    chop_raw = np.concatenate([[np.nan] * 13, chop_raw[13:]])  # Align for min_periods
-    
-    # Align choppiness to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
+    # Align ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Calculate 1d volume average for confirmation (20-period)
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate Camarilla levels from prior 1d OHLC
-    # R1 = C + (H-L) * 1.1/12, S1 = C - (H-L) * 1.1/12
-    # R3 = C + (H-L) * 1.1/4, S3 = C - (H-L) * 1.1/4
-    camarilla_multiplier = 1.1
-    r1_1d = close_1d + (high_1d - low_1d) * camarilla_multiplier / 12
-    s1_1d = close_1d - (high_1d - low_1d) * camarilla_multiplier / 12
-    r3_1d = close_1d + (high_1d - low_1d) * camarilla_multiplier / 4
-    s3_1d = close_1d - (high_1d - low_1d) * camarilla_multiplier / 4
+    # Calculate 1d Camarilla levels (R3, S3) from prior day
+    camarilla_window = 1
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
     
-    # Align Camarilla levels to 4h timeframe (use prior day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Camarilla R3 = C + 1.1*(H-L)/2, S3 = C - 1.1*(H-L)/2
+    camarilla_range = prior_high - prior_low
+    r3_level = prior_close + 1.1 * camarilla_range / 2
+    s3_level = prior_close - 1.1 * camarilla_range / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 30  # Need 30 for CHOP calculations
+    start_idx = max(30, 20)  # Need 30 for ATR30, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(chop_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -101,37 +93,36 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Regime filter: CHOP < 38.2 = trending (favor breakouts), CHOP > 61.8 = choppy (favor mean reversion)
-        trending_regime = chop_aligned[i] < 38.2
-        choppy_regime = chop_aligned[i] > 61.8
+        # Regime filter: only trade breakouts in trending markets (ATR ratio > 1.2)
+        trending_regime = atr_ratio_aligned[i] > 1.2
         
         # Volume confirmation: current volume > 2.0 * 20-period average volume
         volume_confirm = curr_volume > 2.0 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
         
-        # Exit conditions
+        # Exit conditions: opposite Camarilla level
         if position != 0:
-            # Exit long: price < R1 OR regime shifts to choppy
+            # Exit long: price < R3
             if position == 1:
-                if curr_close < r1_aligned[i] or choppy_regime:
+                if curr_close < r3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price > S1 OR regime shifts to choppy
+            # Exit short: price > S3
             elif position == -1:
-                if curr_close > s1_aligned[i] or choppy_regime:
+                if curr_close > s3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
         # Entry conditions: Camarilla breakout with regime and volume filters
         if position == 0:
-            # Long: price > R1 AND trending regime AND volume confirmation
-            long_condition = (curr_close > r1_aligned[i] and 
+            # Long: price > R3 AND trending regime AND volume confirmation
+            long_condition = (curr_close > r3_aligned[i] and 
                             trending_regime and
                             volume_confirm)
             
-            # Short: price < S1 AND trending regime AND volume confirmation
-            short_condition = (curr_close < s1_aligned[i] and 
+            # Short: price < S3 AND trending regime AND volume confirmation
+            short_condition = (curr_close < s3_aligned[i] and 
                              trending_regime and
                              volume_confirm)
             
@@ -150,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dVolSpike_ChopRegime_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dATRRegime_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
