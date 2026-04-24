@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ATR-based volume confirmation and choppiness regime filter.
-- Primary timeframe: 12h for lower trade frequency and reduced fee drag.
-- HTF: 1d for ATR(14) volume spike (>2.0x 24-period MA) and choppiness index (14) regime.
-- Entry: Long when price breaks above Donchian(20) high AND volume spike AND chop < 61.8 (trending).
-         Short when price breaks below Donchian(20) low AND volume spike AND chop < 61.8 (trending).
-- Exit: Opposite Donchian breakout (long exits on lower band, short on upper band) or loss of volume confirmation.
-- Signal size: 0.25 discrete to balance return and drawdown.
-- No session filter to maximize opportunity in 12h timeframe.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-This strategy captures strong trending moves with volume confirmation while avoiding choppy regimes,
-working in both bull and bear markets by only taking breakout trades with institutional participation.
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter, volume confirmation, and ATR-based stoploss.
+- Primary timeframe: 4h for balanced trade frequency and signal quality.
+- HTF: 12h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Donchian Channel: 20-period high/low on 4h for breakout signals.
+- Volume: Current 4h volume > 1.5 * 20-period volume MA to confirm institutional participation.
+- ATR Stoploss: Exit when price moves against position by 2.5 * ATR(20).
+- Entry: Long when price breaks above Donchian upper band AND 12h EMA50 bullish AND volume spike.
+         Short when price breaks below Donchian lower band AND 12h EMA50 bearish AND volume spike.
+- Exit: Opposite Donchian breakout OR ATR stoploss hit OR loss of volume confirmation.
+- Signal size: 0.25 discrete to balance return and drawdown control.
+- Target: 100-180 total trades over 4 years (25-45/year) for 4h timeframe.
+This strategy captures strong momentum moves in the direction of the higher timeframe trend,
+filtered by volume confirmation to avoid false breakouts, with ATR stops to manage risk.
+Works in both bull and bear markets by only taking trend-aligned breakouts.
 """
 
 import numpy as np
@@ -28,60 +31,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h ATR(20) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Get 1d data for ATR and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Calculate 4h Donchian Channel(20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h volume MA(20)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14)
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    tr1 = np.abs(df_1d_high - df_1d_low)
-    tr2 = np.abs(df_1d_high - np.roll(df_1d_close, 1))
-    tr3 = np.abs(df_1d_low - np.roll(df_1d_close, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0.0  # first bar
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h EMA50
+    df_12h_close = df_12h['close'].values
+    ema_12h = pd.Series(df_12h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d choppiness index (14)
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(df_1d_high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(df_1d_low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_tr / (hh - ll)) / np.log10(14)
-    # Handle division by zero or invalid values
-    chop = np.where((hh - ll) > 0, chop, 50.0)
-    
-    # Calculate 24-period 1d volume MA
-    df_1d_volume = df_1d['volume'].values
-    vol_ma_1d = pd.Series(df_1d_volume).rolling(window=24, min_periods=24).mean().values
-    
-    # Align HTF indicators to 12h
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Volume confirmation: current 12h volume > 2.0 * 24-period 1d volume MA (aligned)
-    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
-    
-    # Regime filter: choppiness < 61.8 indicates trending market
-    trending_regime = chop_aligned < 61.8
+    # Align HTF indicators to 4h
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14, 24)  # Need enough bars for Donchian, ATR/chop, volume MA
+    start_idx = max(50, 20)  # Need enough bars for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(atr_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,26 +79,50 @@ def generate_signals(prices):
         curr_low = low[i]
         
         if position == 0:
-            # Check for entry signals with volume spike and trending regime
-            if volume_spike[i] and trending_regime[i]:
-                # Bullish breakout: price breaks above Donchian high
-                if curr_high > donchian_h[i]:
+            # Check for entry signals with volume spike
+            if volume_spike[i]:
+                # Bullish breakout: price > Donchian upper AND 12h EMA50 bullish (close > EMA)
+                if curr_close > donch_high[i] and curr_close > ema_12h_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price breaks below Donchian low
-                elif curr_low < donchian_l[i]:
+                    entry_price = curr_close
+                # Bearish breakout: price < Donchian lower AND 12h EMA50 bearish (close < EMA)
+                elif curr_close < donch_low[i] and curr_close < ema_12h_aligned[i]:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
         elif position == 1:
-            # Long exit: price breaks below Donchian low OR loss of volume confirmation OR chop becomes too high
-            if curr_low < donchian_l[i] or not volume_spike[i] or not trending_regime[i]:
+            # Long exit conditions
+            exit_signal = False
+            # Opposite Donchian breakout
+            if curr_close < donch_low[i]:
+                exit_signal = True
+            # ATR stoploss: price < entry_price - 2.5 * ATR
+            elif curr_close < entry_price - 2.5 * atr[i]:
+                exit_signal = True
+            # Loss of volume confirmation
+            elif not volume_spike[i]:
+                exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian high OR loss of volume confirmation OR chop becomes too high
-            if curr_high > donchian_h[i] or not volume_spike[i] or not trending_regime[i]:
+            # Short exit conditions
+            exit_signal = False
+            # Opposite Donchian breakout
+            if curr_close > donch_high[i]:
+                exit_signal = True
+            # ATR stoploss: price > entry_price + 2.5 * ATR
+            elif curr_close > entry_price + 2.5 * atr[i]:
+                exit_signal = True
+            # Loss of volume confirmation
+            elif not volume_spike[i]:
+                exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -119,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dATR_VolumeSpike_ChopRegime_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
