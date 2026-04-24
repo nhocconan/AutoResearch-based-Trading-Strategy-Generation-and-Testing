@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H4/L4 breakout with 1d HMA21 trend filter and volume spike confirmation.
-- Long when price breaks above H4 AND 1d close > 1d HMA21 (bullish regime)
-- Short when price breaks below L4 AND 1d close < 1d HMA21 (bearish regime)
-- Volume confirmation: current volume > 1.8 * 24-period average volume (strong spike)
-- Exit on opposite Camarilla level (L4 for long exit, H4 for short exit)
-- Uses 12h primary with 1d HTF to target 50-150 trades over 4 years (12-37/year)
-- HMA21 provides smoother trend than EMA, reducing whipsaw in choppy markets
-- Camarilla H4/L4 levels offer stronger breakout signals than H3/L3
-- Designed to capture strong momentum moves with regime and volume filters
+Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume spike confirmation.
+- Long when price breaks above Donchian(20) high AND 1d ATR(14) > 1.5 * 1d ATR(50) (expanding volatility)
+- Short when price breaks below Donchian(20) low AND 1d ATR(14) > 1.5 * 1d ATR(50) (expanding volatility)
+- Volume confirmation: current volume > 2.0 * 20-period average volume (strong spike)
+- Exit on opposite Donchian level (L20 for long exit, H20 for short exit)
+- Uses 4h primary with 1d HTF to target 75-200 total trades over 4 years (19-50/year)
+- Donchian provides price channel structure; ATR filter ensures breakouts occur in expanding volatility; volume spike confirms momentum
+- Designed to work in both bull (breakouts with trend) and bear (breakouts against trend) markets
 - Signal size: 0.25 discrete levels to minimize fee churn
 """
 
@@ -26,102 +25,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (based on previous bar's OHLC)
-    # H4 = close + 1.1 * (high - low) * 1.125 / 2
-    # L4 = close - 1.1 * (high - low) * 1.125 / 2
-    # Using previous bar's OHLC to avoid look-ahead
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate Donchian(20) channels (based on previous 20 bars to avoid look-ahead)
+    # Upper = max(high of previous 20 bars)
+    # Lower = min(low of previous 20 bars)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_h20 = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_l20 = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) * 1.125 / 2
-    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) * 1.125 / 2
-    
-    # Calculate 1d HMA21 for trend filter
+    # Calculate 1d ATR(14) and ATR(50) for volatility expansion filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
-    # Hull Moving Average: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
     
-    def wma(values, window):
-        if len(values) < window:
-            return np.full_like(values, np.nan)
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights / weights.sum(), mode='valid')
+    # True Range calculation
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.roll(daily_close, 1))
+    tr3 = np.abs(daily_low - np.roll(daily_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar has no previous close
     
-    # Pad arrays for WMA calculation
-    wma_half = np.full_like(daily_close, np.nan)
-    wma_full = np.full_like(daily_close, np.nan)
+    # ATR(14) and ATR(50)
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    if len(daily_close) >= half_len:
-        wma_vals = wma(daily_close, half_len)
-        wma_half[half_len-1:] = wma_vals
+    # Volatility expansion: ATR(14) > 1.5 * ATR(50)
+    vol_expansion = atr_14 > (1.5 * atr_50)
+    vol_expansion_aligned = align_htf_to_ltf(prices, df_1d, vol_expansion)
     
-    if len(daily_close) >= 21:
-        wma_vals = wma(daily_close, 21)
-        wma_full[20:] = wma_vals
-    
-    raw_hma = 2 * wma_half - wma_full
-    wma_final = np.full_like(raw_hma, np.nan)
-    if len(raw_hma) >= sqrt_len:
-        wma_vals = wma(raw_hma[~np.isnan(raw_hma)], sqrt_len)
-        valid_idx = ~np.isnan(raw_hma)
-        if np.sum(valid_idx) >= sqrt_len:
-            wma_final[valid_idx] = np.nan
-            wma_final[valid_idx][sqrt_len-1:] = wma_vals
-    
-    hma_21_1d = wma_final
-    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
-    
-    # Trend filter: bullish if close > HMA21, bearish if close < HMA21
-    bullish_regime = close > hma_21_1d_aligned
-    bearish_regime = close < hma_21_1d_aligned
-    
-    # Volume confirmation: volume > 1.8 * 24-period average (strong spike)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (1.8 * vol_ma)
+    # Volume confirmation: volume > 2.0 * 20-period average (strong spike)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(1, 24) + 1  # Need Camarilla (1 bar lag), volume MA
+    start_idx = max(20, 14, 50, 20) + 1  # Need Donchian(20), ATRs, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or 
-            np.isnan(hma_21_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(donchian_h20[i]) or np.isnan(donchian_l20[i]) or 
+            np.isnan(vol_expansion_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above H4 AND bullish regime AND volume confirmation
-            if close[i] > camarilla_h4[i] and bullish_regime[i] and volume_confirm[i]:
+            # Long: break above Donchian H20 AND volatility expansion AND volume confirmation
+            if close[i] > donchian_h20[i] and vol_expansion_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below L4 AND bearish regime AND volume confirmation
-            elif close[i] < camarilla_l4[i] and bearish_regime[i] and volume_confirm[i]:
+            # Short: break below Donchian L20 AND volatility expansion AND volume confirmation
+            elif close[i] < donchian_l20[i] and vol_expansion_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below L4 (opposite level)
-            if close[i] < camarilla_l4[i]:
+            # Long exit: break below Donchian L20 (opposite level)
+            if close[i] < donchian_l20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above H4 (opposite level)
-            if close[i] > camarilla_h4[i]:
+            # Short exit: break above Donchian H20 (opposite level)
+            if close[i] > donchian_h20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_1dHMA21_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dATRFilter_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
