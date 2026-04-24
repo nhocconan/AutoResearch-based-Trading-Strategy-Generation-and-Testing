@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator + Elder Ray combo with volume confirmation and chop regime filter.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1w for trend context (optional filter).
-- Entry: Long when Alligator jaws < teeth < lips (bullish alignment) AND Elder Ray bull power > 0 AND volume > 1.5x MA20 volume.
-         Short when Alligator jaws > teeth > lips (bearish alignment) AND Elder Ray bear power < 0 AND volume > 1.5x MA20 volume.
-- Exit: Opposite Alligator alignment OR Elder Ray power crosses zero.
-- Signal size: 0.25 discrete to minimize fee drag.
-- Williams Alligator: SMAs of median price (13,8,5) with offsets (8,5,3).
-- Elder Ray: Bull Power = High - EMA13(close), Bear Power = Low - EMA13(close).
-- Chop regime: Only trade when Chop(14) < 61.8 (avoid strong ranging markets).
-- Works in bull markets (buy alignments in uptrend) and bear markets (sell alignments in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on strict alignment requirements.
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d ATR volume spike and 12h EMA34 trend filter.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d for ATR volume spike, 12h for EMA34 trend filter.
+- Entry: Long when price breaks above Camarilla R1 AND ATR ratio > 2.0 AND price > 12h EMA34.
+         Short when price breaks below Camarilla S1 AND ATR ratio > 2.0 AND price < 12h EMA34.
+- Exit: Opposite Camarilla breakout OR price crosses 12h EMA34 in opposite direction.
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- ATR ratio (current ATR/20-period ATR) > 2.0 confirms significant volatility expansion to avoid false breakouts.
+- 12h EMA34 provides trend filter to avoid counter-trend trades.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Camarilla levels derived from 1d OHLC provide institutional support/resistance.
+- Estimated trades: ~120 total over 4 years (~30/year) based on volatility breakout frequency with strict filters.
 """
 
 import numpy as np
@@ -22,29 +22,30 @@ def ema(values, period):
     """Calculate Exponential Moving Average."""
     return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def sma(values, period):
-    """Calculate Simple Moving Average."""
-    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
+def atr(high, low, close, period):
+    """Calculate Average True Range."""
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    true_range[0] = high_low[0]  # First period
+    return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def median_price(high, low):
-    """Calculate median price."""
-    return (high + low) / 2.0
-
-def bull_power(high, ema_close):
-    """Calculate Elder Ray Bull Power."""
-    return high - ema_close
-
-def bear_power(low, ema_close):
-    """Calculate Elder Ray Bear Power."""
-    return low - ema_close
-
-def chop(high, low, close, period):
-    """Calculate Choppiness Index."""
-    atr_sum = pd.Series(np.abs(high - low)).rolling(window=period, min_periods=period).sum()
-    hh = pd.Series(high).rolling(window=period, min_periods=period).max()
-    ll = pd.Series(low).rolling(window=period, min_periods=period).min()
-    chop_val = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(period)
-    return chop_val.values
+def camarilla_levels(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    range_ = high - low
+    if range_ == 0:
+        return close, close, close, close, close, close, close, close
+    close_val = close
+    R4 = close_val + range_ * 1.1 / 2
+    R3 = close_val + range_ * 1.1 / 4
+    R2 = close_val + range_ * 1.1 / 6
+    R1 = close_val + range_ * 1.1 / 12
+    S1 = close_val - range_ * 1.1 / 12
+    S2 = close_val - range_ * 1.1 / 6
+    S3 = close_val - range_ * 1.1 / 4
+    S4 = close_val - range_ * 1.1 / 2
+    return R4, R3, R2, R1, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
@@ -55,38 +56,34 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1w trend context (optional filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # Calculate 12h trend filter: EMA34
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 40:
         return np.zeros(n)
     
-    ema50_1w = ema(df_1w['close'].values, 50)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w, additional_delay_bars=1)
+    ema34_12h = ema(df_12h['close'].values, 34)
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h, additional_delay_bars=1)
     
-    # Williams Alligator components on 12h
-    med_price = median_price(high, low)
-    jaws = sma(med_price, 13)  # 13-period
-    teeth = sma(med_price, 8)   # 8-period
-    lips = sma(med_price, 5)    # 5-period
+    # Calculate 1d ATR for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Apply Alligator offsets (8,5,3)
-    jaws = np.roll(jaws, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
+    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
+    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
+    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
     
-    # Elder Ray components
-    ema13_close = ema(close, 13)
-    bull = bull_power(high, ema13_close)
-    bear = bear_power(low, ema13_close)
-    
-    # Volume confirmation: current volume > 1.5x 20-period MA
-    vol_ma20 = sma(volume, 20)
-    vol_ratio = volume / (vol_ma20 + 1e-10)
-    
-    # Chop regime filter: avoid strong ranging markets
-    chop_val = chop(high, low, close, 14)
+    # Calculate Camarilla levels from 1d OHLC
+    df_1d = get_htf_data(prices, '1d')
+    _, _, _, R1, S1, _, _, _ = camarilla_levels(
+        df_1d['high'].values, 
+        df_1d['low'].values, 
+        df_1d['close'].values
+    )
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1, additional_delay_bars=1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1, additional_delay_bars=1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -96,9 +93,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull[i]) or np.isnan(bear[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(chop_val[i]) or np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or
+            np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -106,34 +104,29 @@ def generate_signals(prices):
         
         curr_close = close[i]
         
-        # Exit conditions: opposite Alligator alignment OR Elder Ray power crosses zero
+        # Exit conditions: opposite Camarilla breakout OR price crosses 12h EMA34 in opposite direction
         if position != 0:
-            # Exit long: Alligator loses bullish alignment OR bull power <= 0
+            # Exit long: price breaks below S1 OR price falls below 12h EMA34
             if position == 1:
-                if not (jaws[i] < teeth[i] and teeth[i] < lips[i]) or bull[i] <= 0:
+                if curr_close < S1_aligned[i] or curr_close < ema34_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Alligator loses bearish alignment OR bear power >= 0
+            # Exit short: price breaks above R1 OR price rises above 12h EMA34
             elif position == -1:
-                if not (jaws[i] > teeth[i] and teeth[i] > lips[i]) or bear[i] >= 0:
+                if curr_close > R1_aligned[i] or curr_close > ema34_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Alligator alignment + Elder Ray confirmation + volume + chop filter
+        # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
         if position == 0:
-            # Bullish alignment: jaws < teeth < lips
-            bullish_align = jaws[i] < teeth[i] and teeth[i] < lips[i]
-            # Bearish alignment: jaws > teeth > lips
-            bearish_align = jaws[i] > teeth[i] and teeth[i] > lips[i]
-            
-            # Long: bullish alignment AND bull power > 0 AND volume confirmation AND chop < 61.8 (not ranging)
-            if (bullish_align and bull[i] > 0 and vol_ratio[i] > 1.5 and chop_val[i] < 61.8):
+            # Long: price breaks above R1 AND ATR ratio > 2.0 AND bullish 12h trend
+            if curr_close > R1_aligned[i] and atr_ratio_aligned[i] > 2.0 and curr_close > ema34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment AND bear power < 0 AND volume confirmation AND chop < 61.8
-            elif (bearish_align and bear[i] < 0 and vol_ratio[i] > 1.5 and chop_val[i] < 61.8):
+            # Short: price breaks below S1 AND ATR ratio > 2.0 AND bearish 12h trend
+            elif curr_close < S1_aligned[i] and atr_ratio_aligned[i] > 2.0 and curr_close < ema34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -145,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ElderRay_VolumeConfirm_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dATR_VolumeSpike_12hEMA34_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
