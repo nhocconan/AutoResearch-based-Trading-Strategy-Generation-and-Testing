@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1w chop regime filter.
-- Primary timeframe: 12h for execution, HTF: 1d for Donchian channels and volume MA, 1w for chop regime.
-- Chop > 61.8 = ranging (mean revert at Donchian mid), Chop < 38.2 = trending (breakout follow).
-- Entry: In trending (Chop < 38.2): Long on breakout above 20-period high, Short on breakdown below 20-period low.
-         In ranging (Chop > 61.8): Long at Donchian low with bullish reversal, Short at Donchian high with bearish reversal.
-- Volume confirmation: current volume > 1.3 * 20-period volume MA (to filter weak breakouts).
+Hypothesis: 4h Camarilla H3/L3 breakout with 12h volume spike and 1d ADX regime filter.
+- Primary timeframe: 4h for execution, HTF: 12h for volume confirmation, 1d for ADX trend strength.
+- ADX > 25 indicates trending market (breakout strategy), ADX < 20 indicates ranging (mean reversion at H3/L3).
+- Entry: Long when price breaks above H3 AND ADX > 25 (bullish breakout in trend).
+         Short when price breaks below L3 AND ADX > 25 (bearish breakout in trend).
+         In ranging (ADX < 20): Long when price touches L3 AND reverses up (close > low).
+                                Short when price touches H3 AND reverses down (close < high).
+- Exit: Opposite Camarilla breakout or ADX regime shift to ranging.
+- Volume confirmation: current volume > 1.5 * 20-period volume MA (on 12h).
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -25,105 +28,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and volume MA
+    # Get 1d data for Camarilla pivots and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 1d
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Calculate Camarilla levels (H3, L3) on 1d
+    # Typical Price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    # Camarilla width = (H - L) * 1.1 / 8
+    width = (df_1d['high'] - df_1d['low']) * 1.1 / 8.0
+    # H3 = C + width * 1.1
+    camarilla_h3 = df_1d['close'].values + width * 1.1
+    # L3 = C - width * 1.1
+    camarilla_l3 = df_1d['close'].values - width * 1.1
     
-    # Get 1w data for chop regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Calculate ADX (14-period) on 1d
+    # True Range
+    tr1 = pd.Series(df_1d['high']).diff().abs()
+    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
+    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = pd.Series(df_1d['high']).diff()
+    down_move = -pd.Series(df_1d['low']).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Get 12h data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate Chop Index (14-period) on 1w
-    # True Range
-    tr1 = pd.Series(df_1w['high']).diff().abs()
-    tr2 = (pd.Series(df_1w['high']) - pd.Series(df_1w['low'].shift())).abs()
-    tr3 = (pd.Series(df_1w['low']) - pd.Series(df_1w['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Align HTF indicators to 4h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # High-Low range
-    highest_high = pd.Series(df_1w['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1w['low']).rolling(window=14, min_periods=14).min().values
-    hl_range = highest_high - lowest_low
-    
-    # Chop = 100 * log10(atr_sum / hl_range) / log10(14)
-    chop = 100 * np.log10(atr_sum / (hl_range + 1e-10)) / np.log10(14)
-    
-    # Align HTF indicators to 12h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 12h)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * volume_ma)
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 12h)
+    volume_12h = df_12h['volume'].values
+    volume_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_spike_12h = volume_12h > (1.5 * volume_ma)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, 20)  # Need enough 1w bars for chop and 20 for Donchian/volume MA
+    start_idx = max(30, 20)  # Need enough 1d bars for ADX/Camarilla and 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(chop_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        chop_val = chop_aligned[i]
+        adx_val = adx_aligned[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         prev_close = close[i-1]
         
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        mid = donchian_mid_aligned[i]
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
+        vol_spike = volume_spike_aligned[i]
         
         if position == 0:
             # Check for entry signals
-            if volume_spike[i]:
-                if chop_val < 38.2:  # Trending regime: breakout strategy
-                    # Bullish breakout: price closes above upper Donchian
-                    if curr_close > upper:
+            if vol_spike:
+                if adx_val > 25:  # Trending regime: breakout strategy
+                    # Bullish breakout: price closes above H3
+                    if curr_close > h3:
                         signals[i] = 0.25
                         position = 1
-                    # Bearish breakout: price closes below lower Donchian
-                    elif curr_close < lower:
+                    # Bearish breakout: price closes below L3
+                    elif curr_close < l3:
                         signals[i] = -0.25
                         position = -1
-                elif chop_val > 61.8:  # Ranging regime: mean reversion at extremes
-                    # Long when price touches lower Donchian and shows bullish reversal
-                    if curr_low <= lower and curr_close > curr_low:
+                else:  # Ranging regime (ADX < 20): mean reversion at extremes
+                    # Long when price touches L3 and shows reversal (close > low)
+                    if curr_low <= l3 and curr_close > curr_low:
                         signals[i] = 0.25
                         position = 1
-                    # Short when price touches upper Donchian and shows bearish reversal
-                    elif curr_high >= upper and curr_close < curr_high:
+                    # Short when price touches H3 and shows reversal (close < high)
+                    elif curr_high >= h3 and curr_close < curr_high:
                         signals[i] = -0.25
                         position = -1
-                # In neutral chop (38.2-61.8): no new entries, wait for clearer regime
         elif position == 1:
-            # Long exit: price closes below mid OR chop shifts to strong ranging
-            if curr_close < mid or chop_val > 61.8:
+            # Long exit: price closes below L3 OR ADX drops to ranging
+            if curr_close < l3 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above mid OR chop shifts to strong ranging
-            if curr_close > mid or chop_val > 61.8:
+            # Short exit: price closes above H3 OR ADX drops to ranging
+            if curr_close > h3 or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dVolumeSpike_1wChopRegime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_12hVolumeSpike_1dADXRegime_v1"
+timeframe = "4h"
 leverage = 1.0
