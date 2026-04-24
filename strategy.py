@@ -1,34 +1,20 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator with 1w ADX regime filter and volume confirmation.
-- Jaw (blue): 13-period SMMA smoothed by 8 bars
-- Teeth (red): 8-period SMMA smoothed by 5 bars
-- Lips (green): 5-period SMMA smoothed by 3 bars
-- Long when Lips > Teeth > Jaw AND 1w ADX > 25 AND volume > 1.5 * 20-period average
-- Short when Jaw > Teeth > Lips AND 1w ADX > 25 AND volume > 1.5 * 20-period average
-- Exit when Alligator alignment breaks (Lips <= Teeth or Teeth <= Jaw for long, inverse for short) OR ADX < 20
-- Uses 12h primary with 1w HTF for ADX regime filter to avoid whipsaws in ranging markets
-- Alligator identifies trend emergence and direction; ADX filters for strong trends; volume confirms conviction
-- Designed to catch strong trends in both bull and bear markets while avoiding choppy periods
+Hypothesis: 4h Williams Alligator with 1d ADX regime filter and volume confirmation.
+- Williams Alligator: Jaw (EMA13, 8-period shift), Teeth (EMA8, 5-period shift), Lips (EMA5, 3-period shift)
+- Long when Lips > Teeth > Jaw (bullish alignment) AND 1d ADX > 25 (strong trend) AND volume > 1.5 * 20-period average
+- Short when Lips < Teeth < Jaw (bearish alignment) AND 1d ADX > 25 AND volume > 1.5 * 20-period average
+- Exit when Alligator alignment breaks (Lips <= Teeth for long, Lips >= Teeth for short) OR ADX < 20
+- Uses 4h primary with 1d HTF for ADX regime filter to avoid whipsaws in ranging markets
+- Alligator identifies trend initiation and direction; ADX filters for trending conditions; volume confirms conviction
+- Designed to work in both bull (strong bullish alignment) and bear (strong bearish alignment) markets with trend filter
 - Signal size: 0.25 discrete levels to minimize fee churn
-- Target: 50-150 total trades over 4 years (12-37/year)
+- Target: 75-200 total trades over 4 years (19-50/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def smma(values, period):
-    """Smoothed Moving Average (SMMA) - also known as RMA or Wilder's MA"""
-    result = np.zeros_like(values, dtype=float)
-    if len(values) < period:
-        return result
-    # First value is simple average
-    result[period-1] = np.mean(values[:period])
-    # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CLOSE) / PERIOD
-    for i in range(period, len(values)):
-        result[i] = (result[i-1] * (period-1) + values[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,40 +26,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator components on 12h data
-    jaw = smma(close, 13)  # Jaw (blue line)
-    teeth = smma(close, 8)  # Teeth (red line)
-    lips = smma(close, 5)   # Lips (green line)
+    # Williams Alligator components
+    # Jaw: EMA13 of median price, shifted 8 bars
+    # Teeth: EMA8 of median price, shifted 5 bars  
+    # Lips: EMA5 of median price, shifted 3 bars
+    median_price = (high + low) / 2
     
-    # Smooth the lines as per Alligator specification
-    jaw = smma(jaw, 8)
-    teeth = smma(teeth, 5)
-    lips = smma(lips, 3)
+    jaw_raw = pd.Series(median_price).ewm(span=13, adjust=False, min_periods=13).mean().values
+    teeth_raw = pd.Series(median_price).ewm(span=8, adjust=False, min_periods=8).mean().values
+    lips_raw = pd.Series(median_price).ewm(span=5, adjust=False, min_periods=5).mean().values
     
-    # Calculate 1w ADX for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # Need enough data for ADX calculation
+    # Apply shifts (Alligator lines are shifted into the future)
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
+    
+    # First values after shift are invalid
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
+    
+    # Calculate 1d ADX for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough data for ADX calculation
         return np.zeros(n)
     
-    # True Range calculation for 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # True Range calculation for 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range: max[(high-low), abs(high-close_prev), abs(low-close_prev)]
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = 0  # First value has no previous close
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -102,12 +98,12 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) == 0, 0, dx)
     
     # ADX is smoothed DX
-    adx_1w = wilders_smoothing(dx, period)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    adx_1d = wilders_smoothing(dx, period)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Trend filter: trending if ADX > 25, ranging if ADX < 20
-    strong_trend = adx_1w_aligned > 25
-    weak_trend = adx_1w_aligned < 20
+    strong_trend = adx_1d_aligned > 25
+    weak_trend = adx_1d_aligned < 20
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -117,37 +113,36 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    # Need Alligator lines (max period 13 + smoothing), volume MA (20), and ADX data
-    start_idx = max(13 + 8 + 5, 20, 30) + 5  # Extra buffer for smoothing
+    start_idx = max(13, 20, 30) + 1  # Need Alligator, volume MA, and ADX data
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(adx_1w_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw AND strong trend AND volume confirmation
+            # Long: Lips > Teeth > Jaw (bullish alignment) AND strong trend AND volume confirmation
             if lips[i] > teeth[i] and teeth[i] > jaw[i] and strong_trend[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaw > Teeth > Lips AND strong trend AND volume confirmation
-            elif jaw[i] > teeth[i] and teeth[i] > lips[i] and strong_trend[i] and volume_confirm[i]:
+            # Short: Lips < Teeth < Jaw (bearish alignment) AND strong trend AND volume confirmation
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and strong_trend[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Alligator alignment breaks (Lips <= Teeth or Teeth <= Jaw) OR weak trend
-            if lips[i] <= teeth[i] or teeth[i] <= jaw[i] or weak_trend[i]:
+            # Long exit: Lips <= Teeth (alignment breaks) OR weak trend
+            if lips[i] <= teeth[i] or weak_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator alignment breaks (Jaw <= Teeth or Teeth <= Lips) OR weak trend
-            if jaw[i] <= teeth[i] or teeth[i] <= lips[i] or weak_trend[i]:
+            # Short exit: Lips >= Teeth (alignment breaks) OR weak trend
+            if lips[i] >= teeth[i] or weak_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -155,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_1wADX_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_1dADX_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
