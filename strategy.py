@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d ATR regime filter + volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 1d for ATR-based regime filter.
-- Donchian breakout: Long when price > highest high of last 20 periods, Short when price < lowest low.
-- Regime filter: ATR(14) ratio > 1.2 = high volatility (trade breakouts), ATR ratio < 0.8 = low volatility (fade breakouts).
-- Volume confirmation: current volume > 1.3x 20-period volume MA to ensure participation.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+- Primary timeframe: 4h for execution, HTF: 1d for EMA trend.
+- Camarilla pivot levels (R3, S3) from prior 1d: Long when price > R3, Short when price < S3.
+- Trend filter: Only trade in direction of 1d EMA34 (long if EMA34 rising, short if falling).
+- Volume confirmation: current volume > 1.8x 20-period volume MA to ensure strong participation.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
 - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Works in bull via buying breakouts in high volatility, in bear via selling breakdowns in high volatility, and fading breakouts in low volatility/chop.
+- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
+- Uses actual Camarilla calculation: R3 = H + 1.1*(L-C), S3 = L - 1.1*(H-C).
 """
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -25,100 +26,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR(14) for regime filter
+    # Get 1d data for Camarilla pivots and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate Camarilla levels from prior 1d bar
+    # R3 = H + 1.1*(L - C), S3 = L - 1.1*(H - C)
+    camarilla_R3 = high_1d + 1.1 * (low_1d - close_1d)
+    camarilla_S3 = low_1d - 1.1 * (high_1d - close_1d)
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align to 4h: use prior 1d's levels (already completed bar)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
     
-    # ATR(50) for ratio
-    atr_50 = pd.Series(tr).ewm(alpha=1/50, adjust=False, min_periods=50).mean().values
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR ratio: short-term / long-term volatility
-    atr_ratio = np.where(atr_50 > 0, atr_14 / atr_50, 1.0)
-    
-    # Align 1d ATR ratio to 4h timeframe (completed 1d bar only)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # Donchian channels on 4h
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA
+    # Volume confirmation: current volume > 1.8 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * volume_ma)
+    volume_spike = volume > (1.8 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 50, 20)  # Donchian(20) + ATR(50) + volume MA(20)
+    start_idx = max(34, 20)  # EMA34 + volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Regime: ATR ratio > 1.2 = high volatility (trade breakouts), < 0.8 = low volatility (fade breakouts)
-            if atr_ratio_aligned[i] > 1.2:
-                # High volatility regime: trade breakouts in price direction
-                if close[i] > highest_high[i] and volume_spike[i]:
-                    # Upside breakout with volume: go long
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < lowest_low[i] and volume_spike[i]:
-                    # Downside breakdown with volume: go short
-                    signals[i] = -0.25
-                    position = -1
-            elif atr_ratio_aligned[i] < 0.8:
-                # Low volatility regime: fade breakouts (mean reversion)
-                if close[i] > highest_high[i] and volume_spike[i]:
-                    # Price broke above Donchian high in low vol: sell expecting reversion
-                    signals[i] = -0.25
-                    position = -1
-                elif close[i] < lowest_low[i] and volume_spike[i]:
-                    # Price broke below Donchian low in low vol: buy expecting reversion
-                    signals[i] = 0.25
-                    position = 1
+            # Only trade in direction of 1d EMA34 trend
+            if i > 0 and not np.isnan(ema_34_1d_aligned[i-1]):
+                ema34_slope = ema_34_1d_aligned[i] - ema_34_1d_aligned[i-1]
+                if ema34_slope > 0:  # Uptrend
+                    if close[i] > camarilla_R3_aligned[i] and volume_spike[i]:
+                        # Buy on R3 breakout in uptrend
+                        signals[i] = 0.25
+                        position = 1
+                elif ema34_slope < 0:  # Downtrend
+                    if close[i] < camarilla_S3_aligned[i] and volume_spike[i]:
+                        # Sell on S3 breakdown in downtrend
+                        signals[i] = -0.25
+                        position = -1
         elif position == 1:
-            # Long exit: price returns to midline or opposite breakout
-            midline = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] < midline or close[i] < lowest_low[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Long exit: price returns to Camarilla H3/L3 level or opposite break
+            # Calculate H3 and L3 for exit
+            camarilla_H3 = high_1d + 1.1 * (low_1d - close_1d) / 4  # H3 = H + 1.1*(L-C)/4
+            camarilla_L3 = low_1d - 1.1 * (high_1d - close_1d) / 4  # L3 = L - 1.1*(H-C)/4
+            camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+            camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+            
+            if not np.isnan(camarilla_H3_aligned[i]) and not np.isnan(camarilla_L3_aligned[i]):
+                if close[i] < camarilla_H3_aligned[i] or close[i] < camarilla_S3_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to midline or opposite breakout
-            midline = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] > midline or close[i] > highest_high[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Short exit: price returns to Camarilla H3/L3 level or opposite break
+            camarilla_H3 = high_1d + 1.1 * (low_1d - close_1d) / 4
+            camarilla_L3 = low_1d - 1.1 * (high_1d - close_1d) / 4
+            camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+            camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+            
+            if not np.isnan(camarilla_H3_aligned[i]) and not np.isnan(camarilla_L3_aligned[i]):
+                if close[i] > camarilla_L3_aligned[i] or close[i] > camarilla_R3_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "4h_Donchian20_1dATR_Ratio_VolumeSpike_v1"
+name = "4h_Camarilla_R3S3_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
