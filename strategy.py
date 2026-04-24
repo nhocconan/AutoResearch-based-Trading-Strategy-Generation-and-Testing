@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator + 1d EMA50 trend filter + volume spike confirmation.
-- Primary timeframe: 12h for lower trade frequency (target 50-150 total trades over 4 years).
-- HTF: 1d EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMAs on median price.
-- Entry: Long when Alligator aligned bullish (Lips > Teeth > Jaw) AND price > Lips AND 1d EMA50 bullish AND volume spike.
-         Short when Alligator aligned bearish (Lips < Teeth < Jaw) AND price < Lips AND 1d EMA50 bearish AND volume spike.
-- Exit: Price crosses opposite Alligator line (Lips crosses Jaw) OR loss of volume confirmation.
-- Volume: Current 12h volume > 1.5 * 20-period volume MA.
-- Signal size: 0.25 discrete to minimize fee churn.
-- Target: 80-120 total trades over 4 years (20-30/year) for 12h timeframe.
-Williams Alligator identifies trending vs ranging markets. In strong trends, the lines are well-separated and aligned.
-Volume spike confirms institutional participation. EMA50 filter ensures we only trade with the daily trend.
-This combination should work in both bull and bear markets by capturing strong directional moves with confirmation.
+Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 4h to balance trade frequency and signal quality.
+- HTF: 12h EMA34 for trend direction (bullish if close > EMA, bearish if close < EMA).
+- Volume: Current 4h volume > 2.0 * 20-period volume MA to capture institutional interest.
+- Camarilla: H3 and L3 levels calculated from prior day's range.
+- Entry: Long when price breaks above H3 AND 12h EMA34 bullish AND volume spike.
+         Short when price breaks below L3 AND 12h EMA34 bearish AND volume spike.
+- Exit: Price reverts to prior day's close (typical price as pivot) or loss of volume confirmation.
+- Signal size: 0.25 discrete to balance return and drawdown.
+- Target: 100-200 total trades over 4 years (25-50/year) for 4h timeframe.
+This strategy combines institutional volume confirmation with Camarilla pivot breakouts,
+filtered by 12h trend to avoid counter-trend trades. Works in both bull and bear markets
+by only taking trades in the direction of the 12h trend, with volume spikes confirming
+participation. Camarilla levels provide natural support/resistance for mean reversion exits.
 """
 
 import numpy as np
@@ -30,85 +31,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate median price for Alligator
-    median_price = (high + low) / 2
-    
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for EMA34 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    df_1d_close = df_1d['close'].values
-    ema_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA34 for trend filter
+    df_12h_close = df_12h['close'].values
+    ema_12h = pd.Series(df_12h_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 20-period 1d volume MA for volume confirmation
-    df_1d_volume = df_1d['volume'].values
-    vol_ma_1d = pd.Series(df_1d_volume).rolling(window=20, min_periods=20).mean().values
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # Williams Alligator components (SMA of median price)
-    # Jaw: 13-period SMA, shifted 8 bars
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8)
-    # Teeth: 8-period SMA, shifted 5 bars
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5)
-    # Lips: 5-period SMA, shifted 3 bars
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3)
+    # Calculate Camarilla levels from prior day's OHLC
+    # H3 = close + 1.1 * (high - low) / 4
+    # L3 = close - 1.1 * (high - low) / 4
+    # Pivot (typical price) = (high + low + close) / 3
+    h1d = df_1d['high'].values
+    l1d = df_1d['low'].values
+    c1d = df_1d['close'].values
     
-    jaw_values = jaw.values
-    teeth_values = teeth.values
-    lips_values = lips.values
+    camarilla_h3 = c1d + 1.1 * (h1d - l1d) / 4
+    camarilla_l3 = c1d - 1.1 * (h1d - l1d) / 4
+    camarilla_pivot = (h1d + l1d + c1d) / 3  # Typical price as pivot
     
-    # Align HTF indicators to 12h
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Align HTF indicators to 4h
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Volume confirmation: current 12h volume > 1.5 * 20-period 1d volume MA (aligned)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    # Volume confirmation: current 4h volume > 2.0 * 20-period 12h volume MA
+    df_12h_volume = df_12h['volume'].values
+    vol_ma_12h = pd.Series(df_12h_volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    volume_spike = volume > (2.0 * vol_ma_12h_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from index where all indicators are ready (max shift is 8 for jaw)
-    start_idx = 13  # Need at least 13 for jaw calculation + 8 shift = 21, but we use 13 to be safe
+    # Start from index where all indicators are ready
+    start_idx = max(34, 20)  # Need enough bars for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(jaw_values[i]) or np.isnan(teeth_values[i]) or np.isnan(lips_values[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_pivot_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_lips = lips_values[i]
-        curr_jaw = jaw_values[i]
-        
-        # Alligator alignment conditions
-        bullish_aligned = (curr_lips > teeth_values[i]) and (teeth_values[i] > jaw_values[i])
-        bearish_aligned = (curr_lips < teeth_values[i]) and (teeth_values[i] < jaw_values[i])
+        curr_high = high[i]
+        curr_low = low[i]
         
         if position == 0:
-            # Check for entry signals with volume spike and trend filter
+            # Check for breakout signals with volume spike
             if volume_spike[i]:
-                # Bullish entry: Alligator bullish AND price > Lips AND 1d EMA50 bullish
-                if bullish_aligned and curr_close > curr_lips and curr_close > ema_1d_aligned[i]:
+                # Bullish breakout: price > H3 AND 12h EMA34 bullish (close > EMA)
+                if curr_close > camarilla_h3_aligned[i] and curr_close > ema_12h_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: Alligator bearish AND price < Lips AND 1d EMA50 bearish
-                elif bearish_aligned and curr_close < curr_lips and curr_close < ema_1d_aligned[i]:
+                # Bearish breakout: price < L3 AND 12h EMA34 bearish (close < EMA)
+                elif curr_close < camarilla_l3_aligned[i] and curr_close < ema_12h_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price crosses below Jaw (Alligator wake up signal) OR loss of volume confirmation
-            if curr_close < curr_jaw or not volume_spike[i]:
+            # Long exit: price reverts to pivot OR loss of volume confirmation
+            if curr_close <= camarilla_pivot_aligned[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Jaw (Alligator wake up signal) OR loss of volume confirmation
-            if curr_close > curr_jaw or not volume_spike[i]:
+            # Short exit: price reverts to pivot OR loss of volume confirmation
+            if curr_close >= camarilla_pivot_aligned[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_12hEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
