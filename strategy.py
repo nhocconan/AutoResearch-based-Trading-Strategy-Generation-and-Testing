@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H4/L4 breakout with 12h EMA50 trend filter, volume confirmation, and ATR regime filter.
-- Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Volume confirmation requires >2.0x 24-period average to ensure conviction.
-- ATR regime filter (current ATR > 0.7x 50-period average) avoids low-momentum whipsaws.
-- Exits on Camarilla L4/H4 retest or EMA50 trend violation.
-- Designed for 20-30 trades/year (80-120 total over 4 years) to stay within fee-efficient range.
-- Combines proven elements: Camarilla structure + 12h trend filter + volume/volatility confirmation.
-- Targets BTC and ETH primarily; SOL as secondary validation.
+Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume spike confirmation.
+- Uses 4h EMA50 for trend direction (bullish if price > EMA50, bearish if price < EMA50)
+- Enters long when price breaks above Camarilla H3 (based on prior 4h bar) in bullish 4h trend
+- Enters short when price breaks below Camarilla L3 (based on prior 4h bar) in bearish 4h trend
+- Requires volume > 2.0x 20-period average for conviction
+- Exits on retest of Camarilla L3/H3 or EMA50 trend violation
+- Uses discrete position size 0.20 to limit drawdown and reduce fee churn
+- Session filter: only trade between 08:00-20:00 UTC to avoid low-volume Asian session
+- Designed for 15-30 trades/year (60-120 total over 4 years) to stay within fee-efficient range
 """
 
 import numpy as np
@@ -24,91 +25,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Prior 12h OHLC (completed 12h bar)
-    high_12h = df_12h['high'].shift(1).values
-    low_12h = df_12h['low'].shift(1).values
-    close_12h = df_12h['close'].shift(1).values
+    # Prior 4h OHLC (completed 4h bar)
+    high_4h = df_4h['high'].shift(1).values
+    low_4h = df_4h['low'].shift(1).values
+    close_4h = df_4h['close'].shift(1).values
     
-    # Align to 4h timeframe
-    high_12h_aligned = align_htf_to_ltf(prices, df_12h, high_12h)
-    low_12h_aligned = align_htf_to_ltf(prices, df_12h, low_12h)
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    # Align to 1h timeframe
+    high_4h_aligned = align_htf_to_ltf(prices, df_4h, high_4h)
+    low_4h_aligned = align_htf_to_ltf(prices, df_4h, low_4h)
+    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
     
-    # Calculate Camarilla levels
-    camarilla_h4 = close_12h_aligned + 1.1 * (high_12h_aligned - low_12h_aligned) / 2
-    camarilla_l4 = close_12h_aligned - 1.1 * (high_12h_aligned - low_12h_aligned) / 2
+    # Calculate Camarilla levels (H3/L3) from prior 4h bar
+    camarilla_h3 = close_4h_aligned + 1.1 * (high_4h_aligned - low_4h_aligned) / 4
+    camarilla_l3 = close_4h_aligned - 1.1 * (high_4h_aligned - low_4h_aligned) / 4
     
-    # 12h EMA50 trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA50 trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Volume confirmation: > 2.0x 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for volatility regime filter
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # ATR ratio: current ATR / 50-period average (avoid low volatility chop)
-    atr_ma_long = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / np.where(atr_ma_long > 0, atr_ma_long, 1)
+    # Precompute session hours (08:00-20:00 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 24, atr_period, 50)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr_ratio[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average) + ATR ratio > 0.7 (avoid low vol)
+        # Volume confirmation (> 2.0x average)
         volume_confirm = volume[i] > 2.0 * vol_ma[i]
-        vol_regime = atr_ratio[i] > 0.7
         
         if position == 0:
-            # Long: Close > H4 AND price above 12h EMA50 AND volume confirmation AND vol regime
-            if close[i] > camarilla_h4[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm and vol_regime:
-                signals[i] = 0.25
+            # Long: Close > H3 AND price above 4h EMA50 AND volume confirmation
+            if close[i] > camarilla_h3[i] and close[i] > ema_50_4h_aligned[i] and volume_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short: Close < L4 AND price below 12h EMA50 AND volume confirmation AND vol regime
-            elif close[i] < camarilla_l4[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm and vol_regime:
-                signals[i] = -0.25
+            # Short: Close < L3 AND price below 4h EMA50 AND volume confirmation
+            elif close[i] < camarilla_l3[i] and close[i] < ema_50_4h_aligned[i] and volume_confirm:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Close < L4 OR price crosses below 12h EMA50
-            if close[i] < camarilla_l4[i] or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: Close < L3 OR price crosses below 4h EMA50
+            if close[i] < camarilla_l3[i] or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Close > H4 OR price crosses above 12h EMA50
-            if close[i] > camarilla_h4[i] or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: Close > H3 OR price crosses above 4h EMA50
+            if close[i] > camarilla_h3[i] or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_12hEMA50_VolumeATR_Filter_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_Breakout_4hEMA50_VolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
