@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation + ATR stoploss.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 - Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1d EMA34 for trend filter (price > EMA34 = uptrend, price < EMA34 = downtrend).
-- Entry: Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume > 2.0 * 4h volume MA(20);
-         Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume > 2.0 * 4h volume MA(20).
-- Exit: ATR-based stoploss (2.5 * ATR(14)) and close-based reversal (opposite Donchian break).
+- Entry: Long when price breaks above H3 level AND volume > 2.0 * 4h volume MA(20);
+         Short when price breaks below L3 level AND volume > 2.0 * 4h volume MA(20).
+- Exit: Close below/above L3/H3 levels respectively for profit-taking, with ATR-based stoploss (2.0 * ATR(14)).
 - Signal size: 0.25 discrete to control fee drag.
-- Designed to capture strong trending moves with volume confirmation while avoiding choppy markets via 1d trend filter.
-- Works in both bull and bear markets: trend filter ensures we only trade in direction of higher timeframe trend.
+- Uses Camarilla pivot levels for intraday support/resistance, volume confirmation for participation,
+  1d EMA34 trend filter to avoid counter-trend trades, and ATR for risk management.
+- Designed to work in both bull and bear markets via trend filter and breakout logic.
 """
 
 import numpy as np
@@ -26,7 +27,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels, volume MA(20), and ATR(14)
+    # Get 4h data for Camarilla calculation, volume MA(20), and ATR(14)
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 20:
         return np.zeros(n)
@@ -35,12 +36,6 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     volume_4h = df_4h['volume'].values
-    
-    # Calculate Donchian(20) channels for 4h timeframe
-    # Upper band: 20-period high
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    # Lower band: 20-period low
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # Calculate ATR(14) for 4h timeframe
     tr1 = high_4h[1:] - low_4h[1:]
@@ -52,6 +47,18 @@ def generate_signals(prices):
     
     # Calculate volume MA(20) for 4h timeframe
     vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Camarilla pivot levels for 4h timeframe
+    # Based on previous day's high, low, close
+    # H3 = close + 1.1 * (high - low) / 4
+    # L3 = close - 1.1 * (high - low) / 4
+    # We need to use the previous 4h bar's high/low/close for current bar's levels
+    prev_high = np.concatenate([[high_4h[0]], high_4h[:-1]])  # shift by 1
+    prev_low = np.concatenate([[low_4h[0]], low_4h[:-1]])
+    prev_close = np.concatenate([[close_4h[0]], close_4h[:-1]])
+    
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -71,13 +78,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 14)  # EMA34 needs 34, Donchian needs 20, ATR needs 14
+    start_idx = max(34, 20, 14)  # EMA34 needs 34, volume MA needs 20, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+            np.isnan(camarilla_h3[i]) or 
+            np.isnan(camarilla_l3[i]) or 
             np.isnan(vol_ma_4h[i]) or 
             np.isnan(atr14[i])):
             if position != 0:
@@ -98,22 +105,22 @@ def generate_signals(prices):
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: Price breaks above Donchian(20) high AND price > 1d EMA34 (uptrend)
-                if curr_high > donchian_high[i] and curr_close > ema_34_aligned[i]:
+                # Long: price breaks above H3 level AND price > 1d EMA34 (uptrend)
+                if curr_high > camarilla_h3[i] and curr_close > ema_34_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
-                # Short: Price breaks below Donchian(20) low AND price < 1d EMA34 (downtrend)
-                elif curr_low < donchian_low[i] and curr_close < ema_34_aligned[i]:
+                # Short: price breaks below L3 level AND price < 1d EMA34 (downtrend)
+                elif curr_low < camarilla_l3[i] and curr_close < ema_34_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
         elif position == 1:
             # Long position: check exit conditions
-            # Stoploss: 2.5 * ATR below entry
-            stoploss = entry_price - 2.5 * curr_atr
-            # Exit: close below Donchian(20) low (reversal signal)
-            if curr_close < stoploss or curr_close < donchian_low[i]:
+            # Stoploss: 2.0 * ATR below entry
+            stoploss = entry_price - 2.0 * curr_atr
+            # Profit take: close below L3 level (reversal signal)
+            if curr_close < stoploss or curr_close < camarilla_l3[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -121,10 +128,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Short position: check exit conditions
-            # Stoploss: 2.5 * ATR above entry
-            stoploss = entry_price + 2.5 * curr_atr
-            # Exit: close above Donchian(20) high (reversal signal)
-            if curr_close > stoploss or curr_close > donchian_high[i]:
+            # Stoploss: 2.0 * ATR above entry
+            stoploss = entry_price + 2.0 * curr_atr
+            # Profit take: close above H3 level (reversal signal)
+            if curr_close > stoploss or curr_close > camarilla_h3[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -133,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
