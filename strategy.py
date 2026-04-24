@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
-- Primary timeframe: 6h targeting 75-150 total trades over 4 years (19-37/year).
-- HTF: 1d for trend filter (price above/below cloud) and TK cross confirmation.
-- Entry: Long when price breaks above 6h Donchian(20) high AND price > 1d Ichimoku cloud AND bullish TK cross (Tenkan > Kijun).
-         Short when price breaks below 6h Donchian(20) low AND price < 1d Ichimoku cloud AND bearish TK cross (Tenkan < Kijun).
-- Exit: Opposite Donchian breakout OR price crosses 1d cloud in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag.
-- Volume confirmation: 6h ATR(1) > 1.5 * ATR(20) to ensure volatility expansion.
-- Ichimoku components calculated on 1d timeframe: Tenkan (9-period), Kijun (26-period), Senkou Span A/B (26/52-period).
-- Works in bull markets (buy cloud breakouts in uptrend) and bear markets (sell cloud breakdowns in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on Donchian breakouts with strict Ichimoku filters.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d ATR volume spike and 1w EMA34 trend filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for ATR volume confirmation, 1w for EMA34 trend filter.
+- Entry: Long when price breaks above Camarilla H3 AND ATR ratio > 2.0 AND price > 1w EMA34.
+         Short when price breaks below Camarilla L3 AND ATR ratio > 2.0 AND price < 1w EMA34.
+- Exit: Opposite Camarilla breakout (L3 for long exit, H3 for short exit).
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- ATR ratio (current ATR/20-period ATR) > 2.0 confirms significant volatility expansion.
+- 1w EMA34 provides trend filter to avoid counter-trend trades.
+- Camarilla levels derived from 1d OHLC: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
 """
 
 import numpy as np
@@ -30,37 +31,12 @@ def atr(high, low, close, period):
     true_range[0] = high_low[0]  # First period
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def donchian_channels(high, low, period):
-    """Calculate Donchian Channels."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def ichimoku_cloud(high, low, close):
-    """Calculate Ichimoku Cloud components."""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Actual cloud bounds (shifted values are handled by alignment)
-    span_a = senkou_a
-    span_b = senkou_b
-    
-    return tenkan, kijun, span_a, span_b
+def camarilla_levels(high, low, close):
+    """Calculate Camarilla H3 and L3 levels."""
+    range_hl = high - low
+    H3 = close + 1.1 * range_hl / 2
+    L3 = close - 1.1 * range_hl / 2
+    return H3, L3
 
 def generate_signals(prices):
     n = len(prices)
@@ -72,41 +48,39 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate 1d Ichimoku Cloud for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Calculate 1w trend filter: EMA34
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    tenkan_1d, kijun_1d, span_a_1d, span_b_1d = ichimoku_cloud(
-        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
-    )
+    ema34_1w = ema(df_1w['close'].values, 34)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w, additional_delay_bars=1)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    span_a_1d_aligned = align_htf_to_ltf(prices, df_1d, span_a_1d)
-    span_b_1d_aligned = align_htf_to_ltf(prices, df_1d, span_b_1d)
+    # Calculate 1d ATR for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Calculate 6h ATR for volume spike filter
-    atr_20 = atr(high, low, close, 20)
-    atr_current = atr(high, low, close, 1)
+    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
+    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
     atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
     
-    # Donchian channels on 6h (20-period)
-    donch_hi, donch_lo = donchian_channels(high, low, 20)
+    # Calculate 1d Camarilla levels (H3, L3)
+    camarilla_H3, camarilla_L3 = camarilla_levels(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 60  # Need sufficient data for all indicators
+    start_idx = 50  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or
-            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
-            np.isnan(span_a_1d_aligned[i]) or np.isnan(span_b_1d_aligned[i]) or
-            np.isnan(atr_ratio[i])):
+        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,37 +88,29 @@ def generate_signals(prices):
         
         curr_close = close[i]
         
-        # Determine cloud bounds and TK cross
-        upper_cloud = np.maximum(span_a_1d_aligned[i], span_b_1d_aligned[i])
-        lower_cloud = np.minimum(span_a_1d_aligned[i], span_b_1d_aligned[i])
-        bullish_tk = tenkan_1d_aligned[i] > kijun_1d_aligned[i]
-        bearish_tk = tenkan_1d_aligned[i] < kijun_1d_aligned[i]
-        
-        # Exit conditions: opposite Donchian breakout OR price crosses cloud in opposite direction
+        # Exit conditions: opposite Camarilla breakout
         if position != 0:
-            # Exit long: price breaks below Donchian low OR price falls below cloud
+            # Exit long: price breaks below Camarilla L3
             if position == 1:
-                if curr_close < donch_lo[i] or curr_close < lower_cloud:
+                if curr_close < camarilla_L3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Donchian high OR price rises above cloud
+            # Exit short: price breaks above Camarilla H3
             elif position == -1:
-                if curr_close > donch_hi[i] or curr_close > upper_cloud:
+                if curr_close > camarilla_H3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with cloud filter, TK cross, and volume confirmation
+        # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: price breaks above Donchian high AND price > cloud AND bullish TK cross AND volatility expansion
-            if (curr_close > donch_hi[i] and curr_close > upper_cloud and bullish_tk and 
-                atr_ratio[i] > 1.5):
+            # Long: price breaks above Camarilla H3 AND ATR ratio > 2.0 AND bullish 1w trend
+            if curr_close > camarilla_H3_aligned[i] and atr_ratio_aligned[i] > 2.0 and curr_close > ema34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND price < cloud AND bearish TK cross AND volatility expansion
-            elif (curr_close < donch_lo[i] and curr_close < lower_cloud and bearish_tk and 
-                  atr_ratio[i] > 1.5):
+            # Short: price breaks below Camarilla L3 AND ATR ratio > 2.0 AND bearish 1w trend
+            elif curr_close < camarilla_L3_aligned[i] and atr_ratio_aligned[i] > 2.0 and curr_close < ema34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -156,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IchimokuCloud_DonchianBreakout_VolumeSpike_TKCross_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_1wEMA34_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
