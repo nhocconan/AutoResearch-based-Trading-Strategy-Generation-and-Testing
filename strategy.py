@@ -3,13 +3,13 @@
 Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and 1d volume spike confirmation.
 - Primary timeframe: 4h for entries/exits.
 - HTF: 1d EMA(34) for trend direction (bullish if price > EMA34, bearish if price < EMA34).
-- Volume: Current 4h volume > 2.0 * 20-period 1d volume MA to avoid false breakouts.
+- Volume: Current 4h volume > 2.0 * 20-period volume MA from 1d to avoid false breakouts.
 - Entry: Long when price breaks above Donchian(20) high AND 1d EMA34 trend bullish AND volume spike.
          Short when price breaks below Donchian(20) low AND 1d EMA34 trend bearish AND volume spike.
 - Exit: Opposite Donchian breakout or loss of volume confirmation.
 - Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
 - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Designed to work in both bull and bear markets via trend filter and volume confirmation.
+- Why it should work in both bull and bear: The 1d EMA34 trend filter ensures we only trade in the direction of the higher timeframe trend, reducing whipsaws in ranging markets. Volume confirmation ensures breakouts have conviction. Donchian(20) provides clear structure for entries and exits.
 """
 
 import numpy as np
@@ -75,11 +75,11 @@ def generate_signals(prices):
             # Check for entry signals with volume spike
             if volume_spike[i]:
                 # Bullish breakout: price breaks above upper Donchian AND 1d EMA34 bullish (price > EMA34)
-                if curr_high > upper_donchian and curr_close > ema_34_val:
+                if curr_high > upper_donchian and ema_34_val > 0 and curr_close > ema_34_val:
                     signals[i] = 0.25
                     position = 1
                 # Bearish breakout: price breaks below lower Donchian AND 1d EMA34 bearish (price < EMA34)
-                elif curr_low < lower_donchian and curr_close < ema_34_val:
+                elif curr_low < lower_donchian and ema_34_val > 0 and curr_close < ema_34_val:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
