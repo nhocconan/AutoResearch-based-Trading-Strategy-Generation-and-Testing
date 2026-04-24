@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R Extreme + 12h EMA50 Trend + Volume Spike
-- Primary timeframe: 6h for execution, HTF: 12h for EMA trend.
-- Williams %R(14) extreme levels: < -90 (oversold) for long, > -10 (overbought) for short.
-- Trend filter: Only trade in direction of 12h EMA50 (long if close > EMA50, short if close < EMA50).
-- Volume confirmation: current volume > 2.0x 20-period volume MA to avoid low-liquidity false signals.
-- Works in bull via buying oversold dips in uptrend, in bear via selling overbought rallies in downtrend.
+Hypothesis: 4h Williams %R extreme with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 4h for execution, HTF: 1d for EMA trend.
+- Williams %R(14): Oversold < -80 (long), Overbought > -20 (short).
+- Entry: Williams %R extreme + volume > 2.0x 20-period volume MA + price in direction of 1d EMA34.
+- Exit: Williams %R returns to neutral range (-50) or opposite extreme.
+- Trend filter: Only trade in direction of 1d EMA34 (long if close > EMA34, short if close < EMA34).
+- Works in bull via buying oversold pullbacks in uptrend, in bear via selling overbought rallies in downtrend.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-150 total trades over 4 years (19-37/year) for 6h timeframe.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -25,23 +26,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for EMA trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50 = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h EMA to 6h
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Align 1d EMA to 4h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Williams %R(14) on 6h
+    # Williams %R(14) on 4h
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume confirmation: current volume > 2.0 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,11 +50,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 14, 20)  # EMA50 + Williams %R + volume MA
+    start_idx = max(34, 20, 14)  # EMA34 + volume MA + Williams %R
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]) or
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(williams_r[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,24 +64,24 @@ def generate_signals(prices):
         if position == 0:
             # Check for Williams %R extreme with volume spike and trend filter
             if volume_spike[i]:
-                # Long: Williams %R < -90 (oversold) and close > 12h EMA50 (uptrend)
-                if williams_r[i] < -90 and close[i] > ema_50_aligned[i]:
+                # Long entry: Williams %R < -80 (oversold) and close > 1d EMA34 (uptrend)
+                if williams_r[i] < -80 and close[i] > ema_34_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R > -10 (overbought) and close < 12h EMA50 (downtrend)
-                elif williams_r[i] > -10 and close[i] < ema_50_aligned[i]:
+                # Short entry: Williams %R > -20 (overbought) and close < 1d EMA34 (downtrend)
+                elif williams_r[i] > -20 and close[i] < ema_34_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: Williams %R > -50 (return to neutral) or opposite signal
-            if williams_r[i] > -50:
+            # Long exit: Williams %R returns to neutral (> -50) or opposite extreme
+            if williams_r[i] > -50:  # Exit when momentum fades
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R < -50 (return to neutral) or opposite signal
-            if williams_r[i] < -50:
+            # Short exit: Williams %R returns to neutral (< -50) or opposite extreme
+            if williams_r[i] < -50:  # Exit when momentum fades
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_Extreme_12hEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_WilliamsR_Extreme_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
