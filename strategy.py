@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA34 trend filter and 1d volume spike confirmation.
-- Primary timeframe: 4h targeting 80-120 total trades over 4 years (20-30/year).
-- HTF: 12h for EMA trend filter, 1d for ATR-based volume spike confirmation.
-- Entry: Long when price breaks above Camarilla R1 AND ATR(1)/ATR(20) > 1.5 AND price > 12h EMA34.
-         Short when price breaks below Camarilla S1 AND ATR(1)/ATR(20) > 1.5 AND price < 12h EMA34.
-- Exit: Opposite Camarilla breakout OR price crosses 12h EMA34 in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag.
-- Uses proven Camarilla pivot structure with volume confirmation and trend filter.
-- Works in bull markets (buy R1 breakouts in uptrend) and bear markets (sell S1 breakdowns in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on strict confluence requirements.
+Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and volume confirmation.
+- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
+- HTF: 4h for EMA200 trend filter and 1d for ATR-based volume spike confirmation.
+- Entry: Long when RSI(14) < 30 AND price > 4h EMA200 AND volume spike (current ATR/20-period ATR > 1.5).
+         Short when RSI(14) > 70 AND price < 4h EMA200 AND volume spike.
+- Exit: RSI crosses back to neutral (40-60 range) or opposite RSI extreme.
+- Signal size: 0.20 discrete to minimize fee drag while maintaining profit potential.
+- Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+- Session filter: 08-20 UTC to avoid low-volume Asian session noise.
+- Estimated trades: ~100 total over 4 years (~25/year) based on RSI extreme frequency with strict filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def ema(values, period):
-    """Calculate Exponential Moving Average."""
-    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
+def rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def atr(high, low, close, period):
     """Calculate Average True Range."""
@@ -26,15 +33,12 @@ def atr(high, low, close, period):
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
     true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    true_range[0] = high_low[0]  # First period
+    true_range[0] = high_low[0]
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def camarilla_pivots(high, low, close):
-    """Calculate Camarilla Pivot Points (R1, S1)."""
-    pivot = (high + low + close) / 3.0
-    r1 = pivot + (high - low) * 1.1 / 12.0
-    s1 = pivot - (high - low) * 1.1 / 12.0
-    return r1, s1
+def ema(values, period):
+    """Calculate Exponential Moving Average."""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -45,85 +49,92 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 12h trend filter: EMA34
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 40:
+    # Calculate 4h trend filter: EMA200
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 100:
         return np.zeros(n)
     
-    ema34_12h = ema(df_12h['close'].values, 34)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h, additional_delay_bars=1)
+    ema200_4h = ema(df_4h['close'].values, 200)
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
     
-    # Calculate 1d ATR for volume spike filter
+    # Calculate 1d ATR for volume spike confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
     atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
     atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
-    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
+    atr_ratio = atr_current / (atr_20 + 1e-10)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Camarilla pivots on 4h (using previous bar's high/low/close)
-    camarilla_hi = np.zeros(n)
-    camarilla_lo = np.zeros(n)
-    for i in range(1, n):
-        r1, s1 = camarilla_pivots(high[i-1], low[i-1], close[i-1])
-        camarilla_hi[i] = r1
-        camarilla_lo[i] = s1
-    # First bar remains 0 (no prior data)
+    # Calculate 1h RSI
+    rsi_values = rsi(close, 14)
+    
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 40  # Need sufficient data for all indicators
+    start_idx = 200  # Need sufficient data for 4h EMA200
     
     for i in range(start_idx, n):
-        # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(camarilla_hi[i]) or np.isnan(camarilla_lo[i]) or
-            np.isnan(ema34_12h_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        # Skip if not in trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        # Skip if data not ready
+        if (np.isnan(ema200_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(rsi_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_rsi = rsi_values[i]
         
-        # Exit conditions: opposite Camarilla breakout OR price crosses 12h EMA34 in opposite direction
+        # Exit conditions: RSI returns to neutral range (40-60) or opposite extreme
         if position != 0:
-            # Exit long: price breaks below Camarilla S1 OR price falls below 12h EMA34
+            # Exit long: RSI >= 40 or RSI >= 70 (overbought)
             if position == 1:
-                if curr_close < camarilla_lo[i] or curr_close < ema34_12h_aligned[i]:
+                if curr_rsi >= 40:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Camarilla R1 OR price rises above 12h EMA34
+            # Exit short: RSI <= 60 or RSI <= 30 (oversold)
             elif position == -1:
-                if curr_close > camarilla_hi[i] or curr_close > ema34_12h_aligned[i]:
+                if curr_rsi <= 60:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
+        # Entry conditions: RSI extreme with trend filter and volume confirmation
         if position == 0:
-            # Long: price breaks above Camarilla R1 AND ATR ratio > 1.5 AND bullish 12h trend
-            if curr_close > camarilla_hi[i] and atr_ratio_aligned[i] > 1.5 and curr_close > ema34_12h_aligned[i]:
-                signals[i] = 0.25
+            # Long: RSI < 30 (oversold) AND bullish 4h trend AND volume spike
+            if curr_rsi < 30 and curr_close > ema200_4h_aligned[i] and atr_ratio_aligned[i] > 1.5:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Camarilla S1 AND ATR ratio > 1.5 AND bearish 12h trend
-            elif curr_close < camarilla_lo[i] and atr_ratio_aligned[i] > 1.5 and curr_close < ema34_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: RSI > 70 (overbought) AND bearish 4h trend AND volume spike
+            elif curr_rsi > 70 and curr_close < ema200_4h_aligned[i] and atr_ratio_aligned[i] > 1.5:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.25
+            signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dATR_VolumeSpike_12hEMA34_TrendFilter_v1"
-timeframe = "4h"
+name = "1h_RSIMeanReversion_4hEMA200_TrendFilter_1dATR_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
