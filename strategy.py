@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 1d for ADX regime filter.
+Hypothesis: 4h Donchian(20) breakout + 1d ATR regime filter + volume confirmation.
+- Primary timeframe: 4h for execution, HTF: 1d for ATR-based regime filter.
 - Donchian breakout: Long when price > highest high of last 20 periods, Short when price < lowest low.
-- Regime filter: ADX(14) > 25 = trending (trade breakouts in trend direction), ADX < 20 = ranging (fade breakouts).
-- Volume confirmation: current volume > 1.5x 20-period volume MA to ensure participation.
+- Regime filter: ATR(14) ratio > 1.2 = high volatility (trade breakouts), ATR ratio < 0.8 = low volatility (fade breakouts).
+- Volume confirmation: current volume > 1.3x 20-period volume MA to ensure participation.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
 - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend, and fading breakouts in ranges.
+- Works in bull via buying breakouts in high volatility, in bear via selling breakdowns in high volatility, and fading breakouts in low volatility/chop.
 """
 
 import numpy as np
@@ -25,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ADX(14) for regime filter
+    # Calculate 1d ATR(14) for regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
@@ -41,46 +41,36 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # ATR(14)
+    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Smoothed values (Wilder's smoothing)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_di_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # ATR(50) for ratio
+    atr_50 = pd.Series(tr).ewm(alpha=1/50, adjust=False, min_periods=50).mean().values
     
-    # DI and DX
-    plus_di = 100 * plus_di_smooth / atr
-    minus_di = 100 * minus_di_smooth / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # ATR ratio: short-term / long-term volatility
+    atr_ratio = np.where(atr_50 > 0, atr_14 / atr_50, 1.0)
     
-    # Align 1d ADX to 4h timeframe (completed 1d bar only)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1d ATR ratio to 4h timeframe (completed 1d bar only)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Donchian channels on 4h
     donchian_window = 20
     highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    # Volume confirmation: current volume > 1.3 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    volume_spike = volume > (1.3 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(donchian_window, 34, 20)  # Donchian(20) + ADX buffer + volume MA(20)
+    start_idx = max(donchian_window, 50, 20)  # Donchian(20) + ATR(50) + volume MA(20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or 
+        if (np.isnan(atr_ratio_aligned[i]) or 
             np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
@@ -89,30 +79,25 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Regime: ADX > 25 = trending, ADX < 20 = ranging
-            if adx_aligned[i] > 25:
-                # Trending regime: trade breakouts in trend direction
-                # Use 1d EMA34 for trend direction
-                ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-                ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-                if not np.isnan(ema_34_1d_aligned[i]) and not np.isnan(ema_34_1d_aligned[i-1]):
-                    ema34_slope = ema_34_1d_aligned[i] - ema_34_1d_aligned[i-1]
-                    if close[i] > highest_high[i] and ema34_slope > 0 and volume_spike[i]:
-                        # Uptrend: buy on upside breakout
-                        signals[i] = 0.25
-                        position = 1
-                    elif close[i] < lowest_low[i] and ema34_slope < 0 and volume_spike[i]:
-                        # Downtrend: sell on downside breakdown
-                        signals[i] = -0.25
-                        position = -1
-            elif adx_aligned[i] < 20:
-                # Ranging regime: fade breakouts (mean reversion)
+            # Regime: ATR ratio > 1.2 = high volatility (trade breakouts), < 0.8 = low volatility (fade breakouts)
+            if atr_ratio_aligned[i] > 1.2:
+                # High volatility regime: trade breakouts in price direction
                 if close[i] > highest_high[i] and volume_spike[i]:
-                    # Price broke above Donchian high in range: sell expecting reversion
+                    # Upside breakout with volume: go long
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < lowest_low[i] and volume_spike[i]:
+                    # Downside breakdown with volume: go short
+                    signals[i] = -0.25
+                    position = -1
+            elif atr_ratio_aligned[i] < 0.8:
+                # Low volatility regime: fade breakouts (mean reversion)
+                if close[i] > highest_high[i] and volume_spike[i]:
+                    # Price broke above Donchian high in low vol: sell expecting reversion
                     signals[i] = -0.25
                     position = -1
                 elif close[i] < lowest_low[i] and volume_spike[i]:
-                    # Price broke below Donchian low in range: buy expecting reversion
+                    # Price broke below Donchian low in low vol: buy expecting reversion
                     signals[i] = 0.25
                     position = 1
         elif position == 1:
@@ -134,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dADX_Regime_VolumeSpike_v1"
+name = "4h_Donchian20_1dATR_Ratio_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
