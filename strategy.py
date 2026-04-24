@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
-- Primary timeframe: 12h for execution, HTF: 1d for ATR regime filter (trend/chop detection).
-- Entry: Price breaks above Donchian(20) high (long) or below Donchian(20) low (short) on 12h close,
-         with volume > 1.5x 20-period volume MA, and ATR(14)/ATR(50) > 0.8 (volatility expansion regime).
-- Direction filter: ATR regime filter ensures we trade during volatility expansion, avoiding choppy markets.
-- Exit: Price returns to Donchian(20) midpoint or ATR regime reverses (ATR ratio < 0.6).
+Hypothesis: 6h Elder Ray Power + 1d ADX Regime Filter + Volume Confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for ADX regime and Elder Ray calculation.
+- Elder Ray: Bull Power = High - EMA13(close), Bear Power = Low - EMA13(close).
+- Regime filter: ADX(14) > 25 = trending (only trade in direction of EMA50 slope), ADX < 20 = ranging (mean revert at Elder Ray extremes).
+- Volume confirmation: current volume > 1.5x 20-period volume MA to avoid low-volatility false signals.
 - Discrete signal size: 0.25 to balance return and drawdown control.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend,
-          and avoids whipsaws in ranging markets via ATR regime filter.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+- Works in bull via buying strong Bull Power in uptrend, in bear via selling strong Bear Power in downtrend, and mean reverting in ranges.
 """
 
 import numpy as np
@@ -27,39 +25,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR(14) and ATR(50) for regime filter
+    # Calculate 1d EMA13 for Elder Ray (using close)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate 1d EMA50 for trend slope
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate 1d ADX(14) for regime filter
+    # ADX requires +DI, -DI, and DX calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
     
-    # ATR(14) and ATR(50)
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # ATR ratio: short-term / long-term ATR (volatility expansion indicator)
-    atr_ratio = atr_14 / (atr_50 + 1e-10)  # avoid division by zero
+    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_di_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align ATR ratio to 12h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # DI and DX
+    plus_di = 100 * plus_di_smooth / atr
+    minus_di = 100 * minus_di_smooth / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Donchian(20) channels from 12h data
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
+    # Elder Ray: Bull/Bear Power
+    bull_power = high_1d - ema_13_1d
+    bear_power = low_1d - ema_13_1d
+    
+    # Align all 1d indicators to 6h timeframe (completed 1d bar only)
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Volume confirmation: current volume > 1.5 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,39 +86,53 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, lookback, 20) + 1  # Need ATR50, Donchian20, volume MA20
+    start_idx = max(50, 20) + 1  # Need EMA50, volume MA(20), plus buffer
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(donchian_mid[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Calculate EMA50 slope for trend direction (rising/falling)
+        ema50_slope = ema_50_1d_aligned[i] - ema_50_1d_aligned[i-1]
+        
         if position == 0:
-            # Long: Price breaks above Donchian high with volume spike AND volatility expansion (ATR ratio > 0.8)
-            if (close[i] > highest_high[i] and volume_spike[i] and 
-                atr_ratio_aligned[i] > 0.8):
-                signals[i] = 0.25
-                position = 1
-            # Short: Price breaks below Donchian low with volume spike AND volatility expansion (ATR ratio > 0.8)
-            elif (close[i] < lowest_low[i] and volume_spike[i] and 
-                  atr_ratio_aligned[i] > 0.8):
-                signals[i] = -0.25
-                position = -1
+            # Regime: ADX > 25 = trending, ADX < 20 = ranging
+            if adx_aligned[i] > 25:
+                # Trending regime: trade in direction of EMA50 slope
+                if ema50_slope > 0 and bull_power_aligned[i] > 0 and volume_spike[i]:
+                    # Uptrend: buy on bullish power
+                    signals[i] = 0.25
+                    position = 1
+                elif ema50_slope < 0 and bear_power_aligned[i] < 0 and volume_spike[i]:
+                    # Downtrend: sell on bearish power
+                    signals[i] = -0.25
+                    position = -1
+            elif adx_aligned[i] < 20:
+                # Ranging regime: mean revert at Elder Ray extremes
+                if bull_power_aligned[i] < -0.5 * np.std(bull_power_aligned[max(0,i-50):i]) and volume_spike[i]:
+                    # Oversold: buy
+                    signals[i] = 0.25
+                    position = 1
+                elif bear_power_aligned[i] > 0.5 * np.std(bear_power_aligned[max(0,i-50):i]) and volume_spike[i]:
+                    # Overbought: sell
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: Price returns to Donchian midpoint or ATR regime reverses (low volatility)
-            if (close[i] < donchian_mid[i] or atr_ratio_aligned[i] < 0.6):
+            # Long exit: Elder Ray turns negative or trend reversal
+            if bull_power_aligned[i] < 0 or ema50_slope < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price returns to Donchian midpoint or ATR regime reverses (low volatility)
-            if (close[i] > donchian_mid[i] or atr_ratio_aligned[i] < 0.6):
+            # Short exit: Elder Ray turns positive or trend reversal
+            if bear_power_aligned[i] > 0 or ema50_slope > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -109,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dATRRegime_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_ElderRay_Power_1dADX_Regime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
