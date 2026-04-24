@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Volume-Weighted RSI + 1d Donchian Channel Breakout Filter.
-- Primary timeframe: 6h for execution, HTF: 1d for Donchian(20) breakout direction.
-- Volume-Weighted RSI(14): RSI calculated using volume-weighted price to filter low-conviction moves.
-- Entry: Long when VW-RSI < 30 and price breaks above 1d Donchian upper band; Short when VW-RSI > 70 and price breaks below 1d Donchian lower band.
-- Exit: Opposite VW-RSI extreme (VW-RSI > 50 for long exit, < 50 for short exit) or Donchian middle band touch.
-- Volume confirmation: current volume > 1.3x 20-period volume MA to avoid low-volatility false signals.
+Hypothesis: 12h Donchian(20) breakout + 1d ADX regime filter + volume confirmation.
+- Primary timeframe: 12h for execution, HTF: 1d for ADX regime.
+- Donchian breakout: price breaks above 20-period high (long) or below 20-period low (short).
+- Regime filter: ADX(14) > 25 = trending (only trade breakouts in trend direction), ADX < 20 = ranging (fade breakouts at extremes).
+- Volume confirmation: current volume > 1.5x 20-period volume MA to avoid low-volatility false signals.
 - Discrete signal size: 0.25 to balance return and drawdown control.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-- Works in bull via buying oversold pullbacks in uptrend, in bear via selling overbought rallies in downtrend.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Works in bull via buying upward breakouts in uptrend, in bear via selling downward breakouts in downtrend, and fading breakouts in ranges.
 """
 
 import numpy as np
@@ -26,87 +25,100 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Donchian Channel (20-period)
+    # Calculate 1d ADX(14) for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Donchian bands: upper = highest high, lower = lowest low over 20 periods
-    upper_band = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_band = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    middle_band = (upper_band + lower_band) / 2.0
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
     
-    # Align 1d Donchian bands to 6h timeframe (completed 1d bar only)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    middle_band_aligned = align_htf_to_ltf(prices, df_1d, middle_band)
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Volume-Weighted RSI(14) calculation
-    # Typical Price = (High + Low + Close) / 3
-    typical_price = (high + low + close) / 3.0
-    # Volume-Weighted Typical Price = Typical Price * Volume
-    vw_tp = typical_price * volume
+    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_di_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate changes in VWTP
-    delta = vw_tp - np.roll(vw_tp, 1)
-    delta[0] = 0  # First value has no previous
+    # DI and DX
+    plus_di = 100 * plus_di_smooth / atr
+    minus_di = 100 * minus_di_smooth / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Separate gains and losses
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align 1d ADX to 12h timeframe (completed 1d bar only)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Wilder's smoothing (EMA with alpha=1/14)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Donchian(20) channels on 12h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # RS and RSI
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    vw_rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * volume_ma)
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14, 20) + 1  # Donchian(20), VW-RSI(14), volume MA(20)
+    start_idx = max(lookback, 20) + 1  # Need Donchian(20), volume MA(20), plus buffer
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(middle_band_aligned[i]) or np.isnan(vw_rsi[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Entry conditions: VW-RSI extreme + Donchian breakout + volume confirmation
-            if vw_rsi[i] < 30 and close[i] > upper_band_aligned[i] and volume_spike[i]:
-                # Oversold + breakout above upper band = long
-                signals[i] = 0.25
-                position = 1
-            elif vw_rsi[i] > 70 and close[i] < lower_band_aligned[i] and volume_spike[i]:
-                # Overbought + breakdown below lower band = short
-                signals[i] = -0.25
-                position = -1
+            # Regime: ADX > 25 = trending, ADX < 20 = ranging
+            if adx_aligned[i] > 25:
+                # Trending regime: trade breakouts in trend direction
+                if close[i] > highest_high[i-1] and volume_spike[i]:
+                    # Upward breakout: go long
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < lowest_low[i-1] and volume_spike[i]:
+                    # Downward breakout: go short
+                    signals[i] = -0.25
+                    position = -1
+            elif adx_aligned[i] < 20:
+                # Ranging regime: fade breakouts (mean reversion at extremes)
+                if close[i] < lowest_low[i-1] and volume_spike[i]:
+                    # Price breaks below Donchian low: buy (expect reversion to mean)
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] > highest_high[i-1] and volume_spike[i]:
+                    # Price breaks above Donchian high: sell (expect reversion to mean)
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: VW-RSI > 50 (momentum fading) or price touches middle band
-            if vw_rsi[i] > 50 or close[i] < middle_band_aligned[i]:
+            # Long exit: price reverts to middle of channel or breakdown
+            if close[i] < (highest_high[i-1] + lowest_low[i-1]) / 2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: VW-RSI < 50 (momentum fading) or price touches middle band
-            if vw_rsi[i] < 50 or close[i] > middle_band_aligned[i]:
+            # Short exit: price reverts to middle of channel or breakout above
+            if close[i] > (highest_high[i-1] + lowest_low[i-1]) / 2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VolumeWeightedRSI_1dDonchian_Breakout_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX_Regime_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
