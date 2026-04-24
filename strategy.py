@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla H3/L3 Breakout with 1d EMA34 Trend Filter and Volume Spike.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 12h Camarilla H3/L3 Breakout with 1d EMA34 Trend Filter and Volume Spike.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
 - HTF: 1d EMA34 for trend filter (price > EMA34 = uptrend, price < EMA34 = downtrend).
-- Entry: Long when price breaks above Camarilla H3 level AND price > 1d EMA34 AND volume > 2.0 * 6h volume MA(20);
-         Short when price breaks below Camarilla L3 level AND price < 1d EMA34 AND volume > 2.0 * 6h volume MA(20).
+- Entry: Long when price breaks above Camarilla H3 level AND price > 1d EMA34 AND volume > 2.0 * 12h volume MA(20);
+         Short when price breaks below Camarilla L3 level AND price < 1d EMA34 AND volume > 2.0 * 12h volume MA(20).
 - Exit: Long exits when price crosses below Camarilla L3 level; Short exits when price crosses above Camarilla H3 level.
 - Signal size: 0.25 discrete to balance capture and fee control.
 - Works in bull (buying breakouts in uptrend) and bear (selling breakdowns in downtrend) with reduced whipsaws.
-- Uses 1d Camarilla levels applied to 6h chart with proper MTF alignment.
+- Uses 1d Camarilla levels applied to 12h chart with proper MTF alignment.
 """
 
 import numpy as np
@@ -41,17 +41,17 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Get 1d data for EMA34 trend filter
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align EMA34 to 6h timeframe
+    # Align EMA34 to 12h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Get 6h data for volume MA(20)
+    # Get 12h data for volume MA(20)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
