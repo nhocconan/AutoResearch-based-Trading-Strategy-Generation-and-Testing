@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume confirmation.
-- Primary timeframe: 12h to target 50-150 total trades over 4 years (12-37/year).
-- HTF: 1w EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Camarilla levels: H3 = prior_1d_close + 1.1*(prior_1d_high - prior_1d_low)*1.1/12,
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 4h to target 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d EMA34 for trend direction (bullish if close > EMA34, bearish if close < EMA34).
+- Camarilla levels: H3 = prior_1d_close + 1.1*(prior_1d_high - prior_1d_low)*1.1/12, 
                      L3 = prior_1d_close - 1.1*(prior_1d_high - prior_1d_low)*1.1/12.
-- Entry: Long when price breaks above Camarilla H3 AND 1w EMA50 bullish AND volume > 1.3 * volume MA(20).
-         Short when price breaks below Camarilla L3 AND 1w EMA50 bearish AND volume > 1.3 * volume MA(20).
-- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 2.0*ATR,
-        exit short when price > lowest_low_since_entry + 2.0*ATR.
+- Entry: Long when price breaks above Camarilla H3 AND 1d EMA34 bullish AND volume > 2.0 * volume MA(20).
+         Short when price breaks below Camarilla L3 AND 1d EMA34 bearish AND volume > 2.0 * volume MA(20).
+- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 2.5*ATR,
+        exit short when price > lowest_low_since_entry + 2.5*ATR.
 - Signal size: 0.25 discrete to balance return and drawdown.
-This strategy targets fewer, higher-quality breakouts on the 12h timeframe with institutional volume confirmation
-and weekly trend alignment, reducing fee drag while maintaining profitability in both bull and bear markets.
+This strategy targets fewer, higher-quality breakouts on the 4h timeframe with institutional volume confirmation
+and trend alignment, reducing fee drag while maintaining profitability in both bull and bear markets.
 """
 
 import numpy as np
@@ -29,15 +29,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and 1w data for EMA50 trend filter
+    # Get 1d data for EMA34 trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    df_1w_close = df_1w['close'].values
-    ema_1w = pd.Series(df_1w_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA34 for trend filter
+    df_1d_close = df_1d['close'].values
+    ema_1d = pd.Series(df_1d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Calculate prior day's Camarilla H3 and L3 levels
     # H3 = prior_day_close + 1.1*(prior_day_high - prior_day_low)*1.1/12
@@ -58,8 +57,8 @@ def generate_signals(prices):
     # Calculate volume MA(20) for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 12h
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align HTF indicators to 4h
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -70,11 +69,11 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 50, 14, 20)  # Need enough bars for EMA50, ATR, Vol MA
+    start_idx = max(34, 34, 14, 20)  # Need enough bars for EMA34, ATR, Vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
             np.isnan(camarilla_l3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -87,18 +86,18 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation
-            vol_confirmed = curr_volume > 1.3 * vol_ma[i]
+            # Check for entry signals with volume confirmation (tighter threshold: 2.0x)
+            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
             
-            # Long: Price breaks above Camarilla H3 AND 1w EMA50 bullish AND volume confirmed
-            if curr_close > camarilla_h3_aligned[i] and curr_close > ema_1w_aligned[i] and vol_confirmed:
+            # Long: Price breaks above Camarilla H3 AND 1d EMA34 bullish AND volume confirmed
+            if curr_close > camarilla_h3_aligned[i] and curr_close > ema_1d_aligned[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_high
                 lowest_since_entry = curr_low
-            # Short: Price breaks below Camarilla L3 AND 1w EMA50 bearish AND volume confirmed
-            elif curr_close < camarilla_l3_aligned[i] and curr_close < ema_1w_aligned[i] and vol_confirmed:
+            # Short: Price breaks below Camarilla L3 AND 1d EMA34 bearish AND volume confirmed
+            elif curr_close < camarilla_l3_aligned[i] and curr_close < ema_1d_aligned[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -107,8 +106,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit when price < highest_high - 2.0*ATR
-            if curr_close < highest_since_entry - 2.0 * atr[i]:
+            # ATR trailing stop: exit when price < highest_high - 2.5*ATR (wider stop)
+            if curr_close < highest_since_entry - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,8 +115,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit when price > lowest_low + 2.0*ATR
-            if curr_close > lowest_since_entry + 2.0 * atr[i]:
+            # ATR trailing stop: exit when price > lowest_low + 2.5*ATR (wider stop)
+            if curr_close > lowest_since_entry + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_1wEMA50_Trend_VolumeConfirmation_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
