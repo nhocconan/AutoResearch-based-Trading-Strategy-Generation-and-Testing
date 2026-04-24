@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d EMA200 Trend Filter and Volume Confirmation.
-- Bollinger Band squeeze (low volatility) precedes explosive moves; breakout captures trend initiation.
-- 1d EMA200 provides higher-timeframe trend filter to align with long-term momentum and avoid counter-trend trades.
-- Volume confirmation ensures breakout is supported by participation, reducing false signals.
-- Position size 0.25 balances profit potential and drawdown control in choppy 6h markets.
-- Target trades: 50-150 total over 4 years (12-37/year) to minimize fee drag on 6h timeframe.
-- Works in bull/bear markets via 1d trend filter and volatility-based logic (squeeze exploits low volatility regimes).
+Hypothesis: 12h Camarilla Pivot H3/L3 Breakout with 1d EMA34 Trend Filter and Volume Spike.
+- Camarilla H3/L3 levels act as intraday support/resistance; breakouts capture momentum.
+- 1d EMA34 provides higher-timeframe trend filter to align with intermediate momentum.
+- Volume spike (>2x 24-period average) confirms breakout validity and reduces false signals.
+- Discrete position sizing (0.25) minimizes fee churn while allowing meaningful returns.
+- Target trades: 50-150 total over 4 years (12-37/year) to avoid fee drag on 12h timeframe.
+- Works in bull/bear markets via 1d trend filter and volatility-based logic.
 """
 
 import numpy as np
@@ -23,70 +23,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for EMA200 trend filter
+    # Get 1d data ONCE before loop for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d EMA200 trend filter
+    # 1d EMA34 trend filter
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Bollinger Bands (20, 2) on 6h
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + bb_std * std
-    lower = sma - bb_std * std
-    bb_width = (upper - lower) / sma  # normalized bandwidth
+    # Calculate Camarilla pivot levels from previous 1d bar (use aligned 1d data)
+    # For each 12h bar, use the most recent completed 1d bar's OHLC
+    # We'll compute the pivot levels for each 1d bar and then align to 12h
+    if len(df_1d) >= 2:
+        # Calculate Camarilla levels for each 1d bar
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
+        
+        # Camarilla levels: H3, L3, H4, L4
+        # H3 = close + 1.1*(high-low)/4
+        # L3 = close - 1.1*(high-low)/4
+        # H4 = close + 1.1*(high-low)/2
+        # L4 = close - 1.1*(high-low)/2
+        # We'll use H3/L3 for breakout entries
+        camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+        camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+        
+        # Align Camarilla levels to 12h timeframe (using previous completed 1d bar)
+        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    else:
+        camarilla_h3_aligned = np.full(n, np.nan)
+        camarilla_l3_aligned = np.full(n, np.nan)
     
-    # Bollinger Squeeze: bandwidth below 20-period average bandwidth (low volatility regime)
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
-    
-    # Volume confirmation: > 1.5x 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > 1.5 * vol_ma
+    # Volume confirmation: > 2.0x 24-period average volume (12h * 2 = 1 day)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(bb_period, 20, 200) + 1
+    start_idx = max(24, 34) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(sma[i]) or np.isnan(std[i]) or 
-            np.isnan(bb_width_ma[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Only trade during squeeze breakout with volume confirmation and trend alignment
-            if squeeze[i-1] and not squeeze[i]:  # squeeze breakout (bandwidth expanding)
-                if volume_confirm[i]:
-                    # Long: break above upper band + above 1d EMA200 (bullish higher-timeframe trend)
-                    if close[i] > upper[i] and close[i] > ema_200_1d_aligned[i]:
-                        signals[i] = 0.25
-                        position = 1
-                    # Short: break below lower band + below 1d EMA200 (bearish higher-timeframe trend)
-                    elif close[i] < lower[i] and close[i] < ema_200_1d_aligned[i]:
-                        signals[i] = -0.25
-                        position = -1
+            # Long: break above H3 with volume spike and above 1d EMA34 (bullish higher-timeframe trend)
+            if close[i] > camarilla_h3_aligned[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: break below L3 with volume spike and below 1d EMA34 (bearish higher-timeframe trend)
+            elif close[i] < camarilla_l3_aligned[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: price closes below middle band (SMA) OR below 1d EMA200 (trend change)
-            if close[i] < sma[i] or close[i] < ema_200_1d_aligned[i]:
+            # Long exit: price closes below L3 OR below 1d EMA34 (trend change)
+            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above middle band (SMA) OR above 1d EMA200 (trend change)
-            if close[i] > sma[i] or close[i] > ema_200_1d_aligned[i]:
+            # Short exit: price closes above H3 OR above 1d EMA34 (trend change)
+            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_BollingerSqueeze_Breakout_1dEMA200_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
