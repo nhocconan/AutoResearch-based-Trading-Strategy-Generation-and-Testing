@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator + Elder Ray + 1d EMA trend filter.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for trend filter (price above/below EMA34).
-- Entry: Long when Alligator is bullish (jaw < teeth < lips) AND Elder Ray bull power > 0 AND price > 1d EMA34.
-         Short when Alligator is bearish (jaw > teeth > lips) AND Elder Ray bear power < 0 AND price < 1d EMA34.
-- Exit: Opposite Alligator alignment OR price crosses 1d EMA34 in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Williams Alligator identifies trend absence/presence and direction via smoothed medians.
-- Elder Ray measures bull/bear power behind the move.
-- Works in bull markets (buy when all bullish aligned) and bear markets (sell when all bearish aligned).
-- Estimated trades: ~80 total over 4 years (~20/year) based on Alligator alignment frequency with trend filter.
+Hypothesis: 4h Donchian channel breakout with 12h EMA trend filter and volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 12h for trend filter (price above/below EMA50).
+- Entry: Long when price breaks above Donchian(20) upper band AND close > 12h EMA50 AND volume > 1.5x 20-period average volume.
+         Short when price breaks below Donchian(20) lower band AND close < 12h EMA50 AND volume > 1.5x 20-period average volume.
+- Exit: Opposite Donchian breakout OR price crosses 12h EMA50 in opposite direction.
+- Signal size: 0.25 discrete to minimize fee drag.
+- Donchian channels provide clear breakout levels with built-in volatility adjustment.
+- 12h EMA50 filters for higher timeframe trend alignment.
+- Volume confirmation ensures breakouts have conviction.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on Donchian breakout frequency with filters.
 """
 
 import numpy as np
@@ -21,104 +22,76 @@ def ema(values, period):
     """Calculate Exponential Moving Average."""
     return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def sma(values, period):
-    """Calculate Simple Moving Average."""
-    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
-
-def smma(values, period):
-    """Calculate Smoothed Moving Average (used in Alligator)."""
-    # SMMA is similar to EMA but with different smoothing
-    return pd.Series(values).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 1d trend filter: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
-        return np.zeros(n)
-    
-    ema34_1d = ema(df_1d['close'].values, 34)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d, additional_delay_bars=1)
-    
-    # Williams Alligator on 12h (jaw=13, teeth=8, lips=5 SMMA of median price)
+    # Calculate 12h trend filter: EMA50
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 40:
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    median_price_12h = (df_12h['high'].values + df_12h['low'].values) / 2
-    jaw_12h = smma(median_price_12h, 13)  # Blue line
-    teeth_12h = smma(median_price_12h, 8)   # Red line
-    lips_12h = smma(median_price_12h, 5)    # Green line
+    ema50_12h = ema(df_12h['close'].values, 50)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h, additional_delay_bars=1)
     
-    # Align Alligator lines to 12h timeframe
-    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h, additional_delay_bars=1)
-    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h, additional_delay_bars=1)
-    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h, additional_delay_bars=1)
+    # Donchian channels (20-period) on 4h
+    donchian_window = 20
+    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # Elder Ray on 12h (bull power = high - EMA13, bear power = low - EMA13)
-    ema13_12h = ema(df_12h['close'].values, 13)
-    bull_power_12h = df_12h['high'].values - ema13_12h
-    bear_power_12h = df_12h['low'].values - ema13_12h
-    
-    # Align Elder Ray to 12h timeframe
-    bull_power_12h_aligned = align_htf_to_ltf(prices, df_12h, bull_power_12h, additional_delay_bars=1)
-    bear_power_12h_aligned = align_htf_to_ltf(prices, df_12h, bear_power_12h, additional_delay_bars=1)
-    
-    # 1d trend filter
-    trend_bullish = close > ema34_1d_aligned
-    trend_bearish = close < ema34_1d_aligned
+    # Volume confirmation: volume > 1.5x 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for Alligator/EMA
+    start_idx = max(donchian_window, 20)  # Need sufficient data for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or np.isnan(lips_12h_aligned[i]) or
-            np.isnan(bull_power_12h_aligned[i]) or np.isnan(bear_power_12h_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
-        # Exit conditions: opposite Alligator alignment OR price crosses 1d EMA34 in opposite direction
+        # Exit conditions: opposite Donchian breakout OR price crosses 12h EMA50 in opposite direction
         if position != 0:
-            # Exit long: Alligator turns bearish OR price falls below 1d EMA34
+            # Exit long: price breaks below lower band OR price falls below 12h EMA50
             if position == 1:
-                if (jaw_12h_aligned[i] > teeth_12h_aligned[i] and teeth_12h_aligned[i] > lips_12h_aligned[i]) or curr_close < ema34_1d_aligned[i]:
+                if curr_low < lower_band[i] or curr_close < ema50_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Alligator turns bullish OR price rises above 1d EMA34
+            # Exit short: price breaks above upper band OR price rises above 12h EMA50
             elif position == -1:
-                if (jaw_12h_aligned[i] < teeth_12h_aligned[i] and teeth_12h_aligned[i] < lips_12h_aligned[i]) or curr_close > ema34_1d_aligned[i]:
+                if curr_high > upper_band[i] or curr_close > ema50_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: All aligned in same direction
+        # Entry conditions: Donchian breakout with volume confirmation and trend alignment
         if position == 0:
-            # Long: Alligator bullish AND Elder Ray bullish AND bullish 1d trend
-            if (jaw_12h_aligned[i] < teeth_12h_aligned[i] and teeth_12h_aligned[i] < lips_12h_aligned[i] and
-                bull_power_12h_aligned[i] > 0 and trend_bullish[i]):
+            # Long: price breaks above upper band AND above 12h EMA50 AND volume confirmation
+            if curr_high > upper_band[i] and curr_close > ema50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator bearish AND Elder Ray bearish AND bearish 1d trend
-            elif (jaw_12h_aligned[i] > teeth_12h_aligned[i] and teeth_12h_aligned[i] > lips_12h_aligned[i] and
-                  bear_power_12h_aligned[i] < 0 and trend_bearish[i]):
+            # Short: price breaks below lower band AND below 12h EMA50 AND volume confirmation
+            elif curr_low < lower_band[i] and curr_close < ema50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -130,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsAlligator_ElderRay_1dEMA34_TrendFilter_v1"
-timeframe = "12h"
+name = "4h_DonchianBreakout_12hEMA50_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
