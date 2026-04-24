@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla Pivot Breakout with 4h EMA50 trend filter and volume spike confirmation.
-- Primary timeframe: 1h to balance trade frequency and responsiveness.
-- HTF: 4h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Camarilla Pivots: Calculate R3, S3 levels from prior 4h bar (HLC of completed 4h candle).
-- Entry: Long when price breaks above R3 with volume > 1.5x 20-bar average AND 4h EMA50 bullish.
-         Short when price breaks below S3 with volume > 1.5x 20-bar average AND 4h EMA50 bearish.
-- Exit: Reverse signal from opposite direction or time-based exit (max 12 bars hold).
-- Signal size: 0.20 discrete to minimize fee churn and control drawdown.
-- Session filter: Only trade 08:00-20:00 UTC to avoid low-volume Asian session noise.
-- Target: 80-120 total trades over 4 years (20-30/year) for 1h timeframe.
-This strategy exploits intraday mean reversion failure points (Camarilla extremes) in the direction of the 4h trend,
-with volume confirmation to avoid false breakouts. Works in both bull and bear markets by only taking trend-aligned trades.
+Hypothesis: 6h Camarilla Pivot Reversal with 1w EMA200 Trend Filter and Volume Spike Confirmation.
+- Primary timeframe: 6h to reduce trade frequency and fee drag.
+- HTF: 1w EMA200 for major trend direction (bullish if close > EMA200, bearish if close < EMA200).
+- Camarilla pivots calculated from 1d OHLC: H3, L3, H4, L4 levels.
+- Entry: Long when price crosses above H3 with volume spike AND 1w EMA200 bullish.
+         Short when price crosses below L3 with volume spike AND 1w EMA200 bearish.
+         H3/L3 are strong intraday support/resistance where reversals often occur.
+- Exit: Opposite Camarilla level (L3 for long, H3 for short) or ATR trailing stop.
+- Signal size: 0.25 discrete to balance return and drawdown.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+This strategy fades at H3/L3 in the direction of the weekly trend, avoiding counter-trend trades.
+Volume spikes confirm institutional interest at these key levels. Works in both bull and bear markets
+by only taking trades aligned with the 1w trend, using Camarilla reversals for entry timing.
 """
 
 import numpy as np
@@ -20,110 +21,147 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
-    open_ = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for HTF trend and Camarilla pivots (prior completed bar)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    df_4h_close = df_4h['close'].values
-    ema_4h = pd.Series(df_4h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1w EMA200 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    df_1w_close = df_1w['close'].values
+    ema_1w_200 = pd.Series(df_1w_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_1w_200_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_200)
     
-    # Calculate Camarilla levels from prior 4h bar: R3, S3
-    # Typical price = (H + L + C) / 3
-    typical_price = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3.0
-    typical_price_vals = typical_price.values
+    # Calculate ATR(20) for trailing stop
+    tr1 = np.abs(high[1:] - low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Camarilla R3 = Close + 1.1*(High - Low)
-    # Camarilla S3 = Close - 1.1*(High - Low)
-    camarilla_r3 = df_4h['close'] + 1.1 * (df_4h['high'] - df_4h['low'])
-    camarilla_s3 = df_4h['close'] - 1.1 * (df_4h['high'] - df_4h['low'])
-    r3_vals = camarilla_r3.values
-    s3_vals = camarilla_s3.values
-    
-    # Align Camarilla levels to 1h (use prior completed 4h bar)
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3_vals)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3_vals)
-    
-    # Volume spike: current volume > 1.5x 20-bar average
+    # Volume spike detector: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need EMA50 and volume MA
+    start_idx = max(200, 20, 2)  # Need enough bars for EMA200, ATR, and 1d data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1w_200_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        # Reset bars counter if flat
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        
+        # Get 1d OHLC for Camarilla calculation (previous completed 1d bar)
+        # We need the 1d bar that closed before the current 6h bar
+        # Find the index of the last completed 1d bar
+        # Since we're on 6h timeframe, 4 bars = 1 day
+        idx_1d = i // 4  # Each 1d bar spans 4 of our 6h bars
+        if idx_1d < 1 or idx_1d >= len(df_1d):
+            # Not enough 1d data yet
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        # Get previous completed 1d bar (idx_1d - 1) to avoid look-ahead
+        prev_1d_idx = idx_1d - 1
+        if prev_1d_idx < 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        # Calculate Camarilla pivots from previous 1d bar
+        ph = df_1d['high'].iloc[prev_1d_idx]
+        pl = df_1d['low'].iloc[prev_1d_idx]
+        pc = df_1d['close'].iloc[prev_1d_idx]
+        rng = ph - pl
+        
+        if rng <= 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        # Camarilla levels
+        h3 = pc + (rng * 1.1 / 4)
+        l3 = pc - (rng * 1.1 / 4)
+        h4 = pc + (rng * 1.1 / 2)
+        l4 = pc - (rng * 1.1 / 2)
+        
         if position == 0:
-            bars_since_entry = 0
-        
-        # Check for exit: time-based max hold (12 bars) or reverse signal
-        exit_signal = False
-        if position != 0:
-            bars_since_entry += 1
-            if bars_since_entry >= 12:  # Max 12-hour hold
-                exit_signal = True
-        
-        if position == 0 and not exit_signal:
-            # Check for entry signals (only in session)
-            if in_session[i]:
-                # Long: price > R3 AND volume spike AND 4h EMA50 bullish
-                if close[i] > r3_aligned[i] and vol_spike[i] and close[i] > ema_4h_aligned[i]:
-                    signals[i] = 0.20
-                    position = 1
-                    bars_since_entry = 0
-                # Short: price < S3 AND volume spike AND 4h EMA50 bearish
-                elif close[i] < s3_aligned[i] and vol_spike[i] and close[i] < ema_4h_aligned[i]:
-                    signals[i] = -0.20
-                    position = -1
-                    bars_since_entry = 0
+            # Check for entry signals with volume spike
+            # Long: price crosses above H3 with volume spike AND 1w EMA200 bullish
+            if (curr_close > h3 and low[i-1] <= h3 and  # crossed above H3
+                volume_spike[i] and 
+                curr_close > ema_1w_200_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+                entry_price = curr_close
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
+            # Short: price crosses below L3 with volume spike AND 1w EMA200 bearish
+            elif (curr_close < l3 and high[i-1] >= l3 and  # crossed below L3
+                  volume_spike[i] and 
+                  curr_close < ema_1w_200_aligned[i]):
+                signals[i] = -0.25
+                position = -1
+                entry_price = curr_close
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
         elif position == 1:
-            # Exit long: time-based or price < S3 (mean reversion)
-            if exit_signal or close[i] < s3_aligned[i]:
+            # Update highest high since entry
+            highest_since_entry = max(highest_since_entry, curr_high)
+            # Exit conditions: 
+            # 1. Price reaches L3 (opposite level)
+            # 2. ATR trailing stop: price < highest_high - 2.5*ATR
+            if (curr_close < l3 or 
+                curr_close < highest_since_entry - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: time-based or price > R3 (mean reversion)
-            if exit_signal or close[i] > r3_aligned[i]:
+            # Update lowest low since entry
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+            # Exit conditions: 
+            # 1. Price reaches H3 (opposite level)
+            # 2. ATR trailing stop: price > lowest_low + 2.5*ATR
+            if (curr_close > h3 or 
+                curr_close > lowest_since_entry + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeSpike_v1"
-timeframe = "1h"
+name = "6h_Camarilla_H3L3_Reversal_1wEMA200_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
