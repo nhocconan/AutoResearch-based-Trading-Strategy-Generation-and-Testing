@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-- Long when price breaks above Donchian upper (20-period high) AND 12h close > 12h EMA50 (bullish regime)
-- Short when price breaks below Donchian lower (20-period low) AND 12h close < 12h EMA50 (bearish regime)
-- Volume confirmation: current volume > 1.3 * 20-period average volume
-- Exit on opposite Donchian breakout (lower for long exit, upper for short exit)
-- Uses 4h primary with 12h HTF to target 75-200 trades over 4 years (19-50/year)
-- Donchian provides adaptive structure; EMA50 filters regime; volume avoids fakeouts
-- Designed to work in both bull (breakouts) and bear (mean reversion at extremes) markets
+Hypothesis: 1d KAMA trend + RSI(14) extreme + Bollinger Band(20,2) squeeze regime filter.
+- Long when KAMA rising (bullish trend) AND RSI < 30 (oversold) AND Bollinger Band width > 20th percentile (non-squeeze)
+- Short when KAMA falling (bearish trend) AND RSI > 70 (overbought) AND Bollinger Band width > 20th percentile (non-squeeze)
+- Uses 1d primary timeframe with 1w HTF for trend confirmation (KAMA on weekly close > weekly EMA50)
+- Bollinger Band width regime filter avoids whipsaws in low-volatility environments
 - Signal size: 0.25 discrete levels to minimize fee churn
+- Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
 """
 
 import numpy as np
@@ -17,71 +15,106 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian channels (20-period) - use previous bar to avoid look-ahead
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # KAMA ( Kaufman Adaptive Moving Average ) - trend filter
+    def kama(close, er_fast=2, er_slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+        # Correct calculation:
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.zeros_like(close)
+        for i in range(1, len(close)):
+            volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Volume confirmation: volume > 1.3 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_ma)
+    # Calculate KAMA on 1d
+    kama_1d = kama(close, er_fast=2, er_slow=30)
+    kama_rising = kama_1d > np.roll(kama_1d, 1)
+    kama_falling = kama_1d < np.roll(kama_1d, 1)
     
-    # Get 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_oversold = rsi < 30
+    rsi_overbought = rsi > 70
+    
+    # Bollinger Band Width (20,2) - regime filter
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma_20 + 2 * std_20
+    lower_bb = ma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / ma_20
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=20).apply(
+        lambda x: np.percentile(x, 20) if len(x) == 50 else np.nan, raw=False
+    ).values
+    bb_width_above_threshold = bb_width > bb_width_percentile  # Non-squeeze regime
+    
+    # Get 1w data ONCE before loop for HTF trend confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_close_above_ema = df_1w['close'].values > ema_50_1w
+    weekly_close_below_ema = df_1w['close'].values < ema_50_1w
     
-    # Align 12h EMA50 to 4h timeframe (waits for completed 12h bar)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Trend filter: bullish if close > EMA50, bearish if close < EMA50
-    bullish_regime = close > ema_50_12h_aligned
-    bearish_regime = close < ema_50_12h_aligned
+    # Align weekly EMA50 to 1d timeframe (waits for completed weekly bar)
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_close_above_ema.astype(float))
+    weekly_bullish = weekly_trend_aligned > 0.5
+    weekly_bearish = weekly_trend_aligned < 0.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 20  # Need Donchian and volume MA
+    start_idx = 50  # Need KAMA, RSI, BB width, and weekly alignment
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(kama_rising[i]) or np.isnan(rsi[i]) or 
+            np.isnan(bb_width_above_threshold[i]) or np.isnan(weekly_bullish[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian upper AND bullish regime AND volume confirmation
-            if close[i] > highest_high[i] and bullish_regime[i] and volume_confirm[i]:
+            # Long: KAMA rising (bullish trend) AND RSI oversold AND non-squeeze regime AND weekly bullish
+            if kama_rising[i] and rsi_oversold[i] and bb_width_above_threshold[i] and weekly_bullish[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian lower AND bearish regime AND volume confirmation
-            elif close[i] < lowest_low[i] and bearish_regime[i] and volume_confirm[i]:
+            # Short: KAMA falling (bearish trend) AND RSI overbought AND non-squeeze regime AND weekly bearish
+            elif kama_falling[i] and rsi_overbought[i] and bb_width_above_threshold[i] and weekly_bearish[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below Donchian lower (opposite channel)
-            if close[i] < lowest_low[i]:
+            # Long exit: KAMA falling OR RSI overbought OR squeeze regime
+            if (not kama_rising[i]) or rsi[i] > 70 or not bb_width_above_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above Donchian upper (opposite channel)
-            if close[i] > highest_high[i]:
+            # Short exit: KAMA rising OR RSI oversold OR squeeze regime
+            if (not kama_falling[i]) or rsi[i] < 30 or not bb_width_above_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -89,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_BBWidth_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
