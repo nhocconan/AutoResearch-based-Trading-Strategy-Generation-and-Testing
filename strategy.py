@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA50 trend filter and volume spike confirmation.
+Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume spike confirmation.
 - Uses Camarilla pivot levels (H3/L3) from prior completed 1d candles for breakout detection.
 - Breakout above H3 or below L3 with volume > 2.0x 20-bar average signals strong momentum.
-- Trend filter: price must be above/below 12h EMA50 to align with higher timeframe direction.
-- Designed for 4h timeframe to capture medium-term breakouts in both bull and bear markets.
-- Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 25-50 trades/year (100-200 total over 4 years) to stay fee-efficient.
-- Based on proven pattern: Camarilla breakout + volume + trend filter showed strong performance in DB.
+- Trend filter: price must be above/below 4h EMA50 to align with higher timeframe direction.
+- Session filter: only trade 08:00-20:00 UTC to reduce noise trades.
+- Uses discrete position size 0.20 to limit drawdown and reduce fee churn.
+- Targets 15-37 trades/year (60-150 total over 4 years) to stay fee-efficient.
+- Designed for 1h timeframe to capture medium-term breakouts in both bull and bear markets.
 """
 
 import numpy as np
@@ -29,9 +29,9 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data ONCE before loop for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
     # Prior completed 1d candle for Camarilla calculation
@@ -44,17 +44,21 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + camarilla_range * 1.1 / 2
     camarilla_l3 = close_1d - camarilla_range * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 12h EMA50 trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA50 trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute session hours (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,7 +69,14 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,31 +86,31 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above Camarilla H3 AND price above 12h EMA50 AND volume confirmation
-            if close[i] > camarilla_h3_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm:
-                signals[i] = 0.25
+            # Long: breakout above Camarilla H3 AND price above 4h EMA50 AND volume confirmation
+            if close[i] > camarilla_h3_aligned[i] and close[i] > ema_50_4h_aligned[i] and volume_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short: breakout below Camarilla L3 AND price below 12h EMA50 AND volume confirmation
-            elif close[i] < camarilla_l3_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm:
-                signals[i] = -0.25
+            # Short: breakout below Camarilla L3 AND price below 4h EMA50 AND volume confirmation
+            elif close[i] < camarilla_l3_aligned[i] and close[i] < ema_50_4h_aligned[i] and volume_confirm:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: close below Camarilla L3 OR price below 12h EMA50
-            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: close below Camarilla L3 OR price below 4h EMA50
+            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: close above Camarilla H3 OR price above 12h EMA50
-            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: close above Camarilla H3 OR price above 4h EMA50
+            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_Breakout_4hEMA50_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
