@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams Alligator + 1d ATR Regime + Volume Confirmation
-- Long when: Alligator bullish (jaw < teeth < lips), ATR regime = trending (ATR(7)/ATR(30) > 1.2), volume > 1.5x 20-period average
-- Short when: Alligator bearish (jaw > teeth > lips), ATR regime = trending (ATR(7)/ATR(30) > 1.2), volume > 1.5x 20-period average
-- Exit when Alligator reverses (jaws cross teeth) or ATR regime becomes choppy (ATR(7)/ATR(30) < 0.8)
-- Uses 1d HTF for ATR regime filter to avoid whipsaw in ranging markets
-- Williams Alligator: jaw=SMA(13,8), teeth=SMA(8,5), lips=SMA(5,3) - smoothed with SMMA (using EMA as proxy)
+Hypothesis: 12h Williams Alligator with 1w EMA50 trend filter and volume confirmation.
+- Williams Alligator: Jaw (13-period SMMA smoothed 8), Teeth (8-period SMMA smoothed 5), Lips (5-period SMMA smoothed 3)
+- Long when Lips > Teeth > Jaw (bullish alignment) and close > 1w EMA50 (bullish HTF trend)
+- Short when Lips < Teeth < Jaw (bearish alignment) and close < 1w EMA50 (bearish HTF trend)
+- Volume must be > 2.0x 20-period average for conviction to avoid choppy markets
+- ATR-based trailing stop: exit when price moves 2.5x ATR against position from extreme
+- Uses 1w HTF for trend filter (more stable than 1d) to reduce whipsaw in bear markets
 - Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-- Designed to work in both bull and bear markets via ATR regime filter
+- Designed to work in both bull and bear markets via HTF trend filter and Alligator alignment
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(source, period):
+    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
+    if len(source) < period:
+        return np.full(len(source), np.nan)
+    result = np.full(len(source), np.nan)
+    # First value is simple average
+    result[period-1] = np.mean(source[:period])
+    # Subsequent values: (prev * (period-1) + current) / period
+    for i in range(period, len(source)):
+        result[i] = (result[i-1] * (period-1) + source[i]) / period
+    return result
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,80 +37,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator (using EMA as proxy for SMMA)
-    jaw = pd.Series(close).ewm(span=13, adjust=False).mean().values  # SMA(13,8) -> EMA(13)
-    teeth = pd.Series(close).ewm(span=8, adjust=False).mean().values   # SMA(8,5) -> EMA(8)
-    lips = pd.Series(close).ewm(span=5, adjust=False).mean().values    # SMA(5,3) -> EMA(5)
+    # Williams Alligator components
+    jaw = smma(close, 13)  # Jaw: 13-period SMMA
+    jaw = smma(jaw, 8)     # Smoothed again by 8 periods
+    teeth = smma(close, 8) # Teeth: 8-period SMMA
+    teeth = smma(teeth, 5) # Smoothed again by 5 periods
+    lips = smma(close, 5)  # Lips: 5-period SMMA
+    lips = smma(lips, 3)   # Smoothed again by 3 periods
     
-    # Get 1d data ONCE before loop for ATR regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(7) and ATR(30) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA50
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
-                            np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align 1w EMA50 to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    atr_7_1d = pd.Series(tr_1d).ewm(span=7, adjust=False, min_periods=7).mean().values
-    atr_30_1d = pd.Series(tr_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
-    
-    # ATR ratio regime: >1.2 = trending, <0.8 = choppy
-    atr_ratio_1d = atr_7_1d / atr_30_1d
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    
-    # Volume confirmation: > 1.5x 20-period average volume
+    # Volume confirmation: > 2.0x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * vol_ma
+    volume_spike = volume > 2.0 * vol_ma
+    
+    # ATR(14) for volatility and trailing stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 8, 5, 30, 20) + 1
+    start_idx = max(50, 50, 20, 14) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
             continue
         
         if position == 0:
-            # Long: Alligator bullish + trending regime + volume spike
-            if jaw[i] < teeth[i] and teeth[i] < lips[i] and atr_ratio_1d_aligned[i] > 1.2 and volume_spike[i]:
+            # Bullish alignment: Lips > Teeth > Jaw
+            bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+            # Bearish alignment: Lips < Teeth < Jaw
+            bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+            
+            # Long: bullish alignment, HTF trend up (close > EMA50), volume spike
+            if bullish_alignment and close[i] > ema_50_1w_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator bearish + trending regime + volume spike
-            elif jaw[i] > teeth[i] and teeth[i] > lips[i] and atr_ratio_1d_aligned[i] > 1.2 and volume_spike[i]:
+                highest_high_since_entry = high[i]
+            # Short: bearish alignment, HTF trend down (close < EMA50), volume spike
+            elif bearish_alignment and close[i] < ema_50_1w_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
+                lowest_low_since_entry = low[i]
         elif position == 1:
-            # Long exit: Alligator reverses OR regime becomes choppy
-            if not (jaw[i] < teeth[i] and teeth[i] < lips[i]) or atr_ratio_1d_aligned[i] < 0.8:
+            # Update highest high since entry
+            highest_high_since_entry = max(highest_high_since_entry, high[i])
+            # Long exit: price drops 2.5x ATR from highest high since entry
+            if close[i] < highest_high_since_entry - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                highest_high_since_entry = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator reverses OR regime becomes choppy
-            if not (jaw[i] > teeth[i] and teeth[i] > lips[i]) or atr_ratio_1d_aligned[i] < 0.8:
+            # Update lowest low since entry
+            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+            # Short exit: price rises 2.5x ATR from lowest low since entry
+            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                lowest_low_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_WilliamsAlligator_1dATRRegime_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Williams_Alligator_1wEMA50_VolumeSpike_ATRTrailingStop_v1"
+timeframe = "12h"
 leverage = 1.0
