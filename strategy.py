@@ -1,20 +1,64 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 12h EMA trend filter and volume confirmation.
-- Primary timeframe: 6h for execution, HTF: 12h for EMA trend.
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 of median price.
-  Long when Bull Power > 0 and rising, Short when Bear Power < 0 and falling.
-- Trend filter: Only trade in direction of 12h EMA34 (long if EMA34 rising, short if falling).
+Hypothesis: 12h TRIX with volume spike and 1d choppiness regime filter.
+- Primary timeframe: 12h for execution, HTF: 1d for chop regime and volume confirmation.
+- TRIX: Triple EMA of closing price, momentum oscillator. Long when TRIX crosses above zero,
+  short when crosses below zero. Uses 12-period EMA (standard) to reduce lag.
 - Volume confirmation: current volume > 2.0x 20-period volume MA to ensure strong participation.
+- Choppiness regime: only trade when 1d CHOP(14) > 61.8 (range market) for mean reversion,
+  or when CHOP(14) < 38.2 (trending market) for trend following. Adaptive logic.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
-- Works in bull via buying strong Bull Power in uptrend, in bear via selling strong Bear Power in downtrend.
-- Uses EMA for smoothing which reduces whipsaw vs SMA.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Works in bull via trend following when chop low, in bear via mean reversion when chop high.
+- Uses EMA for smoothness and reduced whipsaw vs SMA.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def ema(values, period):
+    """Exponential Moving Average with min_periods"""
+    if len(values) < period:
+        return np.full_like(values, np.nan, dtype=float)
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def trix(close, period=12):
+    """TRIX: Triple EMA of closing price, then percent change"""
+    e1 = ema(close, period)
+    e2 = ema(e1, period)
+    e3 = ema(e2, period)
+    # Calculate percent change: (current - previous) / previous * 100
+    trix_val = np.full_like(e3, np.nan, dtype=float)
+    trix_val[1:] = (e3[1:] - e3[:-1]) / e3[:-1] * 100
+    return trix_val
+
+def choppiness_index(high, low, close, period=14):
+    """Choppiness Index: measures whether market is choppy (ranging) or trending"""
+    if len(high) < period:
+        return np.full_like(high, np.nan, dtype=float)
+    
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.max(tr1[0], tr2[0], tr3[0]) if len(tr1) > 0 else 0], tr])  # first TR
+    
+    # Sum of TR over period
+    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    
+    # Highest high and lowest low over period
+    max_hh = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    min_ll = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    # Chop formula: 100 * log10(tr_sum / (max_hh - min_ll)) / log10(period)
+    chop = np.full_like(high, np.nan, dtype=float)
+    denominator = max_hh - min_ll
+    valid = (denominator > 0) & ~np.isnan(tr_sum) & ~np.isnan(denominator)
+    chop[valid] = 100 * np.log10(tr_sum[valid] / denominator[valid]) / np.log10(period)
+    
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,27 +71,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA34 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for chop regime and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # TRIX on 1d close
+    trix_1d = trix(close_1d, 12)
+    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_1d)
     
-    # 6h EMA13 for Elder Ray calculation
-    ema_13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Choppiness Index on 1d
+    chop_1d = choppiness_index(high_1d, low_1d, close_1d, 14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Elder Ray components
-    bull_power = high - ema_13_6h  # Bull Power = High - EMA13
-    bear_power = low - ema_13_6h   # Bear Power = Low - EMA13
-    
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA (12h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * volume_ma)
     
@@ -55,11 +97,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 13)  # EMA34 + volume MA + EMA13
+    start_idx = max(30, 20, 14)  # volume MA + TRIX + chop
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+        if (np.isnan(trix_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,36 +109,65 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Only trade in direction of 12h EMA34 trend
-            if i > 0 and not np.isnan(ema_34_12h_aligned[i-1]):
-                ema34_slope = ema_34_12h_aligned[i] - ema_34_12h_aligned[i-1]
-                if ema34_slope > 0:  # Uptrend
-                    # Long when Bull Power > 0 and rising (strong buying pressure)
-                    if bull_power[i] > 0 and (i == start_idx or bull_power[i] > bull_power[i-1]) and volume_spike[i]:
-                        signals[i] = 0.25
-                        position = 1
-                elif ema34_slope < 0:  # Downtrend
-                    # Short when Bear Power < 0 and falling (strong selling pressure)
-                    if bear_power[i] < 0 and (i == start_idx or bear_power[i] < bear_power[i-1]) and volume_spike[i]:
-                        signals[i] = -0.25
-                        position = -1
+            # Adaptive logic based on chop regime
+            if chop_1d_aligned[i] < 38.2:  # Trending market - follow TRIX
+                if i > 0 and not np.isnan(trix_1d_aligned[i-1]):
+                    # TRIX crossing above zero = long signal
+                    if trix_1d_aligned[i-1] <= 0 and trix_1d_aligned[i] > 0:
+                        if volume_spike[i]:
+                            signals[i] = 0.25
+                            position = 1
+                    # TRIX crossing below zero = short signal
+                    elif trix_1d_aligned[i-1] >= 0 and trix_1d_aligned[i] < 0:
+                        if volume_spike[i]:
+                            signals[i] = -0.25
+                            position = -1
+            elif chop_1d_aligned[i] > 61.8:  # Ranging market - mean reversion at extremes
+                # In ranging markets, look for TRIX extremes for mean reversion
+                if i > 0 and not np.isnan(trix_1d_aligned[i-1]):
+                    # TRIX very negative and turning up = long (oversold bounce)
+                    if (trix_1d_aligned[i-1] < -0.5 and trix_1d_aligned[i] > trix_1d_aligned[i-1] and
+                        trix_1d_aligned[i] < 0):
+                        if volume_spike[i]:
+                            signals[i] = 0.25
+                            position = 1
+                    # TRIX very positive and turning down = short (overbought pullback)
+                    elif (trix_1d_aligned[i-1] > 0.5 and trix_1d_aligned[i] < trix_1d_aligned[i-1] and
+                          trix_1d_aligned[i] > 0):
+                        if volume_spike[i]:
+                            signals[i] = -0.25
+                            position = -1
         elif position == 1:
-            # Long exit: Bull Power becomes negative or trend changes
-            if bull_power[i] <= 0 or (i > 0 and ema_34_12h_aligned[i] < ema_34_12h_aligned[i-1]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Long exit: TRIX crosses below zero (trending) or TRIX declines from positive (ranging)
+            if chop_1d_aligned[i] < 38.2:  # Trending - exit on TRIX cross down
+                if trix_1d_aligned[i] < 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:  # Ranging - exit when TRIX returns to zero or declines
+                if trix_1d_aligned[i] <= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power becomes positive or trend changes
-            if bear_power[i] >= 0 or (i > 0 and ema_34_12h_aligned[i] > ema_34_12h_aligned[i-1]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+            # Short exit: TRIX crosses above zero (trending) or TRIX rises from negative (ranging)
+            if chop_1d_aligned[i] < 38.2:  # Trending - exit on TRIX cross up
+                if trix_1d_aligned[i] > 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:  # Ranging - exit when TRIX returns to zero or rises
+                if trix_1d_aligned[i] >= 0:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
 
-name = "6h_ElderRay_12hEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_TRIX_VolumeSpike_ChopRegime_v1"
+timeframe = "12h"
 leverage = 1.0
