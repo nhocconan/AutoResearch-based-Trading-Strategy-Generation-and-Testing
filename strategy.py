@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Donchian channel: 20-bar high/low on 12h timeframe.
-- Entry: Long when price breaks above Donchian upper band AND 1d EMA50 bullish AND volume > 2.0 * volume MA(50).
-         Short when price breaks below Donchian lower band AND 1d EMA50 bearish AND volume > 2.0 * volume MA(50).
-- Exit: Close-based reversal - exit long when price crosses below Donchian lower band,
-        exit short when price crosses above Donchian upper band.
+Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d ADX for regime (trending if ADX > 25, ranging if ADX < 20) with hysteresis.
+- Elder Ray: Bull Power = High - EMA13(Close), Bear Power = EMA13(Close) - Low.
+- Entry: Long when Bull Power > 0 AND ADX > 25 (strong uptrend) AND volume > 1.5 * volume MA(20).
+         Short when Bear Power > 0 AND ADX > 25 (strong downtrend) AND volume > 1.5 * volume MA(20).
+- Exit: Close-based reversal - exit long when Bull Power <= 0,
+        exit short when Bear Power <= 0.
 - Signal size: 0.25 discrete to balance profit potential and drawdown control.
-Designed to work in both bull and bear markets via trend filter and mean-reversion exits.
-Volume confirmation reduces false breakouts. 12h timeframe minimizes fee drag.
+Designed to work in both bull and bear markets via ADX regime filter (avoids whipsaws in ranging markets).
 """
 
 import numpy as np
@@ -28,37 +27,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    df_1d_close = df_1d['close'].values
-    ema_1d = pd.Series(df_1d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ADX for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channel (20-period) on 12h data
-    # We need at least 20 periods for Donchian calculation
-    donchian_window = 20
-    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Calculate volume MA(50) for confirmation
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Align HTF indicators to 12h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Get 1d data for EMA13 (Elder Ray)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components
+    bull_power = high_1d - ema13_1d
+    bear_power = ema13_1d - low_1d
+    
+    # Align HTF indicators to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Calculate volume MA(20) for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    adx_state = 0  # 0: ranging, 1: trending up, -1: trending down (with hysteresis)
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 50, donchian_window, 50)  # Need enough bars for EMA50, Donchian, and volume MA
+    start_idx = max(100, 14+13+14, 20)  # Need enough bars for ADX, EMA13, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,28 +106,42 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
+        # Update ADX state with hysteresis (enter trend at 25, exit at 20)
+        if adx_state == 0:  # Currently ranging
+            if adx_aligned[i] > 25:
+                if bull_power_aligned[i] > bear_power_aligned[i]:
+                    adx_state = 1  # Trending up
+                else:
+                    adx_state = -1  # Trending down
+        elif adx_state == 1:  # Currently trending up
+            if adx_aligned[i] < 20:
+                adx_state = 0  # Back to ranging
+        elif adx_state == -1:  # Currently trending down
+            if adx_aligned[i] < 20:
+                adx_state = 0  # Back to ranging
+        
         if position == 0:
-            # Check for entry signals with volume confirmation (2.0x threshold)
-            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
+            # Check for entry signals with volume confirmation (1.5x threshold)
+            vol_confirmed = curr_volume > 1.5 * vol_ma[i]
             
-            # Long: Price breaks above upper band AND 1d EMA50 bullish AND volume confirmed
-            if curr_close > upper_band[i] and curr_close > ema_1d_aligned[i] and vol_confirmed:
+            # Long: Bull Power > 0 AND ADX trending up AND volume confirmed
+            if bull_power_aligned[i] > 0 and adx_state == 1 and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower band AND 1d EMA50 bearish AND volume confirmed
-            elif curr_close < lower_band[i] and curr_close < ema_1d_aligned[i] and vol_confirmed:
+            # Short: Bear Power > 0 AND ADX trending down AND volume confirmed
+            elif bear_power_aligned[i] > 0 and adx_state == -1 and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price crosses below lower band (reversion to mean)
-            if curr_close < lower_band[i]:
+            # Exit long when Bull Power <= 0 (momentum fading)
+            if bull_power_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price crosses above upper band (reversion to mean)
-            if curr_close > upper_band[i]:
+            # Exit short when Bear Power <= 0 (momentum fading)
+            if bear_power_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "6h_ElderRay_1dADX_Regime_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
