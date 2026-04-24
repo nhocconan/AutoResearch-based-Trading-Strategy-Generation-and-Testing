@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-- Long when price breaks above Donchian upper (20-period high) and close > 12h EMA50 (bullish trend)
-- Short when price breaks below Donchian lower (20-period low) and close < 12h EMA50 (bearish trend)
+Hypothesis: 1h RSI(14) mean reversion with 4h EMA50 trend filter and volume confirmation.
+- Long when RSI < 30 (oversold) and close > 4h EMA50 (bullish trend)
+- Short when RSI > 70 (overbought) and close < 4h EMA50 (bearish trend)
 - Volume must be > 1.5x 20-period average for confirmation
-- ATR(14) trailing stop: exit when price moves 2.0x ATR from extreme since entry
-- Uses 4h primary timeframe with 12h HTF to target 75-200 trades over 4 years (19-50/year)
-- Donchian breakouts capture momentum; 12h EMA50 filter avoids counter-trend traps in bear markets
+- Exit when RSI returns to neutral zone (40-60) or opposite extreme
+- Uses 1h primary timeframe with 4h HTF to target 60-150 trades over 4 years (15-37/year)
+- RSI captures mean reversion in ranging markets while trend filter avoids counter-trend traps
+- Session filter (08-20 UTC) reduces noise during low-liquidity hours
 """
 
 import numpy as np
@@ -23,86 +24,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # RSI(14): 100 - (100 / (1 + RS))
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0.0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
     
-    # Get 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data ONCE before loop for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 4h EMA50 to 1h timeframe
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume confirmation: > 1.5x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > 1.5 * vol_ma
     
-    # ATR(14) for volatility and trailing stop
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Session filter: 08-20 UTC (pre-compute hours array)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 20, 14) + 1
+    start_idx = max(14, 50, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             continue
         
-        if position == 0:
-            # Long: price breaks above Donchian upper, trend up (close > EMA50), volume confirmation
-            if close[i] > highest_high[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
-                position = 1
-                highest_high_since_entry = high[i]
-            # Short: price breaks below Donchian lower, trend down (close < EMA50), volume confirmation
-            elif close[i] < lowest_low[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
-                position = -1
-                lowest_low_since_entry = low[i]
-        elif position == 1:
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            # Long exit: price drops 2.0x ATR from highest high since entry
-            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                highest_high_since_entry = 0.0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            # Short exit: price rises 2.0x ATR from lowest low since entry
-            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                lowest_low_since_entry = 0.0
-            else:
-                signals[i] = -0.25
+        # Apply session filter
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Long: RSI oversold (< 30), trend up (close > EMA50), volume confirmation
+        if rsi[i] < 30.0 and close[i] > ema_50_4h_aligned[i] and volume_confirm[i]:
+            signals[i] = 0.20
+        # Short: RSI overbought (> 70), trend down (close < EMA50), volume confirmation
+        elif rsi[i] > 70.0 and close[i] < ema_50_4h_aligned[i] and volume_confirm[i]:
+            signals[i] = -0.20
+        # Exit: RSI returns to neutral zone (40-60)
+        elif 40.0 <= rsi[i] <= 60.0:
+            signals[i] = 0.0
+        # Hold current signal if no exit condition
+        else:
+            signals[i] = signals[i-1]
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_VolumeConfirm_ATRTrailingStop_v1"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hEMA50_VolumeConfirm_SessionFilter_v1"
+timeframe = "1h"
 leverage = 1.0
