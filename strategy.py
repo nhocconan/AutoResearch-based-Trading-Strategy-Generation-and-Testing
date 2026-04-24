@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR volume spike and 1w EMA50 trend filter.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1w for EMA50 trend filter, 1d for ATR ratio volume confirmation.
-- Entry: Long when price breaks above Donchian(20) high AND ATR ratio > 1.8 AND price > 1w EMA50.
-         Short when price breaks below Donchian(20) low AND ATR ratio > 1.8 AND price < 1w EMA50.
+Hypothesis: 12h Donchian(20) breakout with 1d ATR volume spike filter and 1w EMA50 trend filter.
+- Primary timeframe: 12h targeting 75-150 total trades over 4 years (19-38/year).
+- HTF: 1d for ATR volume confirmation, 1w for EMA50 trend filter.
+- Entry: Long when price breaks above Donchian(20) high AND ATR ratio > 2.0 AND price > 1w EMA50.
+         Short when price breaks below Donchian(20) low AND ATR ratio > 2.0 AND price < 1w EMA50.
 - Exit: Opposite Donchian breakout OR price crosses 1w EMA50 in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- ATR ratio (current ATR/20-period ATR) > 1.8 confirms significant volatility expansion to avoid false breakouts.
+- Signal size: 0.30 discrete to balance profit potential and fee drag.
+- ATR ratio (current 1d ATR / 20-period 1d ATR) > 2.0 confirms significant volatility expansion to avoid false breakouts.
 - 1w EMA50 provides trend filter to avoid counter-trend trades.
 - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
 - Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
@@ -64,7 +64,7 @@ def generate_signals(prices):
     atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
     
-    # Donchian channels on 4h (20-period)
+    # Donchian channels on 12h (20-period)
     donch_hi, donch_lo = donchian_channels(high, low, 20)
     
     signals = np.zeros(n)
@@ -101,23 +101,23 @@ def generate_signals(prices):
         
         # Entry conditions: Donchian breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: price breaks above Donchian high AND ATR ratio > 1.8 AND bullish 1w trend
-            if curr_close > donch_hi[i] and atr_ratio_aligned[i] > 1.8 and curr_close > ema50_1w_aligned[i]:
-                signals[i] = 0.25
+            # Long: price breaks above Donchian high AND ATR ratio > 2.0 AND bullish 1w trend
+            if curr_close > donch_hi[i] and atr_ratio_aligned[i] > 2.0 and curr_close > ema50_1w_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below Donchian low AND ATR ratio > 1.8 AND bearish 1w trend
-            elif curr_close < donch_lo[i] and atr_ratio_aligned[i] > 1.8 and curr_close < ema50_1w_aligned[i]:
-                signals[i] = -0.25
+            # Short: price breaks below Donchian low AND ATR ratio > 2.0 AND bearish 1w trend
+            elif curr_close < donch_lo[i] and atr_ratio_aligned[i] > 2.0 and curr_close < ema50_1w_aligned[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.25
+            signals[i] = -0.30
     
     return signals
 
-name = "4h_DonchianBreakout_1dATR_VolumeSpike_1wEMA50_TrendFilter_v1"
-timeframe = "4h"
+name = "12h_DonchianBreakout_1dATR_VolumeSpike_1wEMA50_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
