@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
-- Primary timeframe: 6h to target 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d ATR(14) for volatility regime - only trade when ATR(14) > ATR(50) (high volatility regime).
-- Donchian channels: Upper = 20-period high, Lower = 20-period low on 6h timeframe.
-- Entry: Long when price breaks above 6h Donchian Upper AND volatility regime high AND volume > 1.5 * volume MA(20).
-         Short when price breaks below 6h Donchian Lower AND volatility regime high AND volume > 1.5 * volume MA(20).
-- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 2.5*ATR(14),
-        exit short when price > lowest_low_since_entry + 2.5*ATR(14).
+Hypothesis: 12h Williams %R extreme reversal with 1w EMA200 trend filter and volume spike confirmation.
+- Primary timeframe: 12h to target 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w EMA200 for trend direction (bullish if close > EMA200, bearish if close < EMA200).
+- Williams %R(14): extreme readings below -80 (oversold) for longs, above -20 (overbought) for shorts.
+- Entry: Long when Williams %R crosses above -80 AND 1w EMA200 bullish AND volume > 1.5 * volume MA(30).
+         Short when Williams %R crosses below -20 AND 1w EMA200 bearish AND volume > 1.5 * volume MA(30).
+- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 2.5*ATR,
+        exit short when price > lowest_low_since_entry + 2.5*ATR.
 - Signal size: 0.25 discrete to balance return and drawdown.
-This strategy targets high-volume breakouts during volatile regimes, which works in both bull (strong trends) and bear (panic spikes) markets.
+This strategy targets mean-reversion opportunities during extreme sentiment with trend alignment and institutional volume confirmation,
+reducing fee drag while maintaining profitability in both bull and bear markets by avoiding overtrading.
 """
 
 import numpy as np
@@ -18,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -27,40 +28,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1w data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate ATR(14) and ATR(50) for volatility regime
+    # Calculate 1w EMA200 for trend filter
+    df_1w_close = df_1w['close'].values
+    ema_1w = pd.Series(df_1w_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Calculate Williams %R(14) on 12h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Calculate ATR(14) for trailing stop
     tr1 = np.abs(high[1:] - low[:-1])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1d data for ATR regime confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
-        return np.zeros(n)
+    # Calculate volume MA(30) for confirmation
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
-    # Calculate 1d ATR(14) and ATR(50) for regime filter
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    tr1_1d = np.abs(df_1d_high[1:] - df_1d_low[:-1])
-    tr2_1d = np.abs(df_1d_high[1:] - df_1d_close[:-1])
-    tr3_1d = np.abs(df_1d_low[1:] - df_1d_close[:-1])
-    tr_1d = np.concatenate([[np.max([tr1_1d[0], tr2_1d[0], tr3_1d[0]])], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_50_1d = pd.Series(tr_1d).rolling(window=50, min_periods=50).mean().values
-    
-    # Calculate volume MA(20) for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to 6h
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
+    # Align HTF indicators to 12h
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,14 +64,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 14, 50, 20)  # Need enough bars for Donchian, ATR, Vol MA
+    start_idx = max(200, 14, 14, 30)  # Need enough bars for EMA200, Williams %R, ATR, Vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_50_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,20 +80,19 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Volatility regime: trade only when 1d ATR(14) > 1d ATR(50) (high volatility)
-        vol_regime = atr_14_1d_aligned[i] > atr_50_1d_aligned[i]
-        vol_confirmed = curr_volume > 1.5 * vol_ma[i]
-        
         if position == 0:
-            # Long: Price breaks above 6h Donchian Upper AND high volatility regime AND volume confirmed
-            if curr_close > high_roll[i] and vol_regime and vol_confirmed:
+            # Check for entry signals with volume confirmation
+            vol_confirmed = curr_volume > 1.5 * vol_ma[i]
+            
+            # Long: Williams %R crosses above -80 (from below) AND 1w EMA200 bullish AND volume confirmed
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and curr_close > ema_1w_aligned[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_high
                 lowest_since_entry = curr_low
-            # Short: Price breaks below 6h Donchian Lower AND high volatility regime AND volume confirmed
-            elif curr_close < low_roll[i] and vol_regime and vol_confirmed:
+            # Short: Williams %R crosses below -20 (from above) AND 1w EMA200 bearish AND volume confirmed
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and curr_close < ema_1w_aligned[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -109,8 +101,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit when price < highest_high - 2.5*ATR(14)
-            if curr_close < highest_since_entry - 2.5 * atr_14[i]:
+            # ATR trailing stop: exit when price < highest_high - 2.5*ATR
+            if curr_close < highest_since_entry - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,8 +110,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit when price > lowest_low + 2.5*ATR(14)
-            if curr_close > lowest_since_entry + 2.5 * atr_14[i]:
+            # ATR trailing stop: exit when price > lowest_low + 2.5*ATR
+            if curr_close > lowest_since_entry + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1dATR_Regime_VolumeConfirmation_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1wEMA200_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
