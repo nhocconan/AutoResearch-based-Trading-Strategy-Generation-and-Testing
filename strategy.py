@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- H3/L3 are strong Camarilla levels (1.25/1.166 multiples) requiring significant momentum to break.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- H3/L3 are strong Camarilla levels (1.25 multiples) requiring meaningful momentum to break.
 - 1d EMA34 ensures we trade only in the direction of the daily trend, reducing whipsaws.
-- Volume spike (>2.0x 20-bar average) confirms institutional participation in breakouts.
-- Position size 0.25 balances profit potential and drawdown control.
-- Target trades: 50-150 total over 4 years (12-37/year) to minimize fee drag.
+- Volume spike (>2.0x 20-bar average) confirms institutional participation.
+- Position size 0.25 balances profit and drawdown control.
+- Target trades: 80-160 total over 4 years (20-40/year) to minimize fee drag.
 - Works in bull/bear markets via daily trend filter and high-probability breakout logic.
 """
 
@@ -33,7 +33,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels from prior 12h bar
+    # Calculate Camarilla pivot levels from prior 4h bar
     prev_high = pd.Series(high).shift(1).values
     prev_low = pd.Series(low).shift(1).values
     prev_close = pd.Series(close).shift(1).values
@@ -42,7 +42,7 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     h3 = pivot + (range_hl * 1.25 / 4)  # H3 level
-    l3 = pivot - (range_hl * 1.166 / 4)  # L3 level
+    l3 = pivot - (range_hl * 1.25 / 4)  # L3 level
     
     # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -93,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
