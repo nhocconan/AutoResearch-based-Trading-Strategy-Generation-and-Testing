@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA(34) trend filter and volume spike confirmation.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA(34) trend filter and 1d volume spike confirmation.
 - Primary timeframe: 4h for entries/exits.
-- HTF: 1d EMA(34) for trend direction (bullish if close > EMA34, bearish if close < EMA34).
-- Volume: Current 4h volume > 2.0 * 20-period volume MA to avoid false breakouts.
+- HTF: 1d EMA(34) for trend direction (bullish if price > EMA34, bearish if price < EMA34).
+- Volume: Current 4h volume > 2.0 * 20-period 1d volume MA to avoid false breakouts.
 - Entry: Long when price breaks above Camarilla H3 level AND 1d EMA34 trend bullish AND volume spike.
          Short when price breaks below Camarilla L3 level AND 1d EMA34 trend bearish AND volume spike.
-- Exit: Opposite Camarilla breakout (L3 for long, H3 for short) or loss of volume confirmation.
+- Exit: Opposite Camarilla breakout or loss of volume confirmation.
 - Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
 - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Why should work: Camarilla levels act as intraday support/resistance; EMA34 filters trend; volume spike confirms breakout strength.
+  Works in bull (trend + breakouts) and bear (mean reversion at extremes + volume exhaustion).
 """
 
 import numpy as np
@@ -26,39 +28,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (based on previous day's OHLC)
-    # We need to calculate this on daily data then align to 4h
+    # Calculate Camarilla levels (H3, L3) based on previous day's range
+    # Camarilla: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+    # Use daily OHLC from 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # H3 = Close + 1.1*(High - Low)/2
-    # L3 = Close - 1.1*(High - Low)/2
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate EMA(34) on 1d close for trend
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # Calculate 20-period volume MA on 1d
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Align Camarilla levels to 4h
+    # Calculate Camarilla levels from 1d OHLC
+    # H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+    camarilla_h3 = df_1d['close'].values + 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
+    camarilla_l3 = df_1d['close'].values - 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
+    
+    # Align HTF indicators to 4h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Get 1d EMA(34) for trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Volume confirmation: current 4h volume > 2.0 * 20-period volume MA
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Volume confirmation: current 4h volume > 2.0 * 20-period 1d volume MA (aligned)
+    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(35, 20)  # Need enough for EMA34 and volume MA
+    start_idx = max(50, 34)  # Need enough 1d bars for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -73,30 +74,30 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        camarilla_h3_val = camarilla_h3_aligned[i]
-        camarilla_l3_val = camarilla_l3_aligned[i]
+        upper_camarilla = camarilla_h3_aligned[i]
+        lower_camarilla = camarilla_l3_aligned[i]
         
         if position == 0:
             # Check for entry signals with volume spike
             if volume_spike[i]:
-                # Bullish breakout: price breaks above Camarilla H3 AND 1d EMA34 bullish (close > EMA34)
-                if curr_high > camarilla_h3_val and curr_close > ema_34_val:
+                # Bullish breakout: price breaks above Camarilla H3 AND 1d EMA34 bullish (price > EMA34)
+                if curr_high > upper_camarilla and curr_close > ema_34_val:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price breaks below Camarilla L3 AND 1d EMA34 bearish (close < EMA34)
-                elif curr_low < camarilla_l3_val and curr_close < ema_34_val:
+                # Bearish breakout: price breaks below Camarilla L3 AND 1d EMA34 bearish (price < EMA34)
+                elif curr_low < lower_camarilla and curr_close < ema_34_val:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
             # Long exit: price breaks below Camarilla L3 OR loss of volume confirmation
-            if curr_low < camarilla_l3_val or not volume_spike[i]:
+            if curr_low < lower_camarilla or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price breaks above Camarilla H3 OR loss of volume confirmation
-            if curr_high > camarilla_h3_val or not volume_spike[i]:
+            if curr_high > upper_camarilla or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
