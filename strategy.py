@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud with 1d Weekly EMA50 Trend Filter and Volume Confirmation
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for Ichimoku components (Tenkan, Kijun, Senkou Span A/B) and weekly EMA50 trend.
-- Entry: Long when price > Kumo (cloud) AND Tenkan > Kijun AND price > weekly EMA50 AND volume spike.
-         Short when price < Kumo (cloud) AND Tenkan < Kijun AND price < weekly EMA50 AND volume spike.
-- Exit: Opposite Ichimoku conditions OR price crosses weekly EMA50 in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag.
-- Volume confirmation: 6h ATR ratio (current/20) > 1.5 to ensure momentum behind moves.
-- Ichimoku cloud provides dynamic support/resistance; weekly EMA50 filters for higher timeframe trend.
-- Works in bull markets (buy above cloud in uptrend) and bear markets (sell below cloud in downtrend).
-- Estimated trades: ~80 total over 4 years (~20/year) based on Ichimoku trend change frequency.
+Hypothesis: 12h Donchian(20) breakout with 1d ATR volume spike filter and 1w EMA50 trend filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for ATR volume spike filter and Camarilla context, 1w for EMA50 trend filter.
+- Entry: Long when price breaks above Donchian(20) high AND ATR ratio > 1.8 AND price > 1w EMA50.
+         Short when price breaks below Donchian(20) low AND ATR ratio > 1.8 AND price < 1w EMA50.
+- Exit: Opposite Donchian breakout OR price crosses 1w EMA50 in opposite direction.
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- ATR ratio (current ATR/20-period ATR) > 1.8 confirms volatility expansion to avoid false breakouts.
+- 1w EMA50 provides strong trend filter to avoid counter-trend trades in bear markets.
+- Donchian channels from prior 20 periods provide objective breakout levels.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
 """
 
 import numpy as np
@@ -27,30 +28,14 @@ def atr(high, low, close, period):
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
     true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    true_range[0] = high_low[0]
+    true_range[0] = high_low[0]  # First period
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def ichimoku_cloud(high, low, close):
-    """Calculate Ichimoku Cloud components."""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2.0
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2.0
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2
-    senkou_a = (tenkan + kijun) / 2.0
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2.0
-    
-    return tenkan, kijun, senkou_a, senkou_b
+def donchian_channels(high, low, period):
+    """Calculate Donchian channels (upper, lower)."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -61,90 +46,82 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1d Ichimoku Cloud
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Calculate 1w trend filter: EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = ichimoku_cloud(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
-        df_1d['close'].values
-    )
+    ema50_1w = ema(df_1w['close'].values, 50)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w, additional_delay_bars=1)
     
-    # Align Ichimoku components to 6h timeframe (no additional delay needed for cloud)
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    # Calculate 1d ATR for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Calculate 1d Weekly EMA50 for trend filter
-    ema50_1d = ema(df_1d['close'].values, 50)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d, additional_delay_bars=1)
+    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
+    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
+    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
     
-    # Calculate 6h ATR for volume confirmation (current ATR / 20-period ATR)
-    atr_20_6h = atr(high, low, close, 20)
-    atr_current_6h = atr(high, low, close, 1)
-    atr_ratio_6h = atr_current_6h / (atr_20_6h + 1e-10)
+    # Donchian channels from prior 20 periods (use prior completed bar for no look-ahead)
+    # We'll calculate this inside the loop using rolling window on prior data
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 60  # Need sufficient data for Ichimoku (52 periods) and EMA50
+    start_idx = 60  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_ratio_6h[i])):
+        # Skip if data not ready (check for NaN from alignment or calculations)
+        if np.isnan(ema50_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
-        # Determine cloud boundaries (Senkou Span A/B)
-        upper_cloud = np.maximum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        lower_cloud = np.minimum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        # Calculate Donchian channels using prior 20 periods (i-20 to i-1)
+        if i >= 21:  # Need at least 20 prior periods + current
+            lookback_high = high[i-20:i]  # 20 periods prior to current
+            lookback_low = low[i-20:i]
+            donchian_upper = np.max(lookback_high)
+            donchian_lower = np.min(lookback_low)
+        else:
+            # Not enough data for Donchian calculation
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        # Exit conditions: opposite Ichimoku conditions OR price crosses weekly EMA50
+        # Exit conditions: opposite Donchian breakout OR price crosses 1w EMA50 in opposite direction
         if position != 0:
-            # Exit long: price < cloud OR Tenkan < Kijun OR price < weekly EMA50
+            # Exit long: price breaks below Donchian lower OR price falls below 1w EMA50
             if position == 1:
-                if (curr_close < lower_cloud or 
-                    tenkan_1d_aligned[i] < kijun_1d_aligned[i] or 
-                    curr_close < ema50_1d_aligned[i]):
+                if curr_close < donchian_lower or curr_close < ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price > cloud OR Tenkan > Kijun OR price > weekly EMA50
+            # Exit short: price breaks above Donchian upper OR price rises above 1w EMA50
             elif position == -1:
-                if (curr_close > upper_cloud or 
-                    tenkan_1d_aligned[i] > kijun_1d_aligned[i] or 
-                    curr_close > ema50_1d_aligned[i]):
+                if curr_close > donchian_upper or curr_close > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Ichimoku signals with trend filter and volume confirmation
+        # Entry conditions: Donchian breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: price > cloud AND Tenkan > Kijun AND price > weekly EMA50 AND volume spike
-            if (curr_close > upper_cloud and 
-                tenkan_1d_aligned[i] > kijun_1d_aligned[i] and 
-                curr_close > ema50_1d_aligned[i] and 
-                atr_ratio_6h[i] > 1.5):
+            # Long: price breaks above Donchian upper AND ATR ratio > 1.8 AND bullish 1w trend
+            if curr_close > donchian_upper and atr_ratio_aligned[i] > 1.8 and curr_close > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price < cloud AND Tenkan < Kijun AND price < weekly EMA50 AND volume spike
-            elif (curr_close < lower_cloud and 
-                  tenkan_1d_aligned[i] < kijun_1d_aligned[i] and 
-                  curr_close < ema50_1d_aligned[i] and 
-                  atr_ratio_6h[i] > 1.5):
+            # Short: price breaks below Donchian lower AND ATR ratio > 1.8 AND bearish 1w trend
+            elif curr_close < donchian_lower and atr_ratio_aligned[i] > 1.8 and curr_close < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -156,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_1dWeeklyEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dATR_VolumeSpike_1wEMA50_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
