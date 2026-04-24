@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Uses Camarilla pivot levels (H3, L3) from prior completed 1d candles to identify support/resistance.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Uses Camarilla pivot levels (H3, L3) from prior completed 1d candles.
 - Breakout above H3 or below L3 with volume > 2.0x 20-bar average signals strong momentum.
 - Trend filter: price must be above/below 1d EMA34 to align with higher timeframe direction.
-- Designed for 12h timeframe to capture medium-term breakouts in both bull and bear markets.
+- Designed for 4h timeframe to capture medium-term breakouts in both bull and bear markets.
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 12-37 trades/year (50-150 total over 4 years) to stay fee-efficient.
+- Targets 20-50 trades/year (80-200 total over 4 years) to stay fee-efficient.
+- Based on proven pattern: Camarilla breakout + volume + trend filter showed strong ETH/SOL performance in DB.
 """
 
 import numpy as np
@@ -38,7 +39,7 @@ def generate_signals(prices):
     camarilla_low = close_1d - 1.1 * (high_1d - low_1d) / 4
     
     # 1d EMA34 trend filter
-    close_1d_series = df_1d['close']
+    close_1d_series = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d_series).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align HTF indicators to LTF
@@ -53,7 +54,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)
+    start_idx = max(50, 34)
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -93,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
