@@ -3,8 +3,8 @@
 Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
 - Uses 4h timeframe (primary) and 1d HTF for trend alignment (proven pattern from DB)
 - Donchian breakout from previous 20-period 4h high/low (structure-based entry)
-- Long when price breaks above 4h Donchian upper band AND price > 1d EMA50 (uptrend) AND volume > 1.5 * volume MA(20)
-- Short when price breaks below 4h Donchian lower band AND price < 1d EMA50 (downtrend) AND volume > 1.5 * volume MA(20)
+- Long when price breaks above 4h Donchian upper band AND price > 1d EMA50 (uptrend) AND volume > 1.8 * volume MA(20)
+- Short when price breaks below 4h Donchian lower band AND price < 1d EMA50 (downtrend) AND volume > 1.8 * volume MA(20)
 - Exit when price reverts to 4h Donchian midpoint (mean reversion structure)
 - Discrete signal size: 0.25 to minimize fee churn
 - Target: 75-200 total trades over 4 years (19-50/year) as per 4h timeframe recommendation
@@ -54,9 +54,9 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    # Volume confirmation: current volume > 1.8 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * volume_ma)
+    volume_confirm = volume > (1.8 * volume_ma)
     
     # Trend filter: price above/below 1d EMA50
     uptrend = close > ema_50_1d_aligned
