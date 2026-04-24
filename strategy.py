@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) combined with 1d Alligator (SMAs) filter and volume confirmation.
-- Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-- Alligator uses SMAs (13,8,5) smoothed; aligned teeth (SMA8) acts as dynamic trend filter.
-- Long when Bull Power > 0, price > SMA8 (teeth), and volume > 2.0x 24-period average.
-- Short when Bear Power < 0, price < SMA8 (teeth), and volume > 2.0x 24-period average.
-- Uses discrete position size 0.25 to manage drawdown and reduce fee churn.
-- Volume confirmation ensures conviction; avoids low-momentum false signals.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1w EMA50 trend filter, volume spike confirmation, and ATR regime filter.
+- Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
+- Volume confirmation requires >2.0x 24-period average to ensure conviction.
+- ATR regime filter (current ATR > 0.7x 50-period average) avoids low-momentum whipsaws.
+- Exits on Camarilla L3/H3 retest or EMA50 trend violation.
 - Designed for 12-30 trades/year (50-120 total over 4 years) to stay within fee-efficient range.
-- Combines trend (Alligator) and momentum (Elder Ray) with volume filter for robustness in bull/bear markets.
+- Combines proven elements: Camarilla structure + weekly trend filter + volume/volatility confirmation.
+- Works in both bull and bear markets: trend filter ensures alignment with higher timeframe momentum,
+  while volume and volatility filters prevent entries in choppy, low-conviction environments.
 """
 
 import numpy as np
@@ -25,84 +25,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Prior 1d OHLC (completed daily bar)
-    high_1d = df_1d['high'].shift(1).values
-    low_1d = df_1d['low'].shift(1).values
-    close_1d = df_1d['close'].shift(1).values
+    # Prior 1w OHLC (completed weekly bar)
+    high_1w = df_1w['high'].shift(1).values
+    low_1w = df_1w['low'].shift(1).values
+    close_1w = df_1w['close'].shift(1).values
     
-    # Align to 6h timeframe
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    # Align to 12h timeframe
+    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
+    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
-    # Calculate EMA13 on 1d close for Elder Ray
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    # Calculate Camarilla levels from prior weekly bar
+    camarilla_h3 = close_1w_aligned + 1.1 * (high_1w_aligned - low_1w_aligned) / 4
+    camarilla_l3 = close_1w_aligned - 1.1 * (high_1w_aligned - low_1w_aligned) / 4
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d_aligned - ema_13_1d_aligned
-    bear_power = low_1d_aligned - ema_13_1d_aligned
-    
-    # Alligator: SMA(13), SMA(8), SMA(5) on 1d close, all smoothed
-    smi_13 = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    smi_8 = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    smi_5 = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
-    
-    # Smoothed (alligator jaws/teeth/lips) - additional 3-period SMAs
-    smi_13_smooth = pd.Series(smi_13).rolling(window=3, min_periods=3).mean().values
-    smi_8_smooth = pd.Series(smi_8).rolling(window=3, min_periods=3).mean().values
-    smi_5_smooth = pd.Series(smi_5).rolling(window=3, min_periods=3).mean().values
-    
-    # Align Alligator components (teeth = SMA8 smoothed is key trend filter)
-    smi_13_aligned = align_htf_to_ltf(prices, df_1d, smi_13_smooth)
-    smi_8_aligned = align_htf_to_ltf(prices, df_1d, smi_8_smooth)  # Teeth
-    smi_5_aligned = align_htf_to_ltf(prices, df_1d, smi_5_smooth)
+    # 1w EMA50 trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: > 2.0x 24-period average
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    
+    # ATR(14) for volatility regime filter
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # ATR ratio: current ATR / 50-period average (avoid low volatility chop)
+    atr_ma_long = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / np.where(atr_ma_long > 0, atr_ma_long, 1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 24)
+    start_idx = max(50, 24, atr_period, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(smi_8_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average)
+        # Volume confirmation (> 2.0x average) + ATR ratio > 0.7 (avoid low vol)
         volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        vol_regime = atr_ratio[i] > 0.7
         
         if position == 0:
-            # Long: Bull Power > 0 AND price > Alligator teeth (SMA8) AND volume confirmation
-            if bull_power[i] > 0 and close[i] > smi_8_aligned[i] and volume_confirm:
+            # Long: Close > H3 AND price above 1w EMA50 AND volume confirmation AND vol regime
+            if close[i] > camarilla_h3[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm and vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND price < Alligator teeth (SMA8) AND volume confirmation
-            elif bear_power[i] < 0 and close[i] < smi_8_aligned[i] and volume_confirm:
+            # Short: Close < L3 AND price below 1w EMA50 AND volume confirmation AND vol regime
+            elif close[i] < camarilla_l3[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm and vol_regime:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power <= 0 OR price crosses below Alligator teeth
-            if bull_power[i] <= 0 or close[i] < smi_8_aligned[i]:
+            # Long exit: Close < L3 OR price crosses below 1w EMA50
+            if close[i] < camarilla_l3[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power >= 0 OR price crosses above Alligator teeth
-            if bear_power[i] >= 0 or close[i] > smi_8_aligned[i]:
+            # Short exit: Close > H3 OR price crosses above 1w EMA50
+            if close[i] > camarilla_h3[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Alligator_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1wEMA50_VolumeATR_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
