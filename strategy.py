@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike confirmation and chop regime filter.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for volume average and chop regime filter.
-- Camarilla levels: calculated from prior 1d OHLC (H3, L3, H4, L4).
-- Entry: Long when price breaks above H3 with volume > 1.5 * 20-period average volume AND chop < 61.8 (trending regime).
-         Short when price breaks below L3 with volume > 1.5 * 20-period average volume AND chop < 61.8.
-- Exit: Opposite breakout (price crosses below L3 for long, above H3 for short) OR chop > 61.8 (range regime).
+Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA50 trend filter and volume average.
+- Bollinger Bands: identifies low volatility squeezes (BB width < 20th percentile) that precede breakouts.
+- Entry: Long when price breaks above upper BB AND BB width is in lowest 20% (squeeze) AND price > 1d EMA50 AND volume > 2.0 * 20-period average volume.
+         Short when price breaks below lower BB AND BB width is in lowest 20% (squeeze) AND price < 1d EMA50 AND volume > 2.0 * 20-period average volume.
+- Exit: Opposite BB breakout signal or BB width expands above 50% (squeeze end).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Camarilla breakouts work in trending markets; chop filter avoids false signals in ranging markets.
-- Volume confirmation ensures institutional participation.
+- Bollinger squeeze works in both bull and bear markets as it captures volatility contraction/expansion cycles.
+- Volume confirmation ensures breakout legitimacy.
+- 1d EMA50 provides robust trend filter to avoid counter-trend trades in choppy markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def ema(values, period):
+    """Calculate Exponential Moving Average with proper min_periods."""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def bollinger_bands(close, period=20, std_dev=2.0):
+    """Calculate Bollinger Bands: returns upper, lower, bandwidth."""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
+    bandwidth = (upper - lower) / (sma + 1e-10)  # Avoid division by zero
+    return upper, lower, bandwidth
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,84 +41,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels, volume average, and chop regime
+    # Calculate 1d trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient data for volume MA and chop
+    if len(df_1d) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
-    # Calculate 1d volume average (20-period)
+    ema50_1d = ema(df_1d['close'].values, 50)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate 1d volume average for confirmation
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
     vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate 1d Chopiness Index (14-period)
-    def choppy_index(high_arr, low_arr, close_arr, period=14):
-        """Chopiness Index: measures whether market is choppy (range) or trending."""
-        atr_sum = np.zeros(len(close_arr))
-        true_range = np.maximum(high_arr - low_arr, 
-                               np.maximum(np.abs(high_arr - np.roll(close_arr, 1)), 
-                                          np.abs(np.roll(close_arr, 1) - low_arr)))
-        true_range[0] = high_arr[0] - low_arr[0]  # First TR
-        
-        # ATR calculation using Wilder's smoothing
-        atr = np.zeros_like(true_range)
-        atr[period-1] = np.mean(true_range[:period])  # Seed with simple average
-        for i in range(period, len(true_range)):
-            atr[i] = (atr[i-1] * (period-1) + true_range[i]) / period
-        
-        # Sum of ATR over period
-        atr_sum = np.zeros_like(close_arr)
-        for i in range(period-1, len(close_arr)):
-            atr_sum[i] = np.sum(atr[i-period+1:i+1])
-        
-        # Chopiness Index formula
-        hh = np.maximum.accumulate(high_arr)
-        ll = np.minimum.accumulate(low_arr)
-        hh_ll_diff = hh - ll
-        
-        chop = np.zeros_like(close_arr)
-        for i in range(period-1, len(close_arr)):
-            if hh_ll_diff[i] > 0 and atr_sum[i] > 0:
-                chop[i] = 100 * np.log10(atr_sum[i] / hh_ll_diff[i]) / np.log10(period)
-            else:
-                chop[i] = 50.0  # Neutral value
-        return chop
+    # Calculate Bollinger Bands from 6h data (20-period, 2 std)
+    bb_upper, bb_lower, bb_width = bollinger_bands(close, 20, 2.0)
     
-    chop_values = choppy_index(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
-    
-    # Calculate Camarilla levels from prior 1d OHLC
-    # H3, L3, H4, L4 levels
-    def calculate_camarilla(high_arr, low_arr, close_arr):
-        """Calculate Camarilla pivot levels: H3, L3, H4, L4."""
-        # Typical price for prior day
-        typical_price = (high_arr + low_arr + close_arr) / 3
-        range_val = high_arr - low_arr
-        
-        # Camarilla formulas
-        H3 = close_arr + (range_val * 1.1 / 4)
-        L3 = close_arr - (range_val * 1.1 / 4)
-        H4 = close_arr + (range_val * 1.1 / 2)
-        L4 = close_arr - (range_val * 1.1 / 2)
-        
-        return H3, L3, H4, L4
-    
-    H3, L3, H4, L4 = calculate_camarilla(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Calculate 20th percentile of BB width for squeeze condition (using expanding window)
+    bb_width_percentile = np.zeros_like(bb_width)
+    for i in range(len(bb_width)):
+        if i < 20:
+            bb_width_percentile[i] = np.nan
+        else:
+            bb_width_percentile[i] = np.percentile(bb_width[max(0, i-50):i+1], 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14)  # Need 20 for volume MA, 14 for chop
+    start_idx = max(20, 50, 20)  # Need 20 for BB, 50 for 1d EMA50, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width[i]) or
+            np.isnan(bb_width_percentile[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,37 +87,43 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        curr_chop = chop_aligned[i]
+        prev_close = close[i-1]
         
         # Exit conditions
         if position != 0:
-            # Exit long: price crosses below L3 OR chop > 61.8 (range regime)
+            # Exit long: price breaks below lower BB OR BB width expands above 50% (squeeze end)
             if position == 1:
-                if curr_close < L3_aligned[i] or curr_chop > 61.8:
+                if curr_close < bb_lower[i] or bb_width[i] > bb_width_percentile[i] * 2.5:  # Exit when width > 2.5x 20th percentile
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price crosses above H3 OR chop > 61.8 (range regime)
+            # Exit short: price breaks above upper BB OR BB width expands above 50% (squeeze end)
             elif position == -1:
-                if curr_close > H3_aligned[i] or curr_chop > 61.8:
+                if curr_close > bb_upper[i] or bb_width[i] > bb_width_percentile[i] * 2.5:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volume confirmation and chop filter
+        # Entry conditions: BB breakout with squeeze, trend filter, and volume confirmation
         if position == 0:
-            # Volume confirmation: current volume > 1.5 * 20-period average volume
-            volume_confirm = curr_volume > 1.5 * vol_ma_20_aligned[i]
+            # BB breakout signals
+            breakout_up = curr_close > bb_upper[i] and prev_close <= bb_upper[i-1]
+            breakout_down = curr_close < bb_lower[i] and prev_close >= bb_lower[i-1]
             
-            # Chop filter: chop < 61.8 indicates trending regime (avoid ranging markets)
-            chop_filter = curr_chop < 61.8
+            # Squeeze condition: BB width in lowest 20% (volatility contraction)
+            squeeze_condition = bb_width[i] <= bb_width_percentile[i]
             
-            # Long entry: price breaks above H3
-            if curr_high > H3_aligned[i] and volume_confirm and chop_filter:
+            # Trend filter: price vs 1d EMA50
+            long_trend = curr_close > ema50_1d_aligned[i]
+            short_trend = curr_close < ema50_1d_aligned[i]
+            
+            # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
+            volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
+            
+            if breakout_up and squeeze_condition and long_trend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below L3
-            elif curr_low < L3_aligned[i] and volume_confirm and chop_filter:
+            elif breakout_down and squeeze_condition and short_trend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -156,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dVolumeSpike_ChopFilter_v1"
-timeframe = "4h"
+name = "6h_BollingerSqueeze_Breakout_1dEMA50_TrendFilter_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
