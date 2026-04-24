@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
 Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-- Uses Donchian channel (20-period high/low) from 4h timeframe as price structure.
-- Breakout above 20-bar high with volume > 2.0x 20-bar average = long signal.
-- Breakdown below 20-bar low with volume > 2.0x 20-bar average = short signal.
+- Uses Donchian channel (20-bar high/low) from 4h timeframe as breakout levels.
+- Breakout above 20-period high with volume > 2.0x 20-bar average = long signal.
+- Breakdown below 20-period low with volume > 2.0x 20-bar average = short signal.
 - Trend filter: price must be above/below 1d EMA50 to align with daily trend.
-- Designed for 4h timeframe to capture multi-day swings with higher probability entries.
+- Designed for 4h timeframe to capture swing trades with higher probability entries.
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 20-50 trades/year (80-200 total over 4 years) to stay fee-efficient.
+- Targets 20-50 trades/year (75-200 total over 4 years) to stay fee-efficient.
 - Volume confirmation reduces false breakouts in choppy markets.
-- Novelty: Combines Donchian breakout with 1d EMA50 trend filter on 4h timeframe for BTC/ETH/SOL.
 """
 
 import numpy as np
@@ -36,7 +35,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channel (20-period) on 4h timeframe
+    # Donchian(20) channels from 4h data
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -47,7 +46,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need enough for EMA and Donchian
+    start_idx = max(50, 20, 20)  # Need enough for EMA, Donchian, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -64,23 +63,23 @@ def generate_signals(prices):
         if position == 0:
             # Only trade if volume confirms breakout
             if volume_confirm:
-                # Long: price breaks above 20-bar high AND above 1d EMA50
+                # Long: price breaks above 20-period high AND above 1d EMA50
                 if close[i] > high_ma[i] and close[i] > ema_50_1d_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: price breaks below 20-bar low AND below 1d EMA50
+                # Short: price breaks below 20-period low AND below 1d EMA50
                 elif close[i] < low_ma[i] and close[i] < ema_50_1d_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price crosses below 20-bar low OR below 1d EMA50
+            # Long exit: price crosses below 20-period low OR below 1d EMA50
             if close[i] < low_ma[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above 20-bar high OR above 1d EMA50
+            # Short exit: price crosses above 20-period high OR above 1d EMA50
             if close[i] > high_ma[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
