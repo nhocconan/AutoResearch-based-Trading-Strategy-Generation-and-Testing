@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation + ATR trailing stop.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+Hypothesis: 6h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
 - HTF: 1d EMA34 for trend filter (price > EMA34 = uptrend, price < EMA34 = downtrend).
-- Entry: Long when price breaks above Donchian(20) upper band AND price > 1d EMA34 AND volume > 2.0 * 4h volume MA(20);
-         Short when price breaks below Donchian(20) lower band AND price < 1d EMA34 AND volume > 2.0 * 4h volume MA(20).
-- Exit: ATR(14) trailing stop (2.5 * ATR) from highest high/lowest low since entry.
+- Entry: Long when price breaks above H3 level AND price > 1d EMA34 AND volume > 2.0 * 6h volume MA(20);
+         Short when price breaks below L3 level AND price < 1d EMA34 AND volume > 2.0 * 6h volume MA(20).
+- Exit: ATR-based trailing stop (2.0 * ATR(14)) from highest high/lowest low since entry.
 - Signal size: 0.25 discrete to control fee drag.
-- Donchian breakouts capture momentum; 1d EMA34 ensures alignment with daily trend; volume confirmation avoids low-conviction breakouts.
-  This combination works in both bull and bear markets by trading with the higher timeframe trend.
+- Camarilla pivot levels provide intraday support/resistance; EMA34 trend filter ensures alignment with daily trend;
+  volume confirmation avoids low-conviction breakouts. Works in both bull and bear markets by trading with the trend.
 """
 
 import numpy as np
@@ -37,20 +37,42 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian(20) bands for 4h timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # Range = high - low
+    rng = high - low
     
-    # Calculate volume MA(20) for 4h timeframe
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels based on previous day's data
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.25 * (high - low)
+    # H2 = close + 1.166 * (high - low)
+    # H1 = close + 1.083 * (high - low)
+    # L1 = close - 1.083 * (high - low)
+    # L2 = close - 1.166 * (high - low)
+    # L3 = close - 1.25 * (high - low)
+    # L4 = close - 1.5 * (high - low)
     
-    # Calculate ATR(14) for 4h timeframe
+    # Shift by 1 to use previous day's data (no look-ahead)
+    prev_typical = pd.Series(typical_price).shift(1).values
+    prev_high = pd.Series(high).shift(1).values
+    prev_low = pd.Series(low).shift(1).values
+    prev_rng = pd.Series(rng).shift(1).values
+    
+    # Calculate H3 and L3 levels
+    H3 = prev_typical + 1.25 * prev_rng
+    L3 = prev_typical - 1.25 * prev_rng
+    
+    # Calculate ATR(14) for 6h timeframe
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[high[0] - low[0]], tr])  # first TR is high-low
     atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume MA(20) for 6h timeframe
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,14 +81,14 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 20, 14)  # EMA34 needs 34, Donchian needs 20, volume MA needs 20, ATR needs 14
+    start_idx = max(34, 20, 14)  # EMA34 needs 34, volume MA needs 20, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_4h[i]) or 
+            np.isnan(H3[i]) or 
+            np.isnan(L3[i]) or 
+            np.isnan(vol_ma_6h[i]) or 
             np.isnan(atr14[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -83,20 +105,20 @@ def generate_signals(prices):
         curr_atr = atr14[i]
         
         # Volume confirmation: 2.0x threshold for strict entry
-        vol_confirm = curr_volume > 2.0 * vol_ma_4h[i]
+        vol_confirm = curr_volume > 2.0 * vol_ma_6h[i]
         
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: price breaks above Donchian upper band AND price > 1d EMA34 (uptrend)
-                if curr_close > highest_high[i] and curr_close > ema_34_aligned[i]:
+                # Long: price breaks above H3 AND price > 1d EMA34 (uptrend)
+                if curr_close > H3[i] and curr_close > ema_34_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
                     lowest_since_entry = curr_close
-                # Short: price breaks below Donchian lower band AND price < 1d EMA34 (downtrend)
-                elif curr_close < lowest_low[i] and curr_close < ema_34_aligned[i]:
+                # Short: price breaks below L3 AND price < 1d EMA34 (downtrend)
+                elif curr_close < L3[i] and curr_close < ema_34_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
@@ -107,8 +129,8 @@ def generate_signals(prices):
             highest_since_entry = max(highest_since_entry, curr_high)
             lowest_since_entry = min(lowest_since_entry, curr_low)
             
-            # Stoploss: 2.5 * ATR below highest high since entry
-            stoploss = highest_since_entry - 2.5 * curr_atr
+            # Stoploss: 2.0 * ATR below highest high since entry
+            stoploss = highest_since_entry - 2.0 * curr_atr
             if curr_close < stoploss:
                 signals[i] = 0.0
                 position = 0
@@ -122,8 +144,8 @@ def generate_signals(prices):
             highest_since_entry = max(highest_since_entry, curr_high)
             lowest_since_entry = min(lowest_since_entry, curr_low)
             
-            # Stoploss: 2.5 * ATR above lowest low since entry
-            stoploss = lowest_since_entry + 2.5 * curr_atr
+            # Stoploss: 2.0 * ATR above lowest low since entry
+            stoploss = lowest_since_entry + 2.0 * curr_atr
             if curr_close > stoploss:
                 signals[i] = 0.0
                 position = 0
@@ -135,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
