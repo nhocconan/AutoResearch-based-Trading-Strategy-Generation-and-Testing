@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA(34) trend filter and 1d volume spike confirmation.
-- Primary timeframe: 4h for entries/exits.
-- HTF: 1d EMA(34) for trend direction (bullish if price > EMA34, bearish if price < EMA34).
-- Volume: Current 4h volume > 2.0 * 20-period 1d volume MA to avoid false breakouts.
-- Entry: Long when price breaks above Camarilla R1 AND 1d EMA34 trend bullish AND volume spike.
-         Short when price breaks below Camarilla S1 AND 1d EMA34 trend bearish AND volume spike.
-- Exit: Opposite Camarilla breakout or loss of volume confirmation.
+Hypothesis: 1d Williams %R(14) with 1w EMA(34) trend filter and volume spike confirmation.
+- Primary timeframe: 1d for entries/exits.
+- HTF: 1w EMA(34) for trend direction (bullish if close > EMA34, bearish if close < EMA34).
+- Volume: Current 1d volume > 2.0 * 20-period volume MA to confirm breakout strength.
+- Entry: Long when Williams %R crosses above -80 from below AND 1w EMA34 bullish AND volume spike.
+         Short when Williams %R crosses below -20 from above AND 1w EMA34 bearish AND volume spike.
+- Exit: Opposite Williams %R crossover or loss of volume confirmation.
 - Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+- Works in bull/bear: Williams %R identifies oversold/overbought conditions; EMA filter ensures trend alignment.
 """
 
 import numpy as np
@@ -26,81 +27,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (based on previous day's OHLC)
-    # For 4h timeframe, we need daily OHLC to compute Camarilla levels
-    # We'll get 1d data and compute Camarilla levels from it
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate Williams %R(14) on 1d
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    williams_r = williams_r.values
+    
+    # Get 1w data for EMA(34) trend and volume MA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla R1 = close + (high - low) * 1.1 / 12
-    # Camarilla S1 = close - (high - low) * 1.1 / 12
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate EMA(34) on 1w close
+    ema_34 = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
-    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
+    # Calculate 20-period volume MA on 1w
+    vol_ma_1w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate EMA(34) on 1d close
-    ema_34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align HTF indicators to 1d
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
-    # Calculate 20-period volume MA on 1d
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to 4h
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Volume confirmation: current 4h volume > 2.0 * 20-period 1d volume MA (aligned)
-    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
+    # Volume confirmation: current 1d volume > 2.0 * 20-period 1w volume MA (aligned)
+    volume_spike = volume > (2.0 * vol_ma_1w_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # Need enough 1d bars for EMA34 and volume MA
+    start_idx = max(34, 14)  # Need enough 1w bars for EMA34 and enough 1d bars for Williams %R
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema_34_val = ema_34_aligned[i]
-        camarilla_r1_val = camarilla_r1_aligned[i]
-        camarilla_s1_val = camarilla_s1_aligned[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_volume_spike = volume_spike[i]
+        
+        # Williams %R crossover signals
+        williams_r_cross_up = (williams_r[i] > -80) and (williams_r[i-1] <= -80)
+        williams_r_cross_down = (williams_r[i] < -20) and (williams_r[i-1] >= -20)
         
         if position == 0:
             # Check for entry signals with volume spike
-            if volume_spike[i]:
-                # Bullish breakout: price breaks above Camarilla R1 AND 1d EMA34 bullish (price > EMA34)
-                if curr_high > camarilla_r1_val and curr_close > ema_34_val:
+            if curr_volume_spike:
+                # Bullish entry: Williams %R crosses above -80 from below AND 1w EMA34 bullish (close > EMA34)
+                if williams_r_cross_up and curr_close > ema_34_val:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price breaks below Camarilla S1 AND 1d EMA34 bearish (price < EMA34)
-                elif curr_low < camarilla_s1_val and curr_close < ema_34_val:
+                # Bearish entry: Williams %R crosses below -20 from above AND 1w EMA34 bearish (close < EMA34)
+                elif williams_r_cross_down and curr_close < ema_34_val:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price breaks below Camarilla S1 OR loss of volume confirmation
-            if curr_low < camarilla_s1_val or not volume_spike[i]:
+            # Long exit: Williams %R crosses below -80 OR loss of volume confirmation
+            if williams_r[i] < -80 or not curr_volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Camarilla R1 OR loss of volume confirmation
-            if curr_high > camarilla_r1_val or not volume_spike[i]:
+            # Short exit: Williams %R crosses above -20 OR loss of volume confirmation
+            if williams_r[i] > -20 or not curr_volume_spike:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dEMA34Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_WilliamsR14_1wEMA34Trend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
