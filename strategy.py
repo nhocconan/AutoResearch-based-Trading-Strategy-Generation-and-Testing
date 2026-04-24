@@ -1,50 +1,34 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla pivot breakout with 1d volume spike and ADX trend filter.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for Camarilla pivot levels, volume average, and ADX calculation.
-- Camarilla Pivots: identifies key support/resistance levels from prior 1d range.
-- Entry: Long when price breaks above R3 with volume confirmation and ADX > 25 (trending).
-         Short when price breaks below S3 with volume confirmation and ADX > 25.
-- Exit: Opposite Camarilla breakout (R4/S4) or ADX < 20 (trend weakens).
+Hypothesis: 12h Donchian channel breakout with 1d volume spike and ATR regime filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for volume average and ATR calculation.
+- Donchian Channel: identifies breakouts from 20-period high/low.
+- Entry: Long when price breaks above 20-period high AND volume > 2.0 * 1d average volume AND ATR(14) < ATR(50) (low volatility regime).
+         Short when price breaks below 20-period low AND volume > 2.0 * 1d average volume AND ATR(14) < ATR(50).
+- Exit: Opposite Donchian breakout signal.
 - Signal size: 0.25 discrete to minimize fee drag.
-- Camarilla breakouts capture institutional order flow at key levels.
-- Volume confirmation avoids false breakouts.
-- ADX filter ensures we trade only in trending markets, avoiding chop.
-- Works in bull markets (breakouts continuation) and bear markets (breakdown continuation).
+- Donchian breakouts capture strong momentum moves.
+- Volume confirmation ensures breakout legitimacy.
+- ATR regime filter avoids high-volatility choppy markets where breakouts fail.
+- Works in both bull and bear markets as it captures volatility expansion after contraction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def adx(high, low, close, period=14):
-    """Average Directional Index with proper min_periods."""
+def atr(high, low, close, period):
+    """Calculate Average True Range with proper min_periods."""
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
-    
-    # True Range
     tr1 = high_series - low_series
     tr2 = abs(high_series - close_series.shift(1))
     tr3 = abs(low_series - close_series.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=period, adjust=False, min_periods=period).mean()
-    
-    # Directional Movement
-    up_move = high_series - high_series.shift(1)
-    down_move = low_series.shift(1) - low_series
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    plus_di = 100 * (pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean() / atr)
-    
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_values = dx.ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    return adx_values
+    atr_values = tr.ewm(span=period, adjust=False, min_periods=period).mean().values
+    return atr_values
 
 def generate_signals(prices):
     n = len(prices)
@@ -57,51 +41,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots, volume, and ADX
+    # Calculate 1d volume average for confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need sufficient data for calculations
+    if len(df_1d) < 20:  # Need sufficient data for volume MA
         return np.zeros(n)
     
-    # Calculate 1d volume average for confirmation (20-period MA)
     vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate 1d ADX for trend filter
-    adx_1d = adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate 1d ATR for regime filter
+    if len(df_1d) < 50:  # Need sufficient data for ATR(50)
+        return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from 1d OHLC
-    # Camarilla formula: based on previous day's range
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    atr_14_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    atr_50_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 50)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
     
-    pivot = (h_1d + l_1d + c_1d) / 3
-    range_1d = h_1d - l_1d
-    
-    # Camarilla levels
-    r3 = pivot + (range_1d * 1.1 / 4)
-    r4 = pivot + (range_1d * 1.1 / 2)
-    s3 = pivot - (range_1d * 1.1 / 4)
-    s4 = pivot - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Calculate Donchian Channel from 12h data (20-period)
+    donchian_period = 20
+    donchian_high = pd.Series(close).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(close).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, 20)  # Need 30 for ADX, 20 for volume MA
+    start_idx = max(donchian_period, 20, 50)  # Need 20 for Donchian, 20 for volume MA, 50 for ATR(50)
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+        # Skip if data not ready (check for NaN from alignment or calculations)
+        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(atr_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -113,37 +84,37 @@ def generate_signals(prices):
         curr_volume = volume[i]
         prev_close = close[i-1]
         
-        # Exit conditions
+        # Exit conditions: opposite Donchian breakout
         if position != 0:
-            # Exit long: price breaks below R3 or ADX < 20 (trend weakening)
+            # Exit long: price breaks below Donchian low
             if position == 1:
-                if curr_low <= r3_aligned[i] or adx_1d_aligned[i] < 20:
+                if curr_low <= donchian_low[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above S3 or ADX < 20
+            # Exit short: price breaks above Donchian high
             elif position == -1:
-                if curr_high >= s3_aligned[i] or adx_1d_aligned[i] < 20:
+                if curr_high >= donchian_high[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volume confirmation and ADX trend filter
+        # Entry conditions: Donchian breakout with volume confirmation and ATR regime filter
         if position == 0:
-            # Camarilla breakout signals
-            breakout_up = curr_high >= r3_aligned[i] and prev_close < r3_aligned[i-1]
-            breakout_down = curr_low <= s3_aligned[i] and prev_close > s3_aligned[i-1]
+            # Donchian breakout signals
+            breakout_up = curr_high >= donchian_high[i] and prev_close < donchian_high[i-1]
+            breakout_down = curr_low <= donchian_low[i] and prev_close > donchian_low[i-1]
             
-            # Volume confirmation: current volume > 1.5 * 20-period average volume
-            volume_confirm = curr_volume > 1.5 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
+            # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
+            volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
             
-            # ADX trend filter: ADX > 25 (strong trend)
-            adx_trend = adx_1d_aligned[i] > 25
+            # ATR regime filter: ATR(14) < ATR(50) (low volatility regime)
+            atr_regime = atr_14_1d_aligned[i] < atr_50_1d_aligned[i]
             
-            if breakout_up and volume_confirm and adx_trend:
+            if breakout_up and volume_confirm and atr_regime:
                 signals[i] = 0.25
                 position = 1
-            elif breakout_down and volume_confirm and adx_trend:
+            elif breakout_down and volume_confirm and atr_regime:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -155,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dVolumeSpike_ADXTrend_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dVolumeSpike_ATRRegime_v1"
+timeframe = "12h"
 leverage = 1.0
