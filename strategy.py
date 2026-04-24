@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w EMA(50) for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Donchian channels: calculated from previous 20d high/low; break above 20d high for long, below 20d low for short.
-- Volume confirmation: current volume > 1.5 * 20d volume MA to filter weak breakouts.
-- ATR-based stoploss: exit when price moves against position by 2.5 * ATR(20).
+Hypothesis: 6h Williams %R extreme with 12h EMA50 trend filter and volume spike confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 12h EMA(50) for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Williams %R(14): long when < -80 (oversold), short when > -20 (overbought) on 6h timeframe.
+- Volume confirmation: current volume > 2.0 * 20-period volume MA to filter weak signals.
+- ATR-based stoploss: exit when price moves against position by 2.5 * ATR(14).
 - Signal size: 0.25 discrete to balance return and drawdown control.
-Designed to capture strong momentum moves at key daily support/resistance levels with weekly trend alignment.
-Works in both bull and bear markets by using trend filter and volatility-based stops.
+Designed to capture mean reversions in extreme conditions with trend alignment, effective in both bull and bear markets.
 """
 
 import numpy as np
@@ -26,60 +25,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(20) for stoploss
+    # Calculate 12h EMA(50)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align HTF EMA50 to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d volume MA(20) for confirmation
+    # Calculate volume MA(20) for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d Donchian(20) from previous day OHLC
-    # Upper band = max(high of last 20 days), Lower band = min(low of last 20 days)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA(50)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align HTF indicators to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Calculate Williams %R(14) on 6h timeframe
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 50, 20, 20)  # Need enough bars for EMA50, Donchian, ATR, volume MA
+    start_idx = max(100, 50, 20, 14, 20)  # Need enough bars for EMA50, Williams %R, ATR, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(close_1w_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(williams_r[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,35 +78,38 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation (1.5x threshold)
-            vol_confirmed = curr_volume > 1.5 * vol_ma_aligned[i]
+            # Check for entry signals with volume confirmation (2.0x threshold)
+            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
             
-            # Determine 1w trend: bullish if close > EMA50, bearish if close < EMA50
-            trend_bullish = close_1w_aligned[i] > ema_50_1w_aligned[i]
-            trend_bearish = close_1w_aligned[i] < ema_50_1w_aligned[i]
+            # Determine 12h trend: bullish if close > EMA50, bearish if close < EMA50
+            htf_close_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+            htf_close = htf_close_aligned[i]
             
-            # Long: price breaks above Donchian upper band AND 1w trend bullish AND volume confirmed
-            if curr_high > donchian_high_aligned[i] and trend_bullish and vol_confirmed:
+            trend_bullish = htf_close > ema_50_12h_aligned[i]
+            trend_bearish = htf_close < ema_50_12h_aligned[i]
+            
+            # Long: Williams %R < -80 (oversold) AND 12h trend bullish AND volume confirmed
+            if williams_r[i] < -80 and trend_bullish and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: price breaks below Donchian lower band AND 1w trend bearish AND volume confirmed
-            elif curr_low < donchian_low_aligned[i] and trend_bearish and vol_confirmed:
+            # Short: Williams %R > -20 (overbought) AND 12h trend bearish AND volume confirmed
+            elif williams_r[i] > -20 and trend_bearish and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Long position: exit on stoploss or Donchian lower band break
-            stop_loss = entry_price - 2.5 * atr_aligned[i]
-            if curr_low < stop_loss or curr_close < donchian_low_aligned[i]:
+            # Long position: exit on stoploss or Williams %R > -20 (overbought)
+            stop_loss = entry_price - 2.5 * atr[i]
+            if curr_low < stop_loss or williams_r[i] > -20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit on stoploss or Donchian upper band break
-            stop_loss = entry_price + 2.5 * atr_aligned[i]
-            if curr_high > stop_loss or curr_close > donchian_high_aligned[i]:
+            # Short position: exit on stoploss or Williams %R < -80 (oversold)
+            stop_loss = entry_price + 2.5 * atr[i]
+            if curr_high > stop_loss or williams_r[i] < -80:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_12hEMA50_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
