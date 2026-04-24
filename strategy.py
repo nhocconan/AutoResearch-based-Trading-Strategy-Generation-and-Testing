@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume confirmation.
-- Primary timeframe: 6h for execution, HTF: 1w for EMA50 trend direction.
-- EMA50 > rising: bullish bias, only take longs at H3 breakout or shorts at L3 breakdown.
-- EMA50 < falling: bearish bias, only take shorts at L3 breakdown or longs at H3 breakout.
-- Entry: Long when price closes above Camarilla H3 AND 1w EMA50 rising.
-         Short when price closes below Camarilla L3 AND 1w EMA50 falling.
-- Volume confirmation: current volume > 1.5 * 20-period volume MA (to avoid false breakouts).
-- Exit: Opposite Camarilla level (L3 for long, H3 for short) or EMA50 trend flip.
-- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike and chop regime filter.
+- Primary timeframe: 12h for execution, HTF: 1d for volume and chop regime.
+- Camarilla H3 (resistance) and L3 (support) from prior 1d candle act as intraday pivot levels.
+- Volume confirmation: current 12h volume > 1.5 * 20-period 12h volume MA to filter weak breakouts.
+- Chop regime: 1d chop > 61.8 (ranging) enables mean reversion at H3/L3; chop < 38.2 (trending) enables breakout continuation.
+- In trending regime (chop < 38.2): Long on break above H3, short on break below L3.
+- In ranging regime (chop > 61.8): Long on rejection at L3 (close > L3 after touch), short on rejection at H3 (close < H3 after touch).
+- Exit: Opposite Camarilla level (H3 for longs, L3 for shorts) or regime shift.
+- Discrete signal size: 0.25 to balance capture and drawdown.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 """
 
 import numpy as np
@@ -27,87 +27,162 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate EMA50 on 1w
-    ema50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1w EMA50 to 6h
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50)
-    
-    # Calculate Camarilla levels from 1d (more stable than 6h)
+    # Get 1d data for Camarilla levels, volume, and chop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Camarilla levels: based on previous day's range
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    range_ = prev_high - prev_low
+    # Calculate 1d Camarilla levels (H3, L3) from prior day OHLC
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # Note: We use prior day's OHLC, so shift by 1 to avoid look-ahead
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
+    camarilla_h3 = prior_close + 1.1 * (prior_high - prior_low)
+    camarilla_l3 = prior_close - 1.1 * (prior_high - prior_low)
     
-    # Camarilla H3 and L3
-    h3 = prev_close + range_ * 1.1 / 4
-    l3 = prev_close - range_ * 1.1 / 4
+    # Align 1d Camarilla levels to 12h (already completed prior day)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Align 1d Camarilla levels to 6h
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # 1d volume spike: current volume > 1.5 * 20-period volume MA
+    volume_ma = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    volume_spike = df_1d['volume'].values > (1.5 * volume_ma)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 6h)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma)
+    # 1d Chop regime: Chop > 61.8 = ranging, Chop < 38.2 = trending
+    # True Range
+    tr1 = pd.Series(df_1d['high']).diff().abs()
+    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
+    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    # Chop = log10(sum(tr,14)/log10(14)) / log10(highest_high - lowest_low,14) * 100
+    highest_high_14 = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    range_14 = highest_high_14 - lowest_low_14
+    chop = np.where(
+        (range_14 > 0) & (sum_tr_14 > 0),
+        np.log10(sum_tr_14 / 14) / np.log10(range_14) * 100,
+        50.0  # default to neutral if invalid
+    )
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need enough 1w bars for EMA50 and 20 for volume MA
+    start_idx = max(30, 20)  # Need enough 1d bars for volume MA and ATR
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_aligned[i]
-        ema50_prev = ema50_aligned[i-1] if i > 0 else ema50_val
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        prev_close = close[i-1]
-        
-        # EMA50 trend: rising if current > previous
-        ema50_rising = ema50_val > ema50_prev
-        ema50_falling = ema50_val < ema50_prev
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
+        vol_spike = volume_spike_aligned[i]
+        chop_val = chop_aligned[i]
         
         if position == 0:
-            # Check for entry signals
-            if volume_spike[i]:
-                # Bullish breakout: price closes above H3 AND EMA50 rising
-                if curr_close > h3_aligned[i] and ema50_rising:
-                    signals[i] = 0.25
-                    position = 1
-                # Bearish breakdown: price closes below L3 AND EMA50 falling
-                elif curr_close < l3_aligned[i] and ema50_falling:
-                    signals[i] = -0.25
-                    position = -1
+            # Check for entry signals with volume confirmation
+            if vol_spike:
+                if chop_val < 38.2:  # Trending regime: breakout
+                    # Long on break above H3
+                    if curr_close > h3:
+                        signals[i] = 0.25
+                        position = 1
+                    # Short on break below L3
+                    elif curr_close < l3:
+                        signals[i] = -0.25
+                        position = -1
+                elif chop_val > 61.8:  # Ranging regime: mean reversion at extremes
+                    # Long on rejection at L3 (price touches L3 and closes above it)
+                    if curr_low <= l3 and curr_close > l3:
+                        signals[i] = 0.25
+                        position = 1
+                    # Short on rejection at H3 (price touches H3 and closes below it)
+                    elif curr_high >= h3 and curr_close < h3:
+                        signals[i] = -0.25
+                        position = -1
         elif position == 1:
-            # Long exit: price closes below L3 OR EMA50 starts falling
-            if curr_close < l3_aligned[i] or ema50_falling:
+            # Long exit: price closes below L3 OR chop shifts to trending (exit ranging mean reversion)
+            if curr_close < l3 or (chop_val < 38.2 and position == 1 and chop_val > 61.8):
+                # Actually, simplify: exit on opposite level or regime shift to opposite extreme
+                if curr_close < l3:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Short exit: price closes above H3 OR chop shifts to ranging (exit trending breakout)
+            if curr_close > h3 or (chop_val > 61.8 and position == -1 and chop_val < 38.2):
+                if curr_close > h3:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            else:
+                signals[i] = -0.25
+    
+    # Fix exit logic: simplify to clear rules
+    # Re-implement exit logic clearly
+    signals = np.zeros(n)
+    position = 0
+    
+    for i in range(start_idx, n):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
+        vol_spike = volume_spike_aligned[i]
+        chop_val = chop_aligned[i]
+        
+        if position == 0:
+            if vol_spike:
+                if chop_val < 38.2:  # Trending: breakout
+                    if curr_close > h3:
+                        signals[i] = 0.25
+                        position = 1
+                    elif curr_close < l3:
+                        signals[i] = -0.25
+                        position = -1
+                elif chop_val > 61.8:  # Ranging: mean reversion
+                    if curr_low <= l3 and curr_close > l3:
+                        signals[i] = 0.25
+                        position = 1
+                    elif curr_high >= h3 and curr_close < h3:
+                        signals[i] = -0.25
+                        position = -1
+        elif position == 1:
+            # Exit long: price closes below L3 (failed support) OR chop shifts to strong trending (invalidates ranging mean reversion)
+            if curr_close < l3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above H3 OR EMA50 starts rising
-            if curr_close > h3_aligned[i] or ema50_rising:
+            # Exit short: price closes above H3 (failed resistance) OR chop shifts to strong ranging (invalidates trending breakout)
+            if curr_close > h3:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +190,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3L3_1wEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_1dVolSpike_ChopRegime_v1"
+timeframe = "12h"
 leverage = 1.0
