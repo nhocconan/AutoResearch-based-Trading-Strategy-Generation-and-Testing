@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume spike confirmation + ATR trailing stop.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1d EMA34 for trend filter (price > EMA34 = uptrend, price < EMA34 = downtrend).
-- Entry: Long when price breaks above Donchian(20) upper band AND price > 1d EMA34 AND volume > 1.5 * 12h volume MA(20);
-         Short when price breaks below Donchian(20) lower band AND price < 1d EMA34 AND volume > 1.5 * 12h volume MA(20).
-- Exit: ATR-based trailing stop (2.5 * ATR(14)) from highest high/lowest low since entry.
+- Entry: Long when price breaks above Donchian(20) upper band AND price > 1d EMA34 AND volume > 2.0 * 4h volume MA(20);
+         Short when price breaks below Donchian(20) lower band AND price < 1d EMA34 AND volume > 2.0 * 4h volume MA(20).
+- Exit: ATR(14) trailing stop (2.5 * ATR) from highest high/lowest low since entry.
 - Signal size: 0.25 discrete to control fee drag.
-- Donchian breakouts capture strong momentum moves; EMA34 trend filter ensures alignment with higher timeframe trend;
-  volume confirmation avoids low-conviction breakouts. This combination works in both bull and bear markets
-  by trading with the prevailing trend during high-volume breakouts.
+- Donchian breakouts capture momentum; 1d EMA34 ensures alignment with daily trend; volume confirmation avoids low-conviction breakouts.
+  This combination works in both bull and bear markets by trading with the higher timeframe trend.
 """
 
 import numpy as np
@@ -38,14 +37,14 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian(20) channels for 12h timeframe
+    # Calculate Donchian(20) bands for 4h timeframe
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate volume MA(20) for 12h timeframe
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume MA(20) for 4h timeframe
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR(14) for 12h timeframe
+    # Calculate ATR(14) for 4h timeframe
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -67,7 +66,7 @@ def generate_signals(prices):
         if (np.isnan(ema_34_aligned[i]) or 
             np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_12h[i]) or 
+            np.isnan(vol_ma_4h[i]) or 
             np.isnan(atr14[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -83,8 +82,8 @@ def generate_signals(prices):
         curr_volume = volume[i]
         curr_atr = atr14[i]
         
-        # Volume confirmation: 1.5x threshold for reasonable entry frequency
-        vol_confirm = curr_volume > 1.5 * vol_ma_12h[i]
+        # Volume confirmation: 2.0x threshold for strict entry
+        vol_confirm = curr_volume > 2.0 * vol_ma_4h[i]
         
         if position == 0:
             # Check for entry signals
@@ -136,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
