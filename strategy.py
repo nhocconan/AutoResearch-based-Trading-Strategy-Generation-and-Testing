@@ -1,46 +1,25 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R Extreme Reversal with 1d ADX Trend Filter and Volume Spike Confirmation.
-- Primary timeframe: 6h targeting 75-150 total trades over 4 years (19-37/year).
-- HTF: 1d for ADX trend filter and ATR-based volume spike.
-- Entry: Long when Williams %R(14) crosses above -20 from below AND ADX(14) > 25 AND ATR ratio > 1.5.
-         Short when Williams %R(14) crosses below -80 from above AND ADX(14) > 25 AND ATR ratio > 1.5.
-- Exit: Opposite Williams %R extreme (%R < -80 for longs, %R > -20 for shorts) OR ADX < 20 (trend weakening).
-- Signal size: 0.25 discrete to minimize fee drag.
-- Williams %R identifies overbought/oversold conditions; in strong trends (ADX>25), these often precede continuations.
-- Volume spike (ATR ratio > 1.5) confirms momentum behind the move.
-- Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on extreme %R frequency with trend/volume filters.
+Hypothesis: 12-hour Camarilla H3/L3 breakout with 1-day ATR volume spike and 1-week EMA34 trend filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for ATR volume spike, 1w for EMA34 trend filter.
+- Entry: Long when price breaks above Camarilla H3 AND ATR ratio > 2.0 AND price > 1w EMA34.
+         Short when price breaks below Camarilla L3 AND ATR ratio > 2.0 AND price < 1w EMA34.
+- Exit: Opposite Camarilla breakout (L3 for long exit, H3 for short exit) OR price crosses 1w EMA34 in opposite direction.
+- Signal size: 0.30 discrete to balance profit potential and fee drag.
+- ATR ratio (current ATR/20-period ATR) > 2.0 confirms significant volatility expansion to avoid false breakouts.
+- 1w EMA34 provides trend filter to avoid counter-trend trades.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Camarilla levels provide mathematically derived support/resistance that works across market regimes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def williams_r(high, low, close, period):
-    """Calculate Williams %R."""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    return wr
-
-def adx(high, low, close, period):
-    """Calculate Average Directional Index."""
-    plus_dm = np.zeros_like(high)
-    minus_dm = np.zeros_like(high)
-    for i in range(1, len(high)):
-        plus_dm[i] = max(high[i] - high[i-1], 0) if high[i] - high[i-1] > high[i-1] - low[i] else 0
-        minus_dm[i] = max(low[i-1] - low[i], 0) if high[i-1] - low[i] > high[i] - high[i-1] else 0
-    
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    
-    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx_vals = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
-    return adx_vals
+def ema(values, period):
+    """Calculate Exponential Moving Average."""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def atr(high, low, close, period):
     """Calculate Average True Range."""
@@ -48,8 +27,16 @@ def atr(high, low, close, period):
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
     true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    true_range[0] = high_low[0]
+    true_range[0] = high_low[0]  # First period
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def camarilla_levels(high, low, close):
+    """Calculate Camarilla pivot levels (H3, L3)."""
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
+    h3 = pivot + (range_val * 1.1 / 4)
+    l3 = pivot - (range_val * 1.1 / 4)
+    return h3, l3
 
 def generate_signals(prices):
     n = len(prices)
@@ -61,74 +48,96 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate 1d ADX for trend filter
+    # Calculate 1w trend filter: EMA34
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
+        return np.zeros(n)
+    
+    ema34_1w = ema(df_1w['close'].values, 34)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w, additional_delay_bars=1)
+    
+    # Calculate 1d ATR for volume spike filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    adx_14 = adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14, additional_delay_bars=1)
-    
-    # Calculate 1d ATR for volume spike filter
     atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
     atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
-    atr_ratio = atr_current / (atr_20 + 1e-10)
+    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
     
-    # Calculate 6h Williams %R
-    wr_14 = williams_r(high, low, close, 14)
+    # Calculate Camarilla levels from daily data (H3, L3)
+    # We need to calculate these for each 1d bar then align to 12h
+    df_1d_for_camarilla = get_htf_data(prices, '1d')
+    if len(df_1d_for_camarilla) < 30:
+        return np.zeros(n)
+    
+    camarilla_high = np.zeros(len(df_1d_for_camarilla))
+    camarilla_low = np.zeros(len(df_1d_for_camarilla))
+    
+    for i in range(len(df_1d_for_camarilla)):
+        h3, l3 = camarilla_levels(
+            df_1d_for_camarilla['high'].values[i],
+            df_1d_for_camarilla['low'].values[i],
+            df_1d_for_camarilla['close'].values[i]
+        )
+        camarilla_high[i] = h3
+        camarilla_low[i] = l3
+    
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d_for_camarilla, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d_for_camarilla, camarilla_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 30  # Need sufficient data for all indicators
+    start_idx = 50  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(wr_14[i]) or np.isnan(adx_14_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        curr_wr = wr_14[i]
-        prev_wr = wr_14[i-1]
+        curr_close = close[i]
         
-        # Exit conditions: opposite Williams %R extreme OR ADX < 20 (trend weakening)
+        # Exit conditions: opposite Camarilla breakout OR price crosses 1w EMA34 in opposite direction
         if position != 0:
-            # Exit long: Williams %R crosses below -80 OR ADX < 20
+            # Exit long: price breaks below Camarilla L3 OR price falls below 1w EMA34
             if position == 1:
-                if curr_wr < -80 or adx_14_aligned[i] < 20:
+                if curr_close < camarilla_low_aligned[i] or curr_close < ema34_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Williams %R crosses above -20 OR ADX < 20
+            # Exit short: price breaks above Camarilla H3 OR price rises above 1w EMA34
             elif position == -1:
-                if curr_wr > -20 or adx_14_aligned[i] < 20:
+                if curr_close > camarilla_high_aligned[i] or curr_close > ema34_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Williams %R extreme reversal with trend and volume confirmation
+        # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: Williams %R crosses above -20 from below AND strong trend AND volume spike
-            if prev_wr <= -20 and curr_wr > -20 and adx_14_aligned[i] > 25 and atr_ratio_aligned[i] > 1.5:
-                signals[i] = 0.25
+            # Long: price breaks above Camarilla H3 AND ATR ratio > 2.0 AND bullish 1w trend
+            if curr_close > camarilla_high_aligned[i] and atr_ratio_aligned[i] > 2.0 and curr_close > ema34_1w_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Williams %R crosses below -80 from above AND strong trend AND volume spike
-            elif prev_wr >= -80 and curr_wr < -80 and adx_14_aligned[i] > 25 and atr_ratio_aligned[i] > 1.5:
-                signals[i] = -0.25
+            # Short: price breaks below Camarilla L3 AND ATR ratio > 2.0 AND bearish 1w trend
+            elif curr_close < camarilla_low_aligned[i] and atr_ratio_aligned[i] > 2.0 and curr_close < ema34_1w_aligned[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.25
+            signals[i] = -0.30
     
     return signals
 
-name = "6h_WilliamsR_Extreme_1dADX_TrendFilter_1dATR_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_1wEMA34_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
