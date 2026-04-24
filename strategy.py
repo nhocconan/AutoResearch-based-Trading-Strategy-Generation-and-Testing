@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA34 trend filter and volume confirmation using 12h ATR spike.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 12h for EMA34 trend filter and ATR-based volatility confirmation.
-- Entry: Long when price breaks above Donchian(20) high AND ATR ratio > 1.5 AND price > 12h EMA34.
-         Short when price breaks below Donchian(20) low AND ATR ratio > 1.5 AND price < 12h EMA34.
-- Exit: Opposite Donchian breakout OR price crosses 12h EMA34 in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- ATR ratio (current ATR/20-period ATR) > 1.5 confirms significant volatility expansion to avoid false breakouts.
-- 12h EMA34 provides trend filter to avoid counter-trend trades.
+Hypothesis: 1h Camarilla pivot breakout with 4h EMA34 trend filter and volume confirmation using ATR spike.
+- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
+- HTF: 4h for EMA34 trend filter and 1d for ATR spike volume confirmation.
+- Entry: Long when price breaks above Camarilla H3 level AND ATR ratio > 1.5 AND price > 4h EMA34.
+         Short when price breaks below Camarilla L3 level AND ATR ratio > 1.5 AND price < 4h EMA34.
+- Exit: Opposite Camarilla breakout OR price crosses 4h EMA34 in opposite direction.
+- Signal size: 0.20 discrete to minimize fee drag while maintaining profit potential.
+- ATR ratio (current ATR/14-period ATR) > 1.5 confirms significant volatility expansion to avoid false breakouts.
+- 4h EMA34 provides trend filter to avoid counter-trend trades.
+- Session filter: 08-20 UTC to avoid low-liquidity periods.
 - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
 - Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
 """
@@ -30,11 +31,13 @@ def atr(high, low, close, period):
     true_range[0] = high_low[0]  # First period
     return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def donchian_channels(high, low, period):
-    """Calculate Donchian Channels."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def camarilla_pivot(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    pivot = (high + low + close) / 3.0
+    range_ = high - low
+    H3 = pivot + (range_ * 1.1 / 4)
+    L3 = pivot - (range_ * 1.1 / 4)
+    return H3, L3
 
 def generate_signals(prices):
     n = len(prices)
@@ -46,74 +49,88 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate 12h trend filter: EMA34
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 40:
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Calculate 4h trend filter: EMA34
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 40:
         return np.zeros(n)
     
-    ema34_12h = ema(df_12h['close'].values, 34)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h, additional_delay_bars=1)
+    ema34_4h = ema(df_4h['close'].values, 34)
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h, additional_delay_bars=1)
     
-    # Calculate 12h ATR for volume spike filter
-    atr_20_12h = atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 20)
-    atr_current_12h = atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 1)
-    atr_ratio_12h = atr_current_12h / (atr_20_12h + 1e-10)  # Avoid division by zero
-    atr_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio_12h, additional_delay_bars=1)
+    # Calculate 1d ATR for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Donchian channels on 4h (20-period)
-    donch_hi, donch_lo = donchian_channels(high, low, 20)
+    atr_14 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
+    atr_ratio = atr_current / (atr_14 + 1e-10)  # Avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 40  # Need sufficient data for all indicators
+    start_idx = 50  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or
-            np.isnan(ema34_12h_aligned[i]) or np.isnan(atr_ratio_12h_aligned[i])):
+        # Skip if outside trading session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Skip if data not ready (check for NaN from alignment or calculations)
+        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Calculate Camarilla levels for current bar
+        H3, L3 = camarilla_pivot(high[i], low[i], close[i])
+        
         curr_close = close[i]
         
-        # Exit conditions: opposite Donchian breakout OR price crosses 12h EMA34 in opposite direction
+        # Exit conditions: opposite Camarilla breakout OR price crosses 4h EMA34 in opposite direction
         if position != 0:
-            # Exit long: price breaks below Donchian low OR price falls below 12h EMA34
+            # Exit long: price breaks below L3 OR price falls below 4h EMA34
             if position == 1:
-                if curr_close < donch_lo[i] or curr_close < ema34_12h_aligned[i]:
+                if curr_close < L3 or curr_close < ema34_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Donchian high OR price rises above 12h EMA34
+            # Exit short: price breaks above H3 OR price rises above 4h EMA34
             elif position == -1:
-                if curr_close > donch_hi[i] or curr_close > ema34_12h_aligned[i]:
+                if curr_close > H3 or curr_close > ema34_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with volatility confirmation and trend filter
+        # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: price breaks above Donchian high AND ATR ratio > 1.5 AND bullish 12h trend
-            if curr_close > donch_hi[i] and atr_ratio_12h_aligned[i] > 1.5 and curr_close > ema34_12h_aligned[i]:
-                signals[i] = 0.25
+            # Long: price breaks above H3 AND ATR ratio > 1.5 AND bullish 4h trend
+            if curr_close > H3 and atr_ratio_aligned[i] > 1.5 and curr_close > ema34_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian low AND ATR ratio > 1.5 AND bearish 12h trend
-            elif curr_close < donch_lo[i] and atr_ratio_12h_aligned[i] > 1.5 and curr_close < ema34_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: price breaks below L3 AND ATR ratio > 1.5 AND bearish 4h trend
+            elif curr_close < L3 and atr_ratio_aligned[i] > 1.5 and curr_close < ema34_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.25
+            signals[i] = -0.20
     
     return signals
 
-name = "4h_DonchianBreakout_12hATR_VolumeSpike_12hEMA34_TrendFilter_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_Breakout_4hEMA34_TrendFilter_1dATR_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
