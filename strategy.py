@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h ADX regime filter and volume confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 12h for ADX(14) regime filter (ADX > 25 = trending market).
-- Entry: Long when price breaks above Donchian upper channel (20-period high) AND 12h ADX > 25 AND volume > 1.5 * 4h volume MA(20);
-         Short when price breaks below Donchian lower channel (20-period low) AND 12h ADX > 25 AND volume > 1.5 * 4h volume MA(20).
-- Exit: Close-based reversal (opposite signal) or ADX < 20 (regime change to ranging).
-- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Donchian channels provide clear structural breakouts; ADX filter ensures we only trade in trending regimes (avoiding whipsaws in ranges); volume confirmation avoids false breakouts.
-- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend) with ADX filter to avoid counter-trend whipsaws.
-- Estimated trades: ~100 total over 4 years (~25/year) based on Donchian breakout frequency with filters.
+Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume confirmation.
+- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
+- HTF: 4h for EMA50 trend filter (strong intermediate trend).
+- Entry: Long when price breaks above Camarilla H3 level AND 4h EMA50 > prior 4h EMA50 (uptrend) AND volume > 1.5 * 1h volume MA(20);
+         Short when price breaks below Camarilla L3 level AND 4h EMA50 < prior 4h EMA50 (downtrend) AND volume > 1.5 * 1h volume MA(20).
+- Exit: Close-based reversal (opposite signal) or trend change (signal=0 when 4h EMA50 slope changes sign).
+- Signal size: 0.20 discrete to minimize fee drag while maintaining profit potential.
+- Camarilla levels derived from 1h OHLC of prior bar provide intraday support/resistance; EMA50 trend filter ensures we trade with the intermediate trend; volume confirmation (1.5x) avoids false breakouts.
+- Session filter: only trade between 08:00-20:00 UTC to avoid low-liquidity periods.
+- Works in bull markets (buy H3 breakouts in uptrend) and bear markets (sell L3 breakdowns in downtrend) with trend filter to avoid counter-trend whipsaws.
+- Estimated trades: ~90 total over 4 years (~22/year) based on Camarilla H3/L3 breakout frequency with filters.
 """
 
 import numpy as np
@@ -27,99 +28,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for ADX regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate ADX(14) on 12h data
-    # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first value NaN
-    
-    # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR, DM+ , DM- with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    # Get 4h data for Donchian channels and volume MA
+    # Get 4h data for EMA50 trend filter
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_slope = ema_50_4h - np.roll(ema_50_4h, 1)
+    ema_50_slope[0] = 0
     
-    # Calculate Donchian channels (20-period) on 4h data
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
+    # Get 1h data for Camarilla calculation (using prior bar OHLC)
+    camarilla_high = np.zeros_like(high)
+    camarilla_low = np.zeros_like(low)
+    for i in range(1, len(high)):
+        h = high[i-1]
+        l = low[i-1]
+        c = close[i-1]
+        camarilla_high[i] = c + (h - l) * 1.1 / 4
+        camarilla_low[i] = c - (h - l) * 1.1 / 4
+    camarilla_high[0] = camarilla_high[1]  # fill first bar
+    camarilla_low[0] = camarilla_low[1]
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
+    vol_ma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    donchian_high = rolling_max(high_4h, 20)
-    donchian_low = rolling_min(low_4h, 20)
-    
-    # Volume MA(20) on 4h
-    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to primary 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Align 4h indicators to 1h timeframe
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema_50_slope_aligned = align_htf_to_ltf(prices, df_4h, ema_50_slope)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
+    
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for ADX and Donchian
+    start_idx = 50  # Need sufficient data for EMA50
     
     for i in range(start_idx, n):
+        # Session filter: skip outside 08:00-20:00 UTC
+        if hours[i] < 8 or hours[i] > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_50_slope_aligned[i]) or 
+            np.isnan(camarilla_high[i]) or np.isnan(camarilla_low[i]) or np.isnan(vol_ma_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -130,51 +86,48 @@ def generate_signals(prices):
         curr_low = low[i]
         curr_volume = volume[i]
         
-        # Exit: ADX < 20 (regime change to ranging) or opposite signal
+        # Exit: trend change (4h EMA50 slope changes sign)
         if position != 0:
-            if adx_aligned[i] < 20:
+            if position == 1 and ema_50_slope_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
                 continue
-            elif position == 1 and curr_low < donchian_low_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                continue
-            elif position == -1 and curr_high > donchian_high_aligned[i]:
+            elif position == -1 and ema_50_slope_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Entry conditions with volume confirmation and Donchian breakout
-        bullish_breakout = curr_high > donchian_high_aligned[i]  # Break above upper channel
-        bearish_breakout = curr_low < donchian_low_aligned[i]    # Break below lower channel
+        # Entry conditions with volume confirmation and Camarilla breakout
+        bullish_breakout = curr_high > camarilla_high[i]  # Break above H3
+        bearish_breakout = curr_low < camarilla_low[i]    # Break below L3
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        trending = adx_aligned[i] > 25
+        # Trend filter: only trade in direction of 4h EMA50 slope
+        uptrend = ema_50_slope_aligned[i] > 0
+        downtrend = ema_50_slope_aligned[i] < 0
         
         # Volume confirmation (1.5x average volume)
-        vol_confirm = curr_volume > 1.5 * vol_ma_4h_aligned[i]
+        vol_confirm = curr_volume > 1.5 * vol_ma_1h[i]
         
         if position == 0:
             # Check for entry signals
-            if vol_confirm and trending:
-                # Long: Price breaks above Donchian upper channel AND trending
-                if bullish_breakout:
-                    signals[i] = 0.25
+            if vol_confirm:
+                # Long: Price breaks above Camarilla H3 AND uptrend
+                if bullish_breakout and uptrend:
+                    signals[i] = 0.20
                     position = 1
-                # Short: Price breaks below Donchian lower channel AND trending
-                elif bearish_breakout:
-                    signals[i] = -0.25
+                # Short: Price breaks below Camarilla L3 AND downtrend
+                elif bearish_breakout and downtrend:
+                    signals[i] = -0.20
                     position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.25
+            signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_ADX14_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_EMA50_Trend_VolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
