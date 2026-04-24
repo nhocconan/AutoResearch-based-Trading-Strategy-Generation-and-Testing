@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1w ADX trend filter and volume confirmation.
-- Primary timeframe: 12h to target 50-150 total trades over 4 years (12-37/year).
-- HTF: 1w ADX(14) for trend strength (trending if ADX > 25, ranging if ADX < 20).
-- Donchian levels: Upper and lower bands from prior 12h candle (using prior close to avoid look-ahead).
-- Entry: Long when price breaks above prior upper band AND ADX > 25 AND volume > 1.5 * volume MA(50).
-         Short when price breaks below prior lower band AND ADX > 25 AND volume > 1.5 * volume MA(50).
-- Exit: Close-based reversal - exit long when price crosses below prior lower band,
-        exit short when price crosses above prior upper band.
-- Signal size: 0.30 discrete to balance return and drawdown.
-This strategy captures medium-term breakouts in trending markets with volume confirmation,
-designed to work in both bull and bear markets by filtering for trending conditions only.
+Hypothesis: 4h Camarilla H4/L4 breakout with 1d Williams %R extreme filter and volume spike confirmation.
+- Primary timeframe: 4h to target 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d Williams %R(14) for extreme conditions (oversold < -80 for long, overbought > -20 for short).
+- Camarilla levels: H4 and L4 from prior 1d candle (stronger breakout levels than H3/L3).
+- Entry: Long when price breaks above prior H4 AND 1d Williams %R < -80 AND volume > 1.8 * volume MA(20).
+         Short when price breaks below prior L4 AND 1d Williams %R > -20 AND volume > 1.8 * volume MA(20).
+- Exit: Close-based reversal - exit long when price crosses below prior 1d close,
+        exit short when price crosses above prior 1d close.
+- Signal size: 0.25 discrete to balance return and drawdown.
+This strategy targets strong intraday reversals at key Camarilla levels during extreme market conditions,
+designed to work in both bull and bear markets by fading extremes with trend confirmation.
 """
 
 import numpy as np
@@ -28,68 +28,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for Williams %R filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1w ADX(14) for trend strength filter
-    df_1w_high = df_1w['high'].values
-    df_1w_low = df_1w['low'].values
-    df_1w_close = df_1w['close'].values
+    # Calculate 1d Williams %R(14) for extreme filter
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate True Range
-    tr1 = df_1w_high - df_1w_low
-    tr2 = np.abs(df_1w_high - np.roll(df_1w_close, 1))
-    tr3 = np.abs(df_1w_low - np.roll(df_1w_close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
+    # Calculate prior 1d Camarilla H4 and L4 levels
+    # H4 = close + 1.5*(high - low)
+    # L4 = close - 1.5*(high - low)
+    # Using prior 1d candle to avoid look-ahead
+    prior_close = df_1d['close'].shift(1).values
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    camarilla_h4 = prior_close + 1.5 * (prior_high - prior_low)
+    camarilla_l4 = prior_close - 1.5 * (prior_high - prior_low)
     
-    # Calculate Directional Movement
-    dm_plus = np.where((df_1w_high - np.roll(df_1w_high, 1)) > (np.roll(df_1w_low, 1) - df_1w_low),
-                       np.maximum(df_1w_high - np.roll(df_1w_high, 1), 0), 0)
-    dm_minus = np.where((np.roll(df_1w_low, 1) - df_1w_low) > (df_1w_high - np.roll(df_1w_high, 1)),
-                        np.maximum(np.roll(df_1w_low, 1) - df_1w_low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate volume MA(20) for confirmation (using 4h data)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Smooth TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate prior 12h Donchian bands (using prior close to avoid look-ahead)
-    # We need to get 12h data for the bands, but we'll use the current timeframe prices
-    # and calculate Donchian from the last 20 periods (excluding current)
-    lookback = 20
-    donchian_upper = np.roll(pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values, 1)
-    donchian_lower = np.roll(pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values, 1)
-    # First value will be NaN due to roll, we'll handle it in the loop
-    
-    # Calculate volume MA(50) for confirmation
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    
-    # Align HTF indicators to 12h
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align HTF indicators to 4h
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    prior_close_aligned = align_htf_to_ltf(prices, df_1d, prior_close)  # for exit condition
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback + 1, 50, 30)  # Need enough bars for calculations
+    start_idx = max(100, 20)  # Need enough bars for Williams %R and calculations
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(prior_close_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,35 +79,34 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation (1.5x threshold) and ADX > 25
-            vol_confirmed = curr_volume > 1.5 * vol_ma[i]
-            strong_trend = adx_aligned[i] > 25
+            # Check for entry signals with volume confirmation (1.8x threshold)
+            vol_confirmed = curr_volume > 1.8 * vol_ma[i]
             
-            # Long: Price breaks above prior upper band AND strong trend AND volume confirmed
-            if curr_close > donchian_upper[i] and strong_trend and vol_confirmed:
-                signals[i] = 0.30
+            # Long: Price breaks above prior H4 AND Williams %R oversold (< -80) AND volume confirmed
+            if curr_close > camarilla_h4_aligned[i] and williams_r_aligned[i] < -80 and vol_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below prior lower band AND strong trend AND volume confirmed
-            elif curr_close < donchian_lower[i] and strong_trend and vol_confirmed:
-                signals[i] = -0.30
+            # Short: Price breaks below prior L4 AND Williams %R overbought (> -20) AND volume confirmed
+            elif curr_close < camarilla_l4_aligned[i] and williams_r_aligned[i] > -20 and vol_confirmed:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price crosses below prior lower band
-            if curr_close < donchian_lower[i]:
+            # Exit long when price crosses below prior 1d close (mean reversion)
+            if curr_close < prior_close_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short when price crosses above prior upper band
-            if curr_close > donchian_upper[i]:
+            # Exit short when price crosses above prior 1d close (mean reversion)
+            if curr_close > prior_close_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Donchian20_1wADX_Trend_VolumeConfirmation_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H4L4_1dWilliamsR_Extreme_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
