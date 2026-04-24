@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla pivot breakout with 1d EMA34 trend filter and volume confirmation.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
 - Long when price breaks above Camarilla H3 level AND 1d close > 1d EMA34 (bullish regime)
 - Short when price breaks below Camarilla L3 level AND 1d close < 1d EMA34 (bearish regime)
 - Volume confirmation: current volume > 1.5 * 20-period average volume
 - Exit on opposite Camarilla breakout (L3 for long exit, H3 for short exit)
-- Uses 6h primary with 1d HTF to target 50-150 trades over 4 years (12-37/year)
+- Uses 12h primary with 1d HTF to target 50-150 trades over 4 years (12-37/year)
 - Camarilla levels provide adaptive support/resistance; EMA34 filters regime; volume avoids fakeouts
 - Designed to work in both bull (breakouts) and bear (mean reversion at extremes) markets
 """
@@ -54,7 +54,7 @@ def generate_signals(prices):
     # Calculate 1d EMA34
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe (waits for completed 1d bar)
+    # Align 1d EMA34 to 12h timeframe (waits for completed 1d bar)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Trend filter: bullish if close > EMA34, bearish if close < EMA34
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3L3_1dEMA34_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
