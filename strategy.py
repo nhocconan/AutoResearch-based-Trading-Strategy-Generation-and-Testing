@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 4h for entries/exits.
-- HTF: 12h EMA50 for trend direction (bullish if price > EMA50, bearish if price < EMA50).
-- Volume: Current 4h volume > 1.3 * 20-period volume MA to confirm breakout strength.
-- Entry: Long when price breaks above Donchian upper band (20-period high) AND 12h EMA50 bullish AND volume spike.
-         Short when price breaks below Donchian lower band (20-period low) AND 12h EMA50 bearish AND volume spike.
-- Exit: Opposite Donchian band (lower for long, upper for short) or loss of volume confirmation.
-- Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-Donchian channels provide objective structure. Combined with trend and volume filters, this avoids false breakouts
-and works in both bull and bear markets by only taking trades in the direction of the 12h trend.
+Hypothesis: 1h RSI mean reversion with 4h trend filter and volume spike confirmation.
+- Primary timeframe: 1h for precise entry/exit timing.
+- HTF: 4h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Volume: Current 1h volume > 2.0 * 24-period volume MA to capture institutional interest.
+- RSI: 14-period RSI for mean reversion signals.
+- Entry: Long when RSI < 30 AND 4h EMA50 bullish AND volume spike.
+         Short when RSI > 70 AND 4h EMA50 bearish AND volume spike.
+- Exit: Opposite RSI level (RSI > 70 for long, RSI < 30 for short) or loss of volume confirmation.
+- Signal size: 0.20 discrete to limit drawdown and reduce fee churn.
+- Session filter: Only trade between 08:00-20:00 UTC to avoid low-liquidity periods.
+- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+This combines mean reversion in ranging markets with trend filtering to avoid counter-trend trades,
+while volume spikes confirm institutional participation. Works in both bull and bear markets by
+only taking trades in the direction of the 4h trend.
 """
 
 import numpy as np
@@ -19,7 +22,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -28,84 +31,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) using previous bar's data to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # 20-period rolling max/min on previous high/low
-    donchian_high = pd.Series(prev_high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(prev_low).rolling(window=20, min_periods=20).min().values
+    # Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    df_12h_close = df_12h['close'].values
-    ema_12h = pd.Series(df_12h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50
+    df_4h_close = df_4h['close'].values
+    ema_4h = pd.Series(df_4h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 20-period volume MA on 12h
-    df_12h_volume = df_12h['volume'].values
-    vol_ma_12h = pd.Series(df_12h_volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 24-period 4h volume MA
+    df_4h_volume = df_4h['volume'].values
+    vol_ma_4h = pd.Series(df_4h_volume).rolling(window=24, min_periods=24).mean().values
     
-    # Align HTF indicators to 4h
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # Align HTF indicators to 1h
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
-    # Volume confirmation: current 4h volume > 1.3 * 20-period 12h volume MA (aligned)
-    volume_spike = volume > (1.3 * vol_ma_12h_aligned)
+    # Volume confirmation: current 1h volume > 2.0 * 24-period 4h volume MA (aligned)
+    volume_spike = volume > (2.0 * vol_ma_4h_aligned)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need enough bars for EMA50 and Donchian
+    start_idx = max(50, 24, 14)  # Need enough bars for EMA50, volume MA, and RSI
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(rsi[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        ema_val = ema_12h_aligned[i]
+        curr_rsi = rsi[i]
+        ema_val = ema_4h_aligned[i]
         
         if position == 0:
-            # Check for entry signals with volume spike
+            # Check for entry signals with volume spike and session filter
             if volume_spike[i]:
-                # Bullish: price breaks above Donchian upper band AND 12h EMA50 bullish (price > EMA)
-                if curr_high > donchian_high[i] and curr_close > ema_val:
-                    signals[i] = 0.25
+                # Bullish: RSI < 30 (oversold) AND 4h EMA50 bullish (close > EMA)
+                if curr_rsi < 30.0 and curr_close > ema_val:
+                    signals[i] = 0.20
                     position = 1
-                # Bearish: price breaks below Donchian lower band AND 12h EMA50 bearish (price < EMA)
-                elif curr_low < donchian_low[i] and curr_close < ema_val:
-                    signals[i] = -0.25
+                # Bearish: RSI > 70 (overbought) AND 4h EMA50 bearish (close < EMA)
+                elif curr_rsi > 70.0 and curr_close < ema_val:
+                    signals[i] = -0.20
                     position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian lower band OR loss of volume confirmation
-            if curr_low < donchian_low[i] or not volume_spike[i]:
+            # Long exit: RSI > 70 (overbought) OR loss of volume confirmation OR outside session
+            if curr_rsi > 70.0 or not volume_spike[i] or not in_session[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above Donchian upper band OR loss of volume confirmation
-            if curr_high > donchian_high[i] or not volume_spike[i]:
+            # Short exit: RSI < 30 (oversold) OR loss of volume confirmation OR outside session
+            if curr_rsi < 30.0 or not volume_spike[i] or not in_session[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hEMA50_Trend_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
