@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend filter and volume confirmation.
-- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h for trend filter (price above/below EMA50) and 1d for volume regime (above average volume).
-- Entry: Long when price breaks above Camarilla R1 AND 4h EMA50 uptrend AND 1d volume > 20-period SMA.
-         Short when price breaks below Camarilla S1 AND 4h EMA50 downtrend AND 1d volume > 20-period SMA.
-- Exit: Opposite Camarilla break (price crosses R1/S1 in opposite direction) OR 4h EMA50 trend reversal.
-- Signal size: 0.20 discrete to minimize fee drag while maintaining profit potential.
-- Camarilla pivot points identify intraday support/resistance levels that work well in ranging markets.
-- EMA50 trend filter ensures we trade with the intermediate-term trend.
+Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for pivot direction (price above/below weekly pivot point).
+- Entry: Long when price breaks above Donchian upper (20) AND weekly pivot bullish AND volume > 1.5x 20-period average.
+         Short when price breaks below Donchian lower (20) AND weekly pivot bearish AND volume > 1.5x 20-period average.
+- Exit: Opposite Donchian breakout OR price crosses weekly pivot in opposite direction.
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- Donchian channels identify breakouts with clear structure.
+- Weekly pivot provides higher-timeframe bias to avoid counter-trend trades.
 - Volume confirmation reduces false breakouts.
-- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-- Session filter: 08-20 UTC to avoid low-liquidity Asian session noise.
-- Estimated trades: ~100 total over 4 years (~25/year) based on Camarilla breakout frequency with filters.
+- Works in bull markets (buy breakouts with weekly bias up) and bear markets (sell breakdowns with weekly bias down).
+- Estimated trades: ~100 total over 4 years (~25/year) based on Donchian breakout frequency with filters.
 """
 
 import numpy as np
@@ -22,10 +21,6 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 def ema(values, period):
     """Calculate Exponential Moving Average."""
     return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def sma(values, period):
-    """Calculate Simple Moving Average."""
-    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,60 +33,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h trend filter: EMA50
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate 20-period average volume
+    avg_vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Donchian channels (20-period)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Weekly pivot point calculation (using prior week's OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    ema50_4h = ema(df_4h['close'].values, 50)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Weekly pivot: (Prior week High + Low + Close) / 3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
     
-    # Calculate 1d volume filter: volume > 20-period SMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Align weekly pivot to 6h timeframe (wait for weekly close)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot, additional_delay_bars=0)
     
-    vol_sma_1d = sma(df_1d['volume'].values, 20)
-    vol_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_1d)
-    
-    # Calculate Camarilla pivot points on 1h (using previous bar's OHLC)
-    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    # We need to shift by 1 to avoid look-ahead (use previous bar to calculate levels for current bar)
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    # Set first bar to NaN since we don't have previous bar
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    # Weekly pivot bias: bullish if price > pivot, bearish if price < pivot
+    weekly_bullish = close > weekly_pivot_aligned
+    weekly_bearish = close < weekly_pivot_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 20  # Need sufficient data for EMA/SMA
+    start_idx = 30  # Need sufficient data for Donchian/volume
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_sma_1d_aligned[i]) or
-            np.isnan(r1[i]) or np.isnan(s1[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Check session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(avg_vol_20[i]) or np.isnan(weekly_pivot_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -100,40 +76,43 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Exit conditions: opposite Camarilla break OR 4h EMA50 trend reversal
+        # Exit conditions: opposite Donchian breakout OR price crosses weekly pivot in opposite direction
         if position != 0:
-            # Exit long: price breaks below S1 OR 4h EMA50 turns downtrend
+            # Exit long: price breaks below Donchian lower OR price falls below weekly pivot
             if position == 1:
-                if curr_close < s1[i] or close[i] < ema50_4h_aligned[i]:
+                if curr_close < donchian_lower[i] or curr_close < weekly_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above R1 OR 4h EMA50 turns uptrend
+            # Exit short: price breaks above Donchian upper OR price rises above weekly pivot
             elif position == -1:
-                if curr_close > r1[i] or close[i] > ema50_4h_aligned[i]:
+                if curr_close > donchian_upper[i] or curr_close > weekly_pivot_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla break with trend and volume confirmation
-        if position == 0 and in_session:
-            # Long: price breaks above R1 AND 4h EMA50 uptrend AND volume confirmation
-            if curr_close > r1[i] and close[i] > ema50_4h_aligned[i] and curr_volume > vol_sma_1d_aligned[i]:
-                signals[i] = 0.20
+        # Entry conditions: Donchian breakout with weekly pivot bias and volume confirmation
+        if position == 0:
+            # Volume confirmation: current volume > 1.5x 20-period average
+            volume_confirmed = curr_volume > 1.5 * avg_vol_20[i]
+            
+            # Long: price breaks above Donchian upper AND weekly pivot bullish AND volume confirmed
+            if curr_close > donchian_upper[i] and weekly_bullish[i] and volume_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND 4h EMA50 downtrend AND volume confirmation
-            elif curr_close < s1[i] and close[i] < ema50_4h_aligned[i] and curr_volume > vol_sma_1d_aligned[i]:
-                signals[i] = -0.20
+            # Short: price breaks below Donchian lower AND weekly pivot bearish AND volume confirmed
+            elif curr_close < donchian_lower[i] and weekly_bearish[i] and volume_confirmed:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.20
+            signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA50_1dVolumeFilter_v1"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
