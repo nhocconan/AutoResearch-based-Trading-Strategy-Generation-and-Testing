@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume confirmation.
-- Long when price breaks above Camarilla H3 AND close > 1w EMA50 (bullish higher timeframe trend)
-- Short when price breaks below Camarilla L3 AND close < 1w EMA50 (bearish higher timeframe trend)
-- Volume must be > 1.5 * median volume of last 28 bars (volume confirmation to avoid fakeouts)
+Hypothesis: 4h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike confirmation.
+- Long when price breaks above Camarilla H3 AND close > 1w EMA50 (bullish trend)
+- Short when price breaks below Camarilla L3 AND close < 1w EMA50 (bearish trend)
+- Volume must be > 2.0 * median volume of last 20 bars (volume spike filter to avoid fakeouts)
 - Exit on opposite Camarilla breakout or trend reversal (close crosses 1w EMA50)
-- Uses 12h primary timeframe with 1w HTF to target 50-150 total trades over 4 years (12-37/year)
-- Camarilla H3/L3 levels provide strong support/resistance that work in both trending and ranging markets
-- 1w EMA50 ensures alignment with weekly trend to avoid counter-trend whipsaws
-- Volume confirmation filter adapts to changing market conditions
-- Designed for BTC/ETH with edge in ranging markets (mean reversion at extremes) and trending markets (breakout continuation)
+- Uses 4h primary timeframe with 1w HTF to target 75-200 total trades over 4 years (19-50/year)
+- Camarilla H3/L3 levels provide stronger support/resistance than R1/S1 for better risk/reward
+- 1w EMA50 ensures alignment with higher timeframe trend to avoid whipsaws in bear markets
+- Volume spike filter adapts to changing market conditions, reducing false breakouts
+- Designed for BTC/ETH edge in both bull and bear markets via trend-following breakouts with confirmation
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -47,18 +47,18 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 12h timeframe
+    # Align 1w EMA50 to 4h timeframe
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: volume > 1.5 * median volume of last 28 bars
-    vol_median = pd.Series(volume).rolling(window=28, min_periods=28).median().values
-    volume_confirm = volume > (1.5 * vol_median)
+    # Volume spike filter: volume > 2.0 * median volume of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    volume_spike = volume > (2.0 * vol_median)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(28, 50) + 1
+    start_idx = max(20, 50) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -70,12 +70,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla H3, trend up (close > EMA50), volume confirmation
-            if close[i] > camarilla_h3[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm[i]:
+            # Long: price breaks above Camarilla H3, trend up (close > EMA50), volume spike
+            if close[i] > camarilla_h3[i] and close[i] > ema_50_1w_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3, trend down (close < EMA50), volume confirmation
-            elif close[i] < camarilla_l3[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm[i]:
+            # Short: price breaks below Camarilla L3, trend down (close < EMA50), volume spike
+            elif close[i] < camarilla_l3[i] and close[i] < ema_50_1w_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_1wEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1wEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
