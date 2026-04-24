@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with weekly pivot regime filter and volume confirmation.
-- Long when price breaks above 6h Donchian upper (20) AND weekly close > weekly pivot (bullish regime)
-- Short when price breaks below 6h Donchian lower (20) AND weekly close < weekly pivot (bearish regime)
-- Volume confirmation: current volume > 1.5 * 20-period average volume
-- Exit on opposite Donchian breakout (lower for long exit, upper for short exit)
-- Uses 6h primary with 1w HTF to target 75-200 trades over 4 years (19-50/year)
-- Weekly pivot provides major support/resistance; Donchian captures breakouts; volume confirms momentum
-- Designed to work in both bull (breakouts with regime) and bear (mean reversion at extremes) markets
+Hypothesis: 12h Donchian(20) breakout with 1d ATR filter and volume spike confirmation.
+- Long when price breaks above Donchian upper band (20-period high) AND 1d ATR(14) > 1d ATR(50) (expanding volatility)
+- Short when price breaks below Donchian lower band (20-period low) AND 1d ATR(14) > 1d ATR(50) (expanding volatility)
+- Volume confirmation: current volume > 1.5 * 20-period average volume (moderate spike to avoid overtrading)
+- Exit on opposite Donchian breakout (lower band for long exit, upper band for short exit)
+- Uses 12h primary with 1d HTF to target 50-150 total trades over 4 years (12-37/year)
+- Donchian channels provide clear breakout levels; ATR filter ensures volatility expansion; volume confirms momentum
+- Designed to capture strong moves in both bull (breakouts up) and bear (breakouts down) markets
 - Signal size: 0.25 discrete levels to minimize fee churn
 """
 
@@ -25,40 +25,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly OHLC for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Get weekly OHLC arrays
-    weekly_open = df_1w['open'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Calculate weekly pivot point: (H + L + C) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    
-    # Align weekly pivot to 6h timeframe (waits for completed weekly bar)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # Weekly regime: bullish if weekly close > pivot, bearish if weekly close < pivot
-    bullish_regime = weekly_close > weekly_pivot
-    bearish_regime = weekly_close < weekly_pivot
-    
-    # Align regime to 6h timeframe
-    bullish_regime_aligned = align_htf_to_ltf(prices, df_1w, bullish_regime.astype(float))
-    bearish_regime_aligned = align_htf_to_ltf(prices, df_1w, bearish_regime.astype(float))
-    
-    # Calculate 6h Donchian channels (20-period)
-    # Donchian upper = highest high of last 20 periods
-    # Donchian lower = lowest low of last 20 periods
+    # Calculate Donchian channels using previous 20-period high/low (avoid look-ahead)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: volume > 1.5 * 20-period average volume
+    # Get 1d data for ATR filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d ATR(14) and ATR(50) for volatility filter
+    df_1d_copy = df_1d.copy()
+    df_1d_copy['high_low'] = df_1d_copy['high'] - df_1d_copy['low']
+    df_1d_copy['high_prev_close'] = abs(df_1d_copy['high'] - df_1d_copy['close'].shift(1))
+    df_1d_copy['low_prev_close'] = abs(df_1d_copy['low'] - df_1d_copy['close'].shift(1))
+    df_1d_copy['true_range'] = df_1d_copy[['high_low', 'high_prev_close', 'low_prev_close']].max(axis=1)
+    
+    atr_14 = df_1d_copy['true_range'].rolling(window=14, min_periods=14).mean().values
+    atr_50 = df_1d_copy['true_range'].rolling(window=50, min_periods=50).mean().values
+    
+    # Align ATR values to 12h timeframe (waits for completed 1d bar)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    
+    # Volatility filter: ATR(14) > ATR(50) indicates expanding volatility
+    vol_expanding = atr_14_aligned > atr_50_aligned
+    
+    # Volume confirmation: volume > 1.5 * 20-period average (moderate spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
@@ -66,36 +61,36 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 20  # Need Donchian and volume MA
+    start_idx = 50  # Need ATR50 and Donchian20
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(bullish_regime_aligned[i]) or 
-            np.isnan(bearish_regime_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Donchian upper AND bullish weekly regime AND volume confirmation
-            if close[i] > donchian_upper[i] and bullish_regime_aligned[i] > 0.5 and volume_confirm[i]:
+            # Long: break above Donchian upper AND volatility expanding AND volume confirmation
+            if close[i] > donchian_upper[i] and vol_expanding[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian lower AND bearish weekly regime AND volume confirmation
-            elif close[i] < donchian_lower[i] and bearish_regime_aligned[i] > 0.5 and volume_confirm[i]:
+            # Short: break below Donchian lower AND volatility expanding AND volume confirmation
+            elif close[i] < donchian_lower[i] and vol_expanding[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below Donchian lower (opposite level)
+            # Long exit: break below Donchian lower (opposite band)
             if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above Donchian upper (opposite level)
+            # Short exit: break above Donchian upper (opposite band)
             if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
@@ -104,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1wPivot_Regime_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dATRFilter_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
