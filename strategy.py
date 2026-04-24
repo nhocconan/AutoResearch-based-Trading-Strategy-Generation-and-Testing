@@ -1,73 +1,35 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ADX regime filter.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for volume confirmation (above 20-period SMA) and ADX regime (ADX > 25 for trending).
-- Entry: Long when price breaks above Donchian(20) high AND 1d volume > 1d volume SMA(20) AND 1d ADX > 25.
-         Short when price breaks below Donchian(20) low AND 1d volume > 1d volume SMA(20) AND 1d ADX > 25.
-- Exit: Opposite Donchian breakout OR ADX falls below 20 (regime change to ranging).
-- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Donchian channels provide clear breakout levels with built-in trend following.
-- Volume confirmation ensures breakouts have participation.
-- ADX filter avoids whipsaws in ranging markets (ADX < 20) and only trades in trending regimes (ADX > 25).
-- Works in bull markets (buy breakouts in uptrends) and bear markets (sell breakdowns in downtrends).
-- Estimated trades: ~100 total over 4 years (~25/year) based on Donchian breakout frequency with filters.
+Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend filter and volume confirmation.
+- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
+- HTF: 4h for trend filter (price above/below EMA50) and 1d for volume regime (above average volume).
+- Entry: Long when price breaks above Camarilla R1 AND 4h EMA50 uptrend AND 1d volume > 20-period SMA.
+         Short when price breaks below Camarilla S1 AND 4h EMA50 downtrend AND 1d volume > 20-period SMA.
+- Exit: Opposite Camarilla break (price crosses R1/S1 in opposite direction) OR 4h EMA50 trend reversal.
+- Signal size: 0.20 discrete to minimize fee drag while maintaining profit potential.
+- Camarilla pivot points identify intraday support/resistance levels that work well in ranging markets.
+- EMA50 trend filter ensures we trade with the intermediate-term trend.
+- Volume confirmation reduces false breakouts.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Session filter: 08-20 UTC to avoid low-liquidity Asian session noise.
+- Estimated trades: ~100 total over 4 years (~25/year) based on Camarilla breakout frequency with filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def donchian_channels(high, low, period):
-    """Calculate Donchian channels: upper=rolling max(high), lower=rolling min(low)."""
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=period, min_periods=period).max().values
-    lower = low_series.rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def ema(values, period):
     """Calculate Exponential Moving Average."""
     return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def adx(high, low, close, period):
-    """Calculate Average Directional Index."""
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    
-    # True Range
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    dm_plus = high_series - high_series.shift(1)
-    dm_minus = low_series.shift(1) - low_series
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smoothed values
-    atr = tr.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    dm_plus_smooth = dm_plus.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    dm_minus_smooth = dm_minus.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # Directional Index
-    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
-    
-    # ADX
-    adx_values = dx.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    return adx_values.values, di_plus.values, di_minus.values
+def sma(values, period):
+    """Calculate Simple Moving Average."""
+    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -76,33 +38,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    upper_12h, lower_12h = donchian_channels(high, low, 20)
-    
-    # Calculate 1d HTF indicators ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 4h trend filter: EMA50
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 1d volume SMA(20) for confirmation
-    volume_sma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_1d)
+    ema50_4h = ema(df_4h['close'].values, 50)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # 1d ADX(25) for regime filter
-    adx_1d, _, _ = adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 25)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate 1d volume filter: volume > 20-period SMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    vol_sma_1d = sma(df_1d['volume'].values, 20)
+    vol_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_1d)
+    
+    # Calculate Camarilla pivot points on 1h (using previous bar's OHLC)
+    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    # We need to shift by 1 to avoid look-ahead (use previous bar to calculate levels for current bar)
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    # Set first bar to NaN since we don't have previous bar
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for Donchian/ADX
+    start_idx = 20  # Need sufficient data for EMA/SMA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or
-            np.isnan(volume_sma_1d_aligned[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_sma_1d_aligned[i]) or
+            np.isnan(r1[i]) or np.isnan(s1[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Check session filter
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,44 +100,40 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Exit conditions: opposite Donchian breakout OR ADX falls below 20 (regime change)
+        # Exit conditions: opposite Camarilla break OR 4h EMA50 trend reversal
         if position != 0:
-            # Exit long: price breaks below Donchian low OR ADX < 20 (ranging)
+            # Exit long: price breaks below S1 OR 4h EMA50 turns downtrend
             if position == 1:
-                if curr_close < lower_12h[i] or adx_1d_aligned[i] < 20:
+                if curr_close < s1[i] or close[i] < ema50_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Donchian high OR ADX < 20 (ranging)
+            # Exit short: price breaks above R1 OR 4h EMA50 turns uptrend
             elif position == -1:
-                if curr_close > upper_12h[i] or adx_1d_aligned[i] < 20:
+                if curr_close > r1[i] or close[i] > ema50_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with volume confirmation and ADX > 25 (trending)
-        if position == 0:
-            # Long: price breaks above Donchian high AND volume > volume SMA AND ADX > 25
-            if (curr_close > upper_12h[i] and 
-                curr_volume > volume_sma_1d_aligned[i] and 
-                adx_1d_aligned[i] > 25):
-                signals[i] = 0.25
+        # Entry conditions: Camarilla break with trend and volume confirmation
+        if position == 0 and in_session:
+            # Long: price breaks above R1 AND 4h EMA50 uptrend AND volume confirmation
+            if curr_close > r1[i] and close[i] > ema50_4h_aligned[i] and curr_volume > vol_sma_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian low AND volume > volume SMA AND ADX > 25
-            elif (curr_close < lower_12h[i] and 
-                  curr_volume > volume_sma_1d_aligned[i] and 
-                  adx_1d_aligned[i] > 25):
-                signals[i] = -0.25
+            # Short: price breaks below S1 AND 4h EMA50 downtrend AND volume confirmation
+            elif curr_close < s1[i] and close[i] < ema50_4h_aligned[i] and curr_volume > vol_sma_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.25
+            signals[i] = -0.20
     
     return signals
 
-name = "12h_Donchian20_1dVolume_ADX_RegimeFilter_v1"
-timeframe = "12h"
+name = "1h_Camarilla_R1S1_Breakout_4hEMA50_1dVolumeFilter_v1"
+timeframe = "1h"
 leverage = 1.0
