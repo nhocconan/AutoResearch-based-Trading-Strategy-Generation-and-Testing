@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 - Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1d for EMA34 trend filter (more stable for BTC/ETH trend identification).
-- Entry: Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume > 2.0 * 4h volume MA(20);
-         Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume > 2.0 * 4h volume MA(20).
+- Entry: Long when price breaks above Camarilla H3 level AND price > 1d EMA34 AND volume > 2.0 * 4h volume MA(20);
+         Short when price breaks below Camarilla L3 level AND price < 1d EMA34 AND volume > 2.0 * 4h volume MA(20).
 - Exit: Close-based reversal (opposite signal) or stoploss via trend filter (signal=0 when price closes below/above 1d EMA34).
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Donchian channels provide structure for breakouts; 1d EMA34 filters counter-trend signals; volume confirmation avoids false breakouts.
+- Camarilla levels provide structure for breakouts; 1d EMA34 filters counter-trend signals; volume confirmation avoids false breakouts.
 - Works in bull markets (buy breakouts) and bear markets (sell breakdowns) with volume confirmation to avoid false signals.
 """
 
@@ -26,11 +26,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) on primary timeframe
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla H3 and L3 levels from previous day
+    # Camarilla: H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
+    # We need previous day's OHLC
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
     # Get 1d data for EMA34
     df_1d = get_htf_data(prices, '1d')
@@ -60,11 +67,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34, 20)  # Donchian20, EMA34, volume MA20
+    start_idx = 1  # Need previous bar for Camarilla
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,9 +95,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Entry conditions with volume confirmation and Donchian breakout
-        bullish_breakout = curr_high > donchian_high[i-1]  # Break above previous period's high
-        bearish_breakout = curr_low < donchian_low[i-1]    # Break below previous period's low
+        # Entry conditions with volume confirmation and Camarilla breakout
+        bullish_breakout = curr_high > camarilla_h3[i]  # Break above H3 level
+        bearish_breakout = curr_low < camarilla_l3[i]   # Break below L3 level
         
         # Trend filter from 1d EMA34
         price_above_ema = curr_close > ema_34_aligned[i]
@@ -102,11 +109,11 @@ def generate_signals(prices):
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: Price breaks above Donchian high AND price above 1d EMA34
+                # Long: Price breaks above Camarilla H3 AND price above 1d EMA34
                 if bullish_breakout and price_above_ema:
                     signals[i] = 0.25
                     position = 1
-                # Short: Price breaks below Donchian low AND price below 1d EMA34
+                # Short: Price breaks below Camarilla L3 AND price below 1d EMA34
                 elif bearish_breakout and price_below_ema:
                     signals[i] = -0.25
                     position = -1
@@ -119,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_VolumeConfirm_v1"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
