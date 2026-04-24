@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI(2) extreme reversals with 4h trend filter and volume spike confirmation.
-- Primary timeframe: 1h for execution, HTF: 4h for trend direction (EMA50), 1d for volume regime.
-- RSI(2) < 10 = oversold, RSI(2) > 90 = overbought on 1h.
-- In 4h uptrend (close > EMA50): long RSI(2) < 10 with volume spike.
-- In 4h downtrend (close < EMA50): short RSI(2) > 90 with volume spike.
-- Volume spike: current volume > 2.0 * 20-period volume MA (1h) to avoid low-volume false signals.
-- Discrete signal size: 0.20 to limit drawdown and reduce fee churn.
-- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
-- Session filter: 08-20 UTC to avoid low-liquidity Asian session noise.
+Hypothesis: 6h Ichimoku Cloud breakout with 1w trend filter and volume confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for Ichimoku components, 1w for ADX trend strength.
+- Ichimoku components (Tenkan-sen, Kijun-sen, Senkou Span A/B) calculated on 1d data.
+- Long when price breaks above Kumo (cloud) AND Tenkan > Kijun (bullish TK cross) AND 1w ADX > 25.
+- Short when price breaks below Kumo AND Tenkan < Kijun (bearish TK cross) AND 1w ADX > 25.
+- In ranging markets (1w ADX < 20): fade at cloud edges with TK cross reversal.
+- Volume confirmation: current volume > 1.3 * 20-period volume MA to avoid false breakouts.
+- Discrete signal size: 0.25 to balance return and drawdown.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -26,96 +26,141 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate EMA50 on 4h close
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Get 1d data for volume regime (optional filter - we'll use 1h volume spike instead)
-    # But we can use 1d average volume as baseline if needed
+    # Get 1d data for Ichimoku
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 20-period volume MA on 1h for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    # Calculate Ichimoku components on 1d
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max()
+    period9_low = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min()
+    tenkan_sen = (period9_high + period9_low) / 2.0
     
-    # Calculate RSI(2) on 1h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max()
+    period26_low = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min()
+    kijun_sen = (period26_high + period26_low) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2.0)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max()
+    period52_low = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min()
+    senkou_span_b = ((period52_high + period52_low) / 2.0)
+    
+    # Get 1w data for ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Calculate ADX (14-period) on 1w
+    # True Range
+    tr1 = pd.Series(df_1w['high']).diff().abs()
+    tr2 = (pd.Series(df_1w['high']) - pd.Series(df_1w['low'].shift())).abs()
+    tr3 = (pd.Series(df_1w['low']) - pd.Series(df_1w['close'].shift())).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = pd.Series(df_1w['high']).diff()
+    down_move = -pd.Series(df_1w['low']).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF indicators to 6h
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 6h)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.3 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # Need 50 for 4h EMA, 20 for volume MA
+    start_idx = max(60, 30, 20)  # Need enough bars for Ichimoku (52), ADX (30), volume MA (20)
     
     for i in range(start_idx, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or np.isnan(senkou_a_aligned[i]) or 
+            np.isnan(senkou_b_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi[i]
+        adx_val = adx_aligned[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        prev_close = close[i-1]
         
-        ema_50 = ema_50_4h_aligned[i]
-        vol_spike = volume_spike[i]
+        tenkan = tenkan_aligned[i]
+        kijun = kijun_aligned[i]
+        senkou_a = senkou_a_aligned[i]
+        senkou_b = senkou_b_aligned[i]
+        
+        # Kumo (cloud) boundaries
+        upper_kumo = max(senkou_a, senkou_b)
+        lower_kumo = min(senkou_a, senkou_b)
         
         if position == 0:
             # Check for entry signals
-            if vol_spike:
-                if curr_close > ema_50:  # 4h uptrend: look for longs on RSI(2) extreme oversold
-                    if rsi_val < 10:
-                        signals[i] = 0.20
+            if volume_spike[i]:
+                if adx_val > 25:  # Trending regime: breakout strategy
+                    # Bullish breakout: price closes above Kumo AND bullish TK cross
+                    if curr_close > upper_kumo and tenkan > kijun:
+                        signals[i] = 0.25
                         position = 1
-                elif curr_close < ema_50:  # 4h downtrend: look for shorts on RSI(2) extreme overbought
-                    if rsi_val > 90:
-                        signals[i] = -0.20
+                    # Bearish breakout: price closes below Kumo AND bearish TK cross
+                    elif curr_close < lower_kumo and tenkan < kijun:
+                        signals[i] = -0.25
+                        position = -1
+                else:  # Ranging regime (ADX < 20): mean reversion at cloud edges
+                    # Long when price touches lower Kumo AND bullish TK cross (tenkan > kijun)
+                    if curr_low <= lower_kumo and tenkan > kijun:
+                        signals[i] = 0.25
+                        position = 1
+                    # Short when price touches upper Kumo AND bearish TK cross (tenkan < kijun)
+                    elif curr_high >= upper_kumo and tenkan < kijun:
+                        signals[i] = -0.25
                         position = -1
         elif position == 1:
-            # Long exit: RSI(2) > 50 (mean reversion) OR trend breaks down
-            if rsi_val > 50 or curr_close < ema_50:
+            # Long exit: price closes below Kumo OR TK cross turns bearish OR ADX drops to ranging
+            if curr_close < lower_kumo or tenkan < kijun or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI(2) < 50 (mean reversion) OR trend breaks up
-            if rsi_val < 50 or curr_close > ema_50:
+            # Short exit: price closes above Kumo OR TK cross turns bullish OR ADX drops to ranging
+            if curr_close > upper_kumo or tenkan > kijun or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI2_Extremes_4hEMA50Trend_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_TKCross_1wADXRegime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
