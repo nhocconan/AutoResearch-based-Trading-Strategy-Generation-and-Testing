@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian(20) breakout with 1w Camarilla pivot structure and volume confirmation.
-- Donchian breakout: long when price > highest high of last 20 bars, short when price < lowest low
-- 1w Camarilla pivot filter: only take longs when price > weekly H3 level, shorts when price < weekly L3 level
-- Volume confirmation: volume > 1.5 * 50-period average to avoid false breakouts
-- Designed to capture strong momentum moves aligned with weekly structure in both bull and bear markets
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+- Long when price breaks above 20-bar Donchian upper channel AND price > 1d EMA50 AND volume > 1.5 * 20-bar average volume
+- Short when price breaks below 20-bar Donchian lower channel AND price < 1d EMA50 AND volume > 1.5 * 20-bar average volume
+- Exit when price returns to the Donchian midpoint (mean reversion) OR volume drops below average
+- Designed to capture medium-term trends with institutional volume confirmation
 - Signal size: 0.25 discrete levels to minimize fee churn
 - Target: 50-150 total trades over 4 years (12-37/year)
 """
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,70 +23,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels
+    # Calculate Donchian channels (20-period)
     period = 20
     highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Calculate 1w Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:  # Need enough data for pivot calculation
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:  # Need enough data for EMA50
         return np.zeros(n)
     
-    # Weekly OHLC for Camarilla calculation
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla pivot levels: H4, H3, L3, L4
-    # H3 = Close + 1.1*(High-Low)/2
-    # L3 = Close - 1.1*(High-Low)/2
-    camarilla_h3 = weekly_close + 1.1 * (weekly_high - weekly_low) / 2
-    camarilla_l3 = weekly_close - 1.1 * (weekly_high - weekly_low) / 2
-    
-    # Align weekly levels to 6h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
-    
-    # Volume confirmation: volume > 1.5 * 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(period, 50)  # Need Donchian and volume MA data
+    start_idx = max(period, 20, 50)  # Need Donchian, volume MA, and EMA data
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_confirm[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high AND price > weekly H3 AND volume confirmation
-            if close[i] > highest_high[i] and close[i] > camarilla_h3_aligned[i] and volume_confirm[i]:
+            # Long: price breaks above Donchian upper AND uptrend AND volume confirmation
+            if close[i] > highest_high[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND price < weekly L3 AND volume confirmation
-            elif close[i] < lowest_low[i] and close[i] < camarilla_l3_aligned[i] and volume_confirm[i]:
+            # Short: price breaks below Donchian lower AND downtrend AND volume confirmation
+            elif close[i] < lowest_low[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian low OR no volume confirmation
-            if close[i] < lowest_low[i] or not volume_confirm[i]:
+            # Long exit: price returns to Donchian midpoint OR volume drops below average
+            if close[i] <= donchian_mid[i] or not volume_confirm[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian high OR no volume confirmation
-            if close[i] > highest_high[i] or not volume_confirm[i]:
+            # Short exit: price returns to Donchian midpoint OR volume drops below average
+            if close[i] >= donchian_mid[i] or not volume_confirm[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_1wCamarilla_H3L3_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
