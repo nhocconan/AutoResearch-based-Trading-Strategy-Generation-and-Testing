@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike and 1w ADX regime filter.
-- Primary timeframe: 12h for execution, HTF: 1d for Camarilla pivots, 1w for ADX trend strength.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and 1w ADX regime filter.
+- Primary timeframe: 4h for execution, HTF: 1d for Camarilla pivots, 1w for ADX trend strength.
 - ADX > 25 indicates trending market (breakout strategy), ADX < 20 indicates ranging (mean reversion at H3/L3).
 - Entry: Long when price breaks above H3 AND ADX > 25 (bullish breakout in trend).
          Short when price breaks below L3 AND ADX > 25 (bearish breakout in trend).
@@ -10,7 +10,7 @@ Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike and 1w ADX regime 
 - Exit: Opposite Camarilla breakout or ADX regime shift to ranging.
 - Volume confirmation: current volume > 1.5 * 20-period volume MA (to avoid false breakouts).
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -74,12 +74,12 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 12h
+    # Align HTF indicators to 4h
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 12h)
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 4h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * volume_ma)
     
@@ -145,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_1dVolumeSpike_1wADXRegime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dVolumeSpike_1wADXRegime_v1"
+timeframe = "4h"
 leverage = 1.0
