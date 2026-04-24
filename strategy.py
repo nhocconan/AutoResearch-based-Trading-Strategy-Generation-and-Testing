@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI(14) mean reversion with 4h ADX(14) regime filter and volume confirmation.
-- Primary timeframe: 1h for entry timing.
-- HTF: 4h ADX(14) to filter regime (ADX > 25 = trending, avoid entries; ADX <= 25 = ranging, mean revert).
-- Volume: Current 1h volume > 1.5 * 20-period volume MA to confirm participation.
-- Entry: Long when RSI(14) < 30 AND ADX <= 25 AND volume spike.
-         Short when RSI(14) > 70 AND ADX <= 25 AND volume spike.
-- Exit: RSI returns to neutral zone (40 < RSI < 60) or loss of volume confirmation.
-- Signal size: 0.20 discrete to limit drawdown and reduce fee churn.
-- Session filter: Trade only between 08:00-20:00 UTC to avoid low-liquidity hours.
-- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA(34) trend filter and 1d volume spike confirmation.
+- Primary timeframe: 12h for entries/exits.
+- HTF: 1d EMA(34) for trend direction (bullish if close > EMA34, bearish if close < EMA34).
+- Volume: Current 12h volume > 2.0 * 20-period volume MA to avoid false breakouts.
+- Entry: Long when price breaks above Camarilla H3 level AND 1d EMA34 trend bullish AND volume spike.
+         Short when price breaks below Camarilla L3 level AND 1d EMA34 trend bearish AND volume spike.
+- Exit: Opposite Camarilla breakout or loss of volume confirmation.
+- Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
+- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 """
 
 import numpy as np
@@ -27,115 +26,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08:00-20:00 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate Camarilla pivot levels (H3, L3) from previous 12h bar
+    # H3 = close + 1.1 * (high - low) / 2
+    # L3 = close - 1.1 * (high - low) / 2
+    # Using previous bar's high/low/close to avoid look-ahead
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = np.nan  # First bar has no previous
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Calculate RSI(14) on 1h
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
-    # Get 4h data for ADX(14) and volume MA
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for EMA(34) trend and volume MA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate ADX(14) on 4h
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate EMA(34) on 1d close
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate 20-period volume MA on 1d
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_4h - np.roll(high_4h, 1)) > (np.roll(low_4h, 1) - low_4h),
-                       np.maximum(high_4h - np.roll(high_4h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_4h, 1) - low_4h) > (high_4h - np.roll(high_4h, 1)),
-                        np.maximum(np.roll(low_4h, 1) - low_4h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align HTF indicators to 12h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha=1/14)
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 20-period volume MA on 4h
-    vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to 1h
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    
-    # Volume confirmation: current 1h volume > 1.5 * 20-period 4h volume MA (aligned)
-    volume_spike = volume > (1.5 * vol_ma_4h_aligned)
+    # Volume confirmation: current 12h volume > 2.0 * 20-period 1d volume MA (aligned)
+    volume_spike = volume > (2.0 * vol_ma_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 30)  # Need enough 4h bars for ADX and volume MA
+    start_idx = max(34, 20, 1)  # Need enough 1d bars for EMA34 and volume MA, plus 1 for previous bar
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(adx_aligned[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(volume_spike[i]) or not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_h3[i]) or 
+            np.isnan(camarilla_l3[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
-        rsi_val = rsi_values[i]
-        vol_spike = volume_spike[i]
+        ema_34_val = ema_34_aligned[i]
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        upper_camarilla = camarilla_h3[i]
+        lower_camarilla = camarilla_l3[i]
         
         if position == 0:
-            # Check for entry signals in ranging market (ADX <= 25) with volume spike
-            if vol_spike and adx_val <= 25:
-                # Oversold: RSI < 30
-                if rsi_val < 30:
-                    signals[i] = 0.20
+            # Check for entry signals with volume spike
+            if volume_spike[i]:
+                # Bullish breakout: price breaks above Camarilla H3 AND 1d EMA34 bullish (close > EMA34)
+                if curr_high > upper_camarilla and curr_close > ema_34_val:
+                    signals[i] = 0.25
                     position = 1
-                # Overbought: RSI > 70
-                elif rsi_val > 70:
-                    signals[i] = -0.20
+                # Bearish breakout: price breaks below Camarilla L3 AND 1d EMA34 bearish (close < EMA34)
+                elif curr_low < lower_camarilla and curr_close < ema_34_val:
+                    signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: RSI returns to neutral (40 < RSI < 60) or loss of volume confirmation
-            if rsi_val > 40 and rsi_val < 60 or not vol_spike:
+            # Long exit: price breaks below Camarilla L3 OR loss of volume confirmation
+            if curr_low < lower_camarilla or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI returns to neutral (40 < RSI < 60) or loss of volume confirmation
-            if rsi_val > 40 and rsi_val < 60 or not vol_spike:
+            # Short exit: price breaks above Camarilla H3 OR loss of volume confirmation
+            if curr_high > upper_camarilla or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI14_4hADX25_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "12h_Camarilla_H3L3_1dEMA34Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
