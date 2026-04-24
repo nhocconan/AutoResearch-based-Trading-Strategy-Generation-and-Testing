@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 1d for ADX trend strength.
-- Donchian breakout: Long when price > upper channel (20-period high), Short when price < lower channel (20-period low).
-- ADX > 25 indicates trending market (trade breakouts), ADX < 20 indicates ranging (fade breakouts).
-- Entry: Long on bullish breakout in trending regime (ADX>25) or bearish breakout in ranging regime (ADX<20).
-         Short on bearish breakout in trending regime (ADX>25) or bullish breakout in ranging regime (ADX<20).
-- Volume confirmation: current volume > 1.3 * 20-period volume MA (on 4h).
+Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX regime filter.
+- Primary timeframe: 4h for structure and execution.
+- HTF: 1d for ADX trend strength (regime filter) and Donchian calculation.
+- Donchian(20): Upper = 20-period high, Lower = 20-period low on 1d.
+- ADX > 25: Trending market → trade breakouts in direction of trend.
+- ADX < 20: Ranging market → fade Donchian touches (mean reversion).
+- Volume confirmation: current 4h volume > 1.8 * 20-period volume MA.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
 - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
@@ -26,12 +26,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX
+    # Get 1d data for Donchian and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate ADX (14-period) on 1d
+    # Calculate 1d Donchian channels (20-period)
+    donch_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d ADX (14-period)
     # True Range
     tr1 = pd.Series(df_1d['high']).diff().abs()
     tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['low'].shift())).abs()
@@ -57,70 +61,64 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d ADX to 4h
+    # Align 1d indicators to 4h
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Donchian channels (20-period) on 4h
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    upper_channel = high_roll.values
-    lower_channel = low_roll.values
-    
-    # Volume confirmation: current volume > 1.3 * 20-period volume MA (on 4h)
+    # Volume confirmation: current 4h volume > 1.8 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * volume_ma)
+    volume_spike = volume > (1.8 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, 20)  # Need enough 1d bars for ADX and 4h bars for Donchian
+    start_idx = max(30, 20)  # Need enough 1d bars for ADX/Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         adx_val = adx_aligned[i]
-        price = close[i]
-        upper = upper_channel[i]
-        lower = lower_channel[i]
+        upper = donch_high_aligned[i]
+        lower = donch_low_aligned[i]
         
         if position == 0:
             # Check for entry signals
             if volume_spike[i]:
-                if adx_val > 25:  # Trending regime: trade breakouts
-                    # Bullish breakout: price > upper channel
-                    if price > upper:
+                if adx_val > 25:  # Trending regime
+                    # Breakout in direction of trend (use 1d close as trend proxy)
+                    trend_up = df_1d['close'].iloc[-1] > df_1d['open'].iloc[-1] if len(df_1d) > 0 else True
+                    if close[i] > upper and trend_up:
                         signals[i] = 0.25
                         position = 1
-                    # Bearish breakout: price < lower channel
-                    elif price < lower:
+                    elif close[i] < lower and not trend_up:
                         signals[i] = -0.25
                         position = -1
-                else:  # Ranging regime (ADX < 20): fade breakouts
-                    # Fade bullish breakout: price > upper channel -> short
-                    if price > upper:
-                        signals[i] = -0.25
-                        position = -1
-                    # Fade bearish breakout: price < lower channel -> long
-                    elif price < lower:
+                else:  # Ranging regime (ADX < 20)
+                    # Mean reversion: fade Donchian touches
+                    if close[i] <= lower and close[i-1] > lower:  # Touch lower band
                         signals[i] = 0.25
                         position = 1
+                    elif close[i] >= upper and close[i-1] < upper:  # Touch upper band
+                        signals[i] = -0.25
+                        position = -1
         elif position == 1:
-            # Long exit: price re-enters Donchian channel or ADX drops to ranging
-            if price < upper and price > lower or adx_val < 20:
+            # Long exit: price returns to middle of channel or opposite touch
+            if close[i] < (upper + lower) / 2 or close[i] >= upper:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price re-enters Donchian channel or ADX drops to ranging
-            if price < upper and price > lower or adx_val < 20:
+            # Short exit: price returns to middle of channel or opposite touch
+            if close[i] > (upper + lower) / 2 or close[i] <= lower:
                 signals[i] = 0.0
                 position = 0
             else:
