@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H4/L4 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Long when price breaks above Camarilla H4 AND 1d close > 1d EMA34 (bullish regime)
-- Short when price breaks below Camarilla L4 AND 1d close < 1d EMA34 (bearish regime)
-- Volume confirmation: current volume > 2.0 * 20-period average volume (strong spike)
-- Exit on opposite Camarilla level (exit long on L4, exit short on H4)
-- Uses 12h primary with 1d HTF to target 50-150 total trades over 4 years (12-37/year)
-- Camarilla H4/L4 are stronger levels than H3/L3, reducing false breakouts
-- Designed to work in both bull (breakouts with trend) and bear (breakouts against trend) markets
+Hypothesis: 4h Williams %R reversal with 12h EMA50 trend filter and volume spike confirmation.
+- Long when Williams %R crosses above -80 (oversold reversal) AND 12h close > 12h EMA50 (bullish trend) AND volume > 1.5 * 20-period average
+- Short when Williams %R crosses below -20 (overbought reversal) AND 12h close < 12h EMA50 (bearish trend) AND volume > 1.5 * 20-period average
+- Exit when Williams %R crosses below -50 for longs or above -50 for shorts (mid-point reversion)
+- Uses 4h primary with 12h HTF to target 75-200 total trades over 4 years (19-50/year)
+- Williams %R captures momentum reversals; EMA50 filters trend; volume spike confirms strength
+- Designed to work in both bull (buy oversold dips in uptrend) and bear (sell overbought rallies in downtrend) markets
 - Signal size: 0.25 discrete levels to minimize fee churn
 """
 
@@ -25,71 +24,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla H4 and L4 levels using previous day's OHLC
-    # For each 12h bar, we need the previous day's high, low, close
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Camarilla levels: H4 = close + (high - low) * 1.1/2, L4 = close - (high - low) * 1.1/2
-    camarilla_h4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_l4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Trend filter: bullish if close > EMA50, bearish if close < EMA50
+    bullish_regime = close > ema_50_12h_aligned
+    bearish_regime = close < ema_50_12h_aligned
     
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Trend filter: bullish if close > EMA34, bearish if close < EMA34
-    bullish_regime = close > ema_34_1d_aligned
-    bearish_regime = close < ema_34_1d_aligned
-    
-    # Volume confirmation: volume > 2.0 * 20-period average (strong spike)
+    # Volume confirmation: volume > 1.5 * 20-period average (volume spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20) + 1  # Need EMA34 and volume MA
+    start_idx = max(50, 20, 14) + 1  # Need EMA50, volume MA, and Williams %R
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Camarilla H4 AND bullish regime AND volume confirmation
-            if close[i] > camarilla_h4_aligned[i] and bullish_regime[i] and volume_confirm[i]:
+            # Long: Williams %R crosses above -80 (from below) AND bullish regime AND volume confirmation
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and bullish_regime[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Camarilla L4 AND bearish regime AND volume confirmation
-            elif close[i] < camarilla_l4_aligned[i] and bearish_regime[i] and volume_confirm[i]:
+            # Short: Williams %R crosses below -20 (from above) AND bearish regime AND volume confirmation
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and bearish_regime[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below Camarilla L4 (opposite level)
-            if close[i] < camarilla_l4_aligned[i]:
+            # Long exit: Williams %R crosses below -50 (from above)
+            if williams_r[i] < -50 and williams_r[i-1] >= -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above Camarilla H4 (opposite level)
-            if close[i] > camarilla_h4_aligned[i]:
+            # Short exit: Williams %R crosses above -50 (from below)
+            if williams_r[i] > -50 and williams_r[i-1] <= -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -97,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
