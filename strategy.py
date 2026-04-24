@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H4/L4 breakout with 1d ATR-based volume filter and 1d EMA50 trend.
-- Uses Camarilla pivot levels (H4, L4) from prior completed 1d candles for stronger breakout signals.
-- Volume filter: current volume > 1.5x 20-period average AND > 1.5x prior 1d average volume to avoid false breakouts.
-- Trend filter: price must be above/below 1d EMA50 to align with higher timeframe direction.
-- Designed for 4h timeframe to capture medium-term breakouts in both bull and bear markets.
+Hypothesis: 1d Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike confirmation.
+- Uses Camarilla pivot levels (H3, L3) from prior completed 1w candles to identify weekly support/resistance.
+- Breakout above H3 or below L3 with volume > 2.0x 20-bar average signals strong momentum.
+- Trend filter: price must be above/below 1w EMA50 to align with higher timeframe direction.
+- Designed for 1d timeframe to capture medium-term breakouts in both bull and bear markets.
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 20-40 trades/year (80-160 total over 4 years) to stay fee-efficient.
+- Targets 15-30 trades/year (60-120 total over 4 years) to stay fee-efficient.
 """
 
 import numpy as np
@@ -23,36 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Prior completed 1d OHLC for Camarilla and EMA50
-    high_1d = df_1d['high'].shift(1).values
-    low_1d = df_1d['low'].shift(1).values
-    close_1d = df_1d['close'].shift(1).values
-    volume_1d = df_1d['volume'].shift(1).values
+    # Prior completed 1w OHLC for Camarilla and EMA50
+    high_1w = df_1w['high'].shift(1).values
+    low_1w = df_1w['low'].shift(1).values
+    close_1w = df_1w['close'].shift(1).values
     
-    # Camarilla levels: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
-    camarilla_high = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_low = close_1d - 1.1 * (high_1d - low_1d) / 2
+    # Camarilla levels: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_high = close_1w + 1.1 * (high_1w - low_1w) / 4
+    camarilla_low = close_1w - 1.1 * (high_1w - low_1w) / 4
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 1d average volume (20-period)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # 1w EMA50 trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align HTF indicators to LTF
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1w, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1w, camarilla_low)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation: > 1.5x 20-period average AND > 1.5x prior 1d average volume
+    # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = (volume > 1.5 * vol_ma) & (volume > 1.5 * vol_ma_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,31 +57,34 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation (> 2.0x average)
+        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        
         if position == 0:
-            # Long: breakout above H4 AND price above 1d EMA50 AND volume confirmation
-            if close[i] > camarilla_high_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm[i]:
+            # Long: breakout above H3 AND price above 1w EMA50 AND volume confirmation
+            if close[i] > camarilla_high_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below L4 AND price below 1d EMA50 AND volume confirmation
-            elif close[i] < camarilla_low_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm[i]:
+            # Short: breakout below L3 AND price below 1w EMA50 AND volume confirmation
+            elif close[i] < camarilla_low_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below L4 OR price below 1d EMA50
-            if close[i] < camarilla_low_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: close below L3 OR price below 1w EMA50
+            if close[i] < camarilla_low_aligned[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above H4 OR price above 1d EMA50
-            if close[i] > camarilla_high_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: close above H3 OR price above 1w EMA50
+            if close[i] > camarilla_high_aligned[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -95,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_1dEMA50_VolumeFilter_v1"
-timeframe = "4h"
+name = "1d_Camarilla_H3L3_Breakout_1wEMA50_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
