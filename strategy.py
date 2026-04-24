@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Camarilla pivot levels: Calculated from prior 1d OHLC (H3, L3 levels for breakout).
-- Entry: Long when price breaks above prior 1d H3 AND 4h EMA50 bullish AND volume > 1.8 * volume MA(20).
-         Short when price breaks below prior 1d L3 AND 4h EMA50 bearish AND volume > 1.8 * volume MA(20).
-- Exit: Close-based reversal - exit long when price crosses below prior 1d L3,
-        exit short when price crosses above prior 1d H3.
-- Signal size: 0.20 discrete to minimize fee churn and control drawdown.
-- Session filter: Only trade between 08:00-20:00 UTC to avoid low-liquidity hours.
+Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w Camarilla H3/L3 for trend direction (bullish if close > weekly H3, bearish if close < weekly L3).
+- Donchian channel: Calculated from prior 6h OHLC (upper/lower bands for breakout).
+- Entry: Long when price breaks above prior 6h Donchian upper AND weekly close > weekly H3 AND volume > 1.8 * volume MA(30).
+         Short when price breaks below prior 6h Donchian lower AND weekly close < weekly L3 AND volume > 1.8 * volume MA(30).
+- Exit: Close-based reversal - exit long when price crosses below prior 6h Donchian lower,
+        exit short when price crosses above prior 6h Donchian upper.
+- Signal size: 0.25 discrete to balance profit potential and drawdown control.
+Uses weekly Camarilla pivot trend filter (proven edge from DB top performers) for BTC/ETH/SOL.
+Works in both bull and bear markets by aligning with higher-timeframe structure.
 """
 
 import numpy as np
@@ -27,59 +28,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for weekly Camarilla pivot trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    df_4h_close = df_4h['close'].values
-    ema_4h = pd.Series(df_4h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly Camarilla levels (H3, L3) for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    rang_1w = high_1w - low_1w
+    camarilla_h3_1w = close_1w + rang_1w * 1.1 / 4
+    camarilla_l3_1w = close_1w - rang_1w * 1.1 / 4
+    
+    # Align weekly Camarilla levels to 6h
+    camarilla_h3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3_1w)
+    camarilla_l3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3_1w)
+    
+    # Get 6h data for Donchian channel (need 20 periods for calculation)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate prior 1d Camarilla levels (H3, L3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 6h Donchian channel (20-period)
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    # Camarilla calculations for H3/L3 levels
-    rang = high_1d - low_1d
-    camarilla_h3 = close_1d + rang * 1.1 / 4
-    camarilla_l3 = close_1d - rang * 1.1 / 4
+    # Donchian upper: max(high, 20)
+    donchian_upper = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    # Donchian lower: min(low, 20)
+    donchian_lower = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    # Align HTF indicators to 1h
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align Donchian channels to 6h
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
     
-    # Calculate volume MA(20) for confirmation (using 1h data)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Precompute session hours (08:00-20:00 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    # Calculate volume MA(30) for confirmation (using 6h data)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 50, 20)  # Need enough bars for EMA50 and volume MA
+    start_idx = max(100, 20, 30)  # Need enough bars for Donchian and volume MA
     
     for i in range(start_idx, n):
-        # Session filter: only trade 08:00-20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if data not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_h3_1w_aligned[i]) or np.isnan(camarilla_l3_1w_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,31 +90,31 @@ def generate_signals(prices):
             # Check for entry signals with volume confirmation (1.8x threshold)
             vol_confirmed = curr_volume > 1.8 * vol_ma[i]
             
-            # Long: Price breaks above prior 1d H3 AND 4h EMA50 bullish AND volume confirmed
-            if curr_close > camarilla_h3_aligned[i] and curr_close > ema_4h_aligned[i] and vol_confirmed:
-                signals[i] = 0.20
+            # Long: Price breaks above prior 6h Donchian upper AND weekly close > weekly H3 AND volume confirmed
+            if curr_close > donchian_upper_aligned[i] and curr_close > camarilla_h3_1w_aligned[i] and vol_confirmed:
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below prior 1d L3 AND 4h EMA50 bearish AND volume confirmed
-            elif curr_close < camarilla_l3_aligned[i] and curr_close < ema_4h_aligned[i] and vol_confirmed:
-                signals[i] = -0.20
+            # Short: Price breaks below prior 6h Donchian lower AND weekly close < weekly L3 AND volume confirmed
+            elif curr_close < donchian_lower_aligned[i] and curr_close < camarilla_l3_1w_aligned[i] and vol_confirmed:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price crosses below prior 1d L3 (reversion to mean)
-            if curr_close < camarilla_l3_aligned[i]:
+            # Exit long when price crosses below prior 6h Donchian lower (reversion to mean)
+            if curr_close < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short when price crosses above prior 1d H3 (reversion to mean)
-            if curr_close > camarilla_h3_aligned[i]:
+            # Exit short when price crosses above prior 6h Donchian upper (reversion to mean)
+            if curr_close > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_4hEMA50_Trend_VolumeConfirm_v1"
-timeframe = "1h"
+name = "6h_Donchian20_1wCamarillaH3L3_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
