@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray + 1d Williams Fractal + Volume Spike.
-- Primary timeframe: 6h targeting 75-150 total trades over 4 years (19-37/year).
-- HTF: 1d for Williams Fractal (breakout/breakdown confirmation) and EMA50 trend filter.
-- Entry: Long when Elder Ray bull power > 0 AND price breaks above bullish fractal AND volume > 1.5x 20-period average AND price > 1d EMA50.
-         Short when Elder Ray bear power < 0 AND price breaks below bearish fractal AND volume > 1.5x 20-period average AND price < 1d EMA50.
-- Exit: Opposite Elder Ray signal OR price crosses 1d EMA50 in opposite direction.
+Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA34 trend filter.
+- Entry: Long when price breaks above R3 with volume spike AND close > 1d EMA34.
+         Short when price breaks below S3 with volume spike AND close < 1d EMA34.
+- Exit: Opposite Camarilla breakout (price crosses H3/L3) OR trend filter reversal.
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Elder Ray measures bull/bear power behind the move (price relative to EMA13).
-- Williams Fractal identifies significant swing points requiring 2-bar confirmation (no look-ahead).
-- Volume spike confirms institutional participation in breakouts.
-- Works in bull markets (buy on bullish breakouts) and bear markets (sell on bearish breakdowns).
-- Estimated trades: ~100 total over 4 years (~25/year) based on fractal breakouts with volume and trend filter.
+- Camarilla levels provide institutional support/resistance with high probability reversal/continuation.
+- Volume spike confirms institutional participation.
+- Trend filter ensures we trade with higher timeframe momentum.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on strict breakout conditions.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def ema(values, period):
     """Calculate Exponential Moving Average."""
@@ -24,7 +24,7 @@ def ema(values, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -33,32 +33,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d trend filter: EMA50
+    # Calculate 1d trend filter: EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    ema50_1d = ema(df_1d['close'].values, 50)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d, additional_delay_bars=0)
+    ema34_1d = ema(df_1d['close'].values, 34)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d, additional_delay_bars=1)
     
-    # Williams Fractal on 1d (requires 2-bar confirmation delay)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    # Calculate 12h Camarilla levels (based on previous 12h bar)
+    # We need to shift by 1 to avoid look-ahead (use previous bar's HLC)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # First bar has no previous
     
-    # Elder Ray on 6h (bull power = high - EMA13, bear power = low - EMA13)
-    ema13 = ema(close, 13)
-    bull_power = high - ema13
-    bear_power = low - ema13
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Camarilla levels
+    R3 = pivot + (range_hl * 1.1 / 4)
+    S3 = pivot - (range_hl * 1.1 / 4)
+    H3 = pivot + (range_hl * 1.1 / 2)
+    L3 = pivot - (range_hl * 1.1 / 2)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
@@ -66,50 +65,44 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 50  # Need sufficient data for EMA/volume MA/fractals
+    start_idx = 30  # Need sufficient data for volume MA and Camarilla
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or
+            np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
-        # Exit conditions: opposite Elder Ray signal OR price crosses 1d EMA50 in opposite direction
+        # Exit conditions: opposite Camarilla breakout OR trend filter reversal
         if position != 0:
-            # Exit long: Elder Ray turns bearish OR price falls below 1d EMA50
+            # Exit long: price crosses below H3 OR trend turns bearish
             if position == 1:
-                if bear_power[i] >= 0 or curr_close < ema50_1d_aligned[i]:
+                if curr_low < H3[i] or curr_close < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Elder Ray turns bullish OR price rises above 1d EMA50
+            # Exit short: price crosses above L3 OR trend turns bullish
             elif position == -1:
-                if bull_power[i] <= 0 or curr_close > ema50_1d_aligned[i]:
+                if curr_high > L3[i] or curr_close > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: All aligned in same direction
+        # Entry conditions: Camarilla breakout with volume and trend alignment
         if position == 0:
-            # Long: Elder Ray bullish AND price breaks above bullish fractal AND volume spike AND bullish 1d trend
-            if (bull_power[i] > 0 and 
-                curr_close > bullish_fractal_aligned[i] and 
-                volume_spike[i] and 
-                curr_close > ema50_1d_aligned[i]):
+            # Long: price breaks above R3 with volume spike AND bullish trend
+            if curr_high > R3[i] and volume_spike[i] and curr_close > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Elder Ray bearish AND price breaks below bearish fractal AND volume spike AND bearish 1d trend
-            elif (bear_power[i] < 0 and 
-                  curr_close < bearish_fractal_aligned[i] and 
-                  volume_spike[i] and 
-                  curr_close < ema50_1d_aligned[i]):
+            # Short: price breaks below S3 with volume spike AND bearish trend
+            elif curr_low < S3[i] and volume_spike[i] and curr_close < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -121,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_WilliamsFractal_VolumeSpike_1dEMA50_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
