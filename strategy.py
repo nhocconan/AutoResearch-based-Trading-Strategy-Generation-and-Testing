@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ATR-based trend filter and volume confirmation.
-- Long when price breaks above Donchian upper AND 1d ATR(14) > median ATR(50) (high volatility regime)
-- Short when price breaks below Donchian lower AND 1d ATR(14) > median ATR(50) (high volatility regime)
-- Volume must be > 1.5 * median volume of last 20 bars (volume confirmation)
-- Exit on opposite Donchian breakout or when ATR(14) < 0.8 * median ATR(50) (low volatility exit)
-- Uses 12h primary timeframe with 1d HTF to target 50-150 total trades over 4 years (12-37/year)
-- Donchian channels provide clear breakout levels that work in both trending and ranging markets
-- ATR filter ensures we only trade during high volatility periods, reducing false breakouts
-- Volume confirmation adds robustness to breakout signals
-- Designed for BTC/ETH with edge in capturing strong moves during volatile periods while avoiding chop
+Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume spike confirmation.
+- Long when price breaks above Donchian upper (20-period high) AND 1d ATR ratio < 0.8 (low volatility regime) AND volume > 1.5 * 20-bar median volume
+- Short when price breaks below Donchian lower (20-period low) AND 1d ATR ratio < 0.8 AND volume > 1.5 * 20-bar median volume
+- Exit on opposite Donchian breakout or when 1d ATR ratio > 1.2 (high volatility regime) to avoid whipsaws in choppy markets
+- Uses 4h primary timeframe with 1d HTF to target 75-200 total trades over 4 years (19-50/year)
+- Donchian channels provide clear trend-following structure that works in both bull and bear markets
+- 1d ATR ratio (ATR(7)/ATR(30)) filters for low-volatility environments where breakouts are more reliable
+- Volume spike confirmation reduces false breakouts from low-volume noise
+- Designed for BTC/ETH with edge in capturing sustained moves during low-volatility regimes
 """
 
 import numpy as np
@@ -26,18 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) based on previous bar
-    # Upper = max(high of last 20 bars), Lower = min(low of last 20 bars)
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    # Calculate Donchian channels (20-period)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d data ONCE before loop for ATR filter
+    # Get 1d data ONCE before loop for ATR regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) and its 50-period median for regime filter
+    # Calculate 1d ATR(7) and ATR(30) for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -46,55 +43,58 @@ def generate_signals(prices):
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan  # First bar has no previous close
+    tr1[0] = high_1d[0] - low_1d[0]  # first bar
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_median_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).median().values
+    atr_7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
+    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
     
-    # Align 1d ATR and its median to 12h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    atr_median_50_aligned = align_htf_to_ltf(prices, df_1d, atr_median_50)
+    # Avoid division by zero
+    atr_ratio = np.where(atr_30 > 0, atr_7 / atr_30, 1.0)
     
-    # Volume confirmation: volume > 1.5 * median volume of last 20 bars
+    # Align 1d ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Volume spike filter: volume > 1.5 * median volume of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
-    volume_confirm = volume > (1.5 * vol_median)
+    volume_spike = volume > (1.5 * vol_median)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 50) + 1
+    start_idx = max(20, 30) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_median_50_aligned[i]) or 
-            np.isnan(vol_median[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_median[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper, high volatility regime, volume confirmation
-            if close[i] > upper[i] and atr_14_aligned[i] > atr_median_50_aligned[i] and volume_confirm[i]:
+            # Long: price breaks above Donchian upper, low volatility regime, volume spike
+            if close[i] > donchian_upper[i] and atr_ratio_aligned[i] < 0.8 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower, high volatility regime, volume confirmation
-            elif close[i] < lower[i] and atr_14_aligned[i] > atr_median_50_aligned[i] and volume_confirm[i]:
+            # Short: price breaks below Donchian lower, low volatility regime, volume spike
+            elif close[i] < donchian_lower[i] and atr_ratio_aligned[i] < 0.8 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian lower OR low volatility regime
-            if close[i] < lower[i] or atr_14_aligned[i] < 0.8 * atr_median_50_aligned[i]:
+            # Long exit: price breaks below Donchian lower OR high volatility regime (ATR ratio > 1.2)
+            if close[i] < donchian_lower[i] or atr_ratio_aligned[i] > 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian upper OR low volatility regime
-            if close[i] > upper[i] or atr_14_aligned[i] < 0.8 * atr_median_50_aligned[i]:
+            # Short exit: price breaks above Donchian upper OR high volatility regime (ATR ratio > 1.2)
+            if close[i] > donchian_upper[i] or atr_ratio_aligned[i] > 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dATR_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dATRRegime_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
