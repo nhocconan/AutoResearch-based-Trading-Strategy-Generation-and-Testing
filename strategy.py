@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d ATR volume spike and 1d EMA34 trend filter.
+Hypothesis: 4h Donchian(20) breakout with 1-day EMA34 trend filter and volume spike confirmation using ATR ratio.
 - Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for ATR spike (volume confirmation) and EMA34 trend filter.
+- HTF: 1d for EMA34 trend filter and ATR-based volume confirmation.
 - Entry: Long when price breaks above Donchian(20) high AND ATR ratio > 2.0 AND price > 1d EMA34.
          Short when price breaks below Donchian(20) low AND ATR ratio > 2.0 AND price < 1d EMA34.
 - Exit: Opposite Donchian breakout OR price crosses 1d EMA34 in opposite direction.
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- ATR ratio (current ATR/20-period ATR) > 2.0 confirms significant volatility expansion to avoid false breakouts.
+- ATR ratio (current ATR/34-period ATR) > 2.0 confirms significant volatility expansion to avoid false breakouts.
 - 1d EMA34 provides trend filter to avoid counter-trend trades.
 - Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
 - Estimated trades: ~120 total over 4 years (~30/year) based on volatility breakout frequency with strict filters.
@@ -52,13 +52,13 @@ def generate_signals(prices):
         return np.zeros(n)
     
     ema34_1d = ema(df_1d['close'].values, 34)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d, additional_delay_bars=1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 1d ATR for volume spike filter
-    atr_20_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
-    atr_current_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
-    atr_ratio_1d = atr_current_1d / (atr_20_1d + 1e-10)  # Avoid division by zero
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d, additional_delay_bars=1)
+    # Calculate 1d ATR for volume spike filter (ATR ratio: current ATR / 34-period ATR)
+    atr_34 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 34)
+    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
+    atr_ratio = atr_current / (atr_34 + 1e-10)  # Avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Donchian channels on 4h (20-period)
     donch_hi, donch_lo = donchian_channels(high, low, 20)
@@ -72,7 +72,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
         if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -98,11 +98,11 @@ def generate_signals(prices):
         # Entry conditions: Donchian breakout with volatility confirmation and trend filter
         if position == 0:
             # Long: price breaks above Donchian high AND ATR ratio > 2.0 AND bullish 1d trend
-            if curr_close > donch_hi[i] and atr_ratio_1d_aligned[i] > 2.0 and curr_close > ema34_1d_aligned[i]:
+            if curr_close > donch_hi[i] and atr_ratio_aligned[i] > 2.0 and curr_close > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below Donchian low AND ATR ratio > 2.0 AND bearish 1d trend
-            elif curr_close < donch_lo[i] and atr_ratio_1d_aligned[i] > 2.0 and curr_close < ema34_1d_aligned[i]:
+            elif curr_close < donch_lo[i] and atr_ratio_aligned[i] > 2.0 and curr_close < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
