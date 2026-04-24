@@ -5,9 +5,9 @@ Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume spi
 - HTF: 1d EMA(50) for trend filter (defines bull/bear regime).
 - Entry: Long when price breaks above Donchian(20) high in bull regime with volume > 2.0 * 4h volume MA(20);
          Short when price breaks below Donchian(20) low in bear regime with volume > 2.0 * 4h volume MA(20).
-- Exit: Price crosses back below Donchian(20) midline for long or above midline for short (mean reversion).
+- Exit: Price crosses below Donchian(10) high for long or above Donchian(10) low for short.
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Donchian captures breakouts; EMA filter avoids counter-trend trades; volume spike confirms conviction.
+- Donchian breakouts capture momentum; EMA filter avoids counter-trend trades; volume spike confirms conviction.
 - Works in bull (buying breakouts in uptrend) and bear (selling breakdowns in downtrend).
 """
 
@@ -46,11 +46,6 @@ def generate_signals(prices):
     vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
-    # Calculate Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -59,8 +54,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,7 +64,15 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        prev_close = close[i-1] if i > 0 else curr_close
+        
+        # Calculate Donchian channels (20-period for entry, 10-period for exit)
+        lookback_20 = max(0, i-19)
+        donchian_high_20 = np.max(high[lookback_20:i+1])
+        donchian_low_20 = np.min(low[lookback_20:i+1])
+        
+        lookback_10 = max(0, i-9)
+        donchian_high_10 = np.max(high[lookback_10:i+1])
+        donchian_low_10 = np.min(low[lookback_10:i+1])
         
         # Volume confirmation: 2.0x threshold (strict to reduce trades)
         vol_confirm = curr_volume > 2.0 * vol_ma_4h_aligned[i]
@@ -82,25 +84,23 @@ def generate_signals(prices):
         if position == 0:
             # Check for entry signals
             # Long: price breaks above Donchian(20) high in bull regime with volume confirmation
-            if (curr_high > highest_high[i] and prev_close <= highest_high[i] and 
-                bull_regime and vol_confirm):
+            if curr_high > donchian_high_20 and bull_regime and vol_confirm:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below Donchian(20) low in bear regime with volume confirmation
-            elif (curr_low < lowest_low[i] and prev_close >= lowest_low[i] and 
-                  bear_regime and vol_confirm):
+            elif curr_low < donchian_low_20 and bear_regime and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long position: exit when price crosses back below Donchian midline
-            if prev_close >= donchian_mid[i] and curr_close < donchian_mid[i]:
+            # Long position: exit when price crosses below Donchian(10) high
+            if curr_close < donchian_high_10:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price crosses back above Donchian midline
-            if prev_close <= donchian_mid[i] and curr_close > donchian_mid[i]:
+            # Short position: exit when price crosses above Donchian(10) low
+            if curr_close > donchian_low_10:
                 signals[i] = 0.0
                 position = 0
             else:
