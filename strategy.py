@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R mean reversion with 1w trend filter and volume confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1w EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
-- Williams %R(14): Long when %R crosses above -80 from below (oversold bounce) in uptrend;
-                    Short when %R crosses below -20 from above (overbought rejection) in downtrend.
-- Volume confirmation: volume > 1.5 * 6h volume MA(50) to ensure conviction.
-- Exit: Opposite %R signal (long exits when %R < -50, short exits when %R > -50) for mean reversion.
+Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
+- Williams Alligator on 12h: Jaw (13,8), Teeth (8,5), Lips (5,3) SMAs with future shift.
+- Entry: Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA50 AND volume > 1.5 * 12h volume MA(20);
+         Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA50 AND volume > 1.5 * 12h volume MA(20).
+- Exit: ATR-based trailing stop (2.0 * ATR(14)) from highest high/lowest low since entry.
 - Signal size: 0.25 discrete to control fee drag.
-- Williams %R captures exhaustion moves in both bull (bounce from oversold) and bear (rejection from overbought) markets,
-  while 1w EMA50 ensures we trade with the major trend. Volume filter avoids low-conviction whipsaws.
+- Designed to capture trends in both bull (longs) and bear (shorts) markets with Alligator's trend identification.
 """
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -27,81 +26,134 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R(14) for 6h timeframe
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    hh_ll = highest_high - lowest_low
-    hh_ll = np.where(hh_ll == 0, 1e-10, hh_ll)
-    williams_r = (highest_high - close) / hh_ll * -100
+    # Calculate Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    # Teeth: 8-period SMMA, shifted 5 bars forward  
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    # SMMA (Smoothed Moving Average) = EMA with alpha = 1/period
+    jaw = pd.Series(close).ewm(alpha=1/13, adjust=False).mean().values
+    teeth = pd.Series(close).ewm(alpha=1/8, adjust=False).mean().values
+    lips = pd.Series(close).ewm(alpha=1/5, adjust=False).mean().values
     
-    # Calculate volume MA(50) for 6h timeframe
-    vol_ma_6h = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Apply forward shifts (Alligator's future shift)
+    jaw_shifted = np.concatenate([np.full(8, np.nan), jaw[:-8]]) if len(jaw) > 8 else np.full_like(jaw, np.nan)
+    teeth_shifted = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) > 5 else np.full_like(teeth, np.nan)
+    lips_shifted = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) > 3 else np.full_like(lips, np.nan)
+    
+    # Calculate ATR(14) for 12h timeframe
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[high[0] - low[0]], tr])  # first TR is high-low
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate volume MA(20) for 12h timeframe
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 50, 14)  # EMA50 needs 50, volume MA needs 50, %R needs 14
+    start_idx = max(50, 20, 14, 13, 8, 5) + 8  # EMA50 needs 50, volume MA needs 20, ATR needs 14, plus Alligator shifts
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma_6h[i])):
+            np.isnan(jaw_shifted[i]) or 
+            np.isnan(teeth_shifted[i]) or 
+            np.isnan(lips_shifted[i]) or 
+            np.isnan(vol_ma_12h[i]) or 
+            np.isnan(atr14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
             continue
         
         curr_close = close[i]
-        curr_wr = williams_r[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
-        prev_wr = williams_r[i-1]
+        curr_atr = atr14[i]
         
-        # Volume confirmation: 1.5x threshold
-        vol_confirm = curr_volume > 1.5 * vol_ma_6h[i]
+        # Volume confirmation: 1.5x threshold for balanced entry frequency
+        vol_confirm = curr_volume > 1.5 * vol_ma_12h[i]
+        
+        # Alligator alignment
+        lips_val = lips_shifted[i]
+        teeth_val = teeth_shifted[i]
+        jaw_val = jaw_shifted[i]
+        
+        bullish_alignment = lips_val > teeth_val and teeth_val > jaw_val
+        bearish_alignment = lips_val < teeth_val and teeth_val < jaw_val
         
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: Williams %R crosses above -80 from below (oversold bounce) AND price > 1w EMA50 (uptrend)
-                if curr_wr > -80 and prev_wr <= -80 and curr_close > ema_50_aligned[i]:
+                # Long: Bullish Alligator alignment AND price > 1d EMA50 (uptrend)
+                if bullish_alignment and curr_close > ema_50_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R crosses below -20 from above (overbought rejection) AND price < 1w EMA50 (downtrend)
-                elif curr_wr < -20 and prev_wr >= -20 and curr_close < ema_50_aligned[i]:
+                    entry_price = curr_close
+                    highest_since_entry = curr_close
+                    lowest_since_entry = curr_close
+                # Short: Bearish Alligator alignment AND price < 1d EMA50 (downtrend)
+                elif bearish_alignment and curr_close < ema_50_aligned[i]:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = curr_close
+                    highest_since_entry = curr_close
+                    lowest_since_entry = curr_close
         elif position == 1:
-            # Long position: exit when %R falls below -50 (mean reversion)
-            if curr_wr < -50:
+            # Long position: update highest since entry and check exit
+            highest_since_entry = max(highest_since_entry, curr_high)
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+            
+            # Stoploss: 2.0 * ATR below highest high since entry
+            stoploss = highest_since_entry - 2.0 * curr_atr
+            if curr_close < stoploss:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when %R rises above -50 (mean reversion)
-            if curr_wr > -50:
+            # Short position: update lowest since entry and check exit
+            highest_since_entry = max(highest_since_entry, curr_high)
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+            
+            # Stoploss: 2.0 * ATR above lowest low since entry
+            stoploss = lowest_since_entry + 2.0 * curr_atr
+            if curr_close > stoploss:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "6h_WilliamsR_MeanReversion_1wEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA50_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
