@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams Alligator + 1d Elder Ray regime filter.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for Elder Ray (Bull/Bear Power) regime detection and 1w for Williams Fractal confirmation.
-- Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs on median price.
-- Regime: 1d Elder Ray - Bull Power > 0 and Bear Power < 0 = bull regime; Bull Power < 0 and Bear Power > 0 = bear regime.
-- Entry: Long when Alligator is bullish (Lips > Teeth > Jaw) AND bull regime AND price > Lips.
-         Short when Alligator is bearish (Lips < Teeth < Jaw) AND bear regime AND price < Lips.
-- Exit: Opposite Alligator alignment (Lips crosses Teeth).
+Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for ATR-based regime detection (choppy vs trending) and volume spike filter.
+- Donchian(20): Upper/lower bands from 20-period high/low.
+- Regime: ATR(10)/ATR(30) ratio > 1.2 = trending (favor breakouts), < 0.8 = choppy (favor mean reversion).
+- Entry: Long when price > Upper Band AND trending regime AND volume > 2.0 * 20-period average volume.
+         Short when price < Lower Band AND trending regime AND volume > 2.0 * 20-period average volume.
+- Exit: Opposite Donchian breakout (price < Upper Band for long exit, price > Lower Band for short exit).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in bull markets via long signals in bull regime, bear markets via short signals in bear regime.
-- Avoids whipsaws by requiring Alligator alignment + regime confirmation.
+- Works in both bull and bear markets by only trading breakouts in trending regimes, avoiding whipsaws in chop.
 """
 
 import numpy as np
@@ -19,134 +18,103 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need sufficient data for calculations
+    if n < 60:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate median price for Alligator
-    median_price = (high + low) / 2.0
-    
-    # Calculate Williams Alligator on 6h data
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().values
-    
-    # Calculate 1d Elder Ray for regime filter
+    # Calculate 1d ATR(10) and ATR(30) for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient data for EMA
+    if len(df_1d) < 30:  # Need sufficient data for ATR30
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA for Elder Ray
-    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # Align length
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema13
-    bear_power = low_1d - ema13
+    # ATR(10) and ATR(30)
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
     
-    # Align Elder Ray to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # ATR ratio for regime: >1.2 = trending, <0.8 = choppy
+    atr_ratio = atr10 / atr30
     
-    # Calculate 1w Williams Fractal for confirmation (optional filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        # If not enough 1w data, continue without fractal filter
-        fractal_bullish = np.ones(n)  # Neutral
-        fractal_bearish = np.ones(n)  # Neutral
-    else:
-        high_1w = df_1w['high'].values
-        low_1w = df_1w['low'].values
-        
-        # Williams Fractal: bearish = high[n-2] is highest of [n-4:n+1], bullish = low[n-2] is lowest
-        bearish_fractal = np.zeros(len(high_1w))
-        bullish_fractal = np.zeros(len(low_1w))
-        
-        for i in range(2, len(high_1w)-2):
-            if (high_1w[i] >= high_1w[i-2] and high_1w[i] >= high_1w[i-1] and 
-                high_1w[i] >= high_1w[i+1] and high_1w[i] >= high_1w[i+2]):
-                bearish_fractal[i] = 1
-            if (low_1w[i] <= low_1w[i-2] and low_1w[i] <= low_1w[i-1] and 
-                low_1w[i] <= low_1w[i+1] and low_1w[i] <= low_1w[i+2]):
-                bullish_fractal[i] = 1
-        
-        # Align fractals to 6h timeframe with 2-bar delay for confirmation
-        bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
-        bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
-        
-        # For regime confirmation: in bull regime, avoid bearish fractals; in bear regime, avoid bullish fractals
-        fractal_bullish = 1.0 - bearish_fractal_aligned  # 1 = no bearish fractal, 0 = bearish fractal present
-        fractal_bearish = 1.0 - bullish_fractal_aligned  # 1 = no bullish fractal, 0 = bullish fractal present
+    # Align ATR ratio to 12h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Calculate 1d volume average for confirmation (20-period)
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Calculate 12h Donchian(20) bands
+    donchian_window = 20
+    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 20)  # Need 13 for Alligator jaw, 20 for 1d EMA
+    start_idx = max(donchian_window, 30)  # Need 20 for Donchian, 30 for ATR30
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        curr_median = median_price[i]
-        curr_lips = lips[i]
+        curr_close = close[i]
+        curr_volume = volume[i]
         
-        # Alligator alignment
-        alligator_bullish = lips[i] > teeth[i] > jaw[i]
-        alligator_bearish = lips[i] < teeth[i] < jaw[i]
+        # Regime filter: only trade breakouts in trending markets (ATR ratio > 1.2)
+        trending_regime = atr_ratio_aligned[i] > 1.2
         
-        # Elder Ray regime
-        bull_regime = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0
-        bear_regime = bull_power_aligned[i] < 0 and bear_power_aligned[i] > 0
+        # Volume confirmation: current volume > 2.0 * 20-period average volume
+        volume_confirm = curr_volume > 2.0 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
         
-        # Williams Fractal confirmation (if available)
-        if len(df_1w) >= 10:
-            bull_fractal_ok = fractal_bullish[i] > 0.5  # No bearish fractal
-            bear_fractal_ok = fractal_bearish[i] > 0.5  # No bullish fractal
-        else:
-            bull_fractal_ok = True
-            bear_fractal_ok = True
-        
-        # Exit conditions: opposite Alligator alignment
+        # Exit conditions: opposite Donchian breakout
         if position != 0:
-            # Exit long: Alligator turns bearish or lips < teeth
+            # Exit long: price < Upper Band
             if position == 1:
-                if not alligator_bullish or curr_lips < teeth[i]:
+                if curr_close < upper_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Alligator turns bullish or lips > teeth
+            # Exit short: price > Lower Band
             elif position == -1:
-                if not alligator_bearish or curr_lips > teeth[i]:
+                if curr_close > lower_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Alligator alignment with regime and fractal filters
+        # Entry conditions: Donchian breakout with regime and volume filters
         if position == 0:
-            # Long: Alligator bullish AND bull regime AND price > lips AND no bearish fractal
-            long_condition = (alligator_bullish and 
-                            bull_regime and
-                            curr_median > curr_lips and
-                            bull_fractal_ok)
+            # Long: price > Upper Band AND trending regime AND volume confirmation
+            long_condition = (curr_close > upper_band[i] and 
+                            trending_regime and
+                            volume_confirm)
             
-            # Short: Alligator bearish AND bear regime AND price < lips AND no bullish fractal
-            short_condition = (alligator_bearish and 
-                             bear_regime and
-                             curr_median < curr_lips and
-                             bear_fractal_ok)
+            # Short: price < Lower Band AND trending regime AND volume confirmation
+            short_condition = (curr_close < lower_band[i] and 
+                             trending_regime and
+                             volume_confirm)
             
             if long_condition:
                 signals[i] = 0.25
@@ -163,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_1dElderRay_1wFractalConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dATRRegime_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
