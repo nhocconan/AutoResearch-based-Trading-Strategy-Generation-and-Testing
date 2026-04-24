@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 - Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1d EMA34 for trend direction (bullish when close > EMA34, bearish when close < EMA34).
-- Entry: Price breaks above/below 4h Donchian(20) levels with volume > 2.0 * 20-period volume MA and 1d EMA34 alignment.
-- Exit: ATR-based stoploss (2.5 * ATR(14)) or Donchian level reversal (opposite level touch).
+- Entry: Price breaks above/below 4h Camarilla R3/S3 levels with volume > 2.5 * 20-period volume MA and 1d EMA34 alignment.
+- Exit: ATR-based stoploss (2.0 * ATR(14)) or Camarilla level reversal (touch opposite H3/L3 level).
 - Signal size: 0.25 discrete to balance capture and fee control.
 Designed to work in both bull and bear markets by following higher timeframe trend while using lower timeframe breakouts for entry timing.
 """
@@ -24,9 +24,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels
+    # Get 4h data for Camarilla levels
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 5:
         return np.zeros(n)
     
     # Get 1d data for EMA34 trend filter
@@ -34,13 +34,29 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4h Donchian(20) channels
+    # Calculate 4h Camarilla levels (R3, S3, H3, L3)
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    close_4h = df_4h['close'].values
+    
+    # Camarilla calculations using previous 4h bar's OHLC
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
+    prev_high[0] = high_4h[0]  # first bar uses current values
+    prev_low[0] = low_4h[0]
+    prev_close[0] = close_4h[0]
+    
+    rang = prev_high - prev_low
+    camarilla_h3 = prev_close + rang * 1.1 / 4
+    camarilla_l3 = prev_close - rang * 1.1 / 4
+    camarilla_r3 = prev_close + rang * 1.1 / 2
+    camarilla_s3 = prev_close - rang * 1.1 / 2
+    
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
     
     # Calculate 1d EMA34 for trend
     close_1d = df_1d['close'].values
@@ -67,11 +83,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34, 20, 14, 20)
+    start_idx = max(5, 34, 20, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(atr_4h_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -84,35 +100,35 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation (2.0x threshold)
-            vol_confirmed = curr_volume > 2.0 * vol_ma_4h_aligned[i]
+            # Check for entry signals with volume confirmation (2.5x threshold)
+            vol_confirmed = curr_volume > 2.5 * vol_ma_4h_aligned[i]
             
             # Determine 1d EMA34 trend: bullish if close > EMA34, bearish if close < EMA34
             trend_bullish = close[i] > ema_34_aligned[i]
             trend_bearish = close[i] < ema_34_aligned[i]
             
-            # Long: price breaks above Donchian high AND 1d trend bullish AND volume confirmed
-            if curr_high > donchian_high_aligned[i] and trend_bullish and vol_confirmed:
+            # Long: price breaks above Camarilla R3 AND 1d trend bullish AND volume confirmed
+            if curr_high > camarilla_r3_aligned[i] and trend_bullish and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            # Short: price breaks below Donchian low AND 1d trend bearish AND volume confirmed
-            elif curr_low < donchian_low_aligned[i] and trend_bearish and vol_confirmed:
+            # Short: price breaks below Camarilla S3 AND 1d trend bearish AND volume confirmed
+            elif curr_low < camarilla_s3_aligned[i] and trend_bearish and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Long position: exit on stoploss or price breaks below Donchian low (reversal signal)
-            stop_loss = entry_price - 2.5 * atr_4h_aligned[i]
-            if curr_low < stop_loss or curr_low < donchian_low_aligned[i]:
+            # Long position: exit on stoploss or price breaks below Camarilla S3 (reversal signal)
+            stop_loss = entry_price - 2.0 * atr_4h_aligned[i]
+            if curr_low < stop_loss or curr_low < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit on stoploss or price breaks above Donchian high (reversal signal)
-            stop_loss = entry_price + 2.5 * atr_4h_aligned[i]
-            if curr_high > stop_loss or curr_high > donchian_high_aligned[i]:
+            # Short position: exit on stoploss or price breaks above Camarilla R3 (reversal signal)
+            stop_loss = entry_price + 2.0 * atr_4h_aligned[i]
+            if curr_high > stop_loss or curr_high > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeConfirm_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
