@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Camarilla H3/L3 breakout with 1-week EMA200 trend filter and 1d volume spike confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1w for EMA200 trend filter, 1d for ATR-based volume spike.
-- Entry: Long when price breaks above Camarilla H3 level AND volume spike (ATR ratio > 1.5) AND price > 1w EMA200.
-         Short when price breaks below Camarilla L3 level AND volume spike (ATR ratio > 1.5) AND price < 1w EMA200.
-- Exit: Opposite Camarilla breakout (L3 for longs, H3 for shorts) OR price crosses 1w EMA200 in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag.
-- Camarilla levels derived from prior 1d range provide institutional support/resistance.
-- Volume spike filter ensures breakouts occur with conviction, reducing false signals.
-- 1w EMA200 filter ensures trades align with major trend, working in both bull (buy strength) and bear (sell weakness).
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d ATR volume spike and 1d EMA34 trend filter.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for EMA34 trend filter and ATR volume confirmation.
+- Entry: Long when price breaks above Camarilla H3 level AND ATR ratio > 1.8 AND price > 1d EMA34.
+         Short when price breaks below Camarilla L3 level AND ATR ratio > 1.8 AND price < 1d EMA34.
+- Exit: Opposite Camarilla breakout OR price crosses 1d EMA34 in opposite direction.
+- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
+- ATR ratio (current ATR/20-period ATR) > 1.8 confirms significant volatility expansion to avoid false breakouts.
+- 1d EMA34 provides trend filter to avoid counter-trend trades.
+- Camarilla levels derived from previous 1d session (high, low, close) provide institutional support/resistance.
+- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+- Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
 """
 
 import numpy as np
@@ -31,20 +33,19 @@ def atr(high, low, close, period):
 
 def camarilla_levels(high, low, close):
     """
-    Calculate Camarilla pivot levels for the day.
-    Based on previous day's high, low, close.
-    Returns H3, L3, H4, L4 levels.
+    Calculate Camarilla pivot levels for intraday trading.
+    Based on previous period's high, low, close.
+    Returns: H4, H3, H2, H1, L1, L2, L3, L4
+    We use H3 and L3 for breakout trading.
     """
     range_val = high - low
-    H3 = close + (range_val * 1.1 / 4)
-    L3 = close - (range_val * 1.1 / 4)
-    H4 = close + (range_val * 1.1 / 2)
-    L4 = close - (range_val * 1.1 / 2)
-    return H3, L3, H4, L4
+    h3 = close + range_val * 1.1 / 4
+    l3 = close - range_val * 1.1 / 4
+    return h3, l3
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -52,58 +53,43 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate 1w trend filter: EMA200
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 210:  # Need sufficient data for EMA200
+    # Calculate 1d trend filter: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    ema200_1w = ema(df_1w['close'].values, 200)
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w, additional_delay_bars=1)
+    ema34_1d = ema(df_1d['close'].values, 34)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d, additional_delay_bars=1)
     
     # Calculate 1d ATR for volume spike filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    atr_20_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
+    atr_current_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
+    atr_ratio_1d = atr_current_1d / (atr_20_1d + 1e-10)  # Avoid division by zero
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d, additional_delay_bars=1)
     
-    atr_14 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
-    atr_ratio = atr_current / (atr_14 + 1e-10)  # Avoid division by zero
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
-    
-    # Calculate Camarilla levels from prior 1d data
-    # We need to shift by 1 to use prior day's data
-    camarilla_H3 = np.full(n, np.nan)
-    camarilla_L3 = np.full(n, np.nan)
-    camarilla_H4 = np.full(n, np.nan)
-    camarilla_L4 = np.full(n, np.nan)
-    
-    for i in range(1, n):
-        H3, L3, H4, L4 = camarilla_levels(
-            df_1d['high'].values[i-1] if i-1 < len(df_1d) else df_1d['high'].values[-1],
-            df_1d['low'].values[i-1] if i-1 < len(df_1d) else df_1d['low'].values[-1],
-            df_1d['close'].values[i-1] if i-1 < len(df_1d) else df_1d['close'].values[-1]
-        )
-        camarilla_H3[i] = H3
-        camarilla_L3[i] = L3
-        camarilla_H4[i] = H4
-        camarilla_L4[i] = L4
-    
-    # Align Camarilla levels to 6h timeframe
-    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3, additional_delay_bars=1)
-    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3, additional_delay_bars=1)
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4, additional_delay_bars=1)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4, additional_delay_bars=1)
+    # Calculate Camarilla levels from 1d data (previous day's HLC)
+    # We need to shift the 1d data by 1 to avoid look-ahead
+    h3_1d, l3_1d = camarilla_levels(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values
+    )
+    # Align Camarilla levels to 12h timeframe (no additional delay needed as they're based on completed 1d bar)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 210  # Need sufficient data for EMA200
+    start_idx = 40  # Need sufficient data for EMA34
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(atr_ratio_1d_aligned[i]) or
+            np.isnan(h3_1d_aligned[i]) or 
+            np.isnan(l3_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,29 +97,29 @@ def generate_signals(prices):
         
         curr_close = close[i]
         
-        # Exit conditions: opposite Camarilla breakout OR price crosses 1w EMA200 in opposite direction
+        # Exit conditions: opposite Camarilla breakout OR price crosses 1d EMA34 in opposite direction
         if position != 0:
-            # Exit long: price breaks below Camarilla L3 OR price falls below 1w EMA200
+            # Exit long: price breaks below L3 level OR price falls below 1d EMA34
             if position == 1:
-                if curr_close < camarilla_L3_aligned[i] or curr_close < ema200_1w_aligned[i]:
+                if curr_close < l3_1d_aligned[i] or curr_close < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Camarilla H3 OR price rises above 1w EMA200
+            # Exit short: price breaks above H3 level OR price rises above 1d EMA34
             elif position == -1:
-                if curr_close > camarilla_H3_aligned[i] or curr_close > ema200_1w_aligned[i]:
+                if curr_close > h3_1d_aligned[i] or curr_close > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volume confirmation and trend filter
+        # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
         if position == 0:
-            # Long: price breaks above Camarilla H3 AND volume spike AND bullish 1w trend
-            if curr_close > camarilla_H3_aligned[i] and atr_ratio_aligned[i] > 1.5 and curr_close > ema200_1w_aligned[i]:
+            # Long: price breaks above H3 level AND ATR ratio > 1.8 AND bullish 1d trend
+            if curr_close > h3_1d_aligned[i] and atr_ratio_1d_aligned[i] > 1.8 and curr_close > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3 AND volume spike AND bearish 1w trend
-            elif curr_close < camarilla_L3_aligned[i] and atr_ratio_aligned[i] > 1.5 and curr_close < ema200_1w_aligned[i]:
+            # Short: price breaks below L3 level AND ATR ratio > 1.8 AND bearish 1d trend
+            elif curr_close < l3_1d_aligned[i] and atr_ratio_1d_aligned[i] > 1.8 and curr_close < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -145,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_1wEMA200_TrendFilter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_1dEMA34_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
