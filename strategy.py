@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Bollinger Band squeeze breakout with 4h trend filter and volume spike.
-- Primary timeframe: 1h for precise entry timing on breakouts.
-- HTF: 4h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Bollinger Bands: 20-period, 2.0 std dev on 1h. Squeeze = BB width < 20th percentile of last 50 bars.
-- Volume: Current 1h volume > 1.5 * 20-period volume MA to confirm breakout strength.
-- Entry: Long when price breaks above upper BB AND 4h EMA50 bullish AND BB squeeze AND volume spike.
-         Short when price breaks below lower BB AND 4h EMA50 bearish AND BB squeeze AND volume spike.
-- Exit: Opposite band touch (long exits at lower BB, short exits at upper BB) or loss of trend/volume.
-- Signal size: 0.20 discrete to limit drawdown and reduce fee churn.
-- Session filter: Only trade between 08:00-20:00 UTC to avoid low-liquidity periods.
-- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
-This strategy captures explosive moves after low-volatility consolidation, filtered by 4h trend to avoid
-counter-trend breakouts, with volume confirmation ensuring institutional participation. Works in both bull
-and bear markets by only taking breakout trades in the direction of the 4h trend.
+Hypothesis: 6h Williams %R extreme with 1d ADX trend filter and volume confirmation.
+- Primary timeframe: 6h for balanced trade frequency and noise reduction.
+- HTF: 1d ADX(14) for trend strength (ADX > 25 = trending market).
+- Williams %R(14): Extreme readings below -80 (oversold) or above -20 (overbought).
+- Volume: Current 6h volume > 1.8 * 20-period 6h volume MA to confirm participation.
+- Entry: Long when %R < -80 AND ADX > 25 AND volume spike.
+         Short when %R > -20 AND ADX > 25 AND volume spike.
+- Exit: Opposite %R level (%R > -20 for long, %R < -80 for short) or ADX < 20.
+- Signal size: 0.25 discrete to balance return and drawdown.
+- Target: 80-180 total trades over 4 years (20-45/year) for 6h timeframe.
+This strategy captures mean reversion extremes in trending markets, avoiding choppy conditions
+where Williams %R fails. Volume spikes confirm institutional interest at turning points.
+Works in both bull and bear markets by only trading strong trends (ADX > 25).
 """
 
 import numpy as np
@@ -31,96 +30,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1h Bollinger Bands (20, 2.0)
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * bb_stddev)
-    lower_band = sma - (bb_std * bb_stddev)
-    bb_width = upper_band - lower_band
+    # Calculate 6h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    denom = highest_high - lowest_low
+    wpct = np.where(denom != 0, -100 * (highest_high - close) / denom, -50.0)
     
-    # Bollinger Band squeeze: width < 20th percentile of last 50 bars
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).quantile(0.20).values
-    bb_squeeze = bb_width < bb_width_percentile
-    
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for ADX(14) trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA50
-    df_4h_close = df_4h['close'].values
-    ema_4h = pd.Series(df_4h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ADX(14)
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
     
-    # Calculate 20-period 4h volume MA
-    df_4h_volume = df_4h['volume'].values
-    vol_ma_4h = pd.Series(df_4h_volume).rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = np.abs(df_1d_high - df_1d_low)
+    tr2 = np.abs(df_1d_high - np.roll(df_1d_close, 1))
+    tr3 = np.abs(df_1d_low - np.roll(df_1d_close, 1))
+    tr1[0] = tr1[0]  # first bar
+    tr2[0] = 0.0
+    tr3[0] = 0.0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align HTF indicators to 1h
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Directional Movement
+    dm_plus = np.where((df_1d_high - np.roll(df_1d_high, 1)) > (np.roll(df_1d_low, 1) - df_1d_low),
+                       np.maximum(df_1d_high - np.roll(df_1d_high, 1), 0.0), 0.0)
+    dm_minus = np.where((np.roll(df_1d_low, 1) - df_1d_low) > (df_1d_high - np.roll(df_1d_high, 1)),
+                        np.maximum(np.roll(df_1d_low, 1) - df_1d_low, 0.0), 0.0)
+    dm_plus[0] = 0.0
+    dm_minus[0] = 0.0
     
-    # Volume confirmation: current 1h volume > 1.5 * 20-period 4h volume MA (aligned)
-    volume_spike = volume > (1.5 * vol_ma_4h_aligned)
+    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/14)
+    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0.0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0.0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0.0)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 20-period 6h volume MA
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align HTF indicators to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: current 6h volume > 1.8 * 20-period 6h volume MA
+    volume_spike = volume > (1.8 * vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 20)  # Need enough bars for EMA50, BB, and volume MA
+    start_idx = max(20, 14)  # Need enough bars for volume MA and Williams %R
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(bb_squeeze[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(adx_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(wpct[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        bb_squeezed = bb_squeeze[i]
-        vol_spike = volume_spike[i]
-        ema_val = ema_4h_aligned[i]
-        upper_bb = upper_band[i]
-        lower_bb = lower_band[i]
+        curr_wpct = wpct[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Check for entry signals with BB squeeze, volume spike, and session filter
-            if bb_squeezed and vol_spike:
-                # Bullish breakout: price breaks above upper BB AND 4h EMA50 bullish (close > EMA)
-                if curr_close > upper_bb and curr_close > ema_val:
-                    signals[i] = 0.20
+            # Check for entry signals with volume spike and ADX > 25
+            if volume_spike[i] and adx_val > 25.0:
+                # Bullish: Williams %R < -80 (oversold)
+                if curr_wpct < -80.0:
+                    signals[i] = 0.25
                     position = 1
-                # Bearish breakout: price breaks below lower BB AND 4h EMA50 bearish (close < EMA)
-                elif curr_close < lower_bb and curr_close < ema_val:
-                    signals[i] = -0.20
+                # Bearish: Williams %R > -20 (overbought)
+                elif curr_wpct > -20.0:
+                    signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price touches lower BB OR loss of BB squeeze OR loss of volume spike OR outside session
-            if curr_low <= lower_bb or not bb_squeezed or not vol_spike or not in_session[i]:
+            # Long exit: Williams %R > -20 (overbought) OR ADX < 20 (weakening trend)
+            if curr_wpct > -20.0 or adx_val < 20.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price touches upper BB OR loss of BB squeeze OR loss of volume spike OR outside session
-            if curr_high >= upper_bb or not bb_squeezed or not vol_spike or not in_session[i]:
+            # Short exit: Williams %R < -80 (oversold) OR ADX < 20 (weakening trend)
+            if curr_wpct < -80.0 or adx_val < 20.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_BB_Squeeze_Breakout_4hEMA50_Trend_VolumeSpike_Session_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1dADX_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
