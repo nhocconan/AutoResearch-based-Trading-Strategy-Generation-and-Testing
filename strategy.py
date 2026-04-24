@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams Alligator + Elder Ray (Bull/Bear Power) with 1d regime filter.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for Elder Ray trend regime and Alligator confirmation.
-- Entry: Long when Alligator is bullish (JAW > TEETH > LIPS) AND Bull Power > 0 AND Bear Power < 0.
-         Short when Alligator is bearish (JAW < TEETH < LIPS) AND Bear Power < 0 AND Bull Power > 0.
-- Exit: Opposite Alligator alignment OR Elder Ray regime shift.
-- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Williams Alligator identifies trend via smoothed medians (JAW=13, TEETH=8, LIPS=5).
-- Elder Ray measures bull/bear power relative to EMA13 to confirm trend strength.
-- 1d regime filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-- Works in bull markets (catch uptrends via Alligator) and bear markets (catch downtrends via Alligator).
-- Estimated trades: ~100 total over 4 years (~25/year) based on trend persistence with filters.
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d volume spike and chop regime filter.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 1d for volume spike and chop regime.
+- Entry: Long when price breaks above Camarilla R1 AND 1d volume > 1.5x 20-period average AND chop > 61.8 (range regime).
+         Short when price breaks below Camarilla S1 AND 1d volume > 1.5x 20-period average AND chop > 61.8.
+- Exit: Opposite Camarilla breakout OR chop < 38.2 (trend regime) to avoid whipsaw.
+- Signal size: 0.25 discrete to minimize fee drag.
+- Camarilla levels provide intraday support/resistance from prior day.
+- Volume spike confirms institutional participation.
+- Chop regime filter ensures mean-reversion logic only in ranging markets.
+- Works in bull markets (buy R1 breaks in uptrend ranges) and bear markets (sell S1 breaks in downtrend ranges).
 """
 
 import numpy as np
@@ -22,36 +21,39 @@ def ema(values, period):
     """Calculate Exponential Moving Average."""
     return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def smma(values, period):
-    """Calculate Smoothed Moving Average (used in Alligator)."""
-    # SMMA is similar to EMA but with alpha = 1/period
-    return pd.Series(values).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+def atr(high, low, close, period):
+    """Calculate Average True Range."""
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    true_range[0] = high_low[0]  # First period
+    return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def alligator(median_price, jaw_period=13, teeth_period=8, lips_period=5,
-              jaw_shift=8, teeth_shift=5, lips_shift=3):
-    """Calculate Williams Alligator lines."""
-    jaw = smma(median_price, jaw_period)
-    teeth = smma(median_price, teeth_period)
-    lips = smma(median_price, lips_period)
-    
-    # Apply shifts (forward shift = lookback in array terms)
-    jaw = np.roll(jaw, jaw_shift)
-    teeth = np.roll(teeth, teeth_shift)
-    lips = np.roll(lips, lips_shift)
-    
-    # Fill shifted values with NaN
-    jaw[:jaw_shift] = np.nan
-    teeth[:teeth_shift] = np.nan
-    lips[:lips_shift] = np.nan
-    
-    return jaw, teeth, lips
+def true_range(high, low, close):
+    """Calculate True Range."""
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]  # First period
+    return tr
 
-def elder_ray(high, low, close, ema_period=13):
-    """Calculate Elder Ray Bull Power and Bear Power."""
-    ema_val = ema(close, ema_period)
-    bull_power = high - ema_val
-    bear_power = low - ema_val
-    return bull_power, bear_power
+def camarilla_levels(high, low, close):
+    """Calculate Camarilla pivot levels for the day."""
+    pivot = (high + low + close) / 3.0
+    range_hl = high - low
+    r1 = pivot + (range_hl * 1.1 / 12)
+    s1 = pivot - (range_hl * 1.1 / 12)
+    return r1, s1
+
+def chop_index(high, low, close, period):
+    """Calculate Choppiness Index."""
+    atr_sum = pd.Series(true_range(high, low, close)).rolling(window=period, min_periods=period).sum()
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    return chop.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -62,69 +64,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate median price for Alligator (typical price)
-    median_price = (high + low + close) / 3
-    
-    # Calculate 1d Elder Ray for regime filter
+    # Calculate 1d Camarilla levels (from prior day)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    bull_power_1d, bear_power_1d = elder_ray(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
+    camarilla_r1, camarilla_s1 = camarilla_levels(
+        df_1d['high'].values,
+        df_1d['low'].values,
         df_1d['close'].values
     )
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d, additional_delay_bars=1)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d, additional_delay_bars=1)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Calculate 6h Alligator
-    jaw, teeth, lips = alligator(median_price)
+    # Calculate 1d volume spike filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma_20 + 1e-10)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    
+    # Calculate 1d chop regime filter
+    chop = chop_index(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values,
+        14
+    )
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 30  # Need sufficient data for all indicators
+    start_idx = 20  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(vol_ratio_aligned[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Exit conditions: opposite Alligator alignment OR Elder Ray regime shift
+        curr_close = close[i]
+        curr_volume = volume[i]
+        
+        # Exit conditions: opposite Camarilla breakout OR chop < 38.2 (trend regime)
         if position != 0:
-            # Exit long: Alligator turns bearish OR Bull Power becomes negative AND Bear Power positive
+            # Exit long: price breaks below S1 OR chop < 38.2 (trend regime)
             if position == 1:
-                if not (jaw[i] > teeth[i] > lips[i]) or (bull_power_1d_aligned[i] < 0 and bear_power_1d_aligned[i] > 0):
+                if curr_close < camarilla_s1_aligned[i] or chop_aligned[i] < 38.2:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: Alligator turns bullish OR Bear Power becomes positive AND Bull Power negative
+            # Exit short: price breaks above R1 OR chop < 38.2 (trend regime)
             elif position == -1:
-                if not (jaw[i] < teeth[i] < lips[i]) or (bear_power_1d_aligned[i] > 0 and bull_power_1d_aligned[i] < 0):
+                if curr_close > camarilla_r1_aligned[i] or chop_aligned[i] < 38.2:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Alligator alignment with Elder Ray confirmation
+        # Entry conditions: Camarilla breakout with volume confirmation and chop regime
         if position == 0:
-            # Bullish Alligator: JAW > TEETH > LIPS
-            bullish_alligator = jaw[i] > teeth[i] > lips[i]
-            # Bearish Alligator: JAW < TEETH < LIPS
-            bearish_alligator = jaw[i] < teeth[i] < lips[i]
-            
-            # Long: Bullish Alligator AND Bull Power > 0 AND Bear Power < 0
-            if bullish_alligator and bull_power_1d_aligned[i] > 0 and bear_power_1d_aligned[i] < 0:
+            # Long: price breaks above R1 AND volume > 1.5x MA AND chop > 61.8 (range regime)
+            if curr_close > camarilla_r1_aligned[i] and vol_ratio_aligned[i] > 1.5 and chop_aligned[i] > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish Alligator AND Bear Power < 0 AND Bull Power > 0
-            elif bearish_alligator and bear_power_1d_aligned[i] < 0 and bull_power_1d_aligned[i] > 0:
+            # Short: price breaks below S1 AND volume > 1.5x MA AND chop > 61.8 (range regime)
+            elif curr_close < camarilla_s1_aligned[i] and vol_ratio_aligned[i] > 1.5 and chop_aligned[i] > 61.8:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -136,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Alligator_ElderRay_1dRegimeFilter_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dVolumeSpike_ChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
