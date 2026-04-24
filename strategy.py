@@ -1,36 +1,29 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Camarilla pivot (R1/S1) breakout with 1w volume spike and ATR regime filter.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w for Camarilla pivot calculation (based on prior week OHLC), volume average and ATR.
-- Camarilla Pivots: identifies key support/resistance levels from prior 1w range.
-- Entry: Long when price breaks above R1 AND volume > 1.8 * 10-period average volume AND ATR(10) < ATR(30) (low volatility regime).
-         Short when price breaks below S1 AND volume > 1.8 * 10-period average volume AND ATR(10) < ATR(30).
-- Exit: Opposite Camarilla breakout (price crosses back below R1 for longs, above S1 for shorts).
+Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h trend filter and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 12h for EMA trend direction, 1d for Elder Ray calculation (based on daily OHLC).
+- Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13) measures bull/bear strength.
+- Entry: Long when Bull Power > 0 AND Bear Power < 0 (bulls in control) AND price > 12h EMA50 (uptrend) AND volume > 1.5 * 20-period average volume.
+         Short when Bear Power < 0 AND Bull Power > 0 (bears in control) AND price < 12h EMA50 (downtrend) AND volume > 1.5 * 20-period average volume.
+- Exit: Opposite Elder Ray signal (Bull Power <= 0 for longs, Bear Power >= 0 for shorts).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in both bull and bear markets as it captures volatility expansion after contraction.
-- Using 1d timeframe reduces trade frequency vs lower timeframes, minimizing fee drag while capturing significant moves.
+- Elder Ray captures the underlying power behind price moves, filtered by 12h trend to avoid counter-trend trades.
+- Volume confirmation ensures legitimacy of the power shift.
+- Works in bull markets via long signals and bear markets via short signals.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def atr(high, low, close, period):
-    """Calculate Average True Range with proper min_periods."""
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_values = tr.ewm(span=period, adjust=False, min_periods=period).mean().values
-    return atr_values
+def ema(series, period):
+    """Calculate Exponential Moving Average with proper min_periods."""
+    return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:  # Need sufficient data for calculations
+    if n < 60:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -39,51 +32,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1w Camarilla pivots (R1, S1) from prior 1w OHLC
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:  # Need at least 2 weeks for prior week calculation
+    # Calculate 1d EMA13 for Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Prior week OHLC for Camarilla calculation
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
+    ema13_1d = ema(df_1d['close'].values, 13)
+    bull_power_1d = df_1d['high'].values - ema13_1d
+    bear_power_1d = df_1d['low'].values - ema13_1d
     
-    # Camarilla R1 and S1 levels
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Align Camarilla levels to 1d timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    
-    # Calculate 1w volume average for confirmation (10-period)
-    if len(df_1w) < 10:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    vol_ma_10 = pd.Series(df_1w['volume'].values).rolling(window=10, min_periods=10).mean().values
-    vol_ma_10_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_10)
+    ema50_12h = ema(df_12h['close'].values, 50)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate 1w ATR for regime filter
-    if len(df_1w) < 30:
+    # Calculate 1d volume average for confirmation (20-period)
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    atr_10_1w = atr(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 10)
-    atr_30_1w = atr(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 30)
-    atr_10_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_10_1w)
-    atr_30_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_30_1w)
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(10, 30)  # Need 10 for volume MA, 30 for ATR(30)
+    start_idx = max(13, 50, 20)  # Need 13 for EMA13, 50 for EMA50, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma_10_aligned[i]) or np.isnan(atr_10_1w_aligned[i]) or
-            np.isnan(atr_30_1w_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,39 +79,35 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        prev_close = close[i-1]
         
-        # Exit conditions: price crosses back below R1 for longs, above S1 for shorts
+        # Exit conditions: Elder Ray power shift
         if position != 0:
-            # Exit long: price crosses below R1
+            # Exit long: Bull Power <= 0 (bulls losing control)
             if position == 1:
-                if curr_close < camarilla_r1_aligned[i]:
+                if bull_power_aligned[i] <= 0:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price crosses above S1
+            # Exit short: Bear Power >= 0 (bears losing control)
             elif position == -1:
-                if curr_close > camarilla_s1_aligned[i]:
+                if bear_power_aligned[i] >= 0:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volume confirmation and ATR regime filter
+        # Entry conditions: Elder Ray alignment with 12h trend and volume confirmation
         if position == 0:
-            # Camarilla breakout signals
-            breakout_up = curr_high >= camarilla_r1_aligned[i] and prev_close < camarilla_r1_aligned[i-1]
-            breakout_down = curr_low <= camarilla_s1_aligned[i] and prev_close > camarilla_s1_aligned[i-1]
+            # Elder Ray signals
+            bulls_in_control = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0
+            bears_in_control = bear_power_aligned[i] < 0 and bull_power_aligned[i] > 0  # Same condition, but we check price vs EMA for direction
             
-            # Volume confirmation: current volume > 1.8 * 10-period average volume (aligned)
-            volume_confirm = curr_volume > 1.8 * vol_ma_10_aligned[i] if not np.isnan(vol_ma_10_aligned[i]) else False
+            # Volume confirmation: current volume > 1.5 * 20-period average volume (aligned)
+            volume_confirm = curr_volume > 1.5 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
             
-            # ATR regime filter: ATR(10) < ATR(30) (low volatility regime)
-            atr_regime = atr_10_1w_aligned[i] < atr_30_1w_aligned[i]
-            
-            if breakout_up and volume_confirm and atr_regime:
+            if bulls_in_control and volume_confirm and curr_close > ema50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            elif breakout_down and volume_confirm and atr_regime:
+            elif bears_in_control and volume_confirm and curr_close < ema50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -137,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_1wVolumeSpike_ATRRegime_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_12hEMA50_Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
