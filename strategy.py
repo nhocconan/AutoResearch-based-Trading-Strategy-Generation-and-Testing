@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 12h EMA50 trend filter and ATR volume confirmation.
-- Long when price breaks above Donchian upper (20) AND close > 12h EMA50 (bullish trend)
-- Short when price breaks below Donchian lower (20) AND close < 12h EMA50 (bearish trend)
-- Volume must be > 2.0 * ATR(14) (volatility-adjusted volume filter to avoid fakeouts)
-- Exit on opposite Donchian breakout or trend reversal (close crosses 12h EMA50)
-- Uses 4h primary timeframe with 12h HTF to target 75-200 trades over 4 years (19-50/year)
-- Donchian channels provide robust structure that works in both trending and ranging markets
-- 12h EMA50 ensures alignment with medium-term trend to avoid whipsaws
-- ATR-scaled volume filter adapts to changing volatility, reducing false breakouts
-- Designed for BTC/ETH with edge in bull markets (breakout continuation) and bear markets (avoiding false breakouts via trend filter)
+Hypothesis: 1h Bollinger Band breakout with 4h EMA50 trend filter and 1d ATR volume confirmation.
+- Long when price breaks above BB upper (20,2) AND 4h EMA50 slope > 0 (bullish trend)
+- Short when price breaks below BB lower (20,2) AND 4h EMA50 slope < 0 (bearish trend)
+- Volume must be > 1.5 * 1d ATR(14) (volatility-adjusted volume filter to avoid fakeouts)
+- Exit on opposite BB breakout or trend reversal (4h EMA50 slope changes sign)
+- Uses 1h primary timeframe with 4h HTF for trend and 1d HTF for volume filter to target 60-150 trades over 4 years (15-37/year)
+- Bollinger Bands provide dynamic support/resistance that adapts to volatility
+- 4h EMA50 ensures alignment with medium-term trend to avoid whipsaws in ranging markets
+- 1d ATR-scaled volume filter reduces false breakouts during low-volume periods
+- Designed for BTC/ETH with edge in trending markets (breakout continuation) and avoids chop via trend filter
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,78 +26,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) using previous period (no look-ahead)
-    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
-    lookback = 20
-    donchian_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    donchian_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    # Calculate Bollinger Bands (20,2) using previous period (no look-ahead)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = (sma + bb_std * std).shift(1).values
+    bb_lower = (sma - bb_std * std).shift(1).values
     
-    # Get 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data ONCE before loop for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50 and its slope
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_slope_4h = np.diff(ema_50_4h, prepend=ema_50_4h[0])
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 4h EMA50 slope to 1h timeframe
+    ema_slope_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_slope_4h)
     
-    # Calculate ATR(14) for dynamic volume threshold
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = np.nan
-    tr3.iloc[0] = np.nan
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Get 1d data ONCE before loop for ATR volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Dynamic volume threshold: volume > 2.0 * ATR (volatility-adjusted)
-    vol_threshold = 2.0 * atr
+    # Calculate 1d ATR(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr_1d = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ATR(14) to 1h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Dynamic volume threshold: volume > 1.5 * 1d ATR(14)
+    vol_threshold = 1.5 * atr_1d_aligned
     volume_confirm = volume > vol_threshold
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 50, 14) + 1
+    start_idx = max(bb_period, 50, 14) + 1
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(ema_slope_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper, trend up (close > EMA50), volume confirmation
-            if close[i] > donchian_upper[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+            # Long: price breaks above BB upper, bullish trend (EMA50 slope > 0), volume confirmation
+            if close[i] > bb_upper[i] and ema_slope_4h_aligned[i] > 0 and volume_confirm[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian lower, trend down (close < EMA50), volume confirmation
-            elif close[i] < donchian_lower[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+            # Short: price breaks below BB lower, bearish trend (EMA50 slope < 0), volume confirmation
+            elif close[i] < bb_lower[i] and ema_slope_4h_aligned[i] < 0 and volume_confirm[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian lower OR trend reversal (close < EMA50)
-            if close[i] < donchian_lower[i] or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: price breaks below BB lower OR trend reversal (EMA50 slope <= 0)
+            if close[i] < bb_lower[i] or ema_slope_4h_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above Donchian upper OR trend reversal (close > EMA50)
-            if close[i] > donchian_upper[i] or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: price breaks above BB upper OR trend reversal (EMA50 slope >= 0)
+            if close[i] > bb_upper[i] or ema_slope_4h_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_ATRVolConfirm_v1"
-timeframe = "4h"
+name = "1h_BB20_2_4hEMA50Slope_1dATRVolConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
