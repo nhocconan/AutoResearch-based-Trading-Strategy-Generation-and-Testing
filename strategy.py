@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams Alligator (Jaw/Teeth/Lips) with 1d EMA50 trend filter and volume confirmation.
-- Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA50 AND volume > 1.3 * ATR(14) * close
-- Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA50 AND volume > 1.3 * ATR(14) * close
-- Exit when Alligator alignment breaks or price crosses 1d EMA50
-- Uses 4h primary timeframe with 1d HTF to target 100-200 trades over 4 years (25-50/year)
-- Williams Alligator identifies trending vs ranging markets via jaw/teeth/lips convergence/divergence
-- 1d EMA50 ensures alignment with longer-term trend to avoid whipsaws in bear markets
-- ATR-scaled volume filter adapts to volatility, reducing false signals during low-volatility periods
-- Designed for BTC/ETH with edge in trending markets (Alligator alignment continuation) and range markets (mean reversion at extremes via trend filter)
+Hypothesis: 12h Williams %R mean reversion with 1d ADX regime filter and volume confirmation.
+- Long when Williams %R(14) < -80 (oversold) AND ADX(14) < 25 (range market) AND volume > 1.5x SMA20 volume
+- Short when Williams %R(14) > -20 (overbought) AND ADX(14) < 25 (range market) AND volume > 1.5x SMA20 volume
+- Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+- Uses 12h primary timeframe with 1d HTF to target 50-150 trades over 4 years (12-37/year)
+- Williams %R identifies overextended moves in range-bound markets, which are common in BTC/ETH consolidation
+- ADX < 25 ensures we only trade in ranging/low-volatility regimes where mean reversion works best
+- Volume confirmation filters low-conviction breakouts that often fail in ranging markets
 """
 
 import numpy as np
@@ -25,78 +24,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator (13,8,5) SMAs using previous values (no look-ahead)
-    close_series = pd.Series(close)
-    # Jaw: 13-period SMA, shifted by 8 bars
-    jaw = close_series.rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth: 8-period SMA, shifted by 5 bars
-    teeth = close_series.rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips: 5-period SMA, shifted by 3 bars
-    lips = close_series.rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate Williams %R(14) using previous period (no look-ahead)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().shift(1).values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Get 1d data ONCE before loop for EMA50 trend filter
+    # Get 1d data ONCE before loop for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
+    # Calculate 1d ADX(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate ATR(14) for dynamic volume threshold
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
     tr2.iloc[0] = np.nan
     tr3.iloc[0] = np.nan
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr_1d.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Dynamic volume threshold: volume > 1.3 * ATR * close (volatility-adjusted)
-    vol_threshold = 1.3 * atr * close
-    volume_confirm = volume > vol_threshold
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Alligator alignment signals
-    bullish_alignment = (lips > teeth) & (teeth > jaw)
-    bearish_alignment = (lips < teeth) & (teeth < jaw)
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume confirmation: volume > 1.5x SMA20 volume
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    volume_confirm = volume > (1.5 * volume_sma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13+8, 8+5, 5+3, 50, 14) + 1  # ~26
+    start_idx = max(14, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(volume_sma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: bullish Alligator alignment, price above 1d EMA50, volume confirmation
-            if bullish_alignment[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm[i]:
+            # Long: Williams %R oversold (< -80), ranging market (ADX < 25), volume confirmation
+            if williams_r[i] < -80 and adx_1d_aligned[i] < 25 and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish Alligator alignment, price below 1d EMA50, volume confirmation
-            elif bearish_alignment[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm[i]:
+            # Short: Williams %R overbought (> -20), ranging market (ADX < 25), volume confirmation
+            elif williams_r[i] > -20 and adx_1d_aligned[i] < 25 and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Alligator alignment breaks OR price crosses below 1d EMA50
-            if not bullish_alignment[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: Williams %R crosses above -50 (mean reversion complete)
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator alignment breaks OR price crosses above 1d EMA50
-            if not bearish_alignment[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: Williams %R crosses below -50 (mean reversion complete)
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -104,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dEMA50_ATRVolConfirm_v1"
-timeframe = "4h"
+name = "12h_WilliamsR_MeanReversion_1dADXRegime_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
