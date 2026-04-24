@@ -1,47 +1,62 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d ATR volatility filter and 1w EMA50 trend filter.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 1d for ATR volatility spike filter and 1w for EMA50 trend filter.
-- Entry: Long when price breaks above Camarilla H3 AND ATR ratio > 1.8 AND price > 1w EMA50.
-         Short when price breaks below Camarilla L3 AND ATR ratio > 1.8 AND price < 1w EMA50.
-- Exit: Opposite Camarilla breakout OR price crosses 1w EMA50 in opposite direction.
+Hypothesis: 1d KAMA trend direction + RSI mean reversion + choppiness regime filter.
+- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
+- HTF: 1w for regime context (choppiness index).
+- Entry: Long when KAMA turns up AND RSI < 40 AND market is choppy (CHOP > 61.8).
+         Short when KAMA turns down AND RSI > 60 AND market is choppy (CHOP > 61.8).
+- Exit: Opposite KAMA turn OR RSI crosses 50 in opposite direction.
 - Signal size: 0.25 discrete to minimize fee drag.
-- ATR ratio (current ATR/20-period ATR) > 1.8 confirms volatility expansion to avoid false breakouts.
-- 1w EMA50 provides strong trend filter to avoid counter-trend trades in choppy markets.
-- Camarilla H3/L3 levels derived from prior 1d OHLC provide institutional support/resistance.
-- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
+- KAMA adapts to market noise, reducing whipsaw in ranging markets.
+- RSI extremes in choppy regimes provide high-probability mean reversion entries.
+- Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+- Estimated trades: ~60 total over 4 years (~15/year) based on regime-filtered signals.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def ema(values, period):
-    """Calculate Exponential Moving Average."""
-    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
+def kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    close = pd.Series(close)
+    direction = np.abs(close.diff(er_period))
+    volatility = close.diff().abs().rolling(er_period, min_periods=1).sum()
+    er = direction / (volatility + 1e-10)
+    sc = (er * (2/(fast_period+1) - 2/(slow_period+1)) + 2/(slow_period+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close.iloc[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close.iloc[i] - kama[i-1])
+    return kama
 
-def atr(high, low, close, period):
-    """Calculate Average True Range."""
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    true_range[0] = high_low[0]  # First period
-    return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
+def rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    close = pd.Series(close)
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
-def camarilla_levels(high, low, close):
-    """Calculate Camarilla pivot levels (H3, L3)."""
-    pivot = (high + low + close) / 3.0
-    range_hl = high - low
-    h3 = pivot + range_hl * 1.1 / 4.0
-    l3 = pivot - range_hl * 1.1 / 4.0
-    return h3, l3
+def choppiness_index(high, low, close, period=14):
+    """Calculate Choppiness Index."""
+    high = pd.Series(high)
+    low = pd.Series(low)
+    close = pd.Series(close)
+    atr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr_sum = atr.rolling(period, min_periods=period).sum()
+    hh = high.rolling(period, min_periods=period).max()
+    ll = low.rolling(period, min_periods=period).min()
+    chop = 100 * np.log10(atr_sum / (hh - ll + 1e-10)) / np.log10(period)
+    return chop.values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
@@ -49,95 +64,81 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate 1w trend filter: EMA50
+    # Calculate KAMA trend
+    kama_vals = kama(close, er_period=10, fast_period=2, slow_period=30)
+    
+    # Calculate RSI
+    rsi_vals = rsi(close, period=14)
+    
+    # Calculate 1w choppiness index for regime filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    ema50_1w = ema(df_1w['close'].values, 50)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w, additional_delay_bars=1)
-    
-    # Calculate 1d ATR for volatility spike filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
-    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
-    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
-    
-    # Camarilla levels from prior 1d OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Use prior day's OHLC for today's Camarilla levels (no look-ahead)
-    camarilla_h3 = np.full(n, np.nan)
-    camarilla_l3 = np.full(n, np.nan)
-    
-    for i in range(1, n):
-        # Prior day's OHLC (index i-1 in 1d data corresponds to prior completed day)
-        prior_day_idx = i - 1
-        if prior_day_idx < len(df_1d):
-            ph = df_1d['high'].iloc[prior_day_idx]
-            pl = df_1d['low'].iloc[prior_day_idx]
-            pc = df_1d['close'].iloc[prior_day_idx]
-            h3, l3 = camarilla_levels(ph, pl, pc)
-            camarilla_h3[i] = h3
-            camarilla_l3[i] = l3
+    chop_1w = choppiness_index(
+        df_1w['high'].values,
+        df_1w['low'].values,
+        df_1w['close'].values,
+        period=14
+    )
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w, additional_delay_bars=1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = 70  # Need sufficient data for all indicators
+    start_idx = 40
     
     for i in range(start_idx, n):
-        # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        # Skip if data not ready
+        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or 
+            np.isnan(chop_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        curr_close = close[i]
-        
-        # Exit conditions: opposite Camarilla breakout OR price crosses 1w EMA50 in opposite direction
+        # Exit conditions: opposite KAMA turn OR RSI crosses 50
         if position != 0:
-            # Exit long: price breaks below Camarilla L3 OR price falls below 1w EMA50
+            kama_up = kama_vals[i] > kama_vals[i-1]
+            kama_down = kama_vals[i] < kama_vals[i-1]
+            rsi_above_50 = rsi_vals[i] > 50
+            rsi_below_50 = rsi_vals[i] < 50
+            
             if position == 1:
-                if curr_close < camarilla_l3[i] or curr_close < ema50_1w_aligned[i]:
+                # Exit long: KAMA turns down OR RSI crosses below 50
+                if not kama_up or rsi_below_50:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Camarilla H3 OR price rises above 1w EMA50
             elif position == -1:
-                if curr_close > camarilla_h3[i] or curr_close > ema50_1w_aligned[i]:
+                # Exit short: KAMA turns up OR RSI crosses above 50
+                if not kama_down or rsi_above_50:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volatility confirmation and trend filter
+        # Entry conditions: KAMA turn + RSI extreme + choppy regime
         if position == 0:
-            # Long: price breaks above Camarilla H3 AND ATR ratio > 1.8 AND bullish 1w trend
-            if curr_close > camarilla_h3[i] and atr_ratio_aligned[i] > 1.8 and curr_close > ema50_1w_aligned[i]:
+            kama_up = kama_vals[i] > kama_vals[i-1]
+            kama_down = kama_vals[i] < kama_vals[i-1]
+            rsi_oversold = rsi_vals[i] < 40
+            rsi_overbought = rsi_vals[i] > 60
+            choppy = chop_1w_aligned[i] > 61.8  # Choppy regime threshold
+            
+            if kama_up and rsi_oversold and choppy:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3 AND ATR ratio > 1.8 AND bearish 1w trend
-            elif curr_close < camarilla_l3[i] and atr_ratio_aligned[i] > 1.8 and curr_close < ema50_1w_aligned[i]:
+            elif kama_down and rsi_overbought and choppy:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long position: maintain signal
             signals[i] = 0.25
         elif position == -1:
-            # Short position: maintain signal
             signals[i] = -0.25
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_1wEMA50_TrendFilter_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_ChopRegime_v1"
+timeframe = "1d"
 leverage = 1.0
