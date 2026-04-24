@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA(34) trend filter and 12h volume spike confirmation.
-- Primary timeframe: 4h for entries/exits.
-- HTF: 12h EMA(34) for trend direction (bullish if price > EMA34, bearish if price < EMA34).
-- Volume: Current 4h volume > 2.0 * 20-period volume MA to avoid false breakouts.
-- Entry: Long when price breaks above Camarilla R1 AND 12h EMA34 trend bullish AND volume spike.
-         Short when price breaks below Camarilla S1 AND 12h EMA34 trend bearish AND volume spike.
-- Exit: Opposite Camarilla breakout or loss of volume confirmation.
-- Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Hypothesis: 1h strategy using 4h Donchian breakout for direction and 1h for precise timing.
+- Primary timeframe: 1h for entry timing (reduces whipsaw vs pure 4h signals).
+- HTF: 4h Donchian(20) for trend structure (bullish if price > upper band, bearish if price < lower band).
+- Volume: Current 1h volume > 1.5 * 20-period volume MA to confirm breakout strength.
+- Entry: Long when price breaks above 4h Donchian high (aligned) AND volume spike.
+         Short when price breaks below 4h Donchian low (aligned) AND volume spike.
+- Exit: Opposite Donchian breakout (aligned) or loss of volume confirmation.
+- Signal size: 0.20 discrete to limit drawdown and fee churn.
+- Session filter: 08-20 UTC to avoid low-liquidity hours.
+- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 """
 
 import numpy as np
@@ -26,88 +27,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (based on previous bar)
-    # Camarilla R1 = close + 1.1*(high-low)/12
-    # Camarilla S1 = close - 1.1*(high-low)/12
-    # Use previous bar's high/low/close to avoid look-ahead
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # First bar: use current values
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
+    # Pre-compute session hours (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    
-    # Get 12h data for EMA(34) trend and volume MA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate EMA(34) on 12h close
-    ema_34 = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Donchian channels (20-period) on 4h
+    donchian_high_4h = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low_4h = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 20-period volume MA on 12h
-    vol_ma_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Align 4h Donchian to 1h (waits for completed 4h bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
     
-    # Align HTF indicators to 4h
-    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    
-    # Volume confirmation: current 4h volume > 2.0 * 20-period 12h volume MA (aligned)
-    volume_spike = volume > (2.0 * vol_ma_12h_aligned)
+    # Calculate 20-period volume MA on 1h
+    vol_ma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_1h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 1)  # Need enough 12h bars for EMA34 and volume MA, plus 1 for pivot calc
+    start_idx = 20  # Need enough bars for Donchian and volume MA
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r1[i]) or 
-            np.isnan(camarilla_s1[i]) or np.isnan(volume_spike[i])):
+        # Skip if outside trading session or data not ready
+        if not in_session[i] or \
+           np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
+           np.isnan(volume_spike[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_34_val = ema_34_aligned[i]
+        upper_donchian = donchian_high_aligned[i]
+        lower_donchian = donchian_low_aligned[i]
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        r1_level = camarilla_r1[i]
-        s1_level = camarilla_s1[i]
         
         if position == 0:
-            # Check for entry signals with volume spike
+            # Check for entry signals with volume spike and session filter
             if volume_spike[i]:
-                # Bullish breakout: price breaks above R1 AND 12h EMA34 bullish (price > EMA34)
-                if curr_high > r1_level and ema_34_val > 0 and curr_close > ema_34_val:
-                    signals[i] = 0.25
+                # Bullish breakout: price breaks above upper Donchian
+                if curr_high > upper_donchian:
+                    signals[i] = 0.20
                     position = 1
-                # Bearish breakout: price breaks below S1 AND 12h EMA34 bearish (price < EMA34)
-                elif curr_low < s1_level and ema_34_val > 0 and curr_close < ema_34_val:
-                    signals[i] = -0.25
+                # Bearish breakout: price breaks below lower Donchian
+                elif curr_low < lower_donchian:
+                    signals[i] = -0.20
                     position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 OR loss of volume confirmation
-            if curr_low < s1_level or not volume_spike[i]:
+            # Long exit: price breaks below lower Donchian OR loss of volume confirmation
+            if curr_low < lower_donchian or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above R1 OR loss of volume confirmation
-            if curr_high > r1_level or not volume_spike[i]:
+            # Short exit: price breaks above upper Donchian OR loss of volume confirmation
+            if curr_high > upper_donchian or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA34Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Donchian20_4hDirection_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
