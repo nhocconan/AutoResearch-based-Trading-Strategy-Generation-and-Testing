@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 12h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Donchian channel: 20-period high/low breakout for entry signals.
-- Entry: Long when price breaks above prior 20-period high AND 12h EMA50 bullish AND volume > 1.5 * volume MA(20).
-         Short when price breaks below prior 20-period low AND 12h EMA50 bearish AND volume > 1.5 * volume MA(20).
-- Exit: Close-based reversal - exit long when price crosses below prior 20-period low,
-        exit short when price crosses above prior 20-period high.
-- Signal size: 0.25 discrete to balance return and drawdown, minimize fee churn.
-- Uses 12h EMA50 (instead of shorter) to reduce noise and improve trade quality in both bull and bear markets.
-- Volume confirmation threshold reduced to 1.5x to increase trade frequency to target range while maintaining quality.
+Hypothesis: 1h Donchian breakout with 4h EMA50 trend filter and volume spike confirmation.
+- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
+- HTF: 4h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Donchian channels: Calculated from prior 20-period 1h high/low (breakout structure).
+- Entry: Long when price breaks above prior 20-period 1h high AND 4h EMA50 bullish AND volume > 2.0 * volume MA(20).
+         Short when price breaks below prior 20-period 1h low AND 4h EMA50 bearish AND volume > 2.0 * volume MA(20).
+- Exit: Close-based reversal - exit long when price crosses below 4h EMA50,
+        exit short when price crosses above 4h EMA50.
+- Signal size: 0.20 discrete to minimize fee churn and manage drawdown.
+Uses 4h EMA50 trend filter (instead of 1d) for better responsiveness to trend changes while filtering noise.
+Session filter: 08-20 UTC to reduce off-hour noise.
 """
 
 import numpy as np
@@ -28,36 +28,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 60:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h_close = df_12h['close'].values
-    ema_12h = pd.Series(df_12h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50 for trend filter
+    df_4h_close = df_4h['close'].values
+    ema_4h = pd.Series(df_4h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Donchian channel (20-period) from 4h data
-    # Using rolling window with min_periods to avoid look-ahead
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate prior 20-period 1h Donchian channels (H20, L20)
+    # Using rolling window on 1h data with min_periods=20
+    high_rolling = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align HTF indicators to 4h
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align HTF indicators to 1h
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate volume MA(20) for confirmation (using 4h data)
+    # Calculate volume MA(20) for confirmation (using 1h data)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(100, 50, 20)  # Need enough bars for EMA50 and Donchian
+    start_idx = max(100, 60)  # Need enough bars for EMA50 and Donchian
     
     for i in range(start_idx, n):
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(high_rolling[i]) or 
+            np.isnan(low_rolling[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,34 +77,34 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation (1.5x threshold)
-            vol_confirmed = curr_volume > 1.5 * vol_ma[i]
+            # Check for entry signals with volume confirmation (2.0x threshold)
+            vol_confirmed = curr_volume > 2.0 * vol_ma[i]
             
-            # Long: Price breaks above prior 20-period high AND 12h EMA50 bullish AND volume confirmed
-            if curr_high > high_roll[i] and curr_close > ema_12h_aligned[i] and vol_confirmed:
-                signals[i] = 0.25
+            # Long: Price breaks above prior 20-period high AND 4h EMA50 bullish AND volume confirmed
+            if curr_high > high_rolling[i] and curr_close > ema_4h_aligned[i] and vol_confirmed:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below prior 20-period low AND 12h EMA50 bearish AND volume confirmed
-            elif curr_low < low_roll[i] and curr_close < ema_12h_aligned[i] and vol_confirmed:
-                signals[i] = -0.25
+            # Short: Price breaks below prior 20-period low AND 4h EMA50 bearish AND volume confirmed
+            elif curr_low < low_rolling[i] and curr_close < ema_4h_aligned[i] and vol_confirmed:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long when price crosses below prior 20-period low (trend change or mean reversion)
-            if curr_close < low_roll[i]:
+            # Exit long when price crosses below 4h EMA50 (trend change)
+            if curr_close < ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short when price crosses above prior 20-period high (trend change or mean reversion)
-            if curr_close > high_roll[i]:
+            # Exit short when price crosses above 4h EMA50 (trend change)
+            if curr_close > ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1h_Donchian20_4hEMA50_Trend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
