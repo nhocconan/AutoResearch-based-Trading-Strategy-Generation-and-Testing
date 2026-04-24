@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and session timing.
-- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
-- HTF: 4h for EMA50 trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
-- RSI(2): Oversold <10 for longs, overbought >90 for shorts in 1h timeframe.
-- Session filter: Only trade 08-20 UTC to avoid low-volume Asian session noise.
-- Entry: Long when RSI(2) < 10 AND price > 4h EMA50 AND session open.
-         Short when RSI(2) > 90 AND price < 4h EMA50 AND session open.
-- Exit: RSI(2) > 60 for long exit, RSI(2) < 40 for short exit (mean reversion completion).
-- Signal size: 0.20 discrete to minimize fee drag.
-- Works in bull markets via longs in uptrends, bear markets via shorts in downtrends.
-- Avoids choppy markets via strong 4h trend filter (only trade with 4h momentum).
+Hypothesis: 6h Donchian(20) breakout with 1w ATR regime filter and volume confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w for ATR-based regime detection (choppy vs trending) and volume spike filter.
+- Donchian(20): Upper/lower bands from 20-period high/low on 6h chart.
+- Regime: ATR(10)/ATR(30) ratio > 1.2 = trending (favor breakouts), < 0.8 = choppy (favor mean reversion).
+- Entry: Long when price > Upper Band AND trending regime AND volume > 2.0 * 6-period average volume.
+         Short when price < Lower Band AND trending regime AND volume > 2.0 * 6-period average volume.
+- Exit: Opposite Donchian breakout (price < Upper Band for long exit, price > Lower Band for short exit).
+- Signal size: 0.25 discrete to minimize fee drag.
+- Works in both bull and bear markets by only trading breakouts in trending regimes, avoiding whipsaws in chop.
+- Uses weekly HTF to avoid overtrading and capture major trend changes.
 """
 
 import numpy as np
@@ -19,100 +19,119 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need sufficient data for calculations
+    if n < 60:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Pre-compute session hours for 08-20 UTC filter
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Calculate 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate 1w ATR(10) and ATR(30) for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need sufficient data for ATR30
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1h RSI(2) for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    # True Range calculation
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # Align length
     
-    avg_gain = pd.Series(gain).ewm(span=2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(span=2, adjust=False, min_periods=2).mean().values
+    # ATR(10) and ATR(30)
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
     
-    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
-    rsi = 100 - (100 / (1 + rs))
+    # ATR ratio for regime: >1.2 = trending, <0.8 = choppy
+    atr_ratio = atr10 / atr30
+    
+    # Align ATR ratio to 6h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
+    
+    # Calculate 1w volume average for confirmation (6-period)
+    if len(df_1w) < 6:
+        return np.zeros(n)
+    
+    vol_ma_6_1w = pd.Series(df_1w['volume'].values).rolling(window=6, min_periods=6).mean().values
+    vol_ma_6_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_6_1w)
+    
+    # Calculate 6h Donchian(20) bands
+    donchian_window = 20
+    upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from index where RSI is ready
-    start_idx = 2  # RSI(2) needs 2 periods
+    # Start from index where all indicators are ready
+    start_idx = max(donchian_window, 30)  # Need 20 for Donchian, 30 for ATR30
     
     for i in range(start_idx, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Skip if EMA50 data not ready
-        if np.isnan(ema_50_4h_aligned[i]):
+        # Skip if data not ready (check for NaN from alignment or calculations)
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_6_1w_aligned[i]) or
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_rsi = rsi[i]
+        curr_volume = volume[i]
         
-        # Exit conditions: RSI mean reversion completion
+        # Regime filter: only trade breakouts in trending markets (ATR ratio > 1.2)
+        trending_regime = atr_ratio_aligned[i] > 1.2
+        
+        # Volume confirmation: current volume > 2.0 * 6-period average volume
+        volume_confirm = curr_volume > 2.0 * vol_ma_6_1w_aligned[i] if not np.isnan(vol_ma_6_1w_aligned[i]) else False
+        
+        # Exit conditions: opposite Donchian breakout
         if position != 0:
-            # Exit long: RSI > 60 (overbought in short term)
+            # Exit long: price < Upper Band
             if position == 1:
-                if curr_rsi > 60:
+                if curr_close < upper_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: RSI < 40 (oversold in short term)
+            # Exit short: price > Lower Band
             elif position == -1:
-                if curr_rsi < 40:
+                if curr_close > lower_band[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: RSI extremes with 4h trend filter
+        # Entry conditions: Donchian breakout with regime and volume filters
         if position == 0:
-            # Long: RSI < 10 (extremely oversold) AND price > 4h EMA50 (uptrend)
-            long_condition = (curr_rsi < 10 and curr_close > ema_50_4h_aligned[i])
+            # Long: price > Upper Band AND trending regime AND volume confirmation
+            long_condition = (curr_close > upper_band[i] and 
+                            trending_regime and
+                            volume_confirm)
             
-            # Short: RSI > 90 (extremely overbought) AND price < 4h EMA50 (downtrend)
-            short_condition = (curr_rsi > 90 and curr_close < ema_50_4h_aligned[i])
+            # Short: price < Lower Band AND trending regime AND volume confirmation
+            short_condition = (curr_close < lower_band[i] and 
+                             trending_regime and
+                             volume_confirm)
             
             if long_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             elif short_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.20
+            signals[i] = -0.25
     
     return signals
 
-name = "1h_RSI2_MeanReversion_4hEMA50Trend_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_Donchian20_Breakout_1wATRRegime_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
