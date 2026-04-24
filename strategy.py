@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA50 trend filter and ATR-based trailing stop.
-- Primary timeframe: 6h to target 50-150 total trades over 4 years (12-37/year).
-- HTF: 12h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 13-period EMA on 6h).
-- Entry: Long when Bull Power > 0 AND 12h EMA50 bullish AND Bull Power rising (current > previous).
-         Short when Bear Power < 0 AND 12h EMA50 bearish AND Bear Power falling (current < previous).
-- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 2.5*ATR,
-        exit short when price > lowest_low_since_entry + 2.5*ATR.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume confirmation.
+- Primary timeframe: 12h to target 50-150 total trades over 4 years (12-37/year).
+- HTF: 1w EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Camarilla levels: H3 = prior_1d_close + 1.1*(prior_1d_high - prior_1d_low)*1.1/12,
+                     L3 = prior_1d_close - 1.1*(prior_1d_high - prior_1d_low)*1.1/12.
+- Entry: Long when price breaks above Camarilla H3 AND 1w EMA50 bullish AND volume > 1.3 * volume MA(20).
+         Short when price breaks below Camarilla L3 AND 1w EMA50 bearish AND volume > 1.3 * volume MA(20).
+- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 2.0*ATR,
+        exit short when price > lowest_low_since_entry + 2.0*ATR.
 - Signal size: 0.25 discrete to balance return and drawdown.
-This strategy captures the force behind price movements (Elder Ray) while filtering by higher-timeframe trend,
-providing confluence that works in both bull and bear markets by avoiding counter-trend entries.
+This strategy targets fewer, higher-quality breakouts on the 12h timeframe with institutional volume confirmation
+and weekly trend alignment, reducing fee drag while maintaining profitability in both bull and bear markets.
 """
 
 import numpy as np
@@ -26,22 +27,26 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla calculation and 1w data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h_close = df_12h['close'].values
-    ema_12h = pd.Series(df_12h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA50 for trend filter
+    df_1w_close = df_1w['close'].values
+    ema_1w = pd.Series(df_1w_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate EMA13 for Elder Ray (on 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = low - ema_13   # Bear Power = Low - EMA13
+    # Calculate prior day's Camarilla H3 and L3 levels
+    # H3 = prior_day_close + 1.1*(prior_day_high - prior_day_low)*1.1/12
+    # L3 = prior_day_close - 1.1*(prior_day_high - prior_day_low)*1.1/12
+    prior_close = df_1d['close'].shift(1).values
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    camarilla_h3 = prior_close + 1.1 * (prior_high - prior_low) * 1.1 / 12
+    camarilla_l3 = prior_close - 1.1 * (prior_high - prior_low) * 1.1 / 12
     
     # Calculate ATR(14) for trailing stop
     tr1 = np.abs(high[1:] - low[:-1])
@@ -50,8 +55,13 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align HTF indicators to 6h
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate volume MA(20) for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align HTF indicators to 12h
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,12 +70,12 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 13, 14)  # Need enough bars for EMA50, EMA13, ATR
+    start_idx = max(50, 50, 14, 20)  # Need enough bars for EMA50, ATR, Vol MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,20 +84,21 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
+        curr_volume = volume[i]
         
         if position == 0:
-            # Check for entry signals
-            # Long: Bull Power > 0 AND 12h EMA50 bullish AND Bull Power rising
-            if (bull_power[i] > 0 and curr_close > ema_12h_aligned[i] and 
-                bull_power[i] > bull_power[i-1]):
+            # Check for entry signals with volume confirmation
+            vol_confirmed = curr_volume > 1.3 * vol_ma[i]
+            
+            # Long: Price breaks above Camarilla H3 AND 1w EMA50 bullish AND volume confirmed
+            if curr_close > camarilla_h3_aligned[i] and curr_close > ema_1w_aligned[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
                 highest_since_entry = curr_high
                 lowest_since_entry = curr_low
-            # Short: Bear Power < 0 AND 12h EMA50 bearish AND Bear Power falling
-            elif (bear_power[i] < 0 and curr_close < ema_12h_aligned[i] and 
-                  bear_power[i] < bear_power[i-1]):
+            # Short: Price breaks below Camarilla L3 AND 1w EMA50 bearish AND volume confirmed
+            elif curr_close < camarilla_l3_aligned[i] and curr_close < ema_1w_aligned[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -96,8 +107,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit when price < highest_high - 2.5*ATR
-            if curr_close < highest_since_entry - 2.5 * atr[i]:
+            # ATR trailing stop: exit when price < highest_high - 2.0*ATR
+            if curr_close < highest_since_entry - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,8 +116,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit when price > lowest_low + 2.5*ATR
-            if curr_close > lowest_since_entry + 2.5 * atr[i]:
+            # ATR trailing stop: exit when price > lowest_low + 2.0*ATR
+            if curr_close > lowest_since_entry + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -114,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_BullBearPower_12hEMA50_Trend_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Camarilla_H3L3_1wEMA50_Trend_VolumeConfirmation_v1"
+timeframe = "12h"
 leverage = 1.0
