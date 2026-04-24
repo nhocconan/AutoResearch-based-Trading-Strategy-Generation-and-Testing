@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1d for ATR-based regime detection (choppy vs trending) and volume spike filter.
 - Donchian(20): Upper/lower bands from 20-period high/low.
 - Regime: ATR(10)/ATR(30) ratio > 1.2 = trending (favor breakouts), < 0.8 = choppy (favor mean reversion).
@@ -50,7 +50,7 @@ def generate_signals(prices):
     # ATR ratio for regime: >1.2 = trending, <0.8 = choppy
     atr_ratio = atr10 / atr30
     
-    # Align ATR ratio to 12h timeframe
+    # Align ATR ratio to 4h timeframe
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Calculate 1d volume average for confirmation (20-period)
@@ -60,7 +60,7 @@ def generate_signals(prices):
     vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 12h Donchian(20) bands
+    # Calculate 4h Donchian(20) bands
     donchian_window = 20
     upper_band = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     lower_band = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
@@ -131,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dATRRegime_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dATRRegime_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
