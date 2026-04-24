@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA200 trend filter and 1d volume spike confirmation.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for EMA200 trend filter and volume spike filter.
-- Entry: Long when price breaks above Camarilla H3 AND volume > 1.5x 20-period average volume AND price > 1d EMA200.
-         Short when price breaks below Camarilla L3 AND volume > 1.5x 20-period average volume AND price < 1d EMA200.
-- Exit: Opposite Camarilla breakout OR price crosses 1d EMA200 in opposite direction.
+Hypothesis: 4h TRIX zero-cross with 12h EMA50 trend filter and volume confirmation using 1d ATR spike.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 12h for EMA50 trend filter and 1d for ATR volume spike filter.
+- Entry: Long when TRIX crosses above zero AND ATR ratio > 2.0 AND price > 12h EMA50.
+         Short when TRIX crosses below zero AND ATR ratio > 2.0 AND price < 12h EMA50.
+- Exit: Opposite TRIX zero-cross OR price crosses 12h EMA50 in opposite direction.
 - Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- Volume confirmation ensures breakouts have participation, reducing false signals.
-- 1d EMA200 provides strong trend filter to avoid counter-trend trades in ranging markets.
-- Camarilla levels derived from prior 12h OHLC provide institutional support/resistance.
-- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-- Estimated trades: ~100 total over 4 years (~25/year) based on volatility breakout frequency with strict filters.
+- TRIX (12,26,9) is a momentum oscillator that filters noise and identifies trend changes.
+- ATR ratio (current ATR/20-period ATR) > 2.0 confirms significant volatility expansion to avoid false signals.
+- 12h EMA50 provides trend filter to avoid counter-trend trades.
+- Works in bull markets (buy momentum in uptrend) and bear markets (sell momentum in downtrend).
+- Estimated trades: ~120 total over 4 years (~30/year) based on momentum shift frequency with strict filters.
 """
 
 import numpy as np
@@ -22,102 +22,99 @@ def ema(values, period):
     """Calculate Exponential Moving Average."""
     return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def camarilla_levels(high, low, close):
-    """Calculate Camarilla pivot levels (H3, L3)."""
-    pivot = (high + low + close) / 3.0
-    range_hl = high - low
-    h3 = pivot + range_hl * 1.1 / 2.0
-    l3 = pivot - range_hl * 1.1 / 2.0
-    return h3, l3
+def atr(high, low, close, period):
+    """Calculate Average True Range."""
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    true_range[0] = high_low[0]  # First period
+    return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def trix(close, period):
+    """Calculate TRIX indicator."""
+    # Triple exponential moving average
+    ema1 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
+    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema3 = ema2.ewm(span=period, adjust=False, min_periods=period).mean()
+    # Calculate percentage change
+    trix_values = pd.Series(ema3).pct_change() * 100
+    return trix_values.values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1d trend filter: EMA200
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 210:
-        return np.zeros(n)
-    
-    ema200_1d = ema(df_1d['close'].values, 200)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d, additional_delay_bars=1)
-    
-    # Calculate 1d volume spike filter: current volume / 20-period average volume
-    avg_vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (avg_vol_20 + 1e-10)  # Avoid division by zero
-    
-    # Camarilla levels from prior 12h OHLC
+    # Calculate 12h trend filter: EMA50
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Use prior 12h period's OHLC for current Camarilla levels (no look-ahead)
-    camarilla_h3 = np.full(n, np.nan)
-    camarilla_l3 = np.full(n, np.nan)
+    ema50_12h = ema(df_12h['close'].values, 50)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h, additional_delay_bars=1)
     
-    # Map 12h indices to 15m indices (12h = 48 * 15m bars)
-    bars_per_12h = 48
+    # Calculate 1d ATR for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    for i in range(bars_per_12h, n, bars_per_12h):
-        # Prior 12h period's OHLC
-        start_idx = i - bars_per_12h
-        end_idx = i
-        if start_idx >= 0 and end_idx <= len(high):
-            ph = np.max(high[start_idx:end_idx])
-            pl = np.min(low[start_idx:end_idx])
-            pc = close[end_idx-1]  # Close of prior 12h period
-            h3, l3 = camarilla_levels(ph, pl, pc)
-            camarilla_h3[i:end_idx+bars_per_12h] = h3
-            camarilla_l3[i:end_idx+bars_per_12h] = l3
+    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
+    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
+    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
+    
+    # Calculate TRIX (12,26,9) on 4h data
+    trix_values = trix(close, 12)
+    trix_signal = trix_values  # TRIX line itself
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, bars_per_12h)
+    start_idx = 60  # Need sufficient data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        # Skip if data not ready (check for NaN from alignment or calculations)
+        if (np.isnan(trix_signal[i]) or np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_vol_ratio = vol_ratio[i]
+        curr_trix = trix_signal[i]
+        prev_trix = trix_signal[i-1] if i > 0 else 0
         
-        # Exit conditions: opposite Camarilla breakout OR price crosses 1d EMA200 in opposite direction
+        # Exit conditions: opposite TRIX zero-cross OR price crosses 12h EMA50 in opposite direction
         if position != 0:
-            # Exit long: price breaks below Camarilla L3 OR price falls below 1d EMA200
+            # Exit long: TRIX crosses below zero OR price falls below 12h EMA50
             if position == 1:
-                if curr_close < camarilla_l3[i] or curr_close < ema200_1d_aligned[i]:
+                if curr_trix < 0 and prev_trix >= 0 or curr_close < ema50_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Camarilla H3 OR price rises above 1d EMA200
+            # Exit short: TRIX crosses above zero OR price rises above 12h EMA50
             elif position == -1:
-                if curr_close > camarilla_h3[i] or curr_close > ema200_1d_aligned[i]:
+                if curr_trix > 0 and prev_trix <= 0 or curr_close > ema50_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volume confirmation and trend filter
+        # Entry conditions: TRIX zero-cross with volatility confirmation and trend filter
         if position == 0:
-            # Long: price breaks above Camarilla H3 AND volume > 1.5x average AND bullish 1d trend
-            if curr_close > camarilla_h3[i] and curr_vol_ratio > 1.5 and curr_close > ema200_1d_aligned[i]:
+            # Long: TRIX crosses above zero AND ATR ratio > 2.0 AND bullish 12h trend
+            if curr_trix > 0 and prev_trix <= 0 and atr_ratio_aligned[i] > 2.0 and curr_close > ema50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3 AND volume > 1.5x average AND bearish 1d trend
-            elif curr_close < camarilla_l3[i] and curr_vol_ratio > 1.5 and curr_close < ema200_1d_aligned[i]:
+            # Short: TRIX crosses below zero AND ATR ratio > 2.0 AND bearish 12h trend
+            elif curr_trix < 0 and prev_trix >= 0 and atr_ratio_aligned[i] > 2.0 and curr_close < ema50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -129,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA200_TrendFilter_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_TRIX_ZeroCross_1dATR_VolumeSpike_12hEMA50_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
