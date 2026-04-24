@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-- Uses 12h timeframe (primary) and 1d HTF for trend alignment (proven pattern from DB)
-- Donchian breakout from previous 20-period 12h high/low (structure-based entry)
-- Long when price breaks above 12h Donchian upper band AND price > 1d EMA34 (uptrend) AND volume > 1.5 * volume MA(20)
-- Short when price breaks below 12h Donchian lower band AND price < 1d EMA34 (downtrend) AND volume > 1.5 * volume MA(20)
-- Exit when price reverts to 12h Donchian midpoint (mean reversion structure)
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+- Uses 4h timeframe (primary) and 1d HTF for trend alignment (proven pattern from DB)
+- Donchian breakout from previous 20-period 4h high/low (structure-based entry)
+- Long when price breaks above 4h Donchian upper band AND price > 1d EMA34 (uptrend) AND volume > 1.5 * volume MA(20)
+- Short when price breaks below 4h Donchian lower band AND price < 1d EMA34 (downtrend) AND volume > 1.5 * volume MA(20)
+- Exit when price reverts to 4h Donchian midpoint (mean reversion structure)
 - Discrete signal size: 0.25 to minimize fee churn
-- Target: 50-150 total trades over 4 years (12-37/year) as per 12h timeframe recommendation
+- Target: 75-200 total trades over 4 years (19-50/year) as per 4h timeframe recommendation
 - Works in both bull/bear: trend filter avoids counter-trend trades, Donchian breakouts capture momentum in all regimes
 """
 
@@ -25,9 +25,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h OHLC for Donchian channels (using previous completed 12h bar)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:  # Need enough data for Donchian(20)
+    # Calculate 4h OHLC for Donchian channels (using previous completed 4h bar)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:  # Need enough data for Donchian(20)
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -35,20 +35,20 @@ def generate_signals(prices):
     if len(df_1d) < 34:  # Need enough data for EMA34
         return np.zeros(n)
     
-    # 12h Donchian(20) from previous 20 bars
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 4h Donchian(20) from previous 20 bars
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # Donchian upper/lower bands (20-period)
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     donchian_mid = (donchian_high + donchian_low) / 2.0  # midpoint for exit
     
-    # Align Donchian levels to 12h timeframe (previous 20-bar Donchian available at open)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    # Align Donchian levels to 4h timeframe (previous 20-bar Donchian available at open)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
