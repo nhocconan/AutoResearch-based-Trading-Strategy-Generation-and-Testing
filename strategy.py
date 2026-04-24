@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout + 1d EMA34 trend filter + volume spike.
-- Primary timeframe: 12h for execution, HTF: 1d for EMA34 trend filter.
-- Camarilla levels: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2.
-- Trend filter: EMA34(1d) slope > 0 = uptrend, < 0 = downtrend.
-- Volume confirmation: current volume > 2.0x 20-period volume MA for strong participation.
+Hypothesis: 4h Camarilla H3/L3 breakout + 1d ADX regime filter + volume confirmation.
+- Primary timeframe: 4h for execution, HTF: 1d for ADX regime.
+- Camarilla pivot levels (H3, L3) from prior 1d: breakout above H3 or below L3 signals momentum.
+- Regime filter: ADX(14) > 25 = trending (trade breakouts in trend direction), ADX < 20 = ranging (fade breakouts).
+- Volume confirmation: current volume > 1.5x 20-period volume MA to ensure participation.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-- Works in bull via buying H3 breakouts in uptrend, in bear via selling L3 breakdowns in downtrend.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Works in bull via buying H3 breakouts in uptrend, in bear via selling L3 breakdowns in downtrend, and fading breakouts in ranges.
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -25,32 +25,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d ADX(14) for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate EMA34 slope (trend direction)
-    ema34_slope = np.zeros_like(ema_34_1d_aligned)
-    ema34_slope[1:] = ema_34_1d_aligned[1:] - ema_34_1d_aligned[:-1]
-    
-    # Camarilla levels from 1d (H3, L3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    rng = high_1d - low_1d
-    H3 = close_1d + 1.1 * rng / 2
-    L3 = close_1d - 1.1 * rng / 2
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed values (Wilder's smoothing)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_di_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI and DX
+    plus_di = 100 * plus_di_smooth / atr
+    minus_di = 100 * minus_di_smooth / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 4h timeframe (completed 1d bar only)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 1d EMA34 for trend direction in trending regime
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate prior 1d Camarilla levels (H3, L3) for breakout signals
+    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    volume_spike = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,8 +86,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_slope[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,29 +96,41 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Trend filter: EMA34 slope > 0 = uptrend, < 0 = downtrend
-            if ema34_slope[i] > 0:
-                # Uptrend: buy on H3 breakout with volume spike
-                if close[i] > H3_aligned[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif ema34_slope[i] < 0:
-                # Downtrend: sell on L3 breakdown with volume spike
-                if close[i] < L3_aligned[i] and volume_spike[i]:
+            # Regime: ADX > 25 = trending, ADX < 20 = ranging
+            if adx_aligned[i] > 25:
+                # Trending regime: trade breakouts in trend direction
+                if not np.isnan(ema_34_1d_aligned[i]) and not np.isnan(ema_34_1d_aligned[i-1]):
+                    ema34_slope = ema_34_1d_aligned[i] - ema_34_1d_aligned[i-1]
+                    if close[i] > camarilla_h3_aligned[i] and ema34_slope > 0 and volume_spike[i]:
+                        # Uptrend: buy on H3 breakout
+                        signals[i] = 0.25
+                        position = 1
+                    elif close[i] < camarilla_l3_aligned[i] and ema34_slope < 0 and volume_spike[i]:
+                        # Downtrend: sell on L3 breakdown
+                        signals[i] = -0.25
+                        position = -1
+            elif adx_aligned[i] < 20:
+                # Ranging regime: fade breakouts (mean reversion)
+                if close[i] > camarilla_h3_aligned[i] and volume_spike[i]:
+                    # Price broke above H3 in range: sell expecting reversion
                     signals[i] = -0.25
                     position = -1
+                elif close[i] < camarilla_l3_aligned[i] and volume_spike[i]:
+                    # Price broke below L3 in range: buy expecting reversion
+                    signals[i] = 0.25
+                    position = 1
         elif position == 1:
-            # Long exit: price returns to midpoint of H3/L3 or breaks below L3
-            midpoint = (H3_aligned[i] + L3_aligned[i]) / 2
-            if close[i] < midpoint or close[i] < L3_aligned[i]:
+            # Long exit: price returns to midpoint of H3/L3 or opposite breakout
+            midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
+            if close[i] < midpoint or close[i] < camarilla_l3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to midpoint of H3/L3 or breaks above H3
-            midpoint = (H3_aligned[i] + L3_aligned[i]) / 2
-            if close[i] > midpoint or close[i] > H3_aligned[i]:
+            # Short exit: price returns to midpoint of H3/L3 or opposite breakout
+            midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
+            if close[i] > midpoint or close[i] > camarilla_h3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -99,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dADX_Regime_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
