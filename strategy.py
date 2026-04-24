@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA50 trend filter and volume confirmation.
-- Long when price breaks above Camarilla H3 AND close > 4h EMA50 (bullish trend)
-- Short when price breaks below Camarilla L3 AND close < 4h EMA50 (bearish trend)
+Hypothesis: 6h Ichimoku Cloud breakout with weekly trend filter and volume confirmation.
+- Long when Tenkan-sen crosses above Kijun-sen AND price > Senkou Span A (cloud top) AND weekly close > weekly EMA50
+- Short when Tenkan-sen crosses below Kijun-sen AND price < Senkou Span B (cloud bottom) AND weekly close < weekly EMA50
 - Volume must be > 1.3x ATR(14) * close (volatility-adjusted volume filter)
-- Exit on trend reversal or price retracing to Camarilla Pivot point
-- Uses 1h primary timeframe with 4h HTF for trend direction, targeting 60-150 trades over 4 years (15-37/year)
-- Camarilla levels provide intraday support/resistance that work in ranging markets
-- 4h EMA50 filters for intermediate trend alignment to reduce whipsaws
-- ATR-scaled volume confirmation adapts to volatility, reducing false breakouts
-- Session filter (08-20 UTC) avoids low-liquidity Asian session noise
-- Designed for BTC/ETH with edge in ranging markets (mean reversion at H3/L3) and trending markets (breakout continuation)
+- Exit on opposite Ichimoku cross or weekly trend reversal
+- Uses 6h primary timeframe with 1w HTF to target 50-150 trades over 4 years (12-37/year)
+- Ichimoku provides dynamic support/resistance via cloud and momentum via TK cross
+- Weekly EMA50 ensures alignment with major trend to avoid counter-trend whipsaws
+- ATR-scaled volume filter adapts to changing volatility, reducing false breakouts
+- Designed for BTC/ETH with edge in trending markets via cloud breaks and momentum confirmation
 """
 
 import numpy as np
@@ -22,52 +21,45 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Pre-compute session filter (08-20 UTC) - open_time is already datetime64[ms]
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels using previous day's OHLC (no look-ahead)
-    # Camarilla: H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
-    # Use daily OHLC from previous completed day
-    close_series = pd.Series(close)
+    # Calculate Ichimoku components (9, 26, 52 periods) using previous data (no look-ahead)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
+    close_series = pd.Series(close)
     
-    # Get daily OHLC (using 1d timeframe for Camarilla calculation)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = high_series.rolling(window=9, min_periods=9).max().shift(1)
+    period9_low = low_series.rolling(window=9, min_periods=9).min().shift(1)
+    tenkan_sen = ((period9_high + period9_low) / 2).values
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = high_series.rolling(window=26, min_periods=26).max().shift(1)
+    period26_low = low_series.rolling(window=26, min_periods=26).min().shift(1)
+    kijun_sen = ((period26_high + period26_low) / 2).values
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = high_series.rolling(window=52, min_periods=52).max().shift(1)
+    period52_low = low_series.rolling(window=52, min_periods=52).min().shift(1)
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Get 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 1w EMA50
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily Camarilla levels to 1h timeframe
-    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    camarilla_pivot = (prev_high + prev_low + prev_close) / 3  # Standard pivot
-    
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # Get 4h data ONCE before loop for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA50
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 4h EMA50 to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align 1w EMA50 to 6h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate ATR(14) for dynamic volume threshold
     tr1 = pd.Series(high - low)
@@ -85,45 +77,53 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from index where all indicators are ready
-    start_idx = max(1, 50, 14) + 1  # Camarilla needs 1d data, EMA50 needs 50, ATR needs 14
+    # Start from index where all indicators are ready (need 52+26 for Senkou B)
+    start_idx = max(52 + 26, 50) + 1
     
     for i in range(start_idx, n):
-        # Skip if not in trading session or data not ready
-        if not in_session[i] or (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-                                 np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-                                 np.isnan(atr[i])):
+        # Skip if data not ready
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Ichimoku TK Cross signals
+        tk_cross_up = tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1]
+        tk_cross_down = tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1]
+        
         if position == 0:
-            # Long: price breaks above Camarilla H3, trend up (close > EMA50), volume confirmation
-            if close[i] > camarilla_h3_aligned[i] and close[i] > ema_50_4h_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.20
+            # Long: TK cross up, price above cloud (Senkou A), weekly bullish, volume confirmation
+            if (tk_cross_up and close[i] > senkou_a[i] and 
+                close[i] > ema_50_1w_aligned[i] and volume_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L3, trend down (close < EMA50), volume confirmation
-            elif close[i] < camarilla_l3_aligned[i] and close[i] < ema_50_4h_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.20
+            # Short: TK cross down, price below cloud (Senkou B), weekly bearish, volume confirmation
+            elif (tk_cross_down and close[i] < senkou_b[i] and 
+                  close[i] < ema_50_1w_aligned[i] and volume_confirm[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price retreats to Camarilla Pivot OR trend reverses
-            if close[i] <= camarilla_pivot_aligned[i] or close[i] < ema_50_4h_aligned[i]:
+            # Long exit: TK cross down OR price falls below cloud OR weekly trend turns bearish
+            if (tk_cross_down or close[i] < senkou_a[i] or 
+                close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rallies to Camarilla Pivot OR trend reverses
-            if close[i] >= camarilla_pivot_aligned[i] or close[i] > ema_50_4h_aligned[i]:
+            # Short exit: TK cross up OR price rises above cloud OR weekly trend turns bullish
+            if (tk_cross_up or close[i] > senkou_b[i] or 
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
 
-name = "1h_Camarilla_H3L3_4hEMA50_VolumeConfirm_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_IchimokuTK_1wEMA50_ATRVolConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
