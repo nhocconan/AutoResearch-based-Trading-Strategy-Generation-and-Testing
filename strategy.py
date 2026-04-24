@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-- Primary timeframe: 4h for execution, HTF: 1d for EMA trend.
-- Donchian(20): Upper/lower bands from highest high/lowest low of past 20 bars.
-- Entry: Long when close breaks above Donchian upper band with volume spike and price > 1d EMA50 (uptrend).
-         Short when close breaks below Donchian lower band with volume spike and price < 1d EMA50 (downtrend).
-- Exit: When price crosses below Donchian middle (for longs) or above Donchian middle (for shorts).
+Hypothesis: 6h Camarilla pivot breakout with 1d EMA34 trend filter and volume spike confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for Camarilla pivots, EMA trend, and volume context.
+- Camarilla pivots: Calculate R3, R4, S3, S4 from prior 1d OHLC.
+- Entry: Long when price breaks above R4 with volume spike and close > 1d EMA34 (strong uptrend continuation).
+         Short when price breaks below S3 with volume spike and close < 1d EMA34 (strong downtrend continuation).
+- Exit: When price reverts to the 1d VWAP (mean reversion to fair value) or opposite signal.
 - Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 """
 
 import numpy as np
@@ -26,23 +26,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend
+    # Get 1d data for Camarilla pivots, EMA trend, and VWAP
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Calculate 1d EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Donchian channels on 4h: 20-period
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    # Calculate 1d VWAP for exit (typical price * volume cumsum)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap = vwap.values
     
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA (on 4h)
+    # Calculate Camarilla pivot levels from prior 1d OHLC
+    # R4 = Close + 1.5 * (High - Low)
+    # R3 = Close + 1.1 * (High - Low)
+    # S3 = Close - 1.1 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    camarilla_r4 = df_1d['close'] + 1.5 * (df_1d['high'] - df_1d['low'])
+    camarilla_r3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low'])
+    camarilla_s3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low'])
+    camarilla_s4 = df_1d['close'] - 1.5 * (df_1d['high'] - df_1d['low'])
+    
+    # Align 1d indicators to 6h
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4.values)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4.values)
+    
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA (on 6h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * volume_ma)
     
@@ -50,12 +65,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20)  # EMA50 + Donchian + volume MA
+    start_idx = max(34, 20)  # EMA34 + volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_upper[i]) or
-            np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(vwap_aligned[i]) or
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -63,26 +78,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Check for Donchian breakout with volume spike and trend filter
+            # Check for breakout signals with volume spike and trend filter
             if volume_spike[i]:
-                # Long: close breaks above Donchian upper in uptrend
-                if close[i] > donchian_upper[i] and close[i] > ema_50_aligned[i]:
+                # Long: price breaks above R4 in uptrend
+                if close[i] > camarilla_r4_aligned[i] and close[i] > ema_34_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: close breaks below Donchian lower in downtrend
-                elif close[i] < donchian_lower[i] and close[i] < ema_50_aligned[i]:
+                # Short: price breaks below S3 in downtrend
+                elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian middle
-            if close[i] < donchian_middle[i]:
+            # Long exit: price reverts to VWAP or opposite signal
+            if close[i] <= vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian middle
-            if close[i] > donchian_middle[i]:
+            # Short exit: price reverts to VWAP or opposite signal
+            if close[i] >= vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -90,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3S4_Breakout_1dEMA34_VWAPExit_v1"
+timeframe = "6h"
 leverage = 1.0
