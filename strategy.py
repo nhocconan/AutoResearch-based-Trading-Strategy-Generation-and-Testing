@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams %R Extreme + 12h EMA50 Trend Filter + Volume Spike.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 12h EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
-- Entry: Long when Williams %R(14) crosses above -20 (oversold bounce) AND price > 12h EMA50 AND volume > 2.0 * 4h volume MA(20);
-         Short when Williams %R(14) crosses below -80 (overbought rejection) AND price < 12h EMA50 AND volume > 2.0 * 4h volume MA(20).
-- Exit: Long exits when Williams %R(14) crosses below -80; Short exits when Williams %R(14) crosses above -20.
-- Signal size: 0.25 discrete to balance capture and fee control.
-- Williams %R captures mean reversion in overextended moves; EMA50 filters higher-timeframe trend; volume spike confirms conviction.
-- Works in bull (buying dips in uptrend) and bear (selling rallies in downtrend) with reduced whipsaws.
+Hypothesis: 1h ADX(14) Trend Strength + 4h Donchian(20) Breakout + Volume Spike.
+- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
+- HTF: 4h Donchian(20) for trend direction (breakout above/below 20-period channel).
+- Entry: Long when price breaks above 4h Donchian upper band AND 1h ADX > 25 AND 1h volume > 1.5 * 1h volume MA(20);
+         Short when price breaks below 4h Donchian lower band AND 1h ADX > 25 AND 1h volume > 1.5 * 1h volume MA(20).
+- Exit: Long exits when price crosses below 4h Donchian middle band; Short exits when price crosses above 4h Donchian middle band.
+- Signal size: 0.20 discrete to minimize fee churn.
+- Session filter: 08:00-20:00 UTC to avoid low-volume off-hours noise.
+- ADX filters for trending markets only, reducing whipsaws in chop.
+- Donchian breakouts capture momentum; volume spike confirms conviction.
+- Works in bull (breakouts in uptrend) and bear (breakdowns in downtrend).
 """
 
 import numpy as np
@@ -26,87 +28,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h Donchian(20) channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Align EMA50 to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Align Donchian channels to 1h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
     
-    # Calculate Williams %R(14) on 4h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 1h ADX(14)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
-    # Get 4h data for volume MA(20)
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    tr14 = wilder_smooth(tr, 14)
+    plus_dm14 = wilder_smooth(plus_dm, 14)
+    minus_dm14 = wilder_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    divisor = np.where(tr14 == 0, 1, tr14)
+    plus_di14 = 100 * plus_dm14 / divisor
+    minus_di14 = 100 * minus_dm14 / divisor
+    dx = np.where((plus_di14 + minus_di14) == 0, 0, 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14))
+    adx = wilder_smooth(dx, 14)
+    
+    # Calculate 1h volume MA(20)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(14, 20, 50)  # Williams %R needs 14, volume MA needs 20, EMA50 needs 50
+    start_idx = max(20, 20, 14+14)  # Donchian needs 20, volume MA needs 20, ADX needs ~28
+    
+    # Precompute session filter (08:00-20:00 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma_4h[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or 
+            np.isnan(adx[i]) or 
+            np.isnan(vol_ma[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_williams_r = williams_r[i]
+        curr_adx = adx[i]
         curr_volume = volume[i]
         
-        # Previous Williams %R for crossover detection
-        prev_williams_r = williams_r[i-1]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = curr_adx > 25
         
-        # Trend filter from 12h EMA50
-        uptrend = curr_close > ema_50_aligned[i]
-        downtrend = curr_close < ema_50_aligned[i]
-        
-        # Volume confirmation: 2.0x threshold
-        vol_confirm = curr_volume > 2.0 * vol_ma_4h[i]
+        # Volume confirmation: 1.5x threshold
+        vol_confirm = curr_volume > 1.5 * vol_ma[i]
         
         if position == 0:
             # Check for entry signals
-            if uptrend and vol_confirm:
-                # Long: Williams %R crosses above -20 (oversold bounce)
-                if prev_williams_r <= -20 and curr_williams_r > -20:
-                    signals[i] = 0.25
+            if strong_trend and vol_confirm:
+                # Long: price breaks above 4h Donchian upper band
+                if curr_close > donchian_high_aligned[i]:
+                    signals[i] = 0.20
                     position = 1
-            elif downtrend and vol_confirm:
-                # Short: Williams %R crosses below -80 (overbought rejection)
-                if prev_williams_r >= -80 and curr_williams_r < -80:
-                    signals[i] = -0.25
+                # Short: price breaks below 4h Donchian lower band
+                elif curr_close < donchian_low_aligned[i]:
+                    signals[i] = -0.20
                     position = -1
         elif position == 1:
-            # Long position: exit when Williams %R crosses below -80
-            if prev_williams_r > -80 and curr_williams_r <= -80:
+            # Long position: exit when price crosses below 4h Donchian middle band
+            if curr_close < donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short position: exit when Williams %R crosses above -20
-            if prev_williams_r < -20 and curr_williams_r >= -20:
+            # Short position: exit when price crosses above 4h Donchian middle band
+            if curr_close > donchian_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_WilliamsR_Extreme_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_ADX_DonchianBreakout_Volume_SessionFilter_v1"
+timeframe = "1h"
 leverage = 1.0
