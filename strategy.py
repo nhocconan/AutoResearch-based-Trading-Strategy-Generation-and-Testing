@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike filter.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+Hypothesis: 4h Camarilla H3/L3 breakout with 1w EMA50 trend filter and volume spike filter.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
 - HTF: 1w EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
 - Camarilla levels from 1d: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low) (intraday resistance/support).
-- Entry: Long when close breaks above H3 AND price > 1w EMA50 AND volume > 2.0 * 12h volume MA(20);
-         Short when close breaks below L3 AND price < 1w EMA50 AND volume > 2.0 * 12h volume MA(20).
+- Entry: Long when close breaks above H3 AND price > 1w EMA50 AND volume > 2.0 * 4h volume MA(20);
+         Short when close breaks below L3 AND price < 1w EMA50 AND volume > 2.0 * 4h volume MA(20).
 - Exit: ATR-based trailing stop (2.0 * ATR(14)) from highest high/lowest low since entry.
 - Signal size: 0.25 discrete to control fee drag.
 - Designed to capture momentum in both bull (longs) and bear (shorts) markets with strict entry conditions.
@@ -48,10 +48,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA50 for trend filter
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ATR(14) for 12h timeframe
+    # Calculate ATR(14) for 4h timeframe
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -59,8 +61,8 @@ def generate_signals(prices):
     tr = np.concatenate([[high[0] - low[0]], tr])  # first TR is high-low
     atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate volume MA(20) for 12h timeframe
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume MA(20) for 4h timeframe
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,7 +78,7 @@ def generate_signals(prices):
         if (np.isnan(ema_50_aligned[i]) or 
             np.isnan(h3_aligned[i]) or 
             np.isnan(l3_aligned[i]) or 
-            np.isnan(vol_ma_12h[i]) or 
+            np.isnan(vol_ma_4h[i]) or 
             np.isnan(atr14[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -93,7 +95,7 @@ def generate_signals(prices):
         curr_atr = atr14[i]
         
         # Volume confirmation: 2.0x threshold for balanced entry frequency
-        vol_confirm = curr_volume > 2.0 * vol_ma_12h[i]
+        vol_confirm = curr_volume > 2.0 * vol_ma_4h[i]
         
         if position == 0:
             # Check for entry signals
@@ -145,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
