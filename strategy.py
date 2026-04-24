@@ -1,40 +1,39 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume spike confirmation.
-- Primary timeframe: 4h for execution, HTF: 12h for HMA trend.
-- Donchian channels calculated from 20-period high/low on 4h.
-- Entry: Long when price breaks above upper Donchian with volume spike and close > 12h HMA21 (uptrend).
-         Short when price breaks below lower Donchian with volume spike and close < 12h HMA21 (downtrend).
-- Exit: When price returns to the opposite Donchian level (mean reversion) or ATR-based stoploss.
-- Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
-- Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+Hypothesis: 1h session-filtered Camarilla H3/L3 breakout with 4h EMA50 trend and volume spike confirmation.
+- Primary timeframe: 1h for execution, HTF: 4h for EMA trend and 1d for Camarilla pivot levels.
+- Camarilla pivot levels calculated from previous 1d OHLC (updated daily).
+- Entry: Long when price breaks above H3 with volume spike and close > 4h EMA50 (uptrend).
+         Short when price breaks below L3 with volume spike and close < 4h EMA50 (downtrend).
+- Exit: When price returns to the Camarilla R3/S3 levels (mean reversion edge).
+- Session filter: Only trade between 08:00-20:00 UTC to avoid low-volume Asian session noise.
+- Discrete signal size: 0.20 to limit drawdown and reduce fee churn.
+- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_hma(series, period):
-    """Calculate Hull Moving Average"""
-    if len(series) < period:
-        return np.full_like(series, np.nan, dtype=np.float64)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    wma_half = pd.Series(series).ewm(span=half_period, adjust=False, min_periods=half_period).mean()
-    # WMA of full period
-    wma_full = pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean()
-    # Raw HMA
-    raw_hma = 2 * wma_half - wma_full
-    # Final HMA
-    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean()
-    return hma.values
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given OHLC"""
+    range_val = high - low
+    if range_val == 0:
+        return close, close, close, close, close, close, close, close
+    camarilla_close = close
+    r3 = camarilla_close + range_val * 1.1 / 4
+    r2 = camarilla_close + range_val * 1.1 / 6
+    r1 = camarilla_close + range_val * 1.1 / 12
+    s1 = camarilla_close - range_val * 1.1 / 12
+    s2 = camarilla_close - range_val * 1.1 / 6
+    s3 = camarilla_close - range_val * 1.1 / 4
+    h3 = camarilla_close + range_val * 1.1 / 2
+    l3 = camarilla_close - range_val * 1.1 / 2
+    return r3, r2, r1, s1, s2, s3, h3, l3
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -43,44 +42,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Pre-compute session hours (08-20 UTC) for filtering
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 1d data for Camarilla levels (updated once per day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h HMA21 for trend filter
-    hma_21 = calculate_hma(df_12h['close'], 21)
+    # Calculate Camarilla levels for each 1d bar
+    r3_1d = np.full(len(df_1d), np.nan)
+    r2_1d = np.full(len(df_1d), np.nan)
+    r1_1d = np.full(len(df_1d), np.nan)
+    s1_1d = np.full(len(df_1d), np.nan)
+    s2_1d = np.full(len(df_1d), np.nan)
+    s3_1d = np.full(len(df_1d), np.nan)
+    h3_1d = np.full(len(df_1d), np.nan)
+    l3_1d = np.full(len(df_1d), np.nan)
     
-    # Align 12h HMA to 4h
-    hma_21_aligned = align_htf_to_ltf(prices, df_12h, hma_21)
+    for i in range(len(df_1d)):
+        r3, r2, r1, s1, s2, s3, h3, l3 = calculate_camarilla(
+            df_1d['high'].iloc[i],
+            df_1d['low'].iloc[i],
+            df_1d['close'].iloc[i]
+        )
+        r3_1d[i] = r3
+        r2_1d[i] = r2
+        r1_1d[i] = r1
+        s1_1d[i] = s1
+        s2_1d[i] = s2
+        s3_1d[i] = s3
+        h3_1d[i] = h3
+        l3_1d[i] = l3
     
-    # Donchian channels (20-period) on 4h
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Align 1d Camarilla levels to 1h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA (on 4h)
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA50 for trend filter
+    ema_50 = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    
+    # Volume confirmation: current volume > 2.0 * 20-period volume MA (on 1h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * volume_ma)
-    
-    # ATR for stoploss (optional - using mean reversion exit instead)
-    # atr_period = 14
-    # tr1 = pd.Series(high).rolling(window=2).max() - pd.Series(low).rolling(window=2).min()
-    # tr2 = abs(pd.Series(high) - pd.Series(close).shift(1))
-    # tr3 = abs(pd.Series(low) - pd.Series(close).shift(1))
-    # tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    # atr = tr.rolling(window=atr_period, min_periods=atr_period).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 20)  # Need enough bars for Donchian and volume MA
+    start_idx = max(50, 20)  # Need enough 4h bars for EMA50 and 20 for volume MA
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(hma_21_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(volume_spike[i])):
+        # Skip if not in trading session or data not ready
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -89,31 +124,31 @@ def generate_signals(prices):
         if position == 0:
             # Check for breakout signals with volume spike and trend filter
             if volume_spike[i]:
-                # Bullish breakout: price > upper Donchian and close > HMA21
-                if close[i] > upper[i] and close[i] > hma_21_aligned[i]:
-                    signals[i] = 0.25
+                # Bullish breakout: price > H3 and close > EMA50
+                if close[i] > h3_aligned[i] and close[i] > ema_50_aligned[i]:
+                    signals[i] = 0.20
                     position = 1
-                # Bearish breakdown: price < lower Donchian and close < HMA21
-                elif close[i] < lower[i] and close[i] < hma_21_aligned[i]:
-                    signals[i] = -0.25
+                # Bearish breakdown: price < L3 and close < EMA50
+                elif close[i] < l3_aligned[i] and close[i] < ema_50_aligned[i]:
+                    signals[i] = -0.20
                     position = -1
         elif position == 1:
-            # Long exit: price returns to lower Donchian (mean reversion)
-            if close[i] <= lower[i]:
+            # Long exit: price returns to R3 (mean reversion)
+            if close[i] <= r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price returns to upper Donchian (mean reversion)
-            if close[i] >= upper[i]:
+            # Short exit: price returns to S3 (mean reversion)
+            if close[i] >= s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hHMA21_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_Breakout_4hEMA50_1dPivot_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
