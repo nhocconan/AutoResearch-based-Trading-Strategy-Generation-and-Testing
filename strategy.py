@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
-- Entry: Long when price breaks above Donchian(20) upper band AND price > 1w EMA50 AND volume > 2.0 * 1d volume MA(20);
-         Short when price breaks below Donchian(20) lower band AND price < 1w EMA50 AND volume > 2.0 * 1d volume MA(20).
-- Exit: ATR-based trailing stop (2.5 * ATR(14)) from highest high/lowest low since entry.
+Hypothesis: 6h Williams %R + 12h EMA50 trend filter with volume spike confirmation.
+- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 12h EMA50 for trend filter (price > EMA50 = uptrend, price < EMA50 = downtrend).
+- Entry: Long when Williams %R(14) crosses above -20 (oversold recovery) AND price > 12h EMA50 AND volume > 2.0 * 6h volume MA(20);
+         Short when Williams %R(14) crosses below -80 (overbought breakdown) AND price < 12h EMA50 AND volume > 2.0 * 6h volume MA(20).
+- Exit: ATR-based trailing stop (2.0 * ATR(14)) from highest high/lowest low since entry.
 - Signal size: 0.25 discrete to control fee drag.
-- Donchian channels provide clear breakout levels based on recent price extremes.
-  Combined with 1w EMA50 trend filter and volume confirmation, this strategy captures
-  strong momentum in both bull and bear markets while avoiding false breakouts.
-  EMA50 on weekly timeframe provides robust trend filtering with less whipsaw.
+- Williams %R identifies momentum extremes; EMA50 trend filter ensures alignment with higher timeframe trend;
+  volume confirmation avoids low-conviction breakouts. This combination works in both bull and bear markets
+  by capturing mean reversion within the prevailing trend.
 """
 
 import numpy as np
@@ -28,27 +27,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Donchian(20) channels for 1d timeframe
-    # Upper band = highest high over last 20 periods
-    # Lower band = lowest low over last 20 periods
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R(14) for 6h timeframe
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Replace division by zero with -50 (neutral)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate volume MA(20) for 1d timeframe
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume MA(20) for 6h timeframe
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR(14) for 1d timeframe
+    # Calculate ATR(14) for 6h timeframe
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -63,14 +64,13 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 20, 14)  # EMA50 needs 50, Donchian needs 20, volume MA needs 20, ATR needs 14
+    start_idx = max(50, 14, 20, 14)  # EMA50 needs 50, Williams %R needs 14, volume MA needs 20, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or 
-            np.isnan(vol_ma_1d[i]) or 
+            np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma_6h[i]) or 
             np.isnan(atr14[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -87,20 +87,20 @@ def generate_signals(prices):
         curr_atr = atr14[i]
         
         # Volume confirmation: 2.0x threshold for strict entry
-        vol_confirm = curr_volume > 2.0 * vol_ma_1d[i]
+        vol_confirm = curr_volume > 2.0 * vol_ma_6h[i]
         
         if position == 0:
             # Check for entry signals
             if vol_confirm:
-                # Long: Price breaks above Donchian upper band AND price > 1w EMA50 (uptrend)
-                if curr_close > highest_20[i] and curr_close > ema_50_aligned[i]:
+                # Long: Williams %R crosses above -20 (recovery from oversold) AND price > 12h EMA50 (uptrend)
+                if williams_r[i] > -20 and williams_r[i-1] <= -20 and curr_close > ema_50_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = curr_close
                     highest_since_entry = curr_close
                     lowest_since_entry = curr_close
-                # Short: Price breaks below Donchian lower band AND price < 1w EMA50 (downtrend)
-                elif curr_close < lowest_20[i] and curr_close < ema_50_aligned[i]:
+                # Short: Williams %R crosses below -80 (breakdown from overbought) AND price < 12h EMA50 (downtrend)
+                elif williams_r[i] < -80 and williams_r[i-1] >= -80 and curr_close < ema_50_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = curr_close
@@ -111,8 +111,8 @@ def generate_signals(prices):
             highest_since_entry = max(highest_since_entry, curr_high)
             lowest_since_entry = min(lowest_since_entry, curr_low)
             
-            # Stoploss: 2.5 * ATR below highest high since entry
-            stoploss = highest_since_entry - 2.5 * curr_atr
+            # Stoploss: 2.0 * ATR below highest high since entry
+            stoploss = highest_since_entry - 2.0 * curr_atr
             if curr_close < stoploss:
                 signals[i] = 0.0
                 position = 0
@@ -126,8 +126,8 @@ def generate_signals(prices):
             highest_since_entry = max(highest_since_entry, curr_high)
             lowest_since_entry = min(lowest_since_entry, curr_low)
             
-            # Stoploss: 2.5 * ATR above lowest low since entry
-            stoploss = lowest_since_entry + 2.5 * curr_atr
+            # Stoploss: 2.0 * ATR above lowest low since entry
+            stoploss = lowest_since_entry + 2.0 * curr_atr
             if curr_close > stoploss:
                 signals[i] = 0.0
                 position = 0
@@ -139,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_12hEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
