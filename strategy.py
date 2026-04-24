@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d ATR volatility filter and volume spike confirmation.
+Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 - Uses Camarilla pivot levels from prior 1d to identify key support/resistance (H3/L3).
 - Breakout above H3 or below L3 with volume > 2x 20-bar average signals institutional participation.
-- Volatility filter: current ATR(14) must be > 0.5x 1d ATR(14) to avoid low-volatility chop.
-- Designed for 4h timeframe to capture medium-term breakouts in both bull and bear markets.
+- Trend filter: price must be above/below 1d EMA34 to align with higher timeframe direction.
+- Designed for 12h timeframe to capture medium-term breakouts in both bull and bear markets.
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 20-50 trades/year (80-200 total over 4 years) to stay fee-efficient.
+- Targets 12-37 trades/year (50-150 total over 4 years) to stay fee-efficient.
 """
 
 import numpy as np
@@ -39,24 +39,13 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 1d ATR14 volatility filter
-    high_low_1d = np.abs(df_1d['high'].values - df_1d['low'].values)
-    high_close_1d = np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'].values[0]], df_1d['close'].values[:-1]]))
-    low_close_1d = np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'].values[0]], df_1d['close'].values[:-1]]))
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # 4h ATR14 for volatility comparison
-    high_low = np.abs(high - low)
-    high_close = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    low_close = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,12 +54,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20, 14)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,28 +67,26 @@ def generate_signals(prices):
         
         # Volume confirmation (> 2x average)
         volume_confirm = volume[i] > 2.0 * vol_ma[i]
-        # Volatility filter: current 4h ATR > 0.5x 1d ATR
-        vol_filter = atr_14[i] > 0.5 * atr_14_1d_aligned[i]
         
         if position == 0:
-            # Long: breakout above H3 AND volume confirmation AND volatility filter
-            if close[i] > camarilla_h3_aligned[i] and volume_confirm and vol_filter:
+            # Long: breakout above H3 AND price above 1d EMA34 AND volume confirmation
+            if close[i] > camarilla_h3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below L3 AND volume confirmation AND volatility filter
-            elif close[i] < camarilla_l3_aligned[i] and volume_confirm and vol_filter:
+            # Short: breakout below L3 AND price below 1d EMA34 AND volume confirmation
+            elif close[i] < camarilla_l3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below L3
-            if close[i] < camarilla_l3_aligned[i]:
+            # Long exit: close below L3 OR price below 1d EMA34
+            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above H3
-            if close[i] > camarilla_h3_aligned[i]:
+            # Short exit: close above H3 OR price above 1d EMA34
+            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dATR_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
