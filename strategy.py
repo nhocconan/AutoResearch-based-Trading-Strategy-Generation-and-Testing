@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian channel breakout with 12h EMA200 trend filter and volume spike confirmation.
-- Uses Donchian(20) channels from 1d timeframe as dynamic support/resistance.
-- Breakout above upper channel with volume > 2.0x 20-bar average = long signal.
-- Breakdown below lower channel with volume > 2.0x 20-bar average = short signal.
-- Trend filter: price must be above/below 12h EMA200 to align with higher timeframe direction.
-- Designed for 4h timeframe to capture medium-term trends with proper channel structure.
-- Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 19-50 trades/year (75-200 total over 4 years) to stay fee-efficient.
-- Combines proven Donchian breakout with 12h trend filter (better than 1d for 4h timeframe).
+Hypothesis: 1h Camarilla H3/L3 breakout with 4h trend filter and volume spike confirmation.
+- Uses Camarilla pivot levels (H3, L3) from 4h timeframe as key support/resistance.
+- Breakout above H3 with volume > 2.0x 20-bar average = long signal.
+- Breakdown below L3 with volume > 2.0x 20-bar average = short signal.
+- Trend filter: price must be above/below 4h EMA20 to align with higher timeframe direction.
+- Designed for 1h timeframe to capture intraday swings with proper pivot structure.
+- Uses discrete position size 0.20 to limit drawdown and reduce fee churn.
+- Targets 15-37 trades/year (60-150 total over 4 years) to stay fee-efficient.
+- Session filter: only trade 08:00-20:00 UTC to avoid low-liquidity periods.
 """
 
 import numpy as np
@@ -24,33 +24,31 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d data ONCE before loop for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # Get 4h data ONCE before loop for Camarilla levels and EMA20 trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian channels for 1d timeframe (20-period high/low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Camarilla pivot levels for 4h timeframe
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Donchian upper = 20-period high, lower = 20-period low
-    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    camarilla_h3 = close_4h + 1.1 * (high_4h - low_4h) / 4
+    camarilla_l3 = close_4h - 1.1 * (high_4h - low_4h) / 4
     
-    # Align Donchian channels to 4h timeframe (wait for 1d bar to close)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    # Align Camarilla levels to 1h timeframe (wait for 4h bar to close)
+    h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
     
-    # Get 12h data ONCE before loop for EMA200 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # 12h EMA200 trend filter
-    close_12h = df_12h['close'].values
-    ema_200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
+    # 4h EMA20 trend filter
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
     # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,12 +57,20 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(200, 20)  # Need enough for EMA200 and Donchian
+    start_idx = max(20, 20)  # Need enough for EMA and volume MA
     
     for i in range(start_idx, n):
+        # Session filter: only trade 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_200_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,31 +82,31 @@ def generate_signals(prices):
         if position == 0:
             # Only trade if volume confirms breakout
             if volume_confirm:
-                # Long: price breaks above upper channel AND above 12h EMA200
-                if close[i] > upper_aligned[i] and close[i] > ema_200_12h_aligned[i]:
-                    signals[i] = 0.25
+                # Long: price breaks above H3 AND above 4h EMA20
+                if close[i] > h3_aligned[i] and close[i] > ema_20_4h_aligned[i]:
+                    signals[i] = 0.20
                     position = 1
-                # Short: price breaks below lower channel AND below 12h EMA200
-                elif close[i] < lower_aligned[i] and close[i] < ema_200_12h_aligned[i]:
-                    signals[i] = -0.25
+                # Short: price breaks below L3 AND below 4h EMA20
+                elif close[i] < l3_aligned[i] and close[i] < ema_20_4h_aligned[i]:
+                    signals[i] = -0.20
                     position = -1
         elif position == 1:
-            # Long exit: price crosses below lower channel OR below 12h EMA200
-            if close[i] < lower_aligned[i] or close[i] < ema_200_12h_aligned[i]:
+            # Long exit: price crosses below L3 OR below 4h EMA20
+            if close[i] < l3_aligned[i] or close[i] < ema_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price crosses above upper channel OR above 12h EMA200
-            if close[i] > upper_aligned[i] or close[i] > ema_200_12h_aligned[i]:
+            # Short exit: price crosses above H3 OR above 4h EMA20
+            if close[i] > h3_aligned[i] or close[i] > ema_20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hEMA200_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_Breakout_4hEMA20_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
