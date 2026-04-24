@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w EMA(34) trend filter and volume spike confirmation.
-- Primary timeframe: 1d targeting 30-100 total trades over 4 years (7-25/year).
-- HTF: 1w EMA(34) for trend filter (defines bull/bear regime on weekly timeframe).
-- Entry: Long when price breaks above Donchian(20) high in bull regime with volume > 2.0 * 1d volume MA(20);
-         Short when price breaks below Donchian(20) low in bear regime with volume > 2.0 * 1d volume MA(20).
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(34) trend filter and volume spike confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d EMA(34) for trend filter (defines bull/bear regime).
+- Entry: Long when price breaks above Donchian(20) high in bull regime with volume > 2.0 * 12h volume MA(20);
+         Short when price breaks below Donchian(20) low in bear regime with volume > 2.0 * 12h volume MA(20).
 - Exit: Price crosses below Donchian(10) high for long or above Donchian(10) low for short.
 - Signal size: 0.25 discrete to balance capture and fee control.
-- Donchian breakouts capture momentum; weekly EMA filter avoids counter-trend trades; volume spike confirms conviction.
+- Donchian breakouts capture momentum; EMA filter avoids counter-trend trades; volume spike confirms conviction.
 - Works in bull (buying breakouts in uptrend) and bear (selling breakdowns in downtrend).
-- Lower trade frequency due to 1d timeframe reduces fee drag while capturing multi-day trends.
+- Uses proper MTF data loading with get_htf_data() called ONCE before loop.
 """
 
 import numpy as np
@@ -27,25 +27,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA calculation (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for volume MA calculation (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Get 1d data for volume MA calculation (same timeframe as primary)
+    # Get 1d data for EMA calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d EMA(34)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1d volume MA(20) for confirmation
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate 12h volume MA(20) for confirmation
+    volume_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,7 +55,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,11 +76,11 @@ def generate_signals(prices):
         donchian_low_10 = np.min(low[lookback_10:i+1])
         
         # Volume confirmation: 2.0x threshold (strict to reduce trades)
-        vol_confirm = curr_volume > 2.0 * vol_ma_1d_aligned[i]
+        vol_confirm = curr_volume > 2.0 * vol_ma_12h_aligned[i]
         
-        # Trend filter: price relative to 1w EMA
-        bull_regime = curr_close > ema_1w_aligned[i]
-        bear_regime = curr_close < ema_1w_aligned[i]
+        # Trend filter: price relative to 1d EMA
+        bull_regime = curr_close > ema_1d_aligned[i]
+        bear_regime = curr_close < ema_1d_aligned[i]
         
         if position == 0:
             # Check for entry signals
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_1wEMA34_Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dEMA34_Trend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
