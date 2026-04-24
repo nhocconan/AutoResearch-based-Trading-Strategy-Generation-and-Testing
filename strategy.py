@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter, volume confirmation, and ATR regime filter.
-- Long when price breaks above Donchian(20) high AND price > 1d EMA50 AND volume > 2.0x 20-period average AND ATR > 0.7x 50-period ATR average.
-- Short when price breaks below Donchian(20) low AND price < 1d EMA50 AND volume > 2.0x 20-period average AND ATR > 0.7x 50-period ATR average.
-- Exit when price crosses the Donchian midpoint (10-period average of high/low) OR price crosses 1d EMA50 in opposite direction.
-- Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Designed for ~20-30 trades/year (80-120 total over 4 years) to stay within fee-efficient range.
-- Combines proven elements: Donchian structure + trend filter + volume/volatility confirmation.
+Hypothesis: 6h Elder Ray (Bull/Bear Power) combined with 1d Alligator (SMAs) filter and volume confirmation.
+- Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+- Alligator uses SMAs (13,8,5) smoothed; aligned teeth (SMA8) acts as dynamic trend filter.
+- Long when Bull Power > 0, price > SMA8 (teeth), and volume > 2.0x 24-period average.
+- Short when Bear Power < 0, price < SMA8 (teeth), and volume > 2.0x 24-period average.
+- Uses discrete position size 0.25 to manage drawdown and reduce fee churn.
+- Volume confirmation ensures conviction; avoids low-momentum false signals.
+- Designed for 12-30 trades/year (50-120 total over 4 years) to stay within fee-efficient range.
+- Combines trend (Alligator) and momentum (Elder Ray) with volume filter for robustness in bull/bear markets.
 """
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,80 +27,82 @@ def generate_signals(prices):
     
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Prior 1d OHLC (completed daily bar)
+    high_1d = df_1d['high'].shift(1).values
+    low_1d = df_1d['low'].shift(1).values
     close_1d = df_1d['close'].shift(1).values
     
-    # Align to 4h timeframe
+    # Align to 6h timeframe
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate EMA13 on 1d close for Elder Ray
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Donchian(20) channels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d_aligned - ema_13_1d_aligned
+    bear_power = low_1d_aligned - ema_13_1d_aligned
     
-    # Volume confirmation: > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Alligator: SMA(13), SMA(8), SMA(5) on 1d close, all smoothed
+    smi_13 = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
+    smi_8 = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    smi_5 = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
     
-    # ATR(14) for volatility regime filter
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Smoothed (alligator jaws/teeth/lips) - additional 3-period SMAs
+    smi_13_smooth = pd.Series(smi_13).rolling(window=3, min_periods=3).mean().values
+    smi_8_smooth = pd.Series(smi_8).rolling(window=3, min_periods=3).mean().values
+    smi_5_smooth = pd.Series(smi_5).rolling(window=3, min_periods=3).mean().values
     
-    # ATR ratio: current ATR / 50-period average (avoid low volatility chop)
-    atr_ma_long = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / np.where(atr_ma_long > 0, atr_ma_long, 1)
+    # Align Alligator components (teeth = SMA8 smoothed is key trend filter)
+    smi_13_aligned = align_htf_to_ltf(prices, df_1d, smi_13_smooth)
+    smi_8_aligned = align_htf_to_ltf(prices, df_1d, smi_8_smooth)  # Teeth
+    smi_5_aligned = align_htf_to_ltf(prices, df_1d, smi_5_smooth)
+    
+    # Volume confirmation: > 2.0x 24-period average
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(lookback, 20, 50, atr_period, 50)
+    start_idx = max(13, 24)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr_ratio[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(smi_8_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation (> 2.0x average) + ATR ratio > 0.7 (avoid low vol)
+        # Volume confirmation (> 2.0x average)
         volume_confirm = volume[i] > 2.0 * vol_ma[i]
-        vol_regime = atr_ratio[i] > 0.7
         
         if position == 0:
-            # Long: Close > Donchian high AND price above 1d EMA50 AND volume confirmation AND vol regime
-            if close[i] > highest_high[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm and vol_regime:
+            # Long: Bull Power > 0 AND price > Alligator teeth (SMA8) AND volume confirmation
+            if bull_power[i] > 0 and close[i] > smi_8_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < Donchian low AND price below 1d EMA50 AND volume confirmation AND vol regime
-            elif close[i] < lowest_low[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm and vol_regime:
+            # Short: Bear Power < 0 AND price < Alligator teeth (SMA8) AND volume confirmation
+            elif bear_power[i] < 0 and close[i] < smi_8_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < Donchian mid OR price crosses below 1d EMA50
-            if close[i] < donchian_mid[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: Bull Power <= 0 OR price crosses below Alligator teeth
+            if bull_power[i] <= 0 or close[i] < smi_8_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > Donchian mid OR price crosses above 1d EMA50
-            if close[i] > donchian_mid[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: Bear Power >= 0 OR price crosses above Alligator teeth
+            if bear_power[i] >= 0 or close[i] > smi_8_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA50_VolumeATR_Filter_v1"
-timeframe = "4h"
+name = "6h_ElderRay_Alligator_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
