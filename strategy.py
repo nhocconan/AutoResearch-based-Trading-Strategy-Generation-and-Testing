@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Williams Alligator with 1d EMA trend filter and volume confirmation.
-- Primary timeframe: 4h for entries/exits.
-- HTF: 1d EMA34 for trend direction (bullish if price > EMA34, bearish if price < EMA34).
-- Alligator Jaw (13-period smoothed median), Teeth (8-period smoothed median), Lips (5-period smoothed median).
-- Volume: Current 4h volume > 1.5 * 20-period volume MA to confirm momentum.
-- Entry: Long when Alligator is bullish (Lips > Teeth > Jaw) AND price > 1d EMA34 AND volume spike.
-         Short when Alligator is bearish (Lips < Teeth < Jaw) AND price < 1d EMA34 AND volume spike.
-- Exit: Opposite Alligator alignment or loss of volume confirmation.
+Hypothesis: 6h Bollinger Band breakout with 1d ATR filter and volume spike confirmation.
+- Primary timeframe: 6h for entries/exits.
+- HTF: 1d ATR (14-period) to filter breakouts (only trade when ATR > 20-period ATR MA).
+- Volume: Current 6h volume > 1.5 * 20-period volume MA to confirm momentum.
+- Entry: Long when price breaks above upper BB(20,2) AND 1d ATR filter bullish AND volume spike.
+         Short when price breaks below lower BB(20,2) AND 1d ATR filter bearish AND volume spike.
+- Exit: Price returns to middle BB (20-period SMA) or loss of volume confirmation.
 - Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-Williams Alligator identifies trending vs ranging markets; works in both bull and bear by filtering with 1d trend.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+BB breakouts capture volatility expansion; ATR filter ensures we trade only in sufficient volatility regimes.
 """
 
 import numpy as np
@@ -28,86 +27,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate median price (typical price) for Alligator
-    median_price = (high + low + close) / 3.0
+    # Calculate Bollinger Bands on 6h
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2.0 * std_20)
+    lower_bb = sma_20 - (2.0 * std_20)
+    middle_bb = sma_20
     
-    # Alligator Jaw: 13-period SMMA of median price (shifted 8 bars ahead)
-    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw_raw, 8)
-    jaw[:8] = np.nan
-    
-    # Alligator Teeth: 8-period SMMA of median price (shifted 5 bars ahead)
-    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth_raw, 5)
-    teeth[:5] = np.nan
-    
-    # Alligator Lips: 5-period SMMA of median price (shifted 3 bars ahead)
-    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips_raw, 3)
-    lips[:3] = np.nan
-    
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for ATR filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
+    # Calculate 1d ATR (14-period)
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
     df_1d_close = df_1d['close'].values
-    ema_34_1d = pd.Series(df_1d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # True Range
+    tr1 = df_1d_high - df_1d_low
+    tr2 = np.abs(df_1d_high - np.roll(df_1d_close, 1))
+    tr3 = np.abs(df_1d_low - np.roll(df_1d_close, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 20-period ATR MA for filter
+    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR filter: 1 if bullish (current ATR > MA), -1 if bearish (current ATR < MA), 0 otherwise
+    atr_filter = np.where(atr_14 > atr_ma_20, 1, np.where(atr_14 < atr_ma_20, -1, 0))
     
     # Calculate 20-period volume MA on 1d
     df_1d_volume = df_1d['volume'].values
-    vol_ma_1d = pd.Series(df_1d_volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = pd.Series(df_1d_volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 4h
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Align HTF indicators to 6h
+    atr_filter_aligned = align_htf_to_ltf(prices, df_1d, atr_filter)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Volume confirmation: current 4h volume > 1.5 * 20-period 1d volume MA (aligned)
-    volume_spike = volume > (1.5 * vol_ma_1d_aligned)
+    # Volume confirmation: current 6h volume > 1.5 * 20-period 1d volume MA (aligned)
+    volume_spike = volume > (1.5 * vol_ma_20_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(13, 8, 5, 34, 20)  # Need enough bars for Alligator and 1d indicators
+    start_idx = max(20, 30)  # Need enough bars for BB and 1d indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
+            np.isnan(atr_filter_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        lips_val = lips[i]
-        teeth_val = teeth[i]
-        jaw_val = jaw[i]
-        ema_val = ema_34_aligned[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        atr_val = atr_filter_aligned[i]
         
         if position == 0:
             # Check for entry signals with volume spike
             if volume_spike[i]:
-                # Bullish: Lips > Teeth > Jaw (Alligator bullish) AND price > 1d EMA34
-                if lips_val > teeth_val > jaw_val and curr_close > ema_val:
+                # Bullish: price breaks above upper BB AND 1d ATR filter bullish
+                if curr_close > upper_bb[i] and atr_val == 1:
                     signals[i] = 0.25
                     position = 1
-                # Bearish: Lips < Teeth < Jaw (Alligator bearish) AND price < 1d EMA34
-                elif lips_val < teeth_val < jaw_val and curr_close < ema_val:
+                # Bearish: price breaks below lower BB AND 1d ATR filter bearish
+                elif curr_close < lower_bb[i] and atr_val == -1:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: Alligator turns bearish OR loss of volume confirmation
-            if not (lips_val > teeth_val > jaw_val) or not volume_spike[i]:
+            # Long exit: price returns to middle BB OR loss of volume confirmation
+            if curr_close <= middle_bb[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator turns bullish OR loss of volume confirmation
-            if not (lips_val < teeth_val < jaw_val) or not volume_spike[i]:
+            # Short exit: price returns to middle BB OR loss of volume confirmation
+            if curr_close >= middle_bb[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -115,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_BollingerBreakout_1dATRFilter_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
