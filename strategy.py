@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Uses 4h timeframe (primary) and 1d HTF for EMA34 trend alignment (proven pattern from DB)
-- Camarilla levels calculated from previous completed 1d bar's OHLC (standard formula)
-- Long when price breaks above R1 AND price > 1d EMA34 (uptrend) AND volume > 2.0 * volume MA(20)
-- Short when price breaks below S1 AND price < 1d EMA34 (downtrend) AND volume > 2.0 * volume MA(20)
-- Exit when price reverts to the Camarilla H3/L3 midpoint (mean reversion structure)
+Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+- Uses 6h timeframe (primary) and 1w HTF for weekly pivot-based trend alignment (novel combination)
+- Weekly pivot levels (PP, R1, S1) calculated from prior completed week's OHLC
+- Long when price breaks above Donchian upper AND price > weekly PP (bullish bias) AND volume > 1.8 * volume MA(20)
+- Short when price breaks below Donchian lower AND price < weekly PP (bearish bias) AND volume > 1.8 * volume MA(20)
+- Exit when price crosses the weekly PP (mean reversion to pivot point)
 - Discrete signal size: 0.25 to minimize fee churn
-- Target: 75-200 total trades over 4 years (19-50/year) as per 4h timeframe recommendation
-- Works in both bull/bear: trend filter avoids counter-trend trades, Camarilla breakouts capture momentum in all regimes
+- Target: 50-150 total trades over 4 years (12-37/year) as per 6h timeframe recommendation
+- Works in both bull/bear: weekly pivot provides structural bias, Donchian breakouts capture momentum with volume confirmation
 """
 
 import numpy as np
@@ -20,118 +20,82 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # Extract price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Shift by 1 to use previous completed 4h bar's OHLC for entry logic
+    # Calculate 6h Donchian levels from previous completed 6h bar's OHLC (lookback=20)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_open = np.roll(open_price, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    prev_open[0] = np.nan
     
-    # Get 1d HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough data for EMA34
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        start_idx = i - lookback
+        end_idx = i  # [start_idx, end_idx-1] = [i-lookback, i-1]
+        if start_idx >= 0 and not (np.isnan(prev_high[start_idx:end_idx]).any() or np.isnan(prev_low[start_idx:end_idx]).any()):
+            upper[i] = np.max(prev_high[start_idx:end_idx])
+            lower[i] = np.min(prev_low[start_idx:end_idx])
+    
+    # Calculate weekly pivot points (PP, R1, S1) from prior completed week's OHLC
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:  # Need at least one weekly bar
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly OHLC
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate Camarilla levels from previous completed 1d bar's OHLC
-    # Standard Camarilla formula based on previous day's range
-    R1 = np.full(n, np.nan)
-    S1 = np.full(n, np.nan)
-    H3 = np.full(n, np.nan)
-    L3 = np.full(n, np.nan)
+    # Weekly pivot: PP = (H + L + C) / 3
+    weekly_pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Align weekly PP to 6h timeframe (wait for weekly bar to close)
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
     
-    for i in range(1, n):
-        # Use previous completed 1d bar's OHLC (we need to map 4h index to 1d index)
-        # Since we're using align_htf_to_ltf later, we'll calculate on 1d then align
-        pass  # Will calculate after getting 1d OHLC
-    
-    # Calculate Camarilla levels on 1d data then align to 4h
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: based on previous 1d bar's OHLC
-    R1_1d = np.full(len(df_1d), np.nan)
-    S1_1d = np.full(len(df_1d), np.nan)
-    H3_1d = np.full(len(df_1d), np.nan)
-    L3_1d = np.full(len(df_1d), np.nan)
-    
-    for i in range(1, len(df_1d)):
-        high_prev = high_1d[i-1]
-        low_prev = low_1d[i-1]
-        close_prev = close_1d[i-1]
-        range_val = high_prev - low_prev
-        
-        if range_val > 0:
-            R1_1d[i] = close_prev + range_val * 1.1 / 12
-            S1_1d[i] = close_prev - range_val * 1.1 / 12
-            H3_1d[i] = close_prev + range_val * 1.1 / 4
-            L3_1d[i] = close_prev - range_val * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    R1 = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1 = align_htf_to_ltf(prices, df_1d, S1_1d)
-    H3 = align_htf_to_ltf(prices, df_1d, H3_1d)
-    L3 = align_htf_to_ltf(prices, df_1d, L3_1d)
-    
-    # Midpoint for exit (between H3 and L3)
-    midpoint = (H3 + L3) / 2.0
-    
-    # Volume confirmation: current volume > 2.0 * 20-period volume MA
+    # Volume confirmation: current volume > 1.8 * 20-period volume MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * volume_ma)
-    
-    # Trend filter: price above/below 1d EMA34
-    uptrend = close > ema_34_1d_aligned
-    downtrend = close < ema_34_1d_aligned
+    volume_confirm = volume > (1.8 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA(20)
+    start_idx = max(lookback, 20)  # Need Donchian lookback and volume MA(20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(midpoint[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(weekly_pp_aligned[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND uptrend AND volume confirmation
-            if close[i] > R1[i] and uptrend[i] and volume_confirm[i]:
+            # Long: price breaks above Donchian upper AND price > weekly PP (bullish bias) AND volume confirmation
+            if close[i] > upper[i] and close[i] > weekly_pp_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND downtrend AND volume confirmation
-            elif close[i] < S1[i] and downtrend[i] and volume_confirm[i]:
+            # Short: price breaks below Donchian lower AND price < weekly PP (bearish bias) AND volume confirmation
+            elif close[i] < lower[i] and close[i] < weekly_pp_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverts to midpoint (H3/L3 midpoint)
-            if close[i] < midpoint[i]:
+            # Long exit: price crosses below weekly PP (mean reversion to pivot)
+            if close[i] < weekly_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverts to midpoint (H3/L3 midpoint)
-            if close[i] > midpoint[i]:
+            # Short exit: price crosses above weekly PP (mean reversion to pivot)
+            if close[i] > weekly_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -139,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPP_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
