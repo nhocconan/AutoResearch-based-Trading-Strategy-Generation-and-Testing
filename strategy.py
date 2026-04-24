@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 1d Bollinger Band width regime filter and volume confirmation.
-- Primary timeframe: 4h for execution, HTF: 1d for volatility regime.
-- Bollinger Band Width (BBW) < 0.05 indicates low volatility (squeeze) → favors mean reversion at Donchian extremes.
-- BBW > 0.10 indicates high volatility (expansion) → favors breakout strategy.
-- In low volatility (BBW < 0.05): Long when price touches lower Donchian AND reverses up (close > low).
-                                 Short when price touches upper Donchian AND reverses down (close < high).
-- In high volatility (BBW > 0.10): Long when price breaks above Donchian(20) upper.
-                                   Short when price breaks below Donchian(20) lower.
-- Exit: Opposite Donchian breakout or regime shift.
-- Volume confirmation: current volume > 1.5 * 20-period volume MA (to avoid false signals).
+Hypothesis: 6h Elder Ray Index with 1d/1w regime filter and volume confirmation.
+- Primary timeframe: 6h for execution, HTF: 1d for Bull/Bear Power EMA trend, 1w for market regime (bull/bear/range).
+- Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13). Measures buying/selling pressure.
+- Regime filter: 1w ADX > 25 and +DI > -DI = bull regime (favor longs), ADX > 25 and -DI > +DI = bear regime (favor shorts), else range.
+- Entry: In bull regime: Long when Bull Power > 0 and rising (Bull Power > prev) AND volume > 1.5 * 20 MA.
+         In bear regime: Short when Bear Power < 0 and falling (Bear Power < prev) AND volume > 1.5 * 20 MA.
+         In range: Mean reversion at Bollinger Bands (20,2) - Long at lower band reversal, Short at upper band reversal.
+- Volume confirmation: current volume > 1.5 * 20-period volume MA to avoid false signals.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-- Works in both bull and bear markets: mean reversion in ranging/low vol, breakout in high vol expansion.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+- Works in bull/bear via regime adaptation, and range via mean reversion.
 """
 
 import numpy as np
@@ -21,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -30,29 +28,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Band Width
+    # Get 1d data for EMA13 (Elder Ray)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Bollinger Band Width (20, 2) on 1d
-    close_1d = pd.Series(df_1d['close'])
-    basis = close_1d.ewm(span=20, adjust=False, min_periods=20).mean().values
-    dev = 2 * close_1d.ewm(span=20, adjust=False, min_periods=20).std().values
-    upper = basis + dev
-    lower = basis - dev
-    bbw = (upper - lower) / basis  # Band width as ratio
+    # Get 1w data for ADX regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Align 1d BBW to 4h
-    bbw_aligned = align_htf_to_ltf(prices, df_1d, bbw)
+    # Calculate EMA(13) on 1d close for Elder Ray
+    ema_13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Donchian channels (20-period) on 4h
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = df_1d['high'].values - ema_13
+    bear_power = df_1d['low'].values - ema_13
+    
+    # Align 1d Elder Ray to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Calculate ADX (14-period) on 1w for regime
+    # True Range
+    tr1 = pd.Series(df_1w['high']).diff().abs()
+    tr2 = (pd.Series(df_1w['high']) - pd.Series(df_1w['low'].shift())).abs()
+    tr3 = (pd.Series(df_1w['low']) - pd.Series(df_1w['close'].shift())).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = pd.Series(df_1w['high']).diff()
+    down_move = -pd.Series(df_1w['low']).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1w ADX and DI to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1w, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1w, minus_di)
+    
+    # Bollinger Bands (20,2) on 6h for range regime mean reversion
     lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    bb_mid = pd.Series(close).rolling(window=lookback, min_periods=lookback).mean().values
+    bb_std = pd.Series(close).rolling(window=lookback, min_periods=lookback).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
     
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 4h)
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 6h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * volume_ma)
     
@@ -60,55 +95,70 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(30, lookback, 20)  # Need enough 1d bars for BBW and lookback for Donchian
+    start_idx = max(30, lookback, 20)  # Need enough bars for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bbw_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i]) or
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bbw_val = bbw_aligned[i]
+        # Determine regime from 1w ADX and DI
+        adx_val = adx_aligned[i]
+        plus_di_val = plus_di_aligned[i]
+        minus_di_val = minus_di_aligned[i]
+        
+        if adx_val > 25 and plus_di_val > minus_di_val:
+            regime = 'bull'  # bull trend
+        elif adx_val > 25 and minus_di_val > plus_di_val:
+            regime = 'bear'  # bear trend
+        else:
+            regime = 'range'  # ranging market
+        
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
         prev_close = close[i-1]
+        prev_bull = bull_power_aligned[i-1] if i > 0 else 0
+        prev_bear = bear_power_aligned[i-1] if i > 0 else 0
         
         if position == 0:
-            # Check for entry signals
+            # Check for entry signals based on regime
             if volume_spike[i]:
-                if bbw_val > 0.10:  # High volatility: breakout strategy
-                    # Bullish breakout: price closes above upper Donchian
-                    if curr_close > highest_high[i]:
+                if regime == 'bull':
+                    # Long when Bull Power > 0 and rising (strong buying pressure)
+                    if bull_power_aligned[i] > 0 and bull_power_aligned[i] > prev_bull:
                         signals[i] = 0.25
                         position = 1
-                    # Bearish breakout: price closes below lower Donchian
-                    elif curr_close < lowest_low[i]:
+                elif regime == 'bear':
+                    # Short when Bear Power < 0 and falling (strong selling pressure)
+                    if bear_power_aligned[i] < 0 and bear_power_aligned[i] < prev_bear:
                         signals[i] = -0.25
                         position = -1
-                elif bbw_val < 0.05:  # Low volatility: mean reversion at extremes
-                    # Long when price touches lower Donchian and shows reversal (close > low)
-                    if curr_low <= lowest_low[i] and curr_close > curr_low:
+                else:  # range regime
+                    # Mean reversion at Bollinger Bands
+                    # Long when price touches lower band and reverses up
+                    if curr_low <= bb_lower[i] and curr_close > curr_low:
                         signals[i] = 0.25
                         position = 1
-                    # Short when price touches upper Donchian and shows reversal (close < high)
-                    elif curr_high >= highest_high[i] and curr_close < curr_high:
+                    # Short when price touches upper band and reverses down
+                    elif curr_high >= bb_upper[i] and curr_close < curr_high:
                         signals[i] = -0.25
                         position = -1
-                # In between BBW values: no clear regime, stay flat
         elif position == 1:
-            # Long exit: price closes below Donchian mid OR regime shifts to low volatility (favor mean reversion)
-            if curr_close < donchian_mid[i] or bbw_val < 0.05:
+            # Long exit: Bull Power turns negative OR regime shifts to bear
+            if bull_power_aligned[i] <= 0 or regime == 'bear':
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above Donchian mid OR regime shifts to low volatility
-            if curr_close > donchian_mid[i] or bbw_val < 0.05:
+            # Short exit: Bear Power turns positive OR regime shifts to bull
+            if bear_power_aligned[i] >= 0 or regime == 'bull':
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dBBWidthRegime_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_ElderRay_1d1wRegime_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
