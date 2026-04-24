@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume spike confirmation.
-- Uses Camarilla pivot levels (H3, L3) from prior completed 1d candles.
-- Breakout above H3 or below L3 with volume > 2.0x 20-bar average signals strong momentum.
-- Trend filter: price must be above/below 1d EMA50 to align with higher timeframe direction.
-- Designed for 12h timeframe to capture medium-term breakouts in both bull and bear markets.
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and choppiness regime filter.
+- Uses Camarilla pivot levels (H3, L3) from prior completed 1d candles for stronger breakouts.
+- Volume confirmation: current volume > 2.0x 20-bar average to ensure momentum.
+- Regime filter: Choppiness Index(14) < 38.2 to ensure trending market (avoid sideways chop).
+- Designed for 4h timeframe to capture strong trending moves in both bull and bear markets.
 - Uses discrete position size 0.25 to limit drawdown and reduce fee churn.
-- Targets 12-37 trades/year (50-150 total over 4 years) to stay fee-efficient.
+- Targets 20-50 trades/year (75-200 total over 4 years) to stay fee-efficient.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for Camarilla pivots and EMA50 trend filter
+    # Get 1d data ONCE before loop for Camarilla pivots and choppiness regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -36,16 +36,27 @@ def generate_signals(prices):
     # Camarilla width
     camarilla_width = (high_1d - low_1d) * 1.1 / 12.0
     # H3 and L3 levels
-    h3_1d = close_1d + camarilla_width * 1.5
-    l3_1d = close_1d - camarilla_width * 1.5
+    h3_1d = close_1d + camarilla_width * 2.618  # H3 = close + width * 2.618
+    l3_1d = close_1d - camarilla_width * 2.618  # L3 = close - width * 2.618
     
-    # Align H3 and L3 to 12h timeframe (wait for 1d bar to close)
+    # Align H3 and L3 to 4h timeframe (wait for 1d bar to close)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d Choppiness Index regime filter (trending when < 38.2)
+    # True range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Sum of true range over 14 periods
+    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Choppiness Index
+    chop_1d = 100 * np.log10(tr_sum_14 / (atr_14 * 14)) / np.log10(14)
+    # Align chop to 4h timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # Volume confirmation: > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,12 +65,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 50)
+    start_idx = max(50, 34)
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,26 +78,28 @@ def generate_signals(prices):
         
         # Volume confirmation (> 2.0x average)
         volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Regime filter: trending market (chop < 38.2)
+        trending_regime = chop_1d_aligned[i] < 38.2
         
         if position == 0:
-            # Long: breakout above H3 AND price above 1d EMA50 AND volume confirmation
-            if close[i] > h3_1d_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm:
+            # Long: breakout above H3 AND volume confirmation AND trending regime
+            if close[i] > h3_1d_aligned[i] and volume_confirm and trending_regime:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below L3 AND price below 1d EMA50 AND volume confirmation
-            elif close[i] < l3_1d_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm:
+            # Short: breakout below L3 AND volume confirmation AND trending regime
+            elif close[i] < l3_1d_aligned[i] and volume_confirm and trending_regime:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below L3 OR price below 1d EMA50
-            if close[i] < l3_1d_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: close below L3 OR loss of volume confirmation OR choppy regime
+            if (close[i] < l3_1d_aligned[i] or not volume_confirm or not trending_regime):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above H3 OR price above 1d EMA50
-            if close[i] > h3_1d_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: close above H3 OR loss of volume confirmation OR choppy regime
+            if (close[i] > h3_1d_aligned[i] or not volume_confirm or not trending_regime):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3_L3_Breakout_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3_L3_Breakout_1dVolSpike_ChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
