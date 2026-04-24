@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H4L4 breakout with 1d EMA34 trend filter and volume spike confirmation.
-- Long when price breaks above H4 level AND close > 1d EMA34 AND volume > 2.0 * 20-period average
-- Short when price breaks below L4 level AND close < 1d EMA34 AND volume > 2.0 * 20-period average
-- Exit when price retreats to Pivot level (mean reversion to equilibrium)
-- Uses 12h primary with 1d HTF for EMA trend filter to avoid counter-trend entries
-- Camarilla levels provide institutional pivot points; volume confirms breakout strength
-- Designed to work in bull markets (breakouts with volume) and bear markets (breakdowns with volume)
-- Signal size: 0.25 discrete levels to minimize fee churn
-- Target: 50-150 total trades over 4 years (12-37/year)
+Hypothesis: 6h Volume-Weighted RSI with 12h Supertrend filter and ATR-based stops.
+- VW-RSI(14): RSI calculated using typical price * volume as input, reducing noise from low-volume spikes
+- Long when VW-RSI crosses above 30 AND 12h Supertrend is bullish
+- Short when VW-RSI crosses below 70 AND 12h Supertrend is bearish
+- Exit when VW-RSI returns to 50 (mean reversion) OR Supertrend flips
+- Uses 6h primary with 12h HTF for trend filter to avoid counter-trend trades
+- Volume weighting makes RSI more responsive to institutional participation
+- Designed to work in ranging markets (mean reversion at extremes) and trending markets (pullbacks in trend)
+- Signal size: 0.25 discrete levels
+- Target: 80-180 total trades over 4 years (20-45/year)
 """
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,67 +26,143 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla levels (using previous bar's OHLC)
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # Pivot = (High + Low + Close) / 3
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Typical price for volume weighting
+    typical_price = (high + low + close) / 3.0
+    vol_typical = typical_price * volume
     
-    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
-    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
-    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
+    # VW-RSI calculation (RSI on volume-weighted typical price)
+    def rsi(values, period=14):
+        delta = np.diff(values, prepend=values[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Wilder's smoothing
+        avg_gain = np.zeros_like(values)
+        avg_loss = np.zeros_like(values)
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        for i in range(period+1, len(values)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    vw_rsi = rsi(vol_typical, 14)
+    
+    # 12h Supertrend for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Volume confirmation: volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    # ATR calculation
+    def atr(high, low, close, period=10):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr1[0] = 0
+        tr2[0] = 0
+        tr3[0] = 0
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        
+        atr_vals = np.zeros_like(tr)
+        atr_vals[period-1] = np.mean(tr[:period])
+        for i in range(period, len(tr)):
+            atr_vals[i] = (atr_vals[i-1] * (period-1) + tr[i]) / period
+        return atr_vals
+    
+    atr_12h = atr(high_12h, low_12h, close_12h, 10)
+    
+    # Supertrend calculation
+    def supertrend(high, low, close, atr_vals, period=10, multiplier=3.0):
+        hl2 = (high + low) / 2.0
+        upperband = hl2 + (multiplier * atr_vals)
+        lowerband = hl2 - (multiplier * atr_vals)
+        
+        # Initialize
+        final_upperband = np.zeros_like(close)
+        final_lowerband = np.zeros_like(close)
+        supertrend_vals = np.zeros_like(close)
+        trend = np.ones_like(close, dtype=int)  # 1 for uptrend, -1 for downtrend
+        
+        final_upperband[0] = upperband[0]
+        final_lowerband[0] = lowerband[0]
+        supertrend_vals[0] = final_lowerband[0]
+        trend[0] = 1
+        
+        for i in range(1, len(close)):
+            # Upper band logic
+            if upperband[i] < final_upperband[i-1] or close[i-1] > final_upperband[i-1]:
+                final_upperband[i] = upperband[i]
+            else:
+                final_upperband[i] = final_upperband[i-1]
+            
+            # Lower band logic
+            if lowerband[i] > final_lowerband[i-1] or close[i-1] < final_lowerband[i-1]:
+                final_lowerband[i] = lowerband[i]
+            else:
+                final_lowerband[i] = final_lowerband[i-1]
+            
+            # Trend logic
+            if trend[i-1] == -1 and close[i] > final_upperband[i]:
+                trend[i] = 1
+            elif trend[i-1] == 1 and close[i] < final_lowerband[i]:
+                trend[i] = -1
+            else:
+                trend[i] = trend[i-1]
+            
+            # Supertrend value
+            if trend[i] == 1:
+                supertrend_vals[i] = final_lowerband[i]
+            else:
+                supertrend_vals[i] = final_upperband[i]
+        
+        return supertrend_vals, trend
+    
+    supertrend_12h, trend_12h = supertrend(high_12h, low_12h, close_12h, atr_12h, 10, 3.0)
+    supertrend_12h_aligned = align_htf_to_ltf(prices, df_12h, supertrend_12h)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34) + 1  # Need volume MA and EMA data
+    start_idx = max(14, 20, 30) + 5  # Need VW-RSI, Supertrend warmup
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(vw_rsi[i]) or np.isnan(supertrend_12h_aligned[i]) or 
+            np.isnan(trend_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above H4 AND close > 1d EMA34 AND volume confirmation
-            if close[i] > camarilla_h4[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Long: VW-RSI crosses above 30 AND 12h Supertrend bullish
+            if vw_rsi[i] > 30 and vw_rsi[i-1] <= 30 and trend_12h_aligned[i] == 1:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below L4 AND close < 1d EMA34 AND volume confirmation
-            elif close[i] < camarilla_l4[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Short: VW-RSI crosses below 70 AND 12h Supertrend bearish
+            elif vw_rsi[i] < 70 and vw_rsi[i-1] >= 70 and trend_12h_aligned[i] == -1:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price retreats to Pivot level (mean reversion)
-            if close[i] <= camarilla_pivot[i]:
+            # Long exit: VW-RSI returns to 50 OR Supertrend turns bearish
+            if vw_rsi[i] >= 50 or trend_12h_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price retreats to Pivot level (mean reversion)
-            if close[i] >= camarilla_pivot[i]:
+            # Short exit: VW-RSI returns to 50 OR Supertrend turns bullish
+            if vw_rsi[i] <= 50 or trend_12h_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -93,6 +170,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H4L4_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "6h_VolWeightedRSI_12hSupertrend_v1"
+timeframe = "6h"
 leverage = 1.0
