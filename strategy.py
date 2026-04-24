@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-- Primary timeframe: 4h for lower trade frequency and reduced fee drag.
-- HTF: 12h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
-- Volume: Current 4h volume > 2.0 * 20-period volume MA to capture institutional interest.
-- Donchian Channel: 20-period high/low for breakout signals.
-- Entry: Long when price breaks above Donchian(20) high AND 12h EMA50 bullish AND volume spike.
-         Short when price breaks below Donchian(20) low AND 12h EMA50 bearish AND volume spike.
-- Exit: Opposite Donchian breakout (price < Donchian(20) low for long, price > Donchian(20) high for short).
-- Signal size: 0.25 discrete to balance profit potential and drawdown control.
-- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-This strategy captures strong momentum moves in the direction of the higher timeframe trend,
-with volume confirmation to filter false breakouts. Works in both bull and bear markets by
-only taking trades aligned with the 12h trend.
+Hypothesis: 1h Bollinger Band squeeze breakout with 4h trend filter and volume spike.
+- Primary timeframe: 1h for precise entry timing on breakouts.
+- HTF: 4h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Bollinger Bands: 20-period, 2.0 std dev on 1h. Squeeze = BB width < 20th percentile of last 50 bars.
+- Volume: Current 1h volume > 1.5 * 20-period volume MA to confirm breakout strength.
+- Entry: Long when price breaks above upper BB AND 4h EMA50 bullish AND BB squeeze AND volume spike.
+         Short when price breaks below lower BB AND 4h EMA50 bearish AND BB squeeze AND volume spike.
+- Exit: Opposite band touch (long exits at lower BB, short exits at upper BB) or loss of trend/volume.
+- Signal size: 0.20 discrete to limit drawdown and reduce fee churn.
+- Session filter: Only trade between 08:00-20:00 UTC to avoid low-liquidity periods.
+- Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+This strategy captures explosive moves after low-volatility consolidation, filtered by 4h trend to avoid
+counter-trend breakouts, with volume confirmation ensuring institutional participation. Works in both bull
+and bear markets by only taking breakout trades in the direction of the 4h trend.
 """
 
 import numpy as np
@@ -30,40 +31,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian Channel (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1h Bollinger Bands (20, 2.0)
+    bb_period = 20
+    bb_std = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_stddev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std * bb_stddev)
+    lower_band = sma - (bb_std * bb_stddev)
+    bb_width = upper_band - lower_band
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Bollinger Band squeeze: width < 20th percentile of last 50 bars
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).quantile(0.20).values
+    bb_squeeze = bb_width < bb_width_percentile
+    
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    df_12h_close = df_12h['close'].values
-    ema_12h = pd.Series(df_12h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50
+    df_4h_close = df_4h['close'].values
+    ema_4h = pd.Series(df_4h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 20-period 12h volume MA
-    df_12h_volume = df_12h['volume'].values
-    vol_ma_12h = pd.Series(df_12h_volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period 4h volume MA
+    df_4h_volume = df_4h['volume'].values
+    vol_ma_4h = pd.Series(df_4h_volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 4h
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # Align HTF indicators to 1h
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
-    # Volume confirmation: current 4h volume > 2.0 * 20-period 12h volume MA (aligned)
-    volume_spike = volume > (2.0 * vol_ma_12h_aligned)
+    # Volume confirmation: current 1h volume > 1.5 * 20-period 4h volume MA (aligned)
+    volume_spike = volume > (1.5 * vol_ma_4h_aligned)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 20)  # Need enough bars for Donchian, EMA50, and volume MA
+    start_idx = max(50, 20, 20)  # Need enough bars for EMA50, BB, and volume MA
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(bb_squeeze[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,36 +87,40 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_high = high[i]
         curr_low = low[i]
-        ema_val = ema_12h_aligned[i]
+        bb_squeezed = bb_squeeze[i]
+        vol_spike = volume_spike[i]
+        ema_val = ema_4h_aligned[i]
+        upper_bb = upper_band[i]
+        lower_bb = lower_band[i]
         
         if position == 0:
-            # Check for entry signals with volume spike
-            if volume_spike[i]:
-                # Bullish: price breaks above Donchian high AND 12h EMA50 bullish (close > EMA)
-                if curr_high > highest_20[i] and curr_close > ema_val:
-                    signals[i] = 0.25
+            # Check for entry signals with BB squeeze, volume spike, and session filter
+            if bb_squeezed and vol_spike:
+                # Bullish breakout: price breaks above upper BB AND 4h EMA50 bullish (close > EMA)
+                if curr_close > upper_bb and curr_close > ema_val:
+                    signals[i] = 0.20
                     position = 1
-                # Bearish: price breaks below Donchian low AND 12h EMA50 bearish (close < EMA)
-                elif curr_low < lowest_20[i] and curr_close < ema_val:
-                    signals[i] = -0.25
+                # Bearish breakout: price breaks below lower BB AND 4h EMA50 bearish (close < EMA)
+                elif curr_close < lower_bb and curr_close < ema_val:
+                    signals[i] = -0.20
                     position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian low
-            if curr_low < lowest_20[i]:
+            # Long exit: price touches lower BB OR loss of BB squeeze OR loss of volume spike OR outside session
+            if curr_low <= lower_bb or not bb_squeezed or not vol_spike or not in_session[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above Donchian high
-            if curr_high > highest_20[i]:
+            # Short exit: price touches upper BB OR loss of BB squeeze OR loss of volume spike OR outside session
+            if curr_high >= upper_bb or not bb_squeezed or not vol_spike or not in_session[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1h_BB_Squeeze_Breakout_4hEMA50_Trend_VolumeSpike_Session_v1"
+timeframe = "1h"
 leverage = 1.0
