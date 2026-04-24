@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d ATR trend filter and volume confirmation.
-- Primary timeframe: 12h to target 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d ATR(14) for trend filter (bullish if ATR rising, bearish if ATR falling).
-- Camarilla levels: Calculate H3, L3, H4, L4 from prior 1d session.
-- Entry: Long when close crosses above H3 with volume > 1.5x 20-period average AND 1d ATR rising.
-         Short when close crosses below L3 with volume > 1.5x 20-period average AND 1d ATR falling.
-- Exit: ATR-based trailing stop - exit long when price < highest_high_since_entry - 2.0*ATR,
-        exit short when price > lowest_low_since_entry + 2.0*ATR.
-- Signal size: 0.25 discrete to balance return and drawdown.
-- Works in both bull and bear markets by using ATR trend (volatility expansion) as regime filter.
-- Camarilla levels provide institutional support/resistance with high probability breakouts.
+Hypothesis: 1h Camarilla Pivot Breakout with 4h EMA50 trend filter and volume spike confirmation.
+- Primary timeframe: 1h to balance trade frequency and responsiveness.
+- HTF: 4h EMA50 for trend direction (bullish if close > EMA50, bearish if close < EMA50).
+- Camarilla Pivots: Calculate R3, S3 levels from prior 4h bar (HLC of completed 4h candle).
+- Entry: Long when price breaks above R3 with volume > 1.5x 20-bar average AND 4h EMA50 bullish.
+         Short when price breaks below S3 with volume > 1.5x 20-bar average AND 4h EMA50 bearish.
+- Exit: Reverse signal from opposite direction or time-based exit (max 12 bars hold).
+- Signal size: 0.20 discrete to minimize fee churn and control drawdown.
+- Session filter: Only trade 08:00-20:00 UTC to avoid low-volume Asian session noise.
+- Target: 80-120 total trades over 4 years (20-30/year) for 1h timeframe.
+This strategy exploits intraday mean reversion failure points (Camarilla extremes) in the direction of the 4h trend,
+with volume confirmation to avoid false breakouts. Works in both bull and bear markets by only taking trend-aligned trades.
 """
 
 import numpy as np
@@ -19,155 +20,110 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Extract price data
-    close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and ATR trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for HTF trend and Camarilla pivots (prior completed bar)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for trend filter
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
-    tr1 = np.abs(df_1d_high[1:] - df_1d_low[:-1])
-    tr2 = np.abs(df_1d_high[1:] - df_1d_close[:-1])
-    tr3 = np.abs(df_1d_low[1:] - df_1d_close[:-1])
-    tr_1d = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    # ATR trend: rising if current > previous, falling if current < previous
-    atr_rising = np.concatenate([[False], atr_1d[1:] > atr_1d[:-1]])
-    atr_falling = np.concatenate([[False], atr_1d[1:] < atr_1d[:-1]])
+    # Calculate 4h EMA50 for trend filter
+    df_4h_close = df_4h['close'].values
+    ema_4h = pd.Series(df_4h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate prior 1d Camarilla levels (H3, L3, H4, L4)
-    # H4 = Close + 1.5*(High - Low)
-    # L4 = Close - 1.5*(High - Low)
-    # H3 = Close + 1.125*(High - Low)
-    # L3 = Close - 1.125*(High - Low)
-    df_1d_range = df_1d_high - df_1d_low
-    camarilla_h4 = df_1d_close + 1.5 * df_1d_range
-    camarilla_l4 = df_1d_close - 1.5 * df_1d_range
-    camarilla_h3 = df_1d_close + 1.125 * df_1d_range
-    camarilla_l3 = df_1d_close - 1.125 * df_1d_range
+    # Calculate Camarilla levels from prior 4h bar: R3, S3
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3.0
+    typical_price_vals = typical_price.values
     
-    # Align HTF indicators to 12h
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    atr_rising_aligned = align_htf_to_ltf(prices, df_1d, atr_rising)
-    atr_falling_aligned = align_htf_to_ltf(prices, df_1d, atr_falling)
+    # Camarilla R3 = Close + 1.1*(High - Low)
+    # Camarilla S3 = Close - 1.1*(High - Low)
+    camarilla_r3 = df_4h['close'] + 1.1 * (df_4h['high'] - df_4h['low'])
+    camarilla_s3 = df_4h['close'] - 1.1 * (df_4h['high'] - df_4h['low'])
+    r3_vals = camarilla_r3.values
+    s3_vals = camarilla_s3.values
     
-    # Calculate 20-period volume average for volume confirmation
+    # Align Camarilla levels to 1h (use prior completed 4h bar)
+    r3_aligned = align_htf_to_ltf(prices, df_4h, r3_vals)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, s3_vals)
+    
+    # Volume spike: current volume > 1.5x 20-bar average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ma)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
+    bars_since_entry = 0
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 20)  # Need enough bars for ATR and volume MA
+    start_idx = max(50, 20)  # Need EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr_rising_aligned[i]) or np.isnan(atr_falling_aligned[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        curr_volume = volume[i]
-        
+        # Reset bars counter if flat
         if position == 0:
-            # Check for entry signals with volume confirmation
-            # Long: close crosses above H3 AND volume > 1.5x average AND ATR rising
-            if (curr_close > camarilla_h3_aligned[i] and 
-                close[i-1] <= camarilla_h3_aligned[i-1] and
-                curr_volume > 1.5 * vol_ma[i] and
-                atr_rising_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-                entry_price = curr_close
-                highest_since_entry = curr_high
-                lowest_since_entry = curr_low
-            # Short: close crosses below L3 AND volume > 1.5x average AND ATR falling
-            elif (curr_close < camarilla_l3_aligned[i] and 
-                  close[i-1] >= camarilla_l3_aligned[i-1] and
-                  curr_volume > 1.5 * vol_ma[i] and
-                  atr_falling_aligned[i]):
-                signals[i] = -0.25
-                position = -1
-                entry_price = curr_close
-                highest_since_entry = curr_high
-                lowest_since_entry = curr_low
+            bars_since_entry = 0
+        
+        # Check for exit: time-based max hold (12 bars) or reverse signal
+        exit_signal = False
+        if position != 0:
+            bars_since_entry += 1
+            if bars_since_entry >= 12:  # Max 12-hour hold
+                exit_signal = True
+        
+        if position == 0 and not exit_signal:
+            # Check for entry signals (only in session)
+            if in_session[i]:
+                # Long: price > R3 AND volume spike AND 4h EMA50 bullish
+                if close[i] > r3_aligned[i] and vol_spike[i] and close[i] > ema_4h_aligned[i]:
+                    signals[i] = 0.20
+                    position = 1
+                    bars_since_entry = 0
+                # Short: price < S3 AND volume spike AND 4h EMA50 bearish
+                elif close[i] < s3_aligned[i] and vol_spike[i] and close[i] < ema_4h_aligned[i]:
+                    signals[i] = -0.20
+                    position = -1
+                    bars_since_entry = 0
         elif position == 1:
-            # Update highest high since entry
-            highest_since_entry = max(highest_since_entry, curr_high)
-            # ATR trailing stop: exit when price < highest_high - 2.0*ATR
-            # Calculate current ATR for stoploss (using 14-period ATR on 12h data)
-            if i >= 14:
-                tr1 = np.abs(high[i] - low[i])
-                tr2 = np.abs(high[i] - close[i-1])
-                tr3 = np.abs(low[i] - close[i-1])
-                tr = max(tr1, tr2, tr3)
-                # Simplified ATR calculation for stop - using recent volatility
-                if i >= 28:
-                    atr_stop = np.mean([
-                        np.abs(high[i-13:i+1] - low[i-13:i+1]),
-                        np.abs(high[i-13:i+1] - close[i-14:i]),
-                        np.abs(low[i-13:i+1] - close[i-14:i])
-                    ]).mean() if hasattr(np.mean([np.abs(high[i-13:i+1] - low[i-13:i+1]), np.abs(high[i-13:i+1] - close[i-14:i]), np.abs(low[i-13:i+1] - close[i-14:i])]), 'mean') else np.abs(high[i] - low[i])
-                else:
-                    atr_stop = np.abs(high[i] - low[i])
-            else:
-                atr_stop = np.abs(high[i] - low[i])
-            
-            if curr_close < highest_since_entry - 2.0 * atr_stop:
+            # Exit long: time-based or price < S3 (mean reversion)
+            if exit_signal or close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Update lowest low since entry
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            # ATR trailing stop: exit when price > lowest_low + 2.0*ATR
-            if i >= 14:
-                tr1 = np.abs(high[i] - low[i])
-                tr2 = np.abs(high[i] - close[i-1])
-                tr3 = np.abs(low[i] - close[i-1])
-                tr = max(tr1, tr2, tr3)
-                if i >= 28:
-                    atr_stop = np.mean([
-                        np.abs(high[i-13:i+1] - low[i-13:i+1]),
-                        np.abs(high[i-13:i+1] - close[i-14:i]),
-                        np.abs(low[i-13:i+1] - close[i-14:i])
-                    ]).mean() if hasattr(np.mean([np.abs(high[i-13:i+1] - low[i-13:i+1]), np.abs(high[i-13:i+1] - close[i-14:i]), np.abs(low[i-13:i+1] - close[i-14:i])]), 'mean') else np.abs(high[i] - low[i])
-                else:
-                    atr_stop = np.abs(high[i] - low[i])
-            else:
-                atr_stop = np.abs(high[i] - low[i])
-            
-            if curr_close > lowest_since_entry + 2.0 * atr_stop:
+            # Exit short: time-based or price > R3 (mean reversion)
+            if exit_signal or close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dATR_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
