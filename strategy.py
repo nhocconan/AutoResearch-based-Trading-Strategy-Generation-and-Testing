@@ -1,23 +1,36 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Ichimoku Cloud with 1d EMA trend filter and volume confirmation.
-- Primary timeframe: 6h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for EMA trend filter (bull/bear regime) and 1w for Ichimoku baseline confirmation.
-- Ichimoku Components: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (52 displacement).
-- Entry: Long when price > Cloud AND Tenkan > Kijun AND 1d EMA50 > 1d EMA200 AND volume > 1.5 * 20-period average volume.
-         Short when price < Cloud AND Tenkan < Kijun AND 1d EMA50 < 1d EMA200 AND volume > 1.5 * 20-period average volume.
-- Exit: Opposite Ichimoku signal (price crosses into/through Cloud or TK cross reverses).
+Hypothesis: 12h Williams Alligator with 1d ATR regime filter and volume confirmation.
+- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
+- HTF: 1d for ATR-based regime detection (choppy vs trending) and volume spike filter.
+- Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA) of median price.
+- Regime: ATR(10)/ATR(30) ratio > 1.2 = trending (favor Alligator alignment), < 0.8 = choppy (avoid trading).
+- Entry: Long when Lips > Teeth > Jaw (bullish alignment) AND trending regime AND volume > 1.5 * 20-period average volume.
+         Short when Lips < Teeth < Jaw (bearish alignment) AND trending regime AND volume > 1.5 * 20-period average volume.
+- Exit: Opposite Alligator alignment (Lips crosses Teeth) OR regime shifts to choppy (ATR ratio < 0.8).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Works in both bull and bear markets by aligning with 1d EMA trend (EMA50 > EMA200 = bull, < = bear) and only trading Ichimoku signals in that direction, avoiding counter-trend whipsaws.
+- Works in both bull and bear markets by only trading strong trends, avoiding whipsaws in chop.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(data, period):
+    """Smoothed Moving Average (SMMA) - same as Wilder's MA or RMA"""
+    if len(data) < period:
+        return np.full(len(data), np.nan)
+    result = np.full(len(data), np.nan)
+    # First value is simple SMA
+    result[period-1] = np.mean(data[:period])
+    # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+    for i in range(period, len(data)):
+        result[i] = (result[i-1] * (period-1) + data[i]) / period
+    return result
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need sufficient data for Ichimoku calculations
+    if n < 50:  # Need sufficient data for calculations
         return np.zeros(n)
     
     # Extract price data
@@ -26,18 +39,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 and EMA200 for trend filter
+    # Calculate median price for Alligator
+    median_price = (high + low) / 2
+    
+    # Calculate 1d ATR(10) and ATR(30) for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:  # Need sufficient data for EMA200
+    if len(df_1d) < 30:  # Need sufficient data for ATR30
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align 1d EMA trend to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # Align length
+    
+    # ATR(10) and ATR(30)
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
+    
+    # ATR ratio for regime: >1.2 = trending, <0.8 = choppy
+    atr_ratio = atr10 / atr30
+    
+    # Align ATR ratio to 12h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Calculate 1d volume average for confirmation (20-period)
     if len(df_1d) < 20:
@@ -46,43 +75,24 @@ def generate_signals(prices):
     vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    tenkan_sen = (pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values +
-                  pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    kijun_sen = (pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values +
-                 pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    senkou_span_b = ((pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values +
-                      pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values) / 2)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for entry/exit)
-    
-    # The Ichimoku Cloud is between Senkou Span A and Senkou Span B
-    # For simplicity, we'll use the unshifted Senkou Span A/B to represent current cloud
-    # (In practice, the cloud is plotted 26 periods ahead, but for signal generation we use current values)
+    # Calculate Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA of median price
+    jaw = smma(median_price, 13)
+    # Teeth: 8-period SMMA of median price
+    teeth = smma(median_price, 8)
+    # Lips: 5-period SMMA of median price
+    lips = smma(median_price, 5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(period_kijun, period_senkou_b, 200)  # Need 26 for Kijun, 52 for Senkou B, 200 for EMA200
+    start_idx = max(13, 30)  # Need 13 for Jaw, 30 for ATR30
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,56 +101,50 @@ def generate_signals(prices):
         curr_close = close[i]
         curr_volume = volume[i]
         
-        # Trend filter: 1d EMA50 > EMA200 = bullish trend, < = bearish trend
-        bullish_trend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
-        bearish_trend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
+        # Regime filter: only trade in trending markets (ATR ratio > 1.2)
+        trending_regime = atr_ratio_aligned[i] > 1.2
+        # Choppy regime filter: exit if ATR ratio < 0.8
+        choppy_regime = atr_ratio_aligned[i] < 0.8
         
         # Volume confirmation: current volume > 1.5 * 20-period average volume
         volume_confirm = curr_volume > 1.5 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
         
-        # Ichimoku signals
-        # Price above Cloud: close > max(Senkou Span A, Senkou Span B)
-        # Price below Cloud: close < min(Senkou Span A, Senkou Span B)
-        # Tenkan-sen > Kijun-sen = bullish momentum
-        # Tenkan-sen < Kijun-sen = bearish momentum
+        # Alligator alignment conditions
+        lips_above_teeth = lips[i] > teeth[i]
+        teeth_above_jaw = teeth[i] > jaw[i]
+        bullish_alignment = lips_above_teeth and teeth_above_jaw
         
-        cloud_top = max(senkou_span_a[i], senkou_span_b[i])
-        cloud_bottom = min(senkou_span_a[i], senkou_span_b[i])
+        lips_below_teeth = lips[i] < teeth[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
+        bearish_alignment = lips_below_teeth and teeth_below_jaw
         
-        price_above_cloud = curr_close > cloud_top
-        price_below_cloud = curr_close < cloud_bottom
-        
-        tenkan_above_kijun = tenkan_sen[i] > kijun_sen[i]
-        tenkan_below_kijun = tenkan_sen[i] < kijun_sen[i]
-        
-        # Exit conditions: opposite Ichimoku signal
+        # Exit conditions
         if position != 0:
-            # Exit long: price falls below Cloud OR Tenkan crosses below Kijun
-            if position == 1:
-                if (curr_close < cloud_top or tenkan_below_kijun):
+            # Exit if regime turns choppy
+            if choppy_regime:
+                signals[i] = 0.0
+                position = 0
+                continue
+            # Exit long: bullish alignment breaks
+            elif position == 1:
+                if not bullish_alignment:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price rises above Cloud OR Tenkan crosses above Kijun
+            # Exit short: bearish alignment breaks
             elif position == -1:
-                if (curr_close > cloud_bottom or tenkan_above_kijun):
+                if not bearish_alignment:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Ichimoku breakout with trend and volume filters
+        # Entry conditions: Alligator alignment with regime and volume filters
         if position == 0:
-            # Long: price > Cloud AND Tenkan > Kijun AND bullish trend AND volume confirmation
-            long_condition = (price_above_cloud and
-                            tenkan_above_kijun and
-                            bullish_trend and
-                            volume_confirm)
+            # Long: bullish alignment AND trending regime AND volume confirmation
+            long_condition = bullish_alignment and trending_regime and volume_confirm
             
-            # Short: price < Cloud AND Tenkan < Kijun AND bearish trend AND volume confirmation
-            short_condition = (price_below_cloud and
-                             tenkan_below_kijun and
-                             bearish_trend and
-                             volume_confirm)
+            # Short: bearish alignment AND trending regime AND volume confirmation
+            short_condition = bearish_alignment and trending_regime and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -157,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_1dEMATrend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dATRRegime_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
