@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla pivot (H4/L4) breakout with 12h volume confirmation and 1d ATR regime filter.
-- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
-- HTF: 12h for volume confirmation, 1d for Camarilla pivots and ATR regime.
-- Camarilla Pivots: identifies key support/resistance levels from prior 1d range (H4/L4 = strong breakout levels).
-- Entry: Long when price breaks above H4 AND volume > 1.5 * 20-period 12h average volume AND ATR(14) < ATR(50) on 1d (low volatility regime).
-         Short when price breaks below L4 AND volume > 1.5 * 20-period 12h average volume AND ATR(14) < ATR(50) on 1d.
-- Exit: Opposite Camarilla breakout (price crosses back below H4 for longs, above L4 for shorts).
-- Signal size: 0.25 discrete to minimize fee drag.
-- Camarilla H4/L4 breakouts capture strong momentum after testing key levels with higher probability of continuation.
-- Volume confirmation on 12h ensures breakout legitimacy with reduced noise.
+Hypothesis: 1h Camarilla pivot (H3/L3) breakout with 4h volume spike and 1d ATR regime filter.
+- Primary timeframe: 1h targeting 60-150 total trades over 4 years (15-37/year).
+- HTF: 4h for volume confirmation (20-period average), 1d for Camarilla pivot calculation (prior day OHLC) and ATR regime.
+- Camarilla Pivots: identifies key support/resistance levels from prior 1d range.
+- Entry: Long when price breaks above H3 AND volume > 2.0 * 4h average volume AND ATR(14) < ATR(50) on 1d (low volatility regime).
+         Short when price breaks below L3 AND volume > 2.0 * 4h average volume AND ATR(14) < ATR(50) on 1d.
+- Exit: Opposite Camarilla breakout (price crosses back below H3 for longs, above L3 for shorts).
+- Signal size: 0.20 discrete to minimize fee drag.
+- Session filter: 08-20 UTC to avoid low-liquidity hours.
+- Camarilla breakouts capture strong momentum moves after testing key levels.
+- Volume confirmation ensures breakout legitimacy.
 - ATR regime filter avoids high-volatility choppy markets where breakouts fail.
 - Works in both bull and bear markets as it captures volatility expansion after contraction.
 """
@@ -41,7 +42,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivots (H4, L4) from prior 1d OHLC
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Calculate 1d Camarilla pivots (H3, L3) from prior 1d OHLC
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:  # Need at least 2 days for prior day calculation
         return np.zeros(n)
@@ -51,21 +56,21 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Camarilla H4 and L4 levels (strong breakout levels)
-    camarilla_h4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_l4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Camarilla H3 and L3 levels
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align Camarilla levels to 1h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate 12h volume average for confirmation (20-period)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Calculate 4h volume average for confirmation (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    vol_ma_20_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    vol_ma_20_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
     
     # Calculate 1d ATR for regime filter
     if len(df_1d) < 50:
@@ -83,9 +88,16 @@ def generate_signals(prices):
     start_idx = max(20, 50)  # Need 20 for volume MA, 50 for ATR(50)
     
     for i in range(start_idx, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
             np.isnan(atr_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -98,17 +110,17 @@ def generate_signals(prices):
         curr_volume = volume[i]
         prev_close = close[i-1]
         
-        # Exit conditions: price crosses back below H4 for longs, above L4 for shorts
+        # Exit conditions: price crosses back below H3 for longs, above L3 for shorts
         if position != 0:
-            # Exit long: price crosses below H4
+            # Exit long: price crosses below H3
             if position == 1:
-                if curr_close < camarilla_h4_aligned[i]:
+                if curr_close < camarilla_h3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price crosses above L4
+            # Exit short: price crosses above L3
             elif position == -1:
-                if curr_close > camarilla_l4_aligned[i]:
+                if curr_close > camarilla_l3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     continue
@@ -116,30 +128,30 @@ def generate_signals(prices):
         # Entry conditions: Camarilla breakout with volume confirmation and ATR regime filter
         if position == 0:
             # Camarilla breakout signals
-            breakout_up = curr_high >= camarilla_h4_aligned[i] and prev_close < camarilla_h4_aligned[i-1]
-            breakout_down = curr_low <= camarilla_l4_aligned[i] and prev_close > camarilla_l4_aligned[i-1]
+            breakout_up = curr_high >= camarilla_h3_aligned[i] and prev_close < camarilla_h3_aligned[i-1]
+            breakout_down = curr_low <= camarilla_l3_aligned[i] and prev_close > camarilla_l3_aligned[i-1]
             
-            # Volume confirmation: current volume > 1.5 * 20-period average volume (aligned)
-            volume_confirm = curr_volume > 1.5 * vol_ma_20_12h_aligned[i] if not np.isnan(vol_ma_20_12h_aligned[i]) else False
+            # Volume confirmation: current volume > 2.0 * 4h average volume (aligned)
+            volume_confirm = curr_volume > 2.0 * vol_ma_20_4h_aligned[i] if not np.isnan(vol_ma_20_4h_aligned[i]) else False
             
-            # ATR regime filter: ATR(14) < ATR(50) (low volatility regime)
+            # ATR regime filter: ATR(14) < ATR(50) on 1d (low volatility regime)
             atr_regime = atr_14_1d_aligned[i] < atr_50_1d_aligned[i]
             
             if breakout_up and volume_confirm and atr_regime:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif breakout_down and volume_confirm and atr_regime:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.25
+            signals[i] = -0.20
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_12hVolumeConfirm_1dATRRegime_v1"
-timeframe = "4h"
+name = "1h_Camarilla_H3L3_Breakout_4hVolumeSpike_1dATRRegime_v1"
+timeframe = "1h"
 leverage = 1.0
