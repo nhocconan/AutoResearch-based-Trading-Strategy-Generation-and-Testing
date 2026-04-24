@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams %R with 1d EMA trend filter and volume confirmation.
-- Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
-- Long when Williams %R crosses above -80 (oversold bounce) AND price > 1d EMA50 (uptrend)
-- Short when Williams %R crosses below -20 (overbought rejection) AND price < 1d EMA50 (downtrend)
-- Volume confirmation: current volume > 1.5 * 20-period average volume
-- Exit when Williams %R crosses -50 (mean reversion) or trend fails
-- Designed to capture mean reversion in extremes with trend alignment
-- Signal size: 0.25 discrete levels to minimize fee churn
-- Target: 50-150 total trades over 4 years (12-37/year)
+Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and ATR-based volatility filter.
+- Long when price breaks above Donchian(20) high AND price > 12h EMA50 AND ATR(14) > 0.5 * ATR(50)
+- Short when price breaks below Donchian(20) low AND price < 12h EMA50 AND ATR(14) > 0.5 * ATR(50)
+- Exit when price crosses the 10-period EMA (on 4h) or volatility drops below threshold
+- Uses discrete position sizing (0.25) to minimize fee churn
+- Target: 75-200 total trades over 4 years (19-50/year)
 """
 
 import numpy as np
@@ -25,62 +22,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R(14) calculation
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    # Calculate Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 10-period EMA for exit (on 4h)
+    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Trend filter
-    uptrend = close > ema_50_1d_aligned
-    downtrend = close < ema_50_1d_aligned
+    # Trend filter: price above/below 12h EMA50
+    uptrend = close > ema_50_12h_aligned
+    downtrend = close < ema_50_12h_aligned
     
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # ATR-based volatility filter: ATR(14) > 0.5 * ATR(50)
+    # True Range calculation
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    volatility_filter = atr_14 > (0.5 * atr_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(14, 50, 20)
+    start_idx = max(20, 10, 50, 50)  # Donchian, EMA10, ATRs, 12h EMA50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_10[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(volatility_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Williams %R crosses above -80 AND uptrend AND volume confirmation
-            if williams_r[i] > -80 and williams_r[i-1] <= -80 and uptrend[i] and volume_filter[i]:
+            # Long: price breaks above Donchian high AND uptrend AND sufficient volatility
+            if close[i] > donchian_high[i] and uptrend[i] and volatility_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R crosses below -20 AND downtrend AND volume confirmation
-            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and downtrend[i] and volume_filter[i]:
+            # Short: price breaks below Donchian low AND downtrend AND sufficient volatility
+            elif close[i] < donchian_low[i] and downtrend[i] and volatility_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Williams %R crosses above -50 OR trend fails
-            if williams_r[i] >= -50 or not uptrend[i]:
+            # Long exit: price crosses below EMA10 OR volatility drops
+            if close[i] < ema_10[i] or not volatility_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Williams %R crosses below -50 OR trend fails
-            if williams_r[i] <= -50 or not downtrend[i]:
+            # Short exit: price crosses above EMA10 OR volatility drops
+            if close[i] > ema_10[i] or not volatility_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolatilityFilter_v1"
+timeframe = "4h"
 leverage = 1.0
