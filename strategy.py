@@ -1,123 +1,112 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation using 1d ATR ratio.
-- Primary timeframe: 4h targeting 100-150 total trades over 4 years (25-38/year).
-- HTF: 1d for ATR volume spike and 12h for EMA trend filter.
-- Entry: Long when price breaks above Donchian(20) high AND ATR ratio > 1.8 AND price > 12h EMA50.
-         Short when price breaks below Donchian(20) low AND ATR ratio > 1.8 AND price < 12h EMA50.
-- Exit: Opposite Donchian breakout OR price crosses 12h EMA50 in opposite direction.
-- Signal size: 0.25 discrete to minimize fee drag while maintaining profit potential.
-- ATR ratio (current ATR/20-period ATR) > 1.8 confirms significant volatility expansion to avoid false breakouts.
-- 12h EMA50 provides trend filter to avoid counter-trend trades.
-- Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-- Estimated trades: ~120 total over 4 years (~30/year) based on volatility breakout frequency with strict filters.
+Hypothesis: 1h RSI mean reversion with 4h EMA50 trend filter and session filter (08-20 UTC).
+- Primary timeframe: 1h targeting 60-120 total trades over 4 years (15-30/year).
+- HTF: 4h for EMA50 trend filter.
+- Entry: Long when RSI(14) < 30 AND price > 4h EMA50 AND session 08-20 UTC.
+         Short when RSI(14) > 70 AND price < 4h EMA50 AND session 08-20 UTC.
+- Exit: RSI crosses back to neutral (40 for long exit, 60 for short exit) OR session end.
+- Signal size: 0.20 discrete to minimize fee drag.
+- RSI mean reversion works in ranging markets; EMA50 filter ensures we trade with the higher timeframe trend.
+- Session filter reduces noise during low-volume hours (20-08 UTC).
+- Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+- Estimated trades: ~90 total over 4 years (~22/year) based on RSI extreme frequency with filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(span=period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def ema(values, period):
     """Calculate Exponential Moving Average."""
     return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def atr(high, low, close, period):
-    """Calculate Average True Range."""
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    true_range[0] = high_low[0]  # First period
-    return pd.Series(true_range).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def donchian_channels(high, low, period):
-    """Calculate Donchian Channels."""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # Calculate 12h trend filter: EMA50
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Calculate 4h trend filter: EMA50
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    ema50_12h = ema(df_12h['close'].values, 50)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h, additional_delay_bars=1)
+    ema50_4h = ema(df_4h['close'].values, 50)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h, additional_delay_bars=1)
     
-    # Calculate 1d ATR for volume spike filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate RSI(14) on 1h
+    rsi_values = rsi(close, 14)
     
-    atr_20 = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 20)
-    atr_current = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 1)
-    atr_ratio = atr_current / (atr_20 + 1e-10)  # Avoid division by zero
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio, additional_delay_bars=1)
-    
-    # Donchian channels on 4h (20-period)
-    donch_hi, donch_lo = donchian_channels(high, low, 20)
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from index where all indicators are ready
-    start_idx = 60  # Need sufficient data for all indicators
+    # Start from index where RSI is ready
+    start_idx = 14
     
     for i in range(start_idx, n):
-        # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+        # Skip if 4h EMA data not ready
+        if np.isnan(ema50_4h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_rsi = rsi_values[i]
+        session_active = in_session[i]
         
-        # Exit conditions: opposite Donchian breakout OR price crosses 12h EMA50 in opposite direction
+        # Exit conditions
         if position != 0:
-            # Exit long: price breaks below Donchian low OR price falls below 12h EMA50
+            # Exit long: RSI crosses above 40 OR session ends
             if position == 1:
-                if curr_close < donch_lo[i] or curr_close < ema50_12h_aligned[i]:
+                if curr_rsi > 40 or not session_active:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above Donchian high OR price rises above 12h EMA50
+            # Exit short: RSI crosses below 60 OR session ends
             elif position == -1:
-                if curr_close > donch_hi[i] or curr_close > ema50_12h_aligned[i]:
+                if curr_rsi < 60 or not session_active:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Donchian breakout with volatility confirmation and trend filter
-        if position == 0:
-            # Long: price breaks above Donchian high AND ATR ratio > 1.8 AND bullish 12h trend
-            if curr_close > donch_hi[i] and atr_ratio_aligned[i] > 1.8 and curr_close > ema50_12h_aligned[i]:
-                signals[i] = 0.25
+        # Entry conditions: RSI extreme with trend filter and session
+        if position == 0 and session_active:
+            # Long: RSI < 30 (oversold) AND bullish 4h trend (price > EMA50)
+            if curr_rsi < 30.0 and curr_close > ema50_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below Donchian low AND ATR ratio > 1.8 AND bearish 12h trend
-            elif curr_close < donch_lo[i] and atr_ratio_aligned[i] > 1.8 and curr_close < ema50_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: RSI > 70 (overbought) AND bearish 4h trend (price < EMA50)
+            elif curr_rsi > 70.0 and curr_close < ema50_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long position: maintain signal
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif position == -1:
             # Short position: maintain signal
-            signals[i] = -0.25
+            signals[i] = -0.20
     
     return signals
 
-name = "4h_DonchianBreakout_1dATR_VolumeSpike_12hEMA50_TrendFilter_v2"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hEMA50_TrendFilter_Session_v1"
+timeframe = "1h"
 leverage = 1.0
