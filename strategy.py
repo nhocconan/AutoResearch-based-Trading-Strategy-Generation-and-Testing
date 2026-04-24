@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
-- Long when price breaks above H3 (75% level) AND close > 1d EMA34 (bullish trend) AND volume > 1.5x ATR(14)*close
-- Short when price breaks below L3 (25% level) AND close < 1d EMA34 (bearish trend) AND volume > 1.5x ATR(14)*close
-- Exit on trend reversal (close crosses EMA34) or price re-enters Camarilla H3-L3 range
-- Uses 12h primary timeframe with 1d HTF to target 50-150 trades over 4 years (12-37/year)
-- Camarilla pivot levels provide high-probability reversal/breakout zones from institutional order flow
-- 1d EMA34 ensures alignment with longer-term trend to avoid whipsaws and counter-trend breakouts
-- ATR-scaled volume filter adapts to volatility, reducing false breakouts in low-volume environments
-- Designed for BTC/ETH with edge in both bull (continuation breakouts) and bear (mean reversion at extremes) markets
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume confirmation.
+- Long when price breaks above Camarilla H3 level AND close > 1d EMA34 (bullish trend)
+- Short when price breaks below Camarilla L3 level AND close < 1d EMA34 (bearish trend)
+- Volume must be > 1.5x ATR(14) * close (volatility-adjusted volume filter)
+- Exit on trend reversal or Camarilla mean reversion (touch L3 for long, H3 for short)
+- Uses 4h primary timeframe with 1d HTF to target 75-200 trades over 4 years (19-50/year)
+- Camarilla levels provide high-probability intraday reversal/breakout points
+- 1d EMA34 ensures alignment with longer-term trend to avoid whipsaws
+- ATR-scaled volume filter adapts to changing volatility regimes
+- Designed for BTC/ETH edge in both bull (breakout continuation) and bear (mean reversion at extremes) markets
 """
 
 import numpy as np
@@ -25,31 +26,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels (based on previous bar)
-    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
-    
-    # Get 1d data ONCE before loop for EMA34 trend filter
+    # Calculate Camarilla pivot levels (using previous day's OHLC, no look-ahead)
+    # For intraday levels, we use daily OHLC from 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d EMA34
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Extract daily OHLC arrays
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Align 1d EMA34 to 12h timeframe
+    # Calculate Camarilla levels for each day
+    # H3 = close + (high - low) * 1.1/4
+    # L3 = close - (high - low) * 1.1/4
+    camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 4
+    camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Get 1d EMA34 trend filter
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for dynamic volume threshold
+    # Calculate ATR(14) for dynamic volume threshold (using 4h data)
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -66,11 +71,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 34, 14) + 1
+    start_idx = max(1, 34, 14) + 1  # Camarilla needs 1d data, EMA34 needs 34, ATR needs 14
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -78,24 +83,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above H3, trend up (close > EMA34), volume confirmation
-            if close[i] > camarilla_h3[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Long: price breaks above Camarilla H3, trend up (close > EMA34), volume confirmation
+            if close[i] > camarilla_h3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below L3, trend down (close < EMA34), volume confirmation
-            elif close[i] < camarilla_l3[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
+            # Short: price breaks below Camarilla L3, trend down (close < EMA34), volume confirmation
+            elif close[i] < camarilla_l3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend reversal OR price re-enters H3-L3 range (mean reversion)
-            if close[i] < ema_34_1d_aligned[i] or (camarilla_l3[i] <= close[i] <= camarilla_h3[i]):
+            # Long exit: price closes below Camarilla L3 (mean reversion) OR trend reverses
+            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend reversal OR price re-enters H3-L3 range (mean reversion)
-            if close[i] > ema_34_1d_aligned[i] or (camarilla_l3[i] <= close[i] <= camarilla_h3[i]):
+            # Short exit: price closes above Camarilla H3 (mean reversion) OR trend reverses
+            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -103,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_1dEMA34_ATRVolConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
