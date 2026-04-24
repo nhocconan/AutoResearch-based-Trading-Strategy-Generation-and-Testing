@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
-- Long when close > upper Donchian(20) AND ATR(14) > 1.5 * ATR(50) (high volatility regime) AND volume > 1.3 * 20-period average
-- Short when close < lower Donchian(20) AND ATR(14) > 1.5 * ATR(50) AND volume > 1.3 * 20-period average
-- Exit when price crosses opposite Donchian band OR ATR(14) < ATR(50) (low volatility regime)
-- Uses 12h primary with 1d HTF for ATR regime filter to avoid whipsaws in low volatility markets
-- Donchian channels provide clear breakout levels; ATR filter ensures trades only in high conviction volatile markets; volume confirms breakout strength
-- Designed to work in both bull (strong upward breaks) and bear (strong downward breaks) markets with volatility filter
-- Signal size: 0.30 discrete levels to balance profit potential and risk management
-- Target: 50-150 total trades over 4 years (12-37/year)
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation.
+- Long when price breaks above Donchian(20) high AND 12h EMA50 is rising AND volume > 2.0 * 20-period average
+- Short when price breaks below Donchian(20) low AND 12h EMA50 is falling AND volume > 2.0 * 20-period average
+- Exit when price touches Donchian(20) midpoint OR volume drops below average
+- Uses 4h primary with 12h HTF for trend filter to avoid counter-trend trades
+- Donchian channels provide clear structure; EMA50 filters trend direction; volume confirms breakout conviction
+- Designed to work in both bull (breakouts with volume) and bear (breakdowns with volume) markets
+- Signal size: 0.25 discrete levels to minimize fee churn
+- Target: 75-200 total trades over 4 years (19-50/year)
 """
 
 import numpy as np
@@ -25,106 +25,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
+    # Calculate Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
-    
-    upper_donchian = rolling_max(high, 20)
-    lower_donchian = rolling_min(low, 20)
-    
-    # Calculate ATR (14-period) for volatility regime filter
-    def calculate_atr(high, low, close, period):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr1[0] = 0
-        tr2[0] = 0
-        tr3[0] = 0
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        
-        atr = np.zeros_like(tr)
-        atr[period-1] = np.mean(tr[:period])
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
-    
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_50 = calculate_atr(high, low, close, 50)
-    
-    # Calculate 1d ATR for regime filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:  # Need enough data for EMA calculation
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    atr_1d_14 = calculate_atr(high_1d, low_1d, close_1d, 14)
-    atr_1d_50 = calculate_atr(high_1d, low_1d, close_1d, 50)
+    # EMA50 slope: rising if current > previous, falling if current < previous
+    ema_50_rising = np.zeros_like(ema_50_12h_aligned, dtype=bool)
+    ema_50_falling = np.zeros_like(ema_50_12h_aligned, dtype=bool)
+    ema_50_rising[1:] = ema_50_12h_aligned[1:] > ema_50_12h_aligned[:-1]
+    ema_50_falling[1:] = ema_50_12h_aligned[1:] < ema_50_12h_aligned[:-1]
     
-    # ATR regime filter: high volatility when short ATR > long ATR * threshold
-    high_vol_regime = atr_1d_14 > (atr_1d_50 * 1.5)
-    low_vol_regime = atr_1d_14 < atr_1d_50
-    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime)
-    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
-    
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50, 20) + 1  # Need Donchian, ATR50, and volume MA data
+    start_idx = max(20, 50) + 1  # Need Donchian20, EMA50 data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or 
-            np.isnan(high_vol_regime_aligned[i]) or np.isnan(low_vol_regime_aligned[i]) or
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above upper Donchian AND high volatility regime AND volume confirmation
-            if close[i] > upper_donchian[i] and high_vol_regime_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.30
+            # Long: price breaks above Donchian high AND EMA50 rising AND volume spike
+            if close[i] > donchian_high[i] and ema_50_rising[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian AND high volatility regime AND volume confirmation
-            elif close[i] < lower_donchian[i] and high_vol_regime_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.30
+            # Short: price breaks below Donchian low AND EMA50 falling AND volume spike
+            elif close[i] < donchian_low[i] and ema_50_falling[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below lower Donchian OR low volatility regime
-            if close[i] < lower_donchian[i] or low_vol_regime_aligned[i]:
+            # Long exit: price touches Donchian midpoint OR volume drops below average
+            if close[i] >= donchian_mid[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above upper Donchian OR low volatility regime
-            if close[i] > upper_donchian[i] or low_vol_regime_aligned[i]:
+            # Short exit: price touches Donchian midpoint OR volume drops below average
+            if close[i] <= donchian_mid[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "12h_Donchian20_1dATRRegime_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
