@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d EMA(34) trend filter and 1d volume spike confirmation.
-- Primary timeframe: 12h for entries/exits.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and 1d volume spike confirmation.
+- Primary timeframe: 4h for entries/exits.
 - HTF: 1d EMA(34) for trend direction (bullish if price > EMA34, bearish if price < EMA34).
-- Volume: Current 12h volume > 2.0 * 20-period volume MA to avoid false breakouts.
+- Volume: Current 4h volume > 2.0 * 20-period 1d volume MA to avoid false breakouts.
 - Entry: Long when price breaks above Donchian(20) high AND 1d EMA34 trend bullish AND volume spike.
          Short when price breaks below Donchian(20) low AND 1d EMA34 trend bearish AND volume spike.
 - Exit: Opposite Donchian breakout or loss of volume confirmation.
 - Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+- Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 """
 
 import numpy as np
@@ -26,7 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) on 12h
+    # Calculate Donchian channels (20-period) on 4h
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -41,11 +41,11 @@ def generate_signals(prices):
     # Calculate 20-period volume MA on 1d
     vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 12h
+    # Align HTF indicators to 4h
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Volume confirmation: current 12h volume > 2.0 * 20-period 1d volume MA (aligned)
+    # Volume confirmation: current 4h volume > 2.0 * 20-period 1d volume MA (aligned)
     volume_spike = volume > (2.0 * vol_ma_1d_aligned)
     
     signals = np.zeros(n)
@@ -98,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dEMA34Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
