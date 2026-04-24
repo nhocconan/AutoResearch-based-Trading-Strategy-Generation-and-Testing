@@ -1,34 +1,28 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike and ATR regime filter.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for volume average and ATR calculation.
-- Camarilla levels: H3 (resistance) and L3 (support) from prior 1d candle.
-- Entry: Long when price breaks above H3 AND volume > 2.0 * 1d average volume AND ATR(14) < ATR(50).
-         Short when price breaks below L3 AND volume > 2.0 * 1d average volume AND ATR(14) < ATR(50).
-- Exit: Opposite Camarilla breakout (H3/L3 crossover).
+Hypothesis: 4h Williams %R reversal with 12h EMA trend filter and volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 12h for EMA trend direction.
+- Williams %R(14): identifies overbought/oversold conditions for mean reversion.
+- Entry: Long when Williams %R crosses above -80 (from below) AND price > 12h EMA50 AND volume > 1.5 * 20-period average volume.
+         Short when Williams %R crosses below -20 (from above) AND price < 12h EMA50 AND volume > 1.5 * 20-period average volume.
+- Exit: Williams %R crosses above -20 for longs OR below -80 for shorts (mean reversion completion).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Camarilla pivots identify key institutional levels where price often accelerates.
-- Volume confirmation ensures breakout legitimacy.
-- ATR regime filter avoids high-volatility choppy markets where breakouts fail.
-- Works in both bull and bear markets as it captures volatility expansion after contraction at key levels.
+- Williams %R captures reversals at extremes, effective in both bull and bear markets.
+- Volume confirmation ensures legitimacy of reversals.
+- 12h EMA50 filter ensures trading with the higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def atr(high, low, close, period):
-    """Calculate Average True Range with proper min_periods."""
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_values = tr.ewm(span=period, adjust=False, min_periods=period).mean().values
-    return atr_values
+def williams_r(high, low, close, period):
+    """Calculate Williams %R with proper min_periods."""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return wr.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -41,84 +35,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d volume average for confirmation (20-period MA)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient data for volume MA
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1d ATR for regime filter
-    if len(df_1d) < 50:  # Need sufficient data for ATR(50)
-        return np.zeros(n)
+    # Calculate 20-period average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    atr_14_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_50_1d = atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 50)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
-    
-    # Calculate Camarilla levels from prior 1d candle
-    # H3 = close + 1.1 * (high - low) / 4
-    # L3 = close - 1.1 * (high - low) / 4
-    camarilla_h3 = df_1d['close'].values + 1.1 * (df_1d['high'].values - df_1d['low'].values) / 4
-    camarilla_l3 = df_1d['close'].values - 1.1 * (df_1d['high'].values - df_1d['low'].values) / 4
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Calculate Williams %R(14)
+    wr = williams_r(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 50)  # Need 20 for volume MA, 50 for ATR(50)
+    start_idx = max(50, 20, 14)  # Need 50 for EMA, 20 for volume MA, 14 for Williams %R
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
-        if (np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(atr_50_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or
-            np.isnan(camarilla_l3_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(wr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
-        prev_close = close[i-1]
+        prev_wr = wr[i-1]
+        curr_wr = wr[i]
         
-        # Exit conditions: opposite Camarilla breakout
+        # Exit conditions: Williams %R mean reversion completion
         if position != 0:
-            # Exit long: price breaks below L3
+            # Exit long: Williams %R crosses above -20 (overbought)
             if position == 1:
-                if curr_low <= camarilla_l3_aligned[i]:
+                if prev_wr < -20 and curr_wr >= -20:
                     signals[i] = 0.0
                     position = 0
                     continue
-            # Exit short: price breaks above H3
+            # Exit short: Williams %R crosses below -80 (oversold)
             elif position == -1:
-                if curr_high >= camarilla_h3_aligned[i]:
+                if prev_wr > -80 and curr_wr <= -80:
                     signals[i] = 0.0
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volume confirmation and ATR regime filter
+        # Entry conditions: Williams %R reversal with trend and volume confirmation
         if position == 0:
-            # Camarilla breakout signals
-            breakout_up = curr_high >= camarilla_h3_aligned[i] and prev_close < camarilla_h3_aligned[i-1]
-            breakout_down = curr_low <= camarilla_l3_aligned[i] and prev_close > camarilla_l3_aligned[i-1]
+            # Williams %R reversal signals
+            wr_cross_up = prev_wr < -80 and curr_wr >= -80   # Cross above -80 (oversold)
+            wr_cross_down = prev_wr > -20 and curr_wr <= -20 # Cross below -20 (overbought)
             
-            # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
-            volume_confirm = curr_volume > 2.0 * vol_ma_20_aligned[i] if not np.isnan(vol_ma_20_aligned[i]) else False
+            # Volume confirmation: current volume > 1.5 * 20-period average volume
+            volume_confirm = curr_volume > 1.5 * vol_ma_20[i]
             
-            # ATR regime filter: ATR(14) < ATR(50) (low volatility regime)
-            atr_regime = atr_14_1d_aligned[i] < atr_50_1d_aligned[i]
+            # Trend filter: price relative to 12h EMA50
+            price_above_ema = curr_close > ema_50_12h_aligned[i]
+            price_below_ema = curr_close < ema_50_12h_aligned[i]
             
-            if breakout_up and volume_confirm and atr_regime:
+            if wr_cross_up and volume_confirm and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            elif breakout_down and volume_confirm and atr_regime:
+            elif wr_cross_down and volume_confirm and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
@@ -130,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_CamarillaH3L3_Breakout_1dVolumeSpike_ATRRegime_v1"
-timeframe = "12h"
+name = "4h_WilliamsR14_Reversal_12hEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
