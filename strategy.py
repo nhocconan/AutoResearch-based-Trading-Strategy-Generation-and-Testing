@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian(20) breakout with 1d ATR filter and volume confirmation.
-- Primary timeframe: 12h, HTF: 1d for ATR-based volatility regime filter
-- Donchian channels calculated from prior 12h OHLC: upper = max(high, 20), lower = min(low, 20)
-- Breakout logic: long when price crosses above upper band with volume confirmation, short when price crosses below lower band
-- Volatility filter: only trade when 1d ATR(14) > 20-period 1d ATR MA (avoid low-volatility chop)
-- Volume confirmation: current 12h volume > 1.5 * 20-period 12h volume MA
-- Exit: reverse signal or when price reverts to prior 12h close (mean reversion)
+Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+- Uses 1d timeframe (primary) and 1w HTF for EMA50 trend alignment
+- Donchian levels calculated from prior 20d: upper = max(high[-20:-1]), lower = min(low[-20:-1])
+- Breakout logic: long when price crosses above upper with volume confirmation, short when price crosses below lower
+- Trend filter: only long when price > 1w EMA50, only short when price < 1w EMA50
+- Volume confirmation: current volume > 1.5 * 20-period volume MA to avoid low-volume false signals
+- Exit: reverse signal or when price reverts to 20-period EMA (mean reversion)
 - Discrete signal size: 0.25 to balance return and risk
-- Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe as per research
-- Works in both bull/bear: volatility filter avoids chop, Donchian breakouts capture momentum in all regimes
+- Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe as per research
+- Works in both bull/bear: trend filter avoids counter-trend trades, Donchian breakouts capture momentum in all regimes
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Extract price and volume data
@@ -27,90 +27,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR(14) for volatility regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First bar: no previous close
-    tr2[0] = high_1d[0] - close_1d[0]  # Approximation for first bar
-    tr3[0] = close_1d[0] - low_1d[0]   # Approximation for first bar
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    volatility_filter = atr_14 > atr_ma_20  # High volatility regime
+    # Calculate prior 20d Donchian channels (use shifted data to avoid look-ahead)
+    # Upper = max(high of prior 20 days), Lower = min(low of prior 20 days)
+    high_shifted = np.roll(high, 1)
+    low_shifted = np.roll(low, 1)
+    high_shifted[0] = np.nan
+    low_shifted[0] = np.nan
     
-    volatility_filter_aligned = align_htf_to_ltf(prices, df_1d, volatility_filter)
+    # Rolling window on shifted data
+    high_series = pd.Series(high_shifted)
+    low_series = pd.Series(low_shifted)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate prior 12h Donchian channels (20-period)
-    # Need to resample to 12h first using mtf_data
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * volume_ma)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Trend filter: price above/below 1w EMA50
+    uptrend = close > ema_50_1w_aligned
+    downtrend = close < ema_50_1w_aligned
     
-    # Donchian channels: 20-period high/low
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    
-    # Volume confirmation: current 12h volume > 1.5 * 20-period 12h volume MA
-    volume_12h = df_12h['volume'].values
-    volume_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_12h = volume_12h > (1.5 * volume_ma_20)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_12h, volume_confirm_12h)
-    
-    # Mean reversion exit: price reverts to prior 12h close
-    prev_close_12h = df_12h['close'].shift(1).values
-    prev_close_aligned = align_htf_to_ltf(prices, df_12h, prev_close_12h)
+    # Mean reversion exit: price reverts to 20-period EMA
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # Need ATR(14)+MA(20) and Donchian(20) and volume MA(20)
+    start_idx = max(50, 20)  # Need 1w EMA50 and Donchian(20) and volume MA(20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(volatility_filter_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(volume_confirm_aligned[i]) or
-            np.isnan(prev_close_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(volume_confirm[i]) or
+            np.isnan(ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above upper band AND volatility filter AND volume confirmation
-            if close[i] > donchian_upper_aligned[i] and close[i-1] <= donchian_upper_aligned[i-1] and volatility_filter_aligned[i] and volume_confirm_aligned[i]:
+            # Long: price crosses above upper AND uptrend AND volume confirmation
+            if close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1] and uptrend[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below lower band AND volatility filter AND volume confirmation
-            elif close[i] < donchian_lower_aligned[i] and close[i-1] >= donchian_lower_aligned[i-1] and volatility_filter_aligned[i] and volume_confirm_aligned[i]:
+            # Short: price crosses below lower AND downtrend AND volume confirmation
+            elif close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1] and downtrend[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reverts to prior 12h close (mean reversion) or reverse signal
-            if close[i] <= prev_close_aligned[i]:
+            # Long exit: price reverts to 20-period EMA (mean reversion) or reverse signal
+            if close[i] <= ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reverts to prior 12h close (mean reversion) or reverse signal
-            if close[i] >= prev_close_aligned[i]:
+            # Short exit: price reverts to 20-period EMA (mean reversion) or reverse signal
+            if close[i] >= ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -118,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_1dATR_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
