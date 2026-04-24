@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
 - Primary timeframe: 4h for entries/exits.
-- HTF: 1d EMA34 for trend direction (bullish if close > EMA34, bearish if close < EMA34).
+- HTF: 1d EMA34 for trend direction (bullish if price > EMA34, bearish if price < EMA34).
 - Volume: Current 4h volume > 2.0 * 20-period volume MA to avoid false breakouts.
-- Entry: Long when price breaks above H3 level AND 1d EMA34 bullish AND volume spike.
-         Short when price breaks below L3 level AND 1d EMA34 bearish AND volume spike.
-- Exit: Opposite Camarilla level (L3 for long, H3 for short) or loss of volume confirmation.
+- Entry: Long when price breaks above Donchian(20) high AND 1d EMA34 bullish AND volume spike.
+         Short when price breaks below Donchian(20) low AND 1d EMA34 bearish AND volume spike.
+- Exit: Opposite Donchian breakout or loss of volume confirmation.
 - Signal size: 0.25 discrete to limit drawdown and reduce fee churn.
 - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-Camarilla levels provide intraday support/resistance that work in both bull and bear markets.
+Donchian breakouts capture strong momentum moves, while EMA34 filter ensures alignment with daily trend.
+Volume spike confirms institutional participation, reducing false breakouts in choppy markets.
 """
 
 import numpy as np
@@ -27,14 +28,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate typical price for Camarilla (using previous day's OHLC)
-    typical_price = (high + low + close) / 3
-    range_hl = high - low
-    
-    # Calculate Camarilla levels for current bar using previous bar's data
-    # H3/L3 are the key levels for intraday trading
-    H3 = close + 1.1 * (high - low) / 2
-    L3 = close - 1.1 * (high - low) / 2
+    # Calculate Donchian channels on 4h
+    donchian_period = 20
+    period_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    period_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -43,29 +40,29 @@ def generate_signals(prices):
     
     # Calculate 1d EMA34
     df_1d_close = df_1d['close'].values
-    ema_34 = pd.Series(df_1d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(df_1d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1d volume MA for volume confirmation
+    # Calculate 20-period volume MA on 1d for volume confirmation
     df_1d_volume = df_1d['volume'].values
-    vol_ma_20 = pd.Series(df_1d_volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma_20_1d = pd.Series(df_1d_volume).rolling(window=20, min_periods=20).mean().values
     
     # Align HTF indicators to 4h
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Volume confirmation: current 4h volume > 2.0 * 20-period 1d volume EMA (aligned)
+    # Volume confirmation: current 4h volume > 2.0 * 20-period 1d volume MA (aligned)
     volume_spike = volume > (2.0 * vol_ma_20_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(34, 20)  # Need enough bars for 1d indicators
+    start_idx = max(donchian_period, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(H3[i]) or np.isnan(L3[i])):
+        if (np.isnan(period_high[i]) or np.isnan(period_low[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,29 +72,28 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         ema_val = ema_34_aligned[i]
-        vol_spike = volume_spike[i]
         
         if position == 0:
             # Check for entry signals with volume spike
-            if vol_spike:
-                # Bullish: price breaks above H3 AND 1d EMA34 bullish (close > EMA)
-                if curr_high > H3[i] and curr_close > ema_val:
+            if volume_spike[i]:
+                # Bullish: price breaks above Donchian high AND 1d EMA34 bullish (price > EMA)
+                if curr_high > period_high[i] and close[i] > ema_val:
                     signals[i] = 0.25
                     position = 1
-                # Bearish: price breaks below L3 AND 1d EMA34 bearish (close < EMA)
-                elif curr_low < L3[i] and curr_close < ema_val:
+                # Bearish: price breaks below Donchian low AND 1d EMA34 bearish (price < EMA)
+                elif curr_low < period_low[i] and close[i] < ema_val:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price breaks below L3 OR loss of volume confirmation
-            if curr_low < L3[i] or not vol_spike:
+            # Long exit: price breaks below Donchian low OR loss of volume confirmation
+            if curr_low < period_low[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above H3 OR loss of volume confirmation
-            if curr_high > H3[i] or not vol_spike:
+            # Short exit: price breaks above Donchian high OR loss of volume confirmation
+            if curr_high > period_high[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -105,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_Donchian20_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
