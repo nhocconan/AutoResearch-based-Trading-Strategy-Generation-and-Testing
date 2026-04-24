@@ -1,34 +1,21 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and volume confirmation.
-- Primary timeframe: 1d for execution, HTF: 1w for trend direction.
-- Williams Alligator: Jaw (13-period SMMA shifted 8), Teeth (8-period SMMA shifted 5), Lips (5-period SMMA shifted 3).
-- Trend filter: 1w EMA50 slope > 0 for bullish bias, < 0 for bearish bias.
-- Entry: Long when Lips cross above Teeth AND price > Jaw AND 1w EMA50 up.
-         Short when Lips cross below Teeth AND price < Jaw AND 1w EMA50 down.
-- Exit: Opposite Alligator cross or 1w EMA50 slope flip.
-- Volume confirmation: current volume > 1.5 * 20-period volume MA (to avoid false signals).
+Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 12h EMA trend filter and volume confirmation.
+- Primary timeframe: 6h for execution, HTF: 12h for EMA trend direction.
+- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (13-period EMA on 6h).
+- Trend filter: 12h EMA50 slope (rising/falling) determines bias - only take longs in uptrend, shorts in downtrend.
+- Entry: Long when Bull Power > 0 AND rising AND volume > 1.5 * 20-period volume MA.
+         Short when Bear Power < 0 AND falling AND volume > 1.5 * 20-period volume MA.
+- Exit: Opposite Elder Ray signal (Bull Power < 0 for long exit, Bear Power > 0 for short exit).
+- Volume confirmation: avoids weak breakouts.
 - Discrete signal size: 0.25 to limit drawdown and reduce fee churn.
-- Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+- Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+- Works in bull (trend-following longs) and bear (trend-following shorts) via 12h EMA50 filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def smma(source, length):
-    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
-    if length < 1:
-        return source.copy()
-    result = np.full_like(source, np.nan, dtype=float)
-    # First value is simple average
-    if len(source) >= length:
-        result[length-1] = np.mean(source[:length])
-    # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CURRENT) / length
-    for i in range(length, len(source)):
-        if not np.isnan(result[i-1]):
-            result[i] = (result[i-1] * (length-1) + source[i]) / length
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -41,38 +28,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 13-period EMA for Elder Ray (on 6h)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = low - ema13   # Low - EMA13
+    
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 and its slope
-    close_1w = pd.Series(df_1w['close'].values)
-    ema50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Slope: difference between current and previous EMA50
-    ema50_slope_1w = np.diff(ema50_1w, prepend=ema50_1w[0])
+    # Calculate EMA50 on 12h
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 and slope to 1d
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    ema50_slope_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_slope_1w)
+    # Calculate EMA50 slope (trend direction) - rising if current > previous
+    ema50_slope = np.zeros_like(ema50_12h)
+    ema50_slope[1:] = ema50_12h[1:] > ema50_12h[:-1]  # True if rising
     
-    # Williams Alligator on 1d
-    # Jaw: 13-period SMMA shifted 8 bars
-    jaw = smma(close, 13)
-    jaw = np.roll(jaw, 8)  # shift right by 8
-    jaw[:8] = np.nan
+    # Align 12h EMA50 and slope to 6h
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema50_slope_aligned = align_htf_to_ltf(prices, df_12h, ema50_slope.astype(float))
     
-    # Teeth: 8-period SMMA shifted 5 bars
-    teeth = smma(close, 8)
-    teeth = np.roll(teeth, 5)  # shift right by 5
-    teeth[:5] = np.nan
-    
-    # Lips: 5-period SMMA shifted 3 bars
-    lips = smma(close, 5)
-    lips = np.roll(lips, 3)  # shift right by 3
-    lips[:3] = np.nan
-    
-    # Volume confirmation: current volume > 1.5 * 20-period volume MA
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA (on 6h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * volume_ma)
     
@@ -80,52 +59,45 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(50, 20, 13+8, 8+5, 5+3)  # EMA50 warmup, volume MA, Alligator shifts
+    start_idx = max(30, 50, 20)  # Need enough bars for EMA calculations
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_slope_1w_aligned[i]) or 
-            np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_slope_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: 1w EMA50 slope
-        bullish_trend = ema50_slope_1w_aligned[i] > 0
-        bearish_trend = ema50_slope_1w_aligned[i] < 0
-        
-        curr_close = close[i]
-        curr_lips = lips[i]
-        curr_teeth = teeth[i]
-        curr_jaw = jaw[i]
-        prev_lips = lips[i-1]
-        prev_teeth = teeth[i-1]
+        curr_bull = bull_power[i]
+        curr_bear = bear_power[i]
+        is_uptrend = ema50_slope_aligned[i] > 0.5  # Boolean: True if rising
+        is_downtrend = ema50_slope_aligned[i] < 0.5  # Boolean: True if falling
+        vol_ok = volume_spike[i]
         
         if position == 0:
-            # Check for entry signals with volume confirmation
-            if volume_spike[i]:
-                # Bullish: Lips cross above Teeth AND price > Jaw AND bullish trend
-                if (curr_lips > curr_teeth and prev_lips <= prev_teeth and 
-                    curr_close > curr_jaw and bullish_trend):
+            # Check for entry signals
+            if vol_ok:
+                # Long: Bull Power > 0 AND uptrend
+                if curr_bull > 0 and is_uptrend:
                     signals[i] = 0.25
                     position = 1
-                # Bearish: Lips cross below Teeth AND price < Jaw AND bearish trend
-                elif (curr_lips < curr_teeth and prev_lips >= prev_teeth and 
-                      curr_close < curr_jaw and bearish_trend):
+                # Short: Bear Power < 0 AND downtrend
+                elif curr_bear < 0 and is_downtrend:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: Lips cross below Teeth OR bearish trend flip
-            if (curr_lips < curr_teeth and prev_lips >= prev_teeth) or not bullish_trend:
+            # Long exit: Bull Power < 0 (momentum fading)
+            if curr_bull < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Lips cross above Teeth OR bullish trend flip
-            if (curr_lips > curr_teeth and prev_lips <= prev_teeth) or not bearish_trend:
+            # Short exit: Bear Power > 0 (momentum fading)
+            if curr_bear > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -133,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsAlligator_1wEMA50Trend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_ElderRay_12hEMA50Trend_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
