@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h TRIX Momentum with 1d Volume Spike and Choppiness Regime Filter.
-- TRIX (12) identifies momentum shifts with reduced lag vs MACD.
-- 1d volume spike (>2.0x 20-period average) confirms institutional participation.
-- 1d Choppiness Index > 61.8 indicates ranging market (mean reversion); < 38.2 indicates trending.
-- In trending regime (CHOP < 38.2): TRIX crosses above/below zero line for trend continuation.
-- In ranging regime (CHOP > 61.8): TRIX extremes (>0.10 long, <-0.10 short) for mean reversion.
-- Position size 0.25 balances profit and drawdown control.
-- Target trades: 50-150 total over 4 years (12-37/year) to minimize fee drag.
-- Works in bull/bear markets via regime adaptation and volume confirmation.
+Hypothesis: 6h Williams %R Extreme Reversal with 1d Trend Filter and Volume Spike.
+- Williams %R(14) identifies overbought/oversold conditions: < -80 = oversold, > -20 = overbought.
+- Extreme readings (< -90 or > -10) signal exhaustion and high-probability reversals.
+- 1d EMA50 provides higher-timeframe trend filter: only take longs above EMA50, shorts below.
+- Volume spike (> 2.0x 24-period average) confirms institutional participation at reversal points.
+- Position size 0.25 balances profit potential with drawdown control in volatile 6h timeframe.
+- Works in both bull and bear markets: 1d trend filter avoids counter-trend whipsaws,
+  while Williams %R extremes capture exhaustion moves in ranging markets.
+- Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -25,97 +25,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop for TRIX, volume, and choppiness
+    # Williams %R(14) calculation: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Get 1d data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA for TRIX calculation (triple EMA)
+    # 1d EMA50 trend filter
     close_1d = df_1d['close'].values
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # first value is invalid due to roll
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d volume spike confirmation
-    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike = df_1d['volume'].values > 2.0 * vol_ma
-    
-    # 1d Choppiness Index (CHOP) - measures ranging vs trending
-    atr_1d = []
-    for i in range(len(df_1d)):
-        if i == 0:
-            atr_1d.append(0)
-        else:
-            tr = max(
-                df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-                abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-                abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
-            )
-            atr_1d.append(tr)
-    atr_1d = np.array(atr_1d)
-    atr_sum = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    high_max = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    low_min = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (high_max - low_min)) / np.log10(14)
-    # Handle division by zero or invalid cases
-    chop = np.where((high_max - low_min) > 0, chop, 50.0)
-    
-    # Align all 1d indicators to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Volume confirmation: > 2.0x 24-period average (strict for 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14, 12*3) + 1  # volume(20), chop(14), TRIX needs ~36 bars
+    start_idx = max(24, 14, 50) + 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        vol_confirm = volume_spike_aligned[i] > 0.5  # boolean as float
+        volume_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            if vol_confirm:
-                # Regime-based entry
-                if chop_aligned[i] < 38.2:  # Trending regime
-                    # Long: TRIX crosses above zero with momentum
-                    if trix_aligned[i] > 0 and trix_aligned[i] > trix_aligned[i-1]:
-                        signals[i] = 0.25
-                        position = 1
-                    # Short: TRIX crosses below zero with momentum
-                    elif trix_aligned[i] < 0 and trix_aligned[i] < trix_aligned[i-1]:
-                        signals[i] = -0.25
-                        position = -1
-                elif chop_aligned[i] > 61.8:  # Ranging regime
-                    # Long: TRIX oversold mean reversion
-                    if trix_aligned[i] < -0.10 and trix_aligned[i] > trix_aligned[i-1]:
-                        signals[i] = 0.25
-                        position = 1
-                    # Short: TRIX overbought mean reversion
-                    elif trix_aligned[i] > 0.10 and trix_aligned[i] < trix_aligned[i-1]:
-                        signals[i] = -0.25
-                        position = -1
+            # Only trade with volume confirmation
+            if volume_confirm:
+                # Long: Williams %R < -90 (extreme oversold) + above 1d EMA50 (bullish trend)
+                if williams_r[i] < -90 and close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Williams %R > -10 (extreme overbought) + below 1d EMA50 (bearish trend)
+                elif williams_r[i] > -10 and close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: TRIX momentum loss or regime change to extreme ranging
-            if trix_aligned[i] < 0 or chop_aligned[i] > 70.0:
+            # Long exit: Williams %R > -20 (exits overbought) OR below 1d EMA50 (trend change)
+            if williams_r[i] > -20 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX momentum loss or regime change to extreme ranging
-            if trix_aligned[i] > 0 or chop_aligned[i] > 70.0:
+            # Short exit: Williams %R < -80 (exits oversold) OR above 1d EMA50 (trend change)
+            if williams_r[i] < -80 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_TRIX_VolumeSpike_ChopperRegime_v1"
-timeframe = "12h"
+name = "6h_WilliamsR_Extreme_1dEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
