@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_ChopFilter
-Hypothesis: On 4h timeframe, enter long when TRIX crosses above zero with volume spike in low-chop regime (trending market).
-Enter short when TRIX crosses below zero with volume spike in low-chop regime.
-Exit when TRIX crosses back through zero or chop increases.
-Uses 1d HTF for chop regime filter to avoid false signals in ranging markets.
-Designed for low trade frequency (~25-40/year) with strong edge in both bull and bear markets via momentum + regime filter.
+4h_Donchian20_Breakout_1dTrend_VolumeFilter
+Hypothesis: 4-hour Donchian(20) breakout with daily EMA50 trend filter and volume confirmation.
+Long when price breaks above upper Donchian channel in uptrend (close > daily EMA50) with volume spike.
+Short when price breaks below lower Donchian channel in downtrend (close < daily EMA50) with volume spike.
+Exit when price re-enters the Donchian channel or trend reverses.
+Designed for 4h timeframe to capture medium-term trends with controlled trade frequency (target: 75-200/4 years).
+Works in bull markets via breakout momentum and in bear markets via short-side breakdowns.
 """
 
 import numpy as np
@@ -22,49 +23,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX on primary 4h timeframe
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) then % change
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (pd.Series(ema3).pct_change(1).values)
-    
-    # Get 1d data for chop regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for Donchian channel calculation (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Calculate Donchian channels for previous 20 periods
+    # Upper = MAX(high over last 20 periods)
+    # Lower = MIN(low over last 20 periods)
+    # We use the previous completed 4h bar's data to avoid look-ahead
+    high_4h_prev = np.concatenate([[np.nan], high_4h[:-1]])
+    low_4h_prev = np.concatenate([[np.nan], low_4h[:-1]])
+    
+    # Rolling window of 20 on previous bar data
+    upper_20 = pd.Series(high_4h_prev).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h_prev).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 4h timeframe (same timeframe, so direct use with 1-bar lag)
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
+    
+    # Get daily data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Chopiness Index on 1d (14-period)
-    def true_range(h, l, c_prev):
-        tr1 = h - l
-        tr2 = np.abs(h - c_prev)
-        tr3 = np.abs(l - c_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_1d = np.zeros(len(close_1d))
-    c_prev_1d = np.concatenate([[close_1d[0]], close_1d[:-1]])
-    for i in range(len(close_1d)):
-        tr = true_range(high_1d[i], low_1d[i], c_prev_1d[i])
-        if i == 0:
-            atr_1d[i] = tr
-        else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr) / 14  # Wilder's smoothing
-    
-    # Sum of true ranges over 14 periods
-    sum_tr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Chopiness Index: 100 * log10(sum_tr_14 / (ATR * 14)) / log10(14)
-    chop = 100 * np.log10(sum_tr_14 / (atr_1d * 14)) / np.log10(14)
-    
-    # Align TRIX and Chop to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=0)  # Chop uses completed 1d bar
-    
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average (on 4h data)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_ma_20)
     
@@ -76,45 +67,53 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: only trade when chop < 38.2 (strong trending regime)
-        in_trend_regime = chop_aligned[i] < 38.2
+        ema_trend = ema_50_1d_aligned[i]
         
         if position == 0:
-            if in_trend_regime and vol_spike[i]:
-                # Long: TRIX crosses above zero
-                if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: TRIX crosses below zero
-                elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Regime-based entry logic
+            if close[i] > ema_trend:  # Uptrend regime (daily)
+                # Long: break above upper Donchian with volume spike
+                long_signal = (close[i] > upper_aligned[i]) and vol_spike[i]
+                # Short: break below lower Donchian only if extreme volume spike (counter-trend fade)
+                short_signal = (close[i] < lower_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
+            else:  # Downtrend regime (daily)
+                # Short: break below lower Donchian with volume spike
+                short_signal = (close[i] < lower_aligned[i]) and vol_spike[i]
+                # Long: break above upper Donchian only if extreme volume spike (counter-trend fade)
+                long_signal = (close[i] > upper_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
+            
+            if long_signal:
+                signals[i] = 0.25
+                position = 1
+            elif short_signal:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Hold long position
+            # Long: hold position
             signals[i] = 0.25
-            # Exit: TRIX crosses below zero OR chop increases (trend weakening)
-            if trix_aligned[i] < 0 or chop_aligned[i] >= 38.2:
+            # Exit conditions: re-enter Donchian channel or trend reversal
+            exit_signal = (close[i] < upper_aligned[i] and close[i] > lower_aligned[i]) or (close[i] < ema_trend * 0.99)
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
-            # Hold short position
+            # Short: hold position
             signals[i] = -0.25
-            # Exit: TRIX crosses above zero OR chop increases (trend weakening)
-            if trix_aligned[i] > 0 or chop_aligned[i] >= 38.2:
+            # Exit conditions: re-enter Donchian channel or trend reversal
+            exit_signal = (close[i] > lower_aligned[i] and close[i] < upper_aligned[i]) or (close[i] > ema_trend * 1.01)
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_ChopFilter"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
