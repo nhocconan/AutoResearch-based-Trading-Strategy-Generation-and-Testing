@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3L3 Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Camarilla pivot levels (H3, L3) derived from daily OHLC act as key intraday support/resistance.
-Breakouts above H3 or below L3 with volume confirmation indicate institutional participation.
-1d EMA34 filter ensures trading with the higher timeframe trend, working in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-12h timeframe targets 12-37 trades/year (50-150 over 4 years).
+6h Elder Ray Power + 1d ADX Regime Filter
+Hypothesis: Elder Ray Bull/Bear Power measures buying/selling pressure relative to EMA13.
+In strong trends (ADX>25 on 1d), we take trades in the direction of both Elder Ray power and trend.
+In ranging markets (ADX<20), we fade extreme Elder Ray readings for mean reversion.
+This adaptive approach works in both bull and bear markets by regime.
+6h timeframe targets 12-37 trades/year (50-150 over 4 years).
 """
 
 import numpy as np
@@ -19,86 +20,138 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d data ONCE before loop for HTF filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d ADX for regime filter (trending vs ranging)
+    # ADX calculation: +DM, -DM, TR, then smoothed
+    dm_plus = np.where((df_1d['high'].diff()) > (df_1d['low'].diff().abs()), 
+                       np.maximum(df_1d['high'].diff(), 0), 0)
+    dm_minus = np.where((df_1d['low'].diff().abs()) > (df_1d['high'].diff()), 
+                        np.maximum(-df_1d['low'].diff(), 0), 0)
+    tr = np.maximum(
+        df_1d['high'] - df_1d['low'],
+        np.maximum(
+            np.abs(df_1d['high'] - df_1d['close'].shift(1)),
+            np.abs(df_1d['low'] - df_1d['close'].shift(1))
+        )
+    )
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values  # previous day's close
-    prev_high = df_1d['high'].shift(1).values    # previous day's high
-    prev_low = df_1d['low'].shift(1).values      # previous day's low
+    # Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Camarilla levels: H3, L3
-    # H3 = close + (high - low) * 1.1/2
-    # L3 = close - (high - low) * 1.1/2
-    camarilla_range = prev_high - prev_low
-    h3 = prev_close + camarilla_range * 1.1 / 2
-    l3 = prev_close - camarilla_range * 1.1 / 2
+    period = 14
+    if len(tr) >= period:
+        tr_smooth = wilders_smoothing(tr, period)
+        dm_plus_smooth = wilders_smoothing(dm_plus, period)
+        dm_minus_smooth = wilders_smoothing(dm_minus, period)
+        
+        # Avoid division by zero
+        dm_plus_di = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
+        dm_minus_di = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
+        dx = 100 * np.abs(dm_plus_di - dm_minus_di) / (dm_plus_di + dm_minus_di + 1e-10)
+        adx = wilders_smoothing(dx, period)
+        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    else:
+        adx_aligned = np.full(n, np.nan)
     
-    # Align Camarilla levels to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Elder Ray Power: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13  # negative values indicate bearish pressure
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(20, 34)  # volume MA, 1d EMA34 alignment
+    start_idx = max(13, 30)  # EMA13, ADX calculation
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        vol_spike = volume_spike[i]
-        
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_aligned[i]
-        downtrend = curr_close < ema_34_aligned[i]
+        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
+        adx_val = adx_aligned[i]
+        is_trending = adx_val > 25
+        is_ranging = adx_val < 20
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above H3 AND uptrend AND volume spike
-            long_entry = (curr_high > h3_aligned[i]) and uptrend and vol_spike
-            # Short: price breaks below L3 AND downtrend AND volume spike
-            short_entry = (curr_low < l3_aligned[i]) and downtrend and vol_spike
-            
-            if long_entry:
-                signals[i] = 0.25
-                position = 1
-            elif short_entry:
-                signals[i] = -0.25
-                position = -1
+            if is_trending:
+                # In trending markets: trade with trend and Elder Ray power
+                # Long: positive bull power AND price above EMA13 (uptrend confirmation)
+                # Short: negative bear power AND price below EMA13 (downtrend confirmation)
+                long_entry = (bull_power[i] > 0) and (close[i] > ema_13[i])
+                short_entry = (bear_power[i] < 0) and (close[i] < ema_13[i])
+                
+                if long_entry:
+                    signals[i] = 0.25
+                    position = 1
+                elif short_entry:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            elif is_ranging:
+                # In ranging markets: fade extreme Elder Ray readings
+                # Long: extremely negative bear power (oversold) AND price below EMA13
+                # Short: extremely positive bull power (overbought) AND price above EMA13
+                # Use -1.5 * ATR as threshold for extreme readings
+                atr_6h = pd.Series(
+                    np.maximum(
+                        high - low,
+                        np.maximum(
+                            np.abs(high - np.roll(close, 1)),
+                            np.abs(low - np.roll(close, 1))
+                        )
+                    )
+                ).rolling(window=14, min_periods=14).mean().values
+                
+                if i >= 14 and not np.isnan(atr_6h[i]):
+                    extreme_bear = bear_power[i] < (-1.5 * atr_6h[i])
+                    extreme_bull = bull_power[i] > (1.5 * atr_6h[i])
+                    
+                    long_entry = extreme_bear and (close[i] < ema_13[i])
+                    short_entry = extreme_bull and (close[i] > ema_13[i])
+                    
+                    if long_entry:
+                        signals[i] = 0.25
+                        position = 1
+                    elif short_entry:
+                        signals[i] = -0.25
+                        position = -1
+                    else:
+                        signals[i] = 0.0
+                else:
+                    signals[i] = 0.0
             else:
+                # Transition regime (ADX between 20-25): no trading
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below L3 (breakdown) OR loss of uptrend
-            if (curr_low < l3_aligned[i]) or (curr_close < ema_34_aligned[i]):
+            # Exit: Elder Ray turns negative OR price crosses below EMA13
+            if (bull_power[i] <= 0) or (close[i] < ema_13[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price rises above H3 (breakout) OR loss of downtrend
-            if (curr_high > h3_aligned[i]) or (curr_close > ema_34_aligned[i]):
+            # Exit: Elder Ray turns positive OR price crosses above EMA13
+            if (bear_power[i] >= 0) or (close[i] > ema_13[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -106,6 +159,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "6h_ElderRay_Power_ADXRegime"
+timeframe = "6h"
 leverage = 1.0
