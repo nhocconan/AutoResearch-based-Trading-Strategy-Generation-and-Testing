@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-1d Williams Fractal Breakout + 1w EMA50 Trend + Volume Spike
-Hypothesis: Williams fractals on 1d identify swing points where price respects structure.
-Breakouts above recent bearish fractals or below bullish fractals capture momentum.
-1w EMA50 filters trend direction to avoid counter-trend whipsaws.
-Volume spike confirms institutional participation.
-Works in bull/bear via trend filter and volatility-based position sizing.
-Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years).
+6h ADX + Donchian(20) Breakout + Volume Confirmation
+Hypothesis: In strong trends (ADX>25), Donchian breakouts capture momentum with volume confirmation.
+ADX filter avoids whipsaws in ranging markets. Works in bull/bear via trend direction from Donchian midpoint.
+Target: 12-37 trades/year on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,30 +20,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter and Williams fractals
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for ADX trend filter (more stable than 6h ADX)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h ADX(14)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Williams fractals on 1w (requires 2-bar confirmation delay)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1w['high'].values,
-        df_1w['low'].values,
-    )
-    # Bearish fractal: extra 2-bar delay for confirmation (needs 2 future 1w bars)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1w, bearish_fractal, additional_delay_bars=2
-    )
-    # Bullish fractal: extra 2-bar delay for confirmation
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1w, bullish_fractal, additional_delay_bars=2
-    )
+    # True Range
+    tr1 = pd.Series(high_12h).diff().abs()
+    tr2 = (pd.Series(high_12h) - pd.Series(close_12h).shift()).abs()
+    tr3 = (pd.Series(low_12h) - pd.Series(close_12h).shift()).abs()
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Calculate ATR(14) for stoploss and volatility filter
+    # Directional Movement
+    up_move = pd.Series(high_12h).diff()
+    down_move = pd.Series(low_12h).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr_12h.values).ewm(alpha=1/14, adjust=False).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # DI and ADX
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # Calculate Donchian channels on 6h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
+    
+    # Calculate ATR(14) for stoploss and volume average
     if len(close) >= 14:
         tr1 = pd.Series(high).diff().abs()
         tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
@@ -56,19 +72,24 @@ def generate_signals(prices):
     else:
         atr = np.full(n, 0.0)
     
+    # Volume average for spike detection
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for data to propagate
-    start_idx = 100
+    # Start index: need enough for all indicators
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(donchian_mid[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,27 +99,24 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_50 = ema_50_aligned[i]
-        bear_fractal = bearish_fractal_aligned[i]
-        bull_fractal = bullish_fractal_aligned[i]
+        adx_val = adx_aligned[i]
+        upper_donchian = highest_high[i]
+        lower_donchian = lowest_low[i]
+        mid_donchian = donchian_mid[i]
         atr_val = atr[i]
+        vol_ma = vol_ma_20[i]
         
-        # Volume spike: current volume > 2.0 * 50-period average (stricter for 1d)
-        if i >= 50:
-            vol_ma_50 = np.mean(volume[i-49:i+1])
-        else:
-            vol_ma_50 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_50
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_val > 25
         
-        # Trend filter
-        uptrend = curr_close > ema_50
-        downtrend = curr_close < ema_50
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        volume_confirmed = curr_volume > 1.5 * vol_ma
         
         if position == 0:
-            # Long: price breaks above recent bearish fractal AND volume spike AND uptrend
-            long_condition = (curr_high > bear_fractal) and volume_spike and uptrend
-            # Short: price breaks below recent bullish fractal AND volume spike AND downtrend
-            short_condition = (curr_low < bull_fractal) and volume_spike and downtrend
+            # Long: price breaks above upper Donchian AND strong trend AND volume confirmed
+            long_condition = (curr_high > upper_donchian) and strong_trend and volume_confirmed
+            # Short: price breaks below lower Donchian AND strong trend AND volume confirmed
+            short_condition = (curr_low < lower_donchian) and strong_trend and volume_confirmed
             
             if long_condition:
                 signals[i] = 0.25
@@ -109,15 +127,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.5*ATR below entry) or trend reversal
-            if curr_close <= entry_price - 2.5 * atr_val or not uptrend:
+            # Exit long: stoploss (2.0*ATR below entry) or trend weakness (ADX < 20) or price below midpoint
+            if (curr_close <= entry_price - 2.0 * atr_val) or (adx_val < 20) or (curr_close < mid_donchian):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.5*ATR above entry) or trend reversal
-            if curr_close >= entry_price + 2.5 * atr_val or not downtrend:
+            # Exit short: stoploss (2.0*ATR above entry) or trend weakness (ADX < 20) or price above midpoint
+            if (curr_close >= entry_price + 2.0 * atr_val) or (adx_val < 20) or (curr_close > mid_donchian):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsFractal_Breakout_1wEMA50_Trend_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ADX_Donchian_Breakout_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
