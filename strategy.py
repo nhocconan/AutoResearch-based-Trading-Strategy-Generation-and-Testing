@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-Hypothesis: 6h Donchian(20) breakouts capture intermediate-term momentum. 
-Weekly pivot direction (based on prior weekly Camarilla H3/L3) filters for institutional bias. 
-Volume spike confirms participation. Works in bull/bear: in bull, longs with weekly bias up; 
-in bear, shorts with weekly bias down. Discrete sizing (0.25) limits fee drag.
-Target: 12-37 trades/year (50-150 over 4 years).
+12h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Donchian channel breakouts capture strong momentum moves. 
+Combined with 1d EMA34 trend filter and volume confirmation, this strategy works in both bull and bear markets:
+- In bull markets: longs on upper band breakouts with uptrend
+- In bear markets: shorts on lower band breakouts with downtrend
+Volume spike confirms institutional participation. Discrete sizing (0.25) limits fee drag.
+Target: 12-30 trades/year (50-120 over 4 years).
 """
 
 import numpy as np
@@ -22,28 +23,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot direction
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels (H3, L3) from prior weekly bar
-    camarilla_h3_w = df_1w['close'] + 1.1 * (df_1w['high'] - df_1w['low']) / 4
-    camarilla_l3_w = df_1w['close'] - 1.1 * (df_1w['high'] - df_1w['low']) / 4
-    camarilla_h3_w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3_w.values)
-    camarilla_l3_w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3_w.values)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Weekly pivot direction: bullish if weekly close > midpoint of H3/L3, bearish if below
-    weekly_midpoint = (camarilla_h3_w + camarilla_l3_w) / 2
-    weekly_midpoint_aligned = align_htf_to_ltf(prices, df_1w, weekly_midpoint.values)
-    weekly_bullish = df_1w['close'] > weekly_midpoint  # True for bullish weekly bias
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.values.astype(float))
-    
-    # Calculate Donchian(20) channels from price
+    # Calculate Donchian channels (20 periods)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR for volume average smoothing (20 periods)
+    # Calculate ATR for volatility filtering (using 20 periods)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -53,13 +46,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian (20)
-    start_idx = 20
+    # Start index: need enough for Donchian (20) and EMA34 (34)
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(camarilla_h3_w_aligned[i]) or \
-           np.isnan(camarilla_l3_w_aligned[i]) or np.isnan(weekly_bullish_aligned[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,10 +61,10 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        highest_20_val = highest_20[i]
-        lowest_20_val = lowest_20[i]
-        weekly_bias_bullish = bool(weekly_bullish_aligned[i])
+        ema_trend = ema_34_aligned[i]
         atr_value = atr[i]
+        upper_band = highest_20[i]
+        lower_band = lowest_20[i]
         
         # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
@@ -81,22 +73,22 @@ def generate_signals(prices):
             vol_ma_20 = np.mean(volume[:i+1])
         volume_spike = curr_volume > 2.0 * vol_ma_20
         
-        # Donchian breakout conditions
-        bullish_breakout = curr_close > highest_20_val
-        bearish_breakout = curr_close < lowest_20_val
+        # Breakout conditions: price breaks above upper band or below lower band
+        bullish_breakout = curr_close > upper_band
+        bearish_breakout = curr_close < lower_band
         
-        # Exit conditions: opposite Donchian breakout or loss of weekly bias
+        # Exit conditions: reverse breakout or trend rejection
         if position != 0:
             exit_signal = False
             
             if position == 1:
-                # Exit on bearish Donchian breakout or weekly bias turns bearish
-                if bearish_breakout or not weekly_bias_bullish:
+                # Exit on bearish breakout below lower band or trend rejection
+                if bearish_breakout or curr_close < ema_trend:
                     exit_signal = True
                     
             elif position == -1:
-                # Exit on bullish Donchian breakout or weekly bias turns bullish
-                if bullish_breakout or weekly_bias_bullish:
+                # Exit on bullish breakout above upper band or trend rejection
+                if bullish_breakout or curr_close > ema_trend:
                     exit_signal = True
             
             if exit_signal:
@@ -104,12 +96,12 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Entry conditions: Donchian breakout + weekly bias alignment + volume spike
+        # Entry conditions: Donchian breakout + trend alignment + volume spike
         if position == 0:
-            # Long: bullish Donchian breakout AND weekly bullish bias AND volume spike
-            long_condition = bullish_breakout and weekly_bias_bullish and volume_spike
-            # Short: bearish Donchian breakout AND weekly bearish bias AND volume spike
-            short_condition = bearish_breakout and (not weekly_bias_bullish) and volume_spike
+            # Long: break above upper band AND price above 1d EMA34
+            long_condition = bullish_breakout and (curr_close > ema_trend) and volume_spike
+            # Short: break below lower band AND price below 1d EMA34
+            short_condition = bearish_breakout and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -124,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_WeeklyPivotDirection_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
