@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts in the direction of the daily EMA34 trend, with volume confirmation.
-Only long when price breaks above Camarilla R1 AND daily close > daily EMA34 AND volume > 1.5 * ATR4h.
-Only short when price breaks below Camarilla S1 AND daily close < daily EMA34 AND volume > 1.5 * ATR4h.
-Uses discrete sizing 0.25 to limit fee drag. Target: 20-50 trades/year.
-Daily EMA34 trend filter provides structural edge in both bull and bear markets by aligning with intermediate-term institutional trend.
+4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v8
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts in the direction of the daily EMA34 trend with volume confirmation.
+Uses tighter volume filter (2.0 * ATR) and adds a minimum hold period of 3 bars to reduce overtrading.
+Only long when price breaks above Camarilla R1 AND daily close > daily EMA34 AND volume > 2.0 * ATR4h.
+Only short when price breaks below Camarilla S1 AND daily close < daily EMA34 AND volume > 2.0 * ATR4h.
+Discrete sizing 0.25 to limit fee drag. Target: 20-40 trades/year.
 """
 
 import numpy as np
@@ -54,6 +54,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0  # track bars in position for minimum hold
     
     # Start index: need warmup for EMA34 and ATR
     start_idx = max(34, 14)
@@ -63,17 +64,17 @@ def generate_signals(prices):
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
-        # Volume confirmation: current volume > 1.5 * ATR
-        volume_confirm = volume[i] > 1.5 * atr[i]
+        # Volume confirmation: current volume > 2.0 * ATR (tighter filter)
+        volume_confirm = volume[i] > 2.0 * atr[i]
         
         # Determine daily trend from EMA34
-        # Bullish trend: daily close > EMA34
-        # Bearish trend: daily close < EMA34
         daily_close_aligned = align_htf_to_ltf(prices, df_1d, c_1d)[i]
         if np.isnan(daily_close_aligned):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
             
         if daily_close_aligned > ema_34_aligned[i]:
@@ -84,6 +85,7 @@ def generate_signals(prices):
             daily_trend = 'neutral'  # no trades in neutral zone
         
         if position == 0:
+            bars_since_entry = 0
             # Long setup: price breaks above Camarilla R1 AND volume confirm AND bullish daily trend
             long_setup = (close[i] > camarilla_r1_aligned[i]) and volume_confirm and (daily_trend == 'bullish')
             
@@ -99,22 +101,28 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
+            bars_since_entry += 1
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price breaks below Camarilla S1 OR daily trend turns bearish
-            if (close[i] < camarilla_s1_aligned[i]) or (daily_trend == 'bearish'):
-                signals[i] = 0.0
-                position = 0
+            # Exit: price breaks below Camarilla S1 OR daily trend turns bearish OR min hold (3 bars) + adverse move
+            if bars_since_entry >= 3:
+                if (close[i] < camarilla_s1_aligned[i]) or (daily_trend == 'bearish'):
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
         elif position == -1:
+            bars_since_entry += 1
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price breaks above Camarilla R1 OR daily trend turns bullish
-            if (close[i] > camarilla_r1_aligned[i]) or (daily_trend == 'bullish'):
-                signals[i] = 0.0
-                position = 0
+            # Exit: price breaks above Camarilla R1 OR daily trend turns bullish OR min hold (3 bars) + adverse move
+            if bars_since_entry >= 3:
+                if (close[i] > camarilla_r1_aligned[i]) or (daily_trend == 'bullish'):
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike"
+name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v8"
 timeframe = "4h"
 leverage = 1.0
