@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike_v1
-Hypothesis: Trade Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume spike confirmation on 6h timeframe.
-R3/S3 levels represent stronger support/resistance than R1/S1, reducing false breakouts.
-Only long when price breaks above R3 in bull regime (price > 1d EMA34), short when breaks below S3 in bear regime (price < 1d EMA34).
-Volume spike > 1.5 * ATR6h confirms momentum. Discrete sizing 0.25 to minimize fee churn.
-Target: 12-25 trades/year to avoid overtrading while capturing strong directional moves in both bull and bear markets.
+12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation on 12h timeframe.
+Only long when price breaks above R1 in bull regime (price > 1d EMA34), short when breaks below S1 in bear regime (price < 1d EMA34).
+Volume spike > 2.0 * ATR12h confirms momentum. Discrete sizing 0.25 to minimize fee drift.
+Target: 12-37 trades/year to avoid overtrading while capturing strong directional moves.
+Works in bull via breakouts, works in bear via short breakdowns, avoids ranging markets via regime filter.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,7 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend regime and Camarilla levels
+    # Get 1d data for trend regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -31,7 +31,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR for volume spike filter (using 6h data)
+    # Calculate ATR for volume spike filter (using 12h data)
     tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
     tr2 = np.maximum(np.abs(low[1:] - close[:-1]), tr1)
     tr = np.concatenate([[np.inf], tr2])  # first TR undefined
@@ -43,15 +43,15 @@ def generate_signals(prices):
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
     
-    # Calculate Camarilla R3/S3 levels for each 1d bar
-    # R3 = C + (H-L)*1.1/4
-    # S3 = C - (H-L)*1.1/4
-    camarilla_r3_1d = c_1d + (h_1d - l_1d) * 1.1 / 4
-    camarilla_s3_1d = c_1d - (h_1d - l_1d) * 1.1 / 4
+    # Calculate Camarilla levels for each 1d bar
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    camarilla_r1_1d = c_1d + (h_1d - l_1d) * 1.1 / 12
+    camarilla_s1_1d = c_1d - (h_1d - l_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,12 +62,12 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike: current volume > 1.5 * ATR
-        volume_spike = volume[i] > 1.5 * atr[i]
+        # Volume spike: current volume > 2.0 * ATR (stricter to reduce trades)
+        volume_spike = volume[i] > 2.0 * atr[i]
         
         # Determine 1d trend regime
         # Bull regime: price > EMA34
@@ -80,11 +80,11 @@ def generate_signals(prices):
             regime = 'range'  # no trades (unlikely but handle)
         
         if position == 0:
-            # Long setup: price breaks above R3 AND volume spike AND bull regime
-            long_setup = (close[i] > camarilla_r3_aligned[i]) and volume_spike and (regime == 'bull')
+            # Long setup: price breaks above R1 AND volume spike AND bull regime
+            long_setup = (close[i] > camarilla_r1_aligned[i]) and volume_spike and (regime == 'bull')
             
-            # Short setup: price breaks below S3 AND volume spike AND bear regime
-            short_setup = (close[i] < camarilla_s3_aligned[i]) and volume_spike and (regime == 'bear')
+            # Short setup: price breaks below S1 AND volume spike AND bear regime
+            short_setup = (close[i] < camarilla_s1_aligned[i]) and volume_spike and (regime == 'bear')
             
             if long_setup:
                 signals[i] = 0.25
@@ -97,20 +97,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price breaks below S3 OR regime turns bearish
-            if (close[i] < camarilla_s3_aligned[i]) or (regime == 'bear'):
+            # Exit: price breaks below S1 OR regime turns bearish
+            if (close[i] < camarilla_s1_aligned[i]) or (regime == 'bear'):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price breaks above R3 OR regime turns bullish
-            if (close[i] > camarilla_r3_aligned[i]) or (regime == 'bull'):
+            # Exit: price breaks above R1 OR regime turns bullish
+            if (close[i] > camarilla_r1_aligned[i]) or (regime == 'bull'):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrendFilter_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
