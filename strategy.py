@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_CloudFilter_1dTrend
-Hypothesis: Trade 6h timeframe using Ichimoku Tenkan-Kijun cross on 6h for entry signals,
-filtered by 1d cloud (price above/below Kumo) for trend alignment, and confirmed by
-6h volume spike (>2.0x 20-bar MA). Enter long when TK cross bullish, price above 1d cloud,
-and volume spike. Enter short when TK cross bearish, price below 1d cloud, and volume spike.
-Exit on opposite TK cross or cloud violation. Uses discrete sizing 0.25. Targets 12-37 trades/year
-on 6h timeframe. Works in bull/bear via 1d cloud filter and volume confirmation to avoid whipsaws.
+12h_KAMA_Regime_Donchian20_Exit
+Hypothesis: Trade 12h timeframe using KAMA(10) for adaptive trend direction, 
+combined with choppiness regime filter (CHOP > 61.8 = range, CHOP < 38.2 = trend) 
+to avoid whipsaws, and weekly Donchian(20) for structured exits. 
+In trending regimes (CHOP < 38.2): follow KAMA direction (long if price > KAMA, short if price < KAMA). 
+In ranging regimes (CHOP > 61.8): mean revert at weekly Donchian bands (long at lower band, short at upper band). 
+Volume confirmation (1d volume > 1.5x 20-bar MA) required for all entries. 
+Uses discrete sizing 0.25 to control fees and drawdown. 
+Designed to work in both bull and bear markets via regime adaptation.
 """
 
 import numpy as np
@@ -18,86 +20,112 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Ichimoku components on 6h (primary timeframe)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Get 1d data for cloud (Kumo) filter
+    # Get 1d data for volume confirmation and choppiness calculation
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Ichimoku cloud components
-    period9_high_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (period9_high_1d + period9_low_1d) / 2
+    # Calculate 1d choppiness indicator (14-period)
+    def choppiness(high_arr, low_arr, close_arr, period=14):
+        atr_sum = np.zeros_like(close_arr)
+        true_range = np.maximum(high_arr - low_arr, 
+                               np.maximum(np.abs(high_arr - np.roll(close_arr, 1)), 
+                                          np.abs(low_arr - np.roll(close_arr, 1))))
+        true_range[0] = high_arr[0] - low_arr[0]  # first TR
+        for i in range(1, len(true_range)):
+            atr_sum[i] = atr_sum[i-1] + true_range[i]
+        
+        # Avoid division by zero
+        max_high = np.maximum.accumulate(high_arr)
+        min_low = np.minimum.accumulate(low_arr)
+        range_hl = max_high - min_low
+        
+        chop = np.full_like(close_arr, 50.0, dtype=float)  # default to neutral
+        for i in range(period, len(close_arr)):
+            if range_hl[i] > 0 and atr_sum[i] > 0:
+                chop[i] = 100 * np.log10(atr_sum[i] / range_hl[i]) / np.log10(period)
+        return chop
     
-    period26_high_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (period26_high_1d + period26_low_1d) / 2
+    chop_1d = choppiness(high_1d, low_1d, close_1d, 14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
+    # Calculate 1d volume spike confirmation (volume > 1.5x 20-bar MA)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (1.5 * vol_ma_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    period52_high_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = (period52_high_1d + period52_low_1d) / 2
+    # Get weekly data for Donchian channel (20-period) - used for exits and range signals
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 1d Kumo cloud edges (Senkou Span A and B)
-    kumo_top_1d = np.maximum(senkou_a_1d, senkou_b_1d)
-    kumo_bottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
+    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d cloud to 6h timeframe (completed daily bar only)
-    kumo_top_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_top_1d)
-    kumo_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom_1d)
+    donchian_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
+    donchian_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
     
-    # Calculate 6h volume spike (>2.0x 20-bar MA)
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_6h = volume > (2.0 * vol_ma_6h)
+    # Calculate KAMA(10) on 1d close for adaptive trend
+    def kama(close, period=10, fast=2, slow=30):
+        # Efficiency ratio
+        change = np.abs(np.diff(close, period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close.shape) > 1 else \
+                     np.sum(np.abs(np.diff(close)), axis=0)
+        # Handle 1D case
+        volatility = np.array([np.sum(np.abs(np.diff(close[i:i+period]))) 
+                              for i in range(len(change))])
+        er = np.zeros_like(close)
+        er[period:] = change / (volatility + 1e-10)
+        
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # Initialize KAMA
+        kama_vals = np.full_like(close, np.nan, dtype=float)
+        kama_vals[period] = close[period]
+        
+        for i in range(period+1, len(close)):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        
+        return kama_vals
+    
+    kama_1d = kama(close_1d, 10, 2, 30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for Ichimoku (52) and volume MA (20)
-    start_idx = max(52, 20)
+    # Start index: need warmup for KAMA (10), choppiness (14), volume MA (20), Donchian (20)
+    start_idx = max(30, 20)  # 30 covers KAMA warmup + buffer
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
-            np.isnan(kumo_top_1d_aligned[i]) or np.isnan(kumo_bottom_1d_aligned[i]) or
-            np.isnan(volume_spike_6h[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(donchian_high_1w_aligned[i]) or
+            np.isnan(donchian_low_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: bullish TK cross (Tenkan > Kijun), price above 1d cloud, volume spike
-            tk_bullish = tenkan[i] > kijun[i]
-            price_above_cloud = close[i] > kumo_top_1d_aligned[i]
-            long_setup = tk_bullish and price_above_cloud and volume_spike_6h[i]
-            
-            # Short: bearish TK cross (Tenkan < Kijun), price below 1d cloud, volume spike
-            tk_bearish = tenkan[i] < kijun[i]
-            price_below_cloud = close[i] < kumo_bottom_1d_aligned[i]
-            short_setup = tk_bearish and price_below_cloud and volume_spike_6h[i]
+            # Determine regime: trending (CHOP < 38.2) or ranging (CHOP > 61.8)
+            if chop_1d_aligned[i] < 38.2:  # Trending regime
+                # Follow KAMA direction
+                long_setup = (close[i] > kama_1d_aligned[i]) and volume_spike_1d_aligned[i]
+                short_setup = (close[i] < kama_1d_aligned[i]) and volume_spike_1d_aligned[i]
+            elif chop_1d_aligned[i] > 61.8:  # Ranging regime
+                # Mean revert at weekly Donchian bands
+                long_setup = (close[i] <= donchian_low_1w_aligned[i]) and volume_spike_1d_aligned[i]
+                short_setup = (close[i] >= donchian_high_1w_aligned[i]) and volume_spike_1d_aligned[i]
+            else:  # Choppy transition zone - no trades
+                long_setup = False
+                short_setup = False
             
             if long_setup:
                 signals[i] = 0.25
@@ -110,20 +138,30 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: bearish TK cross OR price breaks below 1d cloud bottom
-            if (tenkan[i] < kijun[i]) or (close[i] < kumo_bottom_1d_aligned[i]):
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions
+            if chop_1d_aligned[i] < 38.2:  # Trending: exit if price < KAMA
+                if close[i] < kama_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+            else:  # Ranging or transition: exit at opposite Donchian band
+                if close[i] >= donchian_high_1w_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: bullish TK cross OR price breaks above 1d cloud top
-            if (tenkan[i] > kijun[i]) or (close[i] > kumo_top_1d_aligned[i]):
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions
+            if chop_1d_aligned[i] < 38.2:  # Trending: exit if price > KAMA
+                if close[i] > kama_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+            else:  # Ranging or transition: exit at opposite Donchian band
+                if close[i] <= donchian_low_1w_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
     
     return signals
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend"
-timeframe = "6h"
+name = "12h_KAMA_Regime_Donchian20_Exit"
+timeframe = "12h"
 leverage = 1.0
