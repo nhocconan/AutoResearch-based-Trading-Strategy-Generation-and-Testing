@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d Williams %R + 1w EMA50 Trend + Volume Spike + ATR Stop
-Hypothesis: Williams %R identifies overbought/oversold conditions. In a 1w EMA50-defined trend,
-we take mean-reversion entries: long when %R < -80 in uptrend, short when %R > -20 in downtrend.
-Volume spike confirms participation. ATR-based stop manages risk. Works in bull (long in uptrend)
-and bear (short in downtrend). Target: 30-100 trades over 4 years on 1d.
+12h Williams Alligator Breakout + 1d EMA50 Trend + Volume Spike
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend absence/presence. Breakout above Lips or below Jaw with 1d EMA50 trend filter and volume confirmation captures strong moves. Works in bull (long on Lips break) and bear (short on Jaw break). Volume spike ensures participation. Target: 12-30 trades/year on 12h.
 """
 
 import numpy as np
@@ -21,30 +18,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA50 trend and Williams Alligator (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA50 on 1w
-    close_1w = pd.Series(df_1w['close'])
-    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate EMA50 on 1d
+    close_1d = pd.Series(df_1d['close'])
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R(14) on 1d
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.full(n, np.nan)
-    for i in range(14, n):
-        hh = highest_high[i]
-        ll = lowest_low[i]
-        if hh != ll:
-            williams_r[i] = (hh - close[i]) / (hh - ll) * -100
-        else:
-            williams_r[i] = -50  # neutral when range is zero
+    # Calculate Williams Alligator on 1d
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    median_price_1d = (high_1d + low_1d) / 2
     
-    # Calculate ATR(14) for stoploss
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(median_price_1d, 13)
+    teeth = smma(median_price_1d, 8)
+    lips = smma(median_price_1d, 5)
+    
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Calculate ATR(14) for stoploss on 12h
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -62,12 +72,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for Williams %R, EMA50, ATR, volume MA
-    start_idx = max(14, 50, 14, 20)
+    # Start index: need enough for Alligator, EMA50, ATR, volume MA
+    start_idx = max(50, 13, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,24 +88,22 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        williams_r_val = williams_r[i]
-        ema_50_val = ema_50_1w_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema_50_val = ema_50_1d_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation: current volume > 2.0 * 20-period average
         volume_confirm = curr_volume > 2.0 * vol_ma
         
-        # Determine trend: price above/below 1w EMA50
-        uptrend = curr_close > ema_50_val
-        downtrend = curr_close < ema_50_val
-        
         if position == 0:
             # Look for entry signals
-            # Long: Williams %R < -80 (oversold) in uptrend with volume confirmation
-            long_entry = (williams_r_val < -80) and uptrend and volume_confirm
-            # Short: Williams %R > -20 (overbought) in downtrend with volume confirmation
-            short_entry = (williams_r_val > -20) and downtrend and volume_confirm
+            # Long: price > Lips, above 1d EMA50, volume confirmation
+            long_entry = (curr_close > lips_val) and (curr_close > ema_50_val) and volume_confirm
+            # Short: price < Jaw, below 1d EMA50, volume confirmation
+            short_entry = (curr_close < jaw_val) and (curr_close < ema_50_val) and volume_confirm
             
             if long_entry:
                 signals[i] = 0.25
@@ -110,8 +119,8 @@ def generate_signals(prices):
             # Long position management
             # Stoploss: 2 * ATR below entry
             stop_loss = entry_price - 2.0 * atr_val
-            # Exit: stoploss hit OR Williams %R > -50 (exiting oversold) OR trend change
-            if curr_low <= stop_loss or williams_r_val > -50 or not uptrend:
+            # Exit: stoploss hit OR price crosses below Jaw
+            if curr_low <= stop_loss or curr_close < jaw_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -120,8 +129,8 @@ def generate_signals(prices):
             # Short position management
             # Stoploss: 2 * ATR above entry
             stop_loss = entry_price + 2.0 * atr_val
-            # Exit: stoploss hit OR Williams %R < -50 (exiting overbought) OR trend change
-            if curr_high >= stop_loss or williams_r_val < -50 or not downtrend:
+            # Exit: stoploss hit OR price crosses above Lips
+            if curr_high >= stop_loss or curr_close > lips_val:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -129,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WilliamsR_1wEMA50_Trend_VolumeSpike_ATRStop"
-timeframe = "1d"
+name = "12h_Williams_Alligator_Breakout_1dEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
