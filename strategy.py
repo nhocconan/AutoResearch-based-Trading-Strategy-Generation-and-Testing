@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3/L3 Breakout + 12h EMA50 Trend + Volume Spike
-Hypothesis: Camarilla H3 (resistance) and L3 (support) levels from prior day
-act as intraday support/resistance. Breakout above H3 with 12h EMA50 uptrend
-and volume spike captures bullish momentum. Breakdown below L3 with 12h EMA50
-downtrend and volume spike captures bearish momentum. Works in bull via long
-breakouts, bear via short breakdowns. Volume spike confirms institutional
-participation. Target: 20-50 trades/year on 4h.
+6h Elder Ray + 1d Williams %R Regime Filter
+Hypothesis: Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA13.
+Williams %R on 1d identifies overbought/oversold conditions. Long when Bull Power > 0,
+Williams %R < -80 (oversold), and price above EMA50. Short when Bear Power < 0,
+Williams %R > -20 (overbought), and price below EMA50. Works in bull via long signals
+on pullbacks, bear via short signals on rallies. Volume confirmation reduces false breaks.
+Target: 12-37 trades/year on 6h.
 """
 
 import numpy as np
@@ -23,34 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels (prior day)
+    # Calculate EMA13 for Elder Ray
+    if len(close) >= 13:
+        ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    else:
+        ema13 = np.full(n, np.nan)
+    
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
+    
+    # Get 1d data for Williams %R regime filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
-    # H3 = Close + 1.1*(High-Low)/4
-    # L3 = Close - 1.1*(High-Low)/4
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Williams %R on 1d: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_1d = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
     close_1d = df_1d['close'].values
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    williams_r = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r)
     
-    # Align Camarilla levels with 1-bar delay (wait for 1d bar close)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align Williams %R with 1-bar delay (wait for 1d bar close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate EMA50 for trend filter
+    if len(close) >= 50:
+        ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    else:
+        ema50 = np.full(n, np.nan)
     
     # Calculate ATR(14) for stoploss
     if len(close) >= 14:
@@ -71,9 +75,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(williams_r_aligned[i]) or np.isnan(ema50[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -84,23 +87,24 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        h3 = camarilla_h3_aligned[i]
-        l3 = camarilla_l3_aligned[i]
-        ema_50 = ema_50_12h_aligned[i]
+        bp = bull_power[i]
+        br = bear_power[i]
+        wr = williams_r_aligned[i]
+        ema50_val = ema50[i]
         atr_val = atr[i]
         
-        # Volume spike: current volume > 2.0 * 20-period average
+        # Volume confirmation: current volume > 1.5 * 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-19:i+1])
         else:
             vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_20
+        volume_confirm = curr_volume > 1.5 * vol_ma_20
         
         if position == 0:
-            # Long: break above H3 AND uptrend AND volume spike
-            long_condition = curr_high > h3 and curr_close > ema_50 and volume_spike
-            # Short: break below L3 AND downtrend AND volume spike
-            short_condition = curr_low < l3 and curr_close < ema_50 and volume_spike
+            # Long: Bull Power > 0 (buying pressure), Williams %R < -80 (oversold), price > EMA50, volume confirm
+            long_condition = (bp > 0) and (wr < -80) and (curr_close > ema50_val) and volume_confirm
+            # Short: Bear Power < 0 (selling pressure), Williams %R > -20 (overbought), price < EMA50, volume confirm
+            short_condition = (br < 0) and (wr > -20) and (curr_close < ema50_val) and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -111,15 +115,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or price falls below EMA50
-            if curr_close <= entry_price - 2.0 * atr_val or curr_close < ema_50:
+            # Exit long: stoploss (2.5*ATR below entry) or Bear Power turns negative
+            if curr_close <= entry_price - 2.5 * atr_val or bear_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or price rises above EMA50
-            if curr_close >= entry_price + 2.0 * atr_val or curr_close > ema_50:
+            # Exit short: stoploss (2.5*ATR above entry) or Bull Power turns positive
+            if curr_close >= entry_price + 2.5 * atr_val or bull_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -127,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_12hEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_ElderRay_WilliamsR_Regime_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
