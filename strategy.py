@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_ChopFilter_VolumeSpike
-Hypothesis: Camarilla H3/L3 breakout on 12h timeframe with 1d EMA34 trend filter, volume spike confirmation, and choppiness regime filter (CHOP < 38.2). 
-Designed for 12-37 trades/year (50-150 over 4 years) to minimize fee drag. 
-Works in bull markets via breakout continuation and bear markets via trend following. 
-Uses ATR-based stoploss for risk management.
+4h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike
+Hypothesis: Camarilla H3/L3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+Designed for 20-35 trades/year (80-140 over 4 years) to minimize fee drag.
+Uses tight entry conditions: breakout + volume spike + trend alignment (no chop filter to reduce complexity).
+Works in bull markets via breakout continuation and bear markets via trend following.
+ATR-based stoploss for risk management.
 """
 
 import numpy as np
@@ -38,26 +39,13 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 4
     l3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (completed 1d bar)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
-    
-    # Choppiness regime filter: CHOP < 38.2 = trending (favor breakouts), CHOP > 61.8 = ranging (avoid)
-    # Calculate using 14-period high/low range vs true range
-    hl_range = high - low
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    sum_hL14 = pd.Series(hl_range).rolling(window=14, min_periods=14).sum().values
-    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr14 / sum_hL14) / np.log10(14)
-    chop_regime = chop < 38.2  # True when strongly trending (CHOP < 38.2)
     
     # ATR for stoploss calculation
     tr0 = np.abs(high - low)
@@ -70,13 +58,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA (34), volume MA (20), chop (14), ATR (14)
+    # Start index: need enough for 1d EMA (34), volume MA (20), ATR (14)
     start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i]) or np.isnan(atr[i])):
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -86,7 +74,7 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment + trending regime
+            # Look for entry signals - require: Camarilla H3/L3 breakout + volume spike + 1d EMA34 trend alignment
             long_breakout = curr_high > h3_aligned[i]
             short_breakout = curr_low < l3_aligned[i]
             
@@ -94,8 +82,8 @@ def generate_signals(prices):
             long_trend = curr_close > ema_34_1d_aligned[i]
             short_trend = curr_close < ema_34_1d_aligned[i]
             
-            long_entry = (long_breakout and volume_spike[i] and long_trend and chop_regime[i])
-            short_entry = (short_breakout and volume_spike[i] and short_trend and chop_regime[i])
+            long_entry = (long_breakout and volume_spike[i] and long_trend)
+            short_entry = (short_breakout and volume_spike[i] and short_trend)
             
             if long_entry:
                 signals[i] = 0.25
@@ -128,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_ChopFilter_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_TrendFilter_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
