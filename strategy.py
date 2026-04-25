@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
-Hypothesis: Donchian breakouts capture momentum; 1d EMA34 filters trend to avoid counter-trend whipsaws; volume spike confirms participation; chop filter avoids ranging markets. Works in bull/bear via trend filter and volatility-based position sizing. Target: 12-37 trades/year on 12h timeframe.
+4h Donchian(20) breakout + 1d EMA50 trend + volume spike + chop filter
+Hypothesis: Donchian breakouts capture strong momentum; 1d EMA50 filters trend direction;
+volume spike confirms institutional participation; chop filter avoids whipsaws in ranging markets.
+Works in bull via long breakouts in uptrend, bear via short breakouts in downtrend.
+Target: 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
@@ -18,14 +21,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate ATR(14) for stoploss and volatility filter
     if len(close) >= 14:
@@ -37,28 +40,38 @@ def generate_signals(prices):
     else:
         atr = np.full(n, 0.0)
     
-    # Calculate Choppiness Index (14) for regime filter
-    if len(close) >= 14:
-        chop_sum = tr.rolling(window=14, min_periods=14).sum()
-        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-        chop = 100 * np.log10(chop_sum / (highest_high - lowest_low)) / np.log10(14)
-        chop_values = chop.values
+    # Calculate Bollinger Band Width for chop regime (20, 2)
+    if len(close) >= 20:
+        sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+        std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+        upper_band = sma_20 + 2 * std_20
+        lower_band = sma_20 - 2 * std_20
+        bb_width = (upper_band - lower_band) / sma_20
+        # Chop regime: bb_width > 50th percentile of last 100 bars = ranging market
+        bb_width_percentile = np.zeros_like(bb_width)
+        for i in range(20, n):
+            window = bb_width[max(0, i-99):i+1]
+            if len(window) > 0:
+                bb_width_percentile[i] = (np.sum(window <= bb_width[i]) / len(window)) * 100
+        chop_condition = bb_width_percentile > 50  # True when choppy/ranging
     else:
-        chop_values = np.full(n, 50.0)
+        chop_condition = np.zeros(n, dtype=bool)
+        bb_width_percentile = np.zeros(n)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     # Start index: need enough for data to propagate
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(chop_values[i])):
+            np.isnan(sma_20[i]) if i >= 20 else False):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,68 +81,62 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema_34 = ema_34_aligned[i]
+        ema_50 = ema_50_aligned[i]
         atr_val = atr[i]
-        chop_val = chop_values[i]
+        is_chop = chop_condition[i] if i < len(chop_condition) else False
         
         # Donchian channels (20-period)
         if i >= 20:
             donchian_high = np.max(high[i-19:i+1])
             donchian_low = np.min(low[i-19:i+1])
         else:
-            donchian_high = np.max(high[:i+1])
-            donchian_low = np.min(low[:i+1])
+            donchian_high = np.max(high[:i+1]) if i >= 0 else 0
+            donchian_low = np.min(low[:i+1]) if i >= 0 else 0
         
-        # Volume spike: current volume > 2.0 * 50-period average
-        if i >= 50:
-            vol_ma_50 = np.mean(volume[i-49:i+1])
+        # Volume spike: current volume > 2.0 * 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-19:i+1])
         else:
-            vol_ma_50 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 2.0 * vol_ma_50
-        
-        # Trend filter
-        uptrend = curr_close > ema_34
-        downtrend = curr_close < ema_34
-        
-        # Chop filter: avoid ranging markets (chop > 61.8) and extreme trending (chop < 38.2 sometimes fails)
-        # We'll use chop < 61.8 to avoid strong ranging, but allow trending markets
-        not_choppy = chop_val < 61.8
+            vol_ma_20 = np.mean(volume[:i+1]) if i >= 0 else 0
+        volume_spike = curr_volume > 2.0 * vol_ma_20
         
         if position == 0:
             # Long: price breaks above Donchian high AND volume spike AND uptrend AND not choppy
-            long_condition = (curr_high > donchian_high) and volume_spike and uptrend and not_choppy
+            long_condition = (curr_high > donchian_high) and volume_spike and (curr_close > ema_50) and (not is_chop)
             # Short: price breaks below Donchian low AND volume spike AND downtrend AND not choppy
-            short_condition = (curr_low < donchian_low) and volume_spike and downtrend and not_choppy
+            short_condition = (curr_low < donchian_low) and volume_spike and (curr_close < ema_50) and (not is_chop)
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
+                highest_since_entry = curr_close
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
+                lowest_since_entry = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.5*ATR below entry) or trend reversal or Donchian breakout in opposite direction
-            if (curr_close <= entry_price - 2.5 * atr_val or 
-                not uptrend or 
-                curr_low < donchian_low):
+            # Update highest since entry
+            highest_since_entry = max(highest_since_entry, curr_high)
+            # Exit long: stoploss (2.5*ATR below highest) or trend reversal or chop regime
+            if (curr_close <= highest_since_entry - 2.5 * atr_val) or (curr_close < ema_50) or is_chop:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: stoploss (2.5*ATR above entry) or trend reversal or Donchian breakout in opposite direction
-            if (curr_close >= entry_price + 2.5 * atr_val or 
-                not downtrend or 
-                curr_high > donchian_high):
+            # Update lowest since entry
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+            # Exit short: stoploss (2.5*ATR above lowest) or trend reversal or chop regime
+            if (curr_close >= lowest_since_entry + 2.5 * atr_val) or (curr_close > ema_50) or is_chop:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_EMA50_Trend_VolumeSpike_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
