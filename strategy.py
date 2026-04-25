@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_Breakout_1wTrendFilter_VolumeSpike_v1
-Hypothesis: Trade 12h Donchian(20) breakouts aligned with weekly EMA50 trend and volume spike (>2.0*ATR14).
-Uses discrete sizing 0.25 to limit fee drag. Target: 12-37 trades/year to avoid fee drag while maintaining edge.
-Weekly trend filter ensures we only trade with the higher timeframe momentum, reducing whipsaws in both bull and bear markets.
-Volume confirmation adds conviction to breakouts. ATR-based stoploss via signal=0 when price violates opposite Donchian band.
+1d_KAMA_Trend_RSI_ChopFilter_v1
+Hypothesis: Trade daily KAMA trend direction with RSI momentum filter and Choppiness Index regime filter.
+KAMA adapts to market noise, reducing whipsaws in ranging markets. RSI ensures momentum alignment.
+Choppiness Index > 61.8 filters out strong trends where mean reversion fails, focusing on choppy regimes.
+Only trade in choppy markets (CHOP > 61.8) where KAMA + RSI mean reversion edge exists.
+Uses discrete sizing 0.25 to limit fee drag. Target: 7-25 trades/year to avoid fee drag.
+Weekly trend filter from 1w EMA50 ensures we only trade with higher timeframe momentum.
 """
 
 import numpy as np
@@ -16,9 +18,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
     # Get weekly data for EMA50 trend filter
@@ -31,32 +33,68 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ATR14 for volume confirmation and stoploss
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(np.abs(low[1:] - close[:-1]), tr1)
-    tr = np.concatenate([[np.inf], tr2])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate KAMA (adaptive moving average)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Handle volatility calculation correctly for rolling sum
+    volatility_rolling = pd.Series(np.abs(np.diff(close))).rolling(window=10, min_periods=1).sum().values
+    volatility_rolling = np.concatenate([[np.nan] * 9, volatility_rolling[9:]])  # align with change
+    er = np.where(volatility_rolling > 0, change / volatility_rolling, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Calculate Donchian(20) channels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad first value
+    rsi = np.concatenate([[np.nan], rsi])
+    
+    # Calculate Choppiness Index(14)
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with close
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Max/min close over 14 periods
+    max_close = pd.Series(close).rolling(window=14, min_periods=14).max().values
+    min_close = pd.Series(close).rolling(window=14, min_periods=14).min().values
+    chop = np.where((max_close - min_close) != 0, 
+                    100 * np.log10(atr_sum / (max_close - min_close)) / np.log10(14), 
+                    50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for weekly EMA50, ATR, and Donchian channels
-    start_idx = max(50, 14, lookback)
+    # Start index: need warmup for all indicators
+    start_idx = max(50, 30, 14, 14)  # weekly EMA50, KAMA, RSI, CHOP
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0 * ATR
-        volume_confirm = volume[i] > 2.0 * atr[i]
+        # Regime filter: only trade in choppy markets (CHOP > 61.8)
+        if chop[i] <= 61.8:
+            signals[i] = 0.0
+            continue
         
         # Determine weekly trend from EMA50
         weekly_close_aligned = align_htf_to_ltf(prices, df_1w, close_1w)[i]
@@ -65,18 +103,18 @@ def generate_signals(prices):
             continue
             
         if weekly_close_aligned > ema_50_1w_aligned[i]:
-            weekly_trend = 'bullish'  # only allow longs
+            weekly_trend = 'bullish'  # bias toward longs
         elif weekly_close_aligned < ema_50_1w_aligned[i]:
-            weekly_trend = 'bearish'  # only allow shorts
+            weekly_trend = 'bearish'  # bias toward shorts
         else:
-            weekly_trend = 'neutral'  # no trades in neutral zone
+            weekly_trend = 'neutral'
         
         if position == 0:
-            # Long setup: price breaks above Donchian upper band AND volume confirm AND bullish weekly trend
-            long_setup = (close[i] > highest_high[i]) and volume_confirm and (weekly_trend == 'bullish')
+            # Long setup: price below KAMA (mean reversion long) AND RSI < 40 (oversold) AND weekly trend bullish or neutral
+            long_setup = (close[i] < kama[i]) and (rsi[i] < 40) and (weekly_trend in ['bullish', 'neutral'])
             
-            # Short setup: price breaks below Donchian lower band AND volume confirm AND bearish weekly trend
-            short_setup = (close[i] < lowest_low[i]) and volume_confirm and (weekly_trend == 'bearish')
+            # Short setup: price above KAMA (mean reversion short) AND RSI > 60 (overbought) AND weekly trend bearish or neutral
+            short_setup = (close[i] > kama[i]) and (rsi[i] > 60) and (weekly_trend in ['bearish', 'neutral'])
             
             if long_setup:
                 signals[i] = 0.25
@@ -89,20 +127,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price breaks below Donchian lower band OR weekly trend turns bearish
-            if (close[i] < lowest_low[i]) or (weekly_trend == 'bearish'):
+            # Exit: price crosses above KAMA OR RSI > 50 (momentum shift) OR weekly trend turns bearish
+            if (close[i] > kama[i]) or (rsi[i] > 50) or (weekly_trend == 'bearish'):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price breaks above Donchian upper band OR weekly trend turns bullish
-            if (close[i] > highest_high[i]) or (weekly_trend == 'bullish'):
+            # Exit: price crosses below KAMA OR RSI < 50 (momentum shift) OR weekly trend turns bullish
+            if (close[i] < kama[i]) or (rsi[i] < 50) or (weekly_trend == 'bullish'):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Donchian20_Breakout_1wTrendFilter_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
