@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Filter_1dTrend_VolumeSpike
-Hypothesis: Use 1d Ichimoku cloud as trend filter (price above/below cloud) on 6h timeframe with volume spike confirmation for breakout entries.
-Ichimoku cloud provides dynamic support/resistance and trend direction that adapts to volatility.
-Volume spike ensures momentum confirmation. Targets 12-30 trades/year by requiring: 1) price breaks 6h Donchian(20) in direction of 1d Ichimoku trend, 2) volume > 2.0x 20-period average.
-Works in bull/bear: cloud acts as dynamic trend filter, volume spike avoids false breakouts.
+4h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter_v3
+Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and choppiness regime filter (CHOP > 61.8 = range, < 38.2 = trending).
+Targets 20-50 trades/year by requiring: 1) price breaks R1/S1 levels, 2) aligned with 1d EMA trend, 3) market is trending (CHOP < 38.2).
+Uses tighter entry conditions to avoid overtrading fee drag while maintaining edge in both bull and bear markets via regime adaptation.
 """
 
 import numpy as np
@@ -13,72 +12,68 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Precompute session hours (08-20 UTC) once before loop
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1d data for Ichimoku cloud (loaded ONCE)
+    # 1d data for EMA34 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Ichimoku components: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (52 displaced)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d data for Camarilla pivots (loaded ONCE)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Camarilla R1 and S1 levels
+    R1 = prev_close + 1.1 * prev_range * (1.0/12.0)  # R1 = C + 1.1*(HL/12)
+    S1 = prev_close - 1.1 * prev_range * (1.0/12.0)  # S1 = C - 1.1*(HL/12)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Align 1d pivot levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 displaced 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
+    # Choppiness Index on 1d timeframe (trending: CHOP < 38.2, ranging: CHOP > 61.8)
+    atr_1d = []
+    for i in range(len(df_1d)):
+        if i < 14:
+            atr_1d.append(np.nan)
+        else:
+            tr = np.maximum(
+                df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+                np.maximum(
+                    np.abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+                    np.abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+                )
+            )
+            atr_1d.append(tr)
+    atr_1d = np.array(atr_1d)
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=14, min_periods=14).mean().values
+    chop_1d = 100 * np.log10(atr_ma_1d * 14 / np.log(df_1d['high'].rolling(14).max() - df_1d['low'].rolling(14).min())) / np.log10(10)
+    chop_1d = np.nan_to_num(chop_1d, nan=50.0)  # default to neutral when undefined
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 displaced 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # The cloud is between Senkou Span A and B
-    # Current cloud values (displaced back 26 periods to align with current price)
-    # We need values from 26 periods ago to represent current cloud
-    senkou_a_lagged = np.roll(senkou_a, 26)
-    senkou_b_lagged = np.roll(senkou_b, 26)
-    # First 26 values are invalid due to roll
-    senkou_a_lagged[:26] = np.nan
-    senkou_b_lagged[:26] = np.nan
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_lagged)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_lagged)
-    
-    # 6h Donchian(20) for breakout levels
-    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average (moderate spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Start index: need enough for Ichimoku (52) and Donchian (20)
-    start_idx = 52
+    # Start index: need enough for 1d EMA34 (34) and 1d data (2 for shift)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -87,9 +82,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(period20_high[i]) or np.isnan(period20_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -97,39 +91,62 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Ichimoku trend: price above/below cloud
-        top_cloud = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        bottom_cloud = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
-        price_above_cloud = curr_close > top_cloud
-        price_below_cloud = curr_close < bottom_cloud
+        # Trend filter: price relative to 1d EMA34
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
         
-        # Cloud color (green/red): Senkou A > Senkou B = bullish cloud
-        bullish_cloud = senkou_a_aligned[i] > senkou_b_aligned[i]
+        # Regime filter: only trade in trending markets (CHOP < 38.2)
+        trending_market = chop_1d_aligned[i] < 38.2
         
         if position == 0:
-            # Long breakout: price breaks above Donchian high with bullish cloud alignment and volume
-            long_breakout = (curr_high > period20_high[i]) and price_above_cloud and bullish_cloud and volume_confirm[i]
-            # Short breakout: price breaks below Donchian low with bearish cloud alignment and volume
-            short_breakout = (curr_low < period20_low[i]) and price_below_cloud and (not bullish_cloud) and volume_confirm[i]
+            # Look for entry signals with volume confirmation, trend alignment, and trending regime
+            # Long breakout: price breaks above R1 with uptrend, volume confirmation, and trending market
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i] and trending_market
+            # Short breakout: price breaks below S1 with downtrend, volume confirmation, and trending market
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i] and trending_market
             
             if long_breakout:
                 signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
             elif short_breakout:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit when price breaks below cloud or Donchian low
-            if curr_close < bottom_cloud or curr_low < period20_low[i]:
+            # Long position: exit conditions
+            # Calculate 4h ATR for stoploss
+            tr1 = high[1:] - low[1:]
+            tr2 = np.abs(high[1:] - close[:-1])
+            tr3 = np.abs(low[1:] - close[:-1])
+            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+            
+            if curr_close < entry_price - 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price breaks below S1 (mean reversion) or trend changes or market becomes ranging
+            elif curr_close < S1_aligned[i] or not uptrend or chop_1d_aligned[i] >= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit when price breaks above cloud or Donchian high
-            if curr_close > top_cloud or curr_high > period20_high[i]:
+            # Short position: exit conditions
+            # Calculate 4h ATR (same as above)
+            tr1 = high[1:] - low[1:]
+            tr2 = np.abs(high[1:] - close[:-1])
+            tr3 = np.abs(low[1:] - close[:-1])
+            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+            
+            if curr_close > entry_price + 2.5 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit if price breaks above R1 (mean reversion) or trend changes or market becomes ranging
+            elif curr_close > R1_aligned[i] or not downtrend or chop_1d_aligned[i] >= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Cloud_Filter_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_ChopFilter_v3"
+timeframe = "4h"
 leverage = 1.0
