@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Spike
-Hypothesis: Donchian breakouts capture strong momentum. Weekly pivot (from 1w) provides institutional bias:
-- Price above weekly pivot = bullish bias (favor longs)
-- Price below weekly pivot = bearish bias (favor shorts)
-Volume spike confirms participation. Designed for 6h timeframe to achieve 12-37 trades/year per symbol,
-minimizing fee drag while working in both bull and bear markets via directional filtering.
+12h Williams Fractal Breakout + 1d EMA34 Trend + Volume Spike
+Hypothesis: Williams fractals identify key swing points on 1d timeframe. Breakouts above/below
+these levels capture momentum in the direction of the 1d EMA34 trend. Volume spike confirms
+participation. Designed for 12h timeframe with tight entry conditions to achieve 12-37 trades/year.
+Works in bull (breakouts above fractal highs in uptrend) and bear (breakouts below fractal lows in downtrend).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,32 +21,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Donchian channels (call ONCE before loop)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 30:
+    # Get 1d data for Williams fractals and EMA (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 6h high/low
-    donchian_high = pd.Series(df_6h['high'].values).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_6h['low'].values).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams fractals on 1d high/low (requires 5-bar window: 2 left, 2 right)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Williams fractals need 2 extra 1d bars after center bar for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
-    # Align Donchian levels to 6h timeframe (same as primary, so no shift needed but use helper for consistency)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
-    
-    # Get weekly data for pivot point calculation (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot point: (H + L + C) / 3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    
-    # Align weekly pivot to 6h timeframe with extra delay for weekly bar confirmation
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot, additional_delay_bars=1)
+    # Calculate EMA34 on 1d close for trend
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
+        span=34, adjust=False, min_periods=34
+    ).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,13 +52,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian (20), volume MA, and weekly pivot
+    # Start index: need enough for fractals (5-bar lookback), EMA, volume MA
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -70,15 +66,17 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        weekly_pivot_val = weekly_pivot_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
+        bullish_fractal_level = bullish_fractal_aligned[i]
+        bearish_fractal_level = bearish_fractal_aligned[i]
         
         if position == 0:
-            # Look for entry signals with weekly pivot bias
-            # Long: price breaks above Donchian high AND volume spike AND price > weekly pivot (bullish bias)
-            long_entry = (curr_close > donchian_high_aligned[i]) and vol_spike and (curr_close > weekly_pivot_val)
-            # Short: price breaks below Donchian low AND volume spike AND price < weekly pivot (bearish bias)
-            short_entry = (curr_close < donchian_low_aligned[i]) and vol_spike and (curr_close < weekly_pivot_val)
+            # Look for entry signals
+            # Long: price breaks above bullish fractal high AND volume spike AND price > EMA (uptrend)
+            long_entry = (curr_high > bullish_fractal_level) and vol_spike and (curr_close > ema_trend)
+            # Short: price breaks below bearish fractal low AND volume spike AND price < EMA (downtrend)
+            short_entry = (curr_low < bearish_fractal_level) and vol_spike and (curr_close < ema_trend)
             
             if long_entry:
                 signals[i] = 0.25
@@ -90,16 +88,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below Donchian low OR price crosses below weekly pivot (bias change)
-            if (curr_close < donchian_low_aligned[i]) or (curr_close < weekly_pivot_val):
+            # Exit: price crosses below bearish fractal low OR price crosses below EMA (trend change)
+            if (curr_low < bearish_fractal_level) or (curr_close < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above Donchian high OR price crosses above weekly pivot (bias change)
-            if (curr_close > donchian_high_aligned[i]) or (curr_close > weekly_pivot_val):
+            # Exit: price crosses above bullish fractal high OR price crosses above EMA (trend change)
+            if (curr_high > bullish_fractal_level) or (curr_close > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -107,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian20_Breakout_WeeklyPivot_Direction_VolumeSpike"
-timeframe = "6h"
+name = "12h_Williams_Fractal_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
