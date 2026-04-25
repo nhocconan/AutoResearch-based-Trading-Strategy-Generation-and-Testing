@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v20
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v21
 Hypothesis: Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike captures institutional moves. Uses discrete sizing (0.25) and ATR stoploss (2.0) with 8-bar minimum hold. Volume spike threshold reduced to 3.0x average to increase trade frequency while maintaining quality. EMA trend filter uses close price alignment to avoid look-ahead. Works in bull/bear by only taking breakouts in 1d trend direction.
 """
 
@@ -158,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v20"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_v21"
 timeframe = "4h"
 leverage = 1.0
