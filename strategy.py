@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_ChopRegime_v1
-Hypothesis: Trade 4h TRIX (TRIple Exponential Average) crossovers with volume spike confirmation 
-and choppiness regime filter. TRIX > 0 and rising = bullish momentum, TRIX < 0 and falling = bearish.
-Only trade when CHOP(14) > 61.8 (ranging market) for mean reversion at extremes or 
-CHOP(14) < 38.2 (trending market) for momentum continuation. Volume spike (volume > 2.0 * ATR) 
-confirms institutional participation. Target: 20-40 trades/year to minimize fee drag.
-Discrete sizing: 0.25 long/short.
+1h_Camarilla_R1S1_Breakout_4hTrend_1dVolRegime_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 1h with 4h EMA50 trend filter and 1d volume regime filter.
+Only trade long when 4h EMA50 up + 1d volume above average, short when 4h EMA50 down + 1d volume above average.
+Use 1h Camarilla levels from prior 4h bar for structure. Volume filter reduces false breakouts in low volatility.
+Target: 20-50 trades/year to minimize fee drag while capturing high-probability breakouts.
+Discrete sizing: 0.20.
 """
 
 import numpy as np
@@ -23,110 +22,112 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 4h data for trend and Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for trend regime
-    ema_34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 4h EMA50 for trend
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate TRIX on close (primary timeframe: 4h)
-    # TRIX = EMA(EMA(EMA(close), period), period), period) - 1
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = (ema3 / np.roll(ema3, 1)) - 1  # percentage change
-    trix[0] = 0  # first value undefined
+    # Calculate prior 4h bar OHLC for Camarilla levels
+    # Camarilla uses prior day's OHLC, but we use prior 4h bar for 1h timeframe
+    prior_4h_high = df_4h['high'].shift(1).values  # prior completed 4h bar
+    prior_4h_low = df_4h['low'].shift(1).values
+    prior_4h_close = df_4h['close'].shift(1).values
     
-    # Calculate ATR for volatility filters
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(np.abs(low[1:] - close[:-1]), tr1)
-    tr = np.concatenate([[np.inf], tr2])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Camarilla levels for prior 4h bar
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    camarilla_range = prior_4h_high - prior_4h_low
+    r1 = prior_4h_close + camarilla_range * 1.1 / 12
+    s1 = prior_4h_close - camarilla_range * 1.1 / 12
     
-    # Calculate Choppiness Index (CHOP) for regime detection
-    # CHOP = 100 * log10(sum(ATR(14)) / (max(high) - min(low))) / log10(period)
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr_14 / (max_high_14 - min_low_14)) / np.log10(14)
-    # Handle division by zero or invalid values
-    chop = np.where((max_high_14 - min_low_14) > 0, chop, 50.0)
-    chop = np.where(np.isnan(chop), 50.0, chop)
+    # Align Camarilla levels to 1h timeframe (delayed by one 4h bar for completion)
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    
+    # Get 1d data for volume regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate 1d average volume (20-period SMA)
+    avg_vol_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # open_time is already datetime64[ms]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0  # track holding period
     
-    # Start index: need warmup for TRIX (45), ATR (14), CHOP (14), 12h EMA (34)
-    start_idx = max(45, 14, 14, 34)
+    # Start index: need warmup for 4h EMA50 (50), Camarilla (need prior 4h bar), 1d avg volume (20)
+    start_idx = max(50, 20) + 1  # +1 for prior 4h bar shift
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
-            np.isnan(atr[i]) or np.isnan(chop[i]) or
-            np.isnan(ema_34_12h_aligned[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(avg_vol_1d_aligned[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
-        # Volume spike: current volume > 2.0 * ATR
-        volume_spike = volume[i] > 2.0 * atr[i]
-        
-        # TRIX signals: TRIX > 0 and rising = bullish, TRIX < 0 and falling = bearish
-        trix_bullish = (trix[i] > 0) and (trix[i] > trix[i-1])
-        trix_bearish = (trix[i] < 0) and (trix[i] < trix[i-1])
-        
-        # Choppiness regime: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (momentum)
-        chop_ranging = chop[i] > 61.8
-        chop_trending = chop[i] < 38.2
-        
-        # 12h trend filter: only trade in direction of 12h trend
-        price_above_12h_ema = close[i] > ema_34_12h_aligned[i]
-        price_below_12h_ema = close[i] < ema_34_12h_aligned[i]
-        
-        if position == 0:
-            # Long setup: TRIX bullish AND volume spike AND (chop ranging OR (chop trending AND price above 12h EMA))
-            long_setup = trix_bullish and volume_spike and (chop_ranging or (chop_trending and price_above_12h_ema))
-            
-            # Short setup: TRIX bearish AND volume spike AND (chop ranging OR (chop trending AND price below 12h EMA))
-            short_setup = trix_bearish and volume_spike and (chop_ranging or (chop_trending and price_below_12h_ema))
-            
-            if long_setup:
-                signals[i] = 0.25
-                position = 1
-                bars_since_entry = 0
-            elif short_setup:
-                signals[i] = -0.25
-                position = -1
-                bars_since_entry = 0
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.0
-                bars_since_entry = 0
+            continue
+        
+        # Volume regime: 1d volume above average (avoid low volatility breakouts)
+        volume_regime = volume[i] > avg_vol_1d_aligned[i]
+        
+        if position == 0:
+            # Long setup: price breaks above R1, 4h EMA50 up, volume regime
+            if (close[i] > r1_aligned[i] and 
+                close[i-1] <= r1_aligned[i-1] and  # ensure breakout happened this bar
+                ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] and  # 4h EMA50 rising
+                volume_regime):
+                signals[i] = 0.20
+                position = 1
+            
+            # Short setup: price breaks below S1, 4h EMA50 down, volume regime
+            elif (close[i] < s1_aligned[i] and 
+                  close[i-1] >= s1_aligned[i-1] and  # ensure breakdown happened this bar
+                  ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] and  # 4h EMA50 falling
+                  volume_regime):
+                signals[i] = -0.20
+                position = -1
+            else:
+                signals[i] = 0.0
+        
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
-            bars_since_entry += 1
-            # Exit: TRIX turns bearish OR chop becomes extremely ranging OR max holding period (16 bars = 2 days)
-            if (not trix_bullish) or (chop[i] > 70) or (bars_since_entry >= 16):
+            signals[i] = 0.20
+            # Exit: price breaks below S1 OR 4h EMA50 turns down OR end of session
+            if (close[i] < s1_aligned[i] or 
+                ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] or
+                hour >= 20):  # force exit before session end
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+        
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
-            bars_since_entry += 1
-            # Exit: TRIX turns bullish OR chop becomes extremely ranging OR max holding period (16 bars = 2 days)
-            if (not trix_bearish) or (chop[i] > 70) or (bars_since_entry >= 16):
+            signals[i] = -0.20
+            # Exit: price breaks above R1 OR 4h EMA50 turns up OR end of session
+            if (close[i] > r1_aligned[i] or 
+                ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] or
+                hour >= 20):  # force exit before session end
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
     
     return signals
 
-name = "4h_TRIX_VolumeSpike_ChopRegime_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolRegime_v1"
+timeframe = "1h"
 leverage = 1.0
