@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume spike confirmation.
-Long when price breaks above R1 with 1d EMA50 uptrend and volume > 2.0x 20-period average.
-Short when price breaks below S1 with 1d EMA50 downtrend and volume > 2.0x 20-period average.
-Exit on opposite band touch (S1/R1) or trend reversal.
-Uses discrete sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
-Works in bull via trend-following breakouts, in bear via mean reversion at extreme bands.
+6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike
+Hypothesis: 6h Camarilla R4/S4 breakout with 1d EMA50 trend filter and volume spike confirmation.
+R4/S4 represent stronger breakout levels than R3/S3, reducing false signals and improving trade quality.
+Long when price breaks above R4 with 1d EMA50 uptrend and volume > 2.0x 20-period average.
+Short when price breaks below S4 with 1d EMA50 downtrend and volume > 2.0x 20-period average.
+Exit on opposite band touch (S4/R4) or trend reversal.
+Uses discrete sizing (0.25) to minimize fee churn. Target: 12-37 trades/year.
+Works in bull via trend-following breakouts, in bear via reduced whipsaw from stronger breakout levels.
 """
 
 import numpy as np
@@ -23,39 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla calculations (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
+    # Get 6h data for Camarilla calculations (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 5:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Calculate Camarilla levels for each 4h bar (based on previous bar)
-    R1_4h = np.full(len(close_4h), np.nan)
-    S1_4h = np.full(len(close_4h), np.nan)
-    R3_4h = np.full(len(close_4h), np.nan)
-    S3_4h = np.full(len(close_4h), np.nan)
+    # Calculate Camarilla levels for each 6h bar (based on previous bar)
+    R4_6h = np.full(len(close_6h), np.nan)
+    S4_6h = np.full(len(close_6h), np.nan)
+    R3_6h = np.full(len(close_6h), np.nan)
+    S3_6h = np.full(len(close_6h), np.nan)
     
-    for i in range(1, len(close_4h)):
-        # Camarilla levels based on previous 4h bar's range
-        high_prev = high_4h[i-1]
-        low_prev = low_4h[i-1]
-        close_prev = close_4h[i-1]
+    for i in range(1, len(close_6h)):
+        # Camarilla levels based on previous 6h bar's range
+        high_prev = high_6h[i-1]
+        low_prev = low_6h[i-1]
+        close_prev = close_6h[i-1]
         range_prev = high_prev - low_prev
         
         if range_prev > 0:
-            R1_4h[i] = close_prev + (range_prev * 1.1 / 12)
-            S1_4h[i] = close_prev - (range_prev * 1.1 / 12)
-            R3_4h[i] = close_prev + (range_prev * 1.1 / 4)
-            S3_4h[i] = close_prev - (range_prev * 1.1 / 4)
+            R4_6h[i] = close_prev + (range_prev * 1.1 / 2)  # R4 level
+            S4_6h[i] = close_prev - (range_prev * 1.1 / 2)  # S4 level
+            R3_6h[i] = close_prev + (range_prev * 1.1 / 4)  # R3 level
+            S3_6h[i] = close_prev - (range_prev * 1.1 / 4)  # S3 level
     
     # Align Camarilla levels to original timeframe
-    R1_4h_aligned = align_htf_to_ltf(prices, df_4h, R1_4h)
-    S1_4h_aligned = align_htf_to_ltf(prices, df_4h, S1_4h)
-    R3_4h_aligned = align_htf_to_ltf(prices, df_4h, R3_4h)
-    S3_4h_aligned = align_htf_to_ltf(prices, df_4h, S3_4h)
+    R4_6h_aligned = align_htf_to_ltf(prices, df_6h, R4_6h)
+    S4_6h_aligned = align_htf_to_ltf(prices, df_6h, S4_6h)
+    R3_6h_aligned = align_htf_to_ltf(prices, df_6h, R3_6h)
+    S3_6h_aligned = align_htf_to_ltf(prices, df_6h, S3_6h)
     
     # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
@@ -79,16 +80,16 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_4h_aligned[i]) or np.isnan(S1_4h_aligned[i]) or 
+        if (np.isnan(R4_6h_aligned[i]) or np.isnan(S4_6h_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with uptrend and volume spike
-            long_signal = (close[i] > R1_4h_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and vol_spike[i]
-            # Short: price breaks below S1 with downtrend and volume spike
-            short_signal = (close[i] < S1_4h_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and vol_spike[i]
+            # Long: price breaks above R4 with uptrend and volume spike
+            long_signal = (close[i] > R4_6h_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and vol_spike[i]
+            # Short: price breaks below S4 with downtrend and volume spike
+            short_signal = (close[i] < S4_6h_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and vol_spike[i]
             
             if long_signal:
                 signals[i] = 0.25
@@ -101,22 +102,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: price touches S1 or trend reverses
-            exit_signal = (close[i] < S1_4h_aligned[i]) or (close[i] < ema_50_1d_aligned[i])
+            # Exit conditions: price touches S3 or trend reverses
+            exit_signal = (close[i] < S3_6h_aligned[i]) or (close[i] < ema_50_1d_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: price touches R1 or trend reverses
-            exit_signal = (close[i] > R1_4h_aligned[i]) or (close[i] > ema_50_1d_aligned[i])
+            # Exit conditions: price touches R3 or trend reverses
+            exit_signal = (close[i] > R3_6h_aligned[i]) or (close[i] > ema_50_1d_aligned[i])
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
