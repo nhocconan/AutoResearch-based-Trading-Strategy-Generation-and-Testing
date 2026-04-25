@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_RegimeTight
-Hypothesis: 6h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume spike confirmation, and chop regime filter.
-Targets 12-37 trades/year by requiring: 1) price breaks R1/S1 levels, 2) aligned with 1d EMA trend, 3) volume > 2.5x 20-period average (strict), 4) choppy market filter (CHOP > 61.8) for mean reversion edge in bear markets.
-Designed to reduce overtrading vs prior 6h variants while maintaining edge in both bull/bear via regime adaptation.
+4h_Donchian20_Breakout_1dTrend_VolumeConfirm
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>1.5x 20-bar avg).
+Targets 20-50 trades/year by requiring: 1) price breaks Donchian channel, 2) aligned with 1d EMA trend, 3) volume spike.
+Designed for low turnover and high edge via trend alignment and institutional volume confirmation. Uses ATR(14) stoploss.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,49 +24,36 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # 1d data for EMA34 trend filter (loaded ONCE)
+    # 1d data for EMA50 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d data for Camarilla pivots (loaded ONCE)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
+    # 1d data for higher timeframe trend (optional: 1d EMA200 for regime)
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Camarilla R1 and S1 levels
-    R1 = prev_close + 1.1 * prev_range * (1.0/12.0)  # R1 = C + 1.1*(HL/12)
-    S1 = prev_close - 1.1 * prev_range * (1.0/12.0)  # S1 = C - 1.1*(HL/12)
+    # Donchian Channel (20) on 4h timeframe
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d pivot levels to 6h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume confirmation: current volume > 2.5 * 20-period average (strict spike)
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 2.5)
+    volume_confirm = volume > (vol_ma * 1.5)
     
-    # Chop regime filter: CHOP > 61.8 = choppy/range (mean reversion favorable)
-    # True range
+    # ATR(14) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Chop = 100 * log10(sum(ATR14) / (n * max(high-low))) over period
-    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    max_hl = pd.Series(high - low).rolling(window=14, min_periods=14).max().values
-    chop = 100 * np.log10(sum_atr14 / (14 * max_hl))
-    chop_filter = chop > 61.8  # choppy market
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA34 (34) and chop calculation (14+14-1=27)
-    start_idx = 50
+    # Start index: need enough for Donchian(20) and 1d EMA50 (50)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -75,8 +62,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -84,22 +71,25 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         
-        # Trend filter: price relative to 1d EMA34
-        uptrend = curr_close > ema_34_1d_aligned[i]
-        downtrend = curr_close < ema_34_1d_aligned[i]
+        # Trend and regime filters
+        uptrend = curr_close > ema_50_1d_aligned[i]
+        downtrend = curr_close < ema_50_1d_aligned[i]
+        bull_regime = curr_close > ema_200_1d_aligned[i]  # bull market filter
+        bear_regime = curr_close < ema_200_1d_aligned[i]  # bear market filter
         
         if position == 0:
-            # Look for entry signals with volume confirmation, trend alignment, and chop filter
-            # Long breakout: price breaks above R1 with uptrend and volume confirmation in choppy market
-            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i] and chop_filter[i]
-            # Short breakout: price breaks below S1 with downtrend and volume confirmation in choppy market
-            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i] and chop_filter[i]
+            # Look for entry signals with volume confirmation
+            # Long breakout: price breaks above Donchian upper with uptrend and volume confirmation
+            long_breakout = (curr_close > highest_20[i]) and uptrend and volume_confirm[i]
+            # Short breakout: price breaks below Donchian lower with downtrend and volume confirmation
+            short_breakout = (curr_close < lowest_20[i]) and downtrend and volume_confirm[i]
             
-            if long_breakout:
+            # In bull regime, favor longs; in bear regime, favor shorts
+            if long_breakout and (bull_regime or not bear_regime):
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            elif short_breakout:
+            elif short_breakout and (bear_regime or not bull_regime):
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -107,36 +97,24 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Stoploss: 2.5 * ATR below entry (using 6h ATR)
-            tr1 = high[1:] - low[1:]
-            tr2 = np.abs(high[1:] - close[:-1])
-            tr3 = np.abs(low[1:] - close[:-1])
-            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-            
-            if curr_close < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR below entry
+            if curr_close < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks below S1 (mean reversion) or trend changes or chop ends
-            elif curr_close < S1_aligned[i] or not uptrend or not chop_filter[i]:
+            # Exit if price breaks below Donchian lower (mean reversion) or trend changes
+            elif curr_close < lowest_20[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Calculate 6h ATR (same as above)
-            tr1 = high[1:] - low[1:]
-            tr2 = np.abs(high[1:] - close[:-1])
-            tr3 = np.abs(low[1:] - close[:-1])
-            tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-            atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-            
-            if curr_close > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR above entry
+            if curr_close > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks above R1 (mean reversion) or trend changes or chop ends
-            elif curr_close > R1_aligned[i] or not downtrend or not chop_filter[i]:
+            # Exit if price breaks above Donchian upper (mean reversion) or trend changes
+            elif curr_close > highest_20[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -144,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_RegimeTight"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
