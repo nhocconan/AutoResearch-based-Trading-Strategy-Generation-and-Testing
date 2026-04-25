@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_Breakout_1wTrend_VolumeConfirm
-Hypothesis: 1d Camarilla R4/S4 breakout with 1w trend filter and volume spike confirmation.
-Long when price breaks above Camarilla R4 in 1w uptrend (close > 1w EMA34) with volume > 2.0x 20-bar average.
-Short when price breaks below Camarilla S4 in 1w downtrend (close < 1w EMA34) with volume > 2.0x 20-bar average.
-Exit via ATR-based trailing stop (2.5*ATR from extreme) or re-entry into Camarilla H4/L4 range.
-Designed for ~7-25 trades/year by requiring strong breakouts (R4/S4), weekly trend alignment, and volume confirmation.
-Works in bull/bear markets via 1w EMA34 filter; avoids whipsaws via volume confirmation and tight stops.
+6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ATRstop
+Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume spike confirmation.
+Long when price breaks above Camarilla R3 in 1d uptrend (close > 1d EMA34) with volume > 2.0x 20-bar average.
+Short when price breaks below Camarilla S3 in 1d downtrend (close < 1d EMA34) with volume > 2.0x 20-bar average.
+Exit via ATR-based trailing stop (2.5*ATR from extreme) or re-entry into Camarilla H3/L3 range.
+Designed for ~12-37 trades/year by requiring strong breakouts (R3/S3), daily trend alignment, and volume confirmation.
+Works in bull/bear markets via 1d EMA34 filter; avoids whipsaws via volume confirmation and tight stops.
 """
 
 import numpy as np
@@ -23,33 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get previous day's OHLC for Camarilla levels (1d HTF, aligned with 1 extra delay for completed bar)
+    # Get 1d data for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Get previous day's OHLC for Camarilla levels (1d HTF, aligned with 1 extra delay for completed bar)
     prev_close = align_htf_to_ltf(prices, df_1d, df_1d['close'].values, additional_delay_bars=1)
     prev_high = align_htf_to_ltf(prices, df_1d, df_1d['high'].values, additional_delay_bars=1)
     prev_low = align_htf_to_ltf(prices, df_1d, df_1d['low'].values, additional_delay_bars=1)
     prev_open = align_htf_to_ltf(prices, df_1d, df_1d['open'].values, additional_delay_bars=1)
     
-    # Camarilla levels from previous day's OHLC (R4/S4 are outer levels)
+    # Camarilla levels from previous day's OHLC
     camarilla_range = prev_high - prev_low
-    R4 = prev_close + camarilla_range * 1.1 / 2  # Same as H4
-    S4 = prev_close - camarilla_range * 1.1 / 2  # Same as L4
-    H4 = prev_close + camarilla_range * 1.1 / 2
-    L4 = prev_close - camarilla_range * 1.1 / 2
+    R1 = prev_close + camarilla_range * 1.1 / 12
+    S1 = prev_close - camarilla_range * 1.1 / 12
+    R3 = prev_close + camarilla_range * 1.1 / 4
+    S3 = prev_close - camarilla_range * 1.1 / 4
+    H3 = prev_close + camarilla_range * 1.1 / 2
+    L3 = prev_close - camarilla_range * 1.1 / 2
     
     # ATR for trailing stop (14-period)
     atr_period = 14
@@ -74,21 +72,21 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(R4[i]) or np.isnan(S4[i]) or 
-            np.isnan(H4[i]) or np.isnan(L4[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
+            np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_34_1w_aligned[i]
+        ema_trend = ema_34_1d_aligned[i]
         
         if position == 0:
-            # Only trade in trending regimes (1w EMA34 filter)
-            if close[i] > ema_trend:  # 1w uptrend regime
-                # Long: break above Camarilla R4 with volume spike
-                long_signal = (close[i] > R4[i]) and vol_regime[i]
-            else:  # 1w downtrend regime
-                # Short: break below Camarilla S4 with volume spike
-                short_signal = (close[i] < S4[i]) and vol_regime[i]
+            # Only trade in trending regimes (1d EMA34 filter)
+            if close[i] > ema_trend:  # 1d uptrend regime
+                # Long: break above Camarilla R3 with volume spike
+                long_signal = (close[i] > R3[i]) and vol_regime[i]
+            else:  # 1d downtrend regime
+                # Short: break below Camarilla S3 with volume spike
+                short_signal = (close[i] < S3[i]) and vol_regime[i]
             
             if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
@@ -109,9 +107,9 @@ def generate_signals(prices):
             # Update highest close
             if close[i] > long_high:
                 long_high = close[i]
-            # Exit conditions: ATR trailing stop OR re-enter Camarilla H4/L4 range
+            # Exit conditions: ATR trailing stop OR re-enter Camarilla H3/L3 range
             atr_stop = long_high - 2.5 * atr[i]
-            range_exit = (close[i] < H4[i] and close[i] > L4[i])
+            range_exit = (close[i] < H3[i] and close[i] > L3[i])
             if close[i] <= atr_stop or range_exit:
                 signals[i] = 0.0
                 position = 0
@@ -121,15 +119,15 @@ def generate_signals(prices):
             # Update lowest close
             if close[i] < short_low:
                 short_low = close[i]
-            # Exit conditions: ATR trailing stop OR re-enter Camarilla H4/L4 range
+            # Exit conditions: ATR trailing stop OR re-enter Camarilla H3/L3 range
             atr_stop = short_low + 2.5 * atr[i]
-            range_exit = (close[i] > L4[i] and close[i] < H4[i])
+            range_exit = (close[i] > L3[i] and close[i] < H3[i])
             if close[i] >= atr_stop or range_exit:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_Pivot_Breakout_1wTrend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ATRstop"
+timeframe = "6h"
 leverage = 1.0
