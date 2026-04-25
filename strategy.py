@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume Spike + ATR Stoploss + Chop Regime Filter
-Hypothesis: Donchian breakouts capture institutional flow. Volume spike confirms
-institutional participation. Chop regime filter (CHOP>61.8) ensures we only trade
-in ranging markets where breakouts are more reliable. ATR stoploss manages risk.
-Works in bull/bear via regime adaptation. Target: 25-40 trades/year on 4h.
+1h RSI(2) Extreme Reversion + 4h EMA50 Trend + Volume Spike
+Hypothesis: In 1h timeframe, RSI(2) < 5 signals oversold bounce in uptrend (4h EMA50),
+RSI(2) > 95 signals overbought rejection in downtrend. Volume spike confirms institutional participation.
+Uses 4h EMA50 for trend filter (works in bull/bear via trend alignment) and 1h only for precise entry timing.
+Target: 15-30 trades/year on 1h (60-120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,7 +21,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for stoploss and position sizing
+    # Get 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Calculate ATR(14) for stoploss
     if len(close) >= 14:
         tr1 = pd.Series(high).diff().abs()
         tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
@@ -31,44 +41,18 @@ def generate_signals(prices):
     else:
         atr = np.full(n, 0.0)
     
-    # Calculate Donchian channels (20-period)
-    if len(close) >= 20:
-        donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-        donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate RSI(2) on 1h close
+    if len(close) >= 2:
+        delta = pd.Series(close).diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+        avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        rsi = rsi.fillna(50).values  # neutral when undefined
     else:
-        donchian_high = np.full(n, np.nan)
-        donchian_low = np.full(n, np.nan)
-    
-    # Calculate Choppiness Index (14-period) for regime filter
-    if len(close) >= 14:
-        # True Range
-        tr1 = pd.Series(high).diff().abs()
-        tr2 = (pd.Series(high) - pd.Series(close).shift()).abs()
-        tr3 = (pd.Series(low) - pd.Series(close).shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr_sum = tr.rolling(window=14, min_periods=14).sum().values
-        
-        # Max(HH) - Min(LL) over 14 periods
-        max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-        min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-        range_14 = max_high - min_low
-        
-        # Chop = 100 * log10(atr_sum / range_14) / log10(14)
-        # Avoid division by zero
-        chop = np.full(n, 50.0)  # default to neutral
-        mask = (range_14 > 0) & (~np.isnan(range_14)) & (~np.isnan(atr_sum))
-        chop[mask] = 100 * np.log10(atr_sum[mask] / range_14[mask]) / np.log10(14)
-    else:
-        chop = np.full(n, 50.0)
-    
-    # Volume spike: current volume > 2.0 * 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 19:
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
-        else:
-            vol_ma_20[i] = np.mean(volume[:i+1]) if i >= 0 else 0.0
-    volume_spike = volume > (2.0 * vol_ma_20)
+        rsi = np.full(n, 50.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,10 +63,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(chop[i])):
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,46 +75,52 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        dh = donchian_high[i]
-        dl = donchian_low[i]
+        ema_50 = ema_50_4h_aligned[i]
         atr_val = atr[i]
-        chop_val = chop[i]
-        vol_spike = volume_spike[i]
+        rsi_val = rsi[i]
         
-        # Regime filter: only trade in ranging markets (Chop > 61.8)
-        in_range = chop_val > 61.8
+        # Volume spike: current volume > 2.0 * 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-19:i+1])
+        else:
+            vol_ma_20 = np.mean(volume[:i+1])
+        volume_spike = curr_volume > 2.0 * vol_ma_20
+        
+        # Trend filter
+        uptrend = curr_close > ema_50
+        downtrend = curr_close < ema_50
         
         if position == 0:
-            # Long: price breaks above Donchian high AND volume spike AND ranging market
-            long_condition = (curr_high > dh) and vol_spike and in_range
-            # Short: price breaks below Donchian low AND volume spike AND ranging market
-            short_condition = (curr_low < dl) and vol_spike and in_range
+            # Long: RSI(2) < 5 (extreme oversold) AND volume spike AND uptrend
+            long_condition = (rsi_val < 5) and volume_spike and uptrend
+            # Short: RSI(2) > 95 (extreme overbought) AND volume spike AND downtrend
+            short_condition = (rsi_val > 95) and volume_spike and downtrend
             
             if long_condition:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = curr_close
             elif short_condition:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or Donchian low break
-            if curr_close <= entry_price - 2.0 * atr_val or curr_low < dl:
+            # Exit long: stoploss (2.0*ATR below entry) or RSI > 70 (overbought) or trend reversal
+            if curr_close <= entry_price - 2.0 * atr_val or rsi_val > 70 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or Donchian high break
-            if curr_close >= entry_price + 2.0 * atr_val or curr_high > dh:
+            # Exit short: stoploss (2.0*ATR above entry) or RSI < 30 (oversold) or trend reversal
+            if curr_close >= entry_price + 2.0 * atr_val or rsi_val < 30 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
-name = "4h_Donchian20_Breakout_VolumeSpike_ChopFilter_ATRStop_v1"
-timeframe = "4h"
+name = "1h_RSI2_Extreme_4hEMA50_Trend_VolumeSpike_v1"
+timeframe = "1h"
 leverage = 1.0
