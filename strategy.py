@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H3L3_Breakout_12hEMA34_VolumeConfirm_v1
-Hypothesis: Trade Camarilla H3/L3 breakouts on 4h timeframe with 12-hour EMA34 trend filter and volume confirmation.
-In bull markets: buy when price breaks above Camarilla H3 and price > 12h EMA34.
-In bear markets: sell when price breaks below Camarilla L3 and price < 12h EMA34.
+1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1
+Hypothesis: Trade Camarilla R1/S1 breakouts on 1d timeframe with 1-week EMA20 trend filter and volume confirmation.
+In bull markets: buy when price breaks above Camarilla R1 and price > weekly EMA20.
+In bear markets: sell when price breaks below Camarilla S1 and price < weekly EMA20.
 Requires volume > 1.5x 20-period average for confirmation.
 Exit on opposite Camarilla level touch or trend reversal.
 Position size: 0.25 to limit drawdown.
-Target: 75-200 total trades over 4 years = 19-50/year.
+Target: 30-100 total trades over 4 years = 7-25/year.
 Works in bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets.
 """
 
@@ -25,62 +25,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla levels and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:  # Need sufficient data for EMA34
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need sufficient data for EMA
         return np.zeros(n)
     
-    # Calculate 12h EMA34 for HTF trend filter
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate weekly EMA20 for HTF trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Get 1d data for Camarilla levels and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:  # Need sufficient data for volume average
+        return np.zeros(n)
     
     # Calculate 20-period average volume for confirmation
-    volume_12h = df_12h['volume'].values
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    volume_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate Camarilla levels for each 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla levels for each 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    hl_range_12h = high_12h - low_12h
-    h3_12h = close_12h + (1.1 * hl_range_12h / 2)  # H3 = close + 1.1*(high-low)/2
-    l3_12h = close_12h - (1.1 * hl_range_12h / 2)  # L3 = close - 1.1*(high-low)/2
+    hl_range_1d = high_1d - low_1d
+    r1_1d = close_1d + (1.1 * hl_range_1d / 12)  # R1 = close + 1.1*(high-low)/12
+    s1_1d = close_1d - (1.1 * hl_range_1d / 12)  # S1 = close - 1.1*(high-low)/12
     
     # Align Camarilla levels to match prices index
-    h3_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA34 (34) and volume MA (20)
-    start_idx = 34
+    # Start index: need warmup for weekly EMA20 (20) and daily volume MA (20)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or 
+        if (np.isnan(ema_20_1w_aligned[i]) or 
             np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(h3_aligned[i]) or
-            np.isnan(l3_aligned[i])):
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 12h HTF trend (bullish = price above 12h EMA34)
-        htf_12h_bullish = close[i] > ema_34_12h_aligned[i]
-        htf_12h_bearish = close[i] < ema_34_12h_aligned[i]
+        # Determine 1w HTF trend (bullish = price above weekly EMA20)
+        htf_1w_bullish = close[i] > ema_20_1w_aligned[i]
+        htf_1w_bearish = close[i] < ema_20_1w_aligned[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long setup: price breaks above Camarilla H3 + 12h uptrend + volume confirmation
-            long_setup = (close[i] > h3_aligned[i]) and htf_12h_bullish and volume_confirm
+            # Long setup: price breaks above Camarilla R1 + 1w uptrend + volume confirmation
+            long_setup = (close[i] > r1_aligned[i]) and htf_1w_bullish and volume_confirm
             
-            # Short setup: price breaks below Camarilla L3 + 12h downtrend + volume confirmation
-            short_setup = (close[i] < l3_aligned[i]) and htf_12h_bearish and volume_confirm
+            # Short setup: price breaks below Camarilla S1 + 1w downtrend + volume confirmation
+            short_setup = (close[i] < s1_aligned[i]) and htf_1w_bearish and volume_confirm
             
             if long_setup:
                 signals[i] = 0.25
@@ -93,20 +98,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches Camarilla L3 (stop) OR 12h trend turns bearish
-            if (close[i] <= l3_aligned[i]) or (not htf_12h_bullish):
+            # Exit: price touches Camarilla S1 (stop) OR 1w trend turns bearish
+            if (close[i] <= s1_aligned[i]) or (not htf_1w_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches Camarilla H3 (stop) OR 12h trend turns bullish
-            if (close[i] >= h3_aligned[i]) or (htf_12h_bullish):
+            # Exit: price touches Camarilla R1 (stop) OR 1w trend turns bullish
+            if (close[i] >= r1_aligned[i]) or (htf_1w_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Camarilla_H3L3_Breakout_12hEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
