@@ -1,22 +1,36 @@
 #!/usr/bin/env python3
 """
-6h Williams Alligator + 12h Weekly Pivot R1S1 Breakout with Volume Confirmation
-Hypothesis: Williams Alligator (JAW/TEETH/LIPS) identifies trend absence/presence on 6h.
-When alligator is "sleeping" (JAW > TEETH > LIPS for downtrend, JAW < TEETH < LIPS for uptrend),
-we wait for price to break weekly Camarilla R1/S1 levels with volume confirmation.
-In trending markets (alligator awakened), we follow the alligator direction.
-Weekly pivots provide institutional support/resistance. Designed for low trade frequency 
-(12-37/year) on 6h timeframe to work in both bull and bear markets via trend following 
-and mean reversion at extremes.
+4h Camarilla H3L3 Breakout with 1d HMA21 Trend and Volume Spike
+Hypothesis: Camarilla pivot levels (H3/L3) act as strong intraday support/resistance. Breakouts above H3 or below L3 with 
+volume confirmation and aligned 1d HMA21 trend capture institutional moves. The 1d HMA21 reduces lag vs EMA while smoothing 
+noise, providing reliable trend direction. Volume spike confirms participation. Designed for low-moderate trade frequency 
+(19-50/year) on 4h timeframe to work in both bull and bear markets via trend following.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=np.float64)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA of half period
+    wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean()
+    # WMA of full period
+    wma_full = pd.Series(series).ewm(span=period, adjust=False).mean()
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    # Final HMA: WMA of raw_hma with sqrt_period
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
+    return hma.values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,33 +38,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for weekly pivot calculation (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for HMA21 trend and Camarilla pivots (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivots on 12h data (approx weekly from 12h bars)
-    # Use previous 12h bar's high/low/close to avoid look-ahead
-    prev_high_12h = df_12h['high'].shift(1).values
-    prev_low_12h = df_12h['low'].shift(1).values
-    prev_close_12h = df_12h['close'].shift(1).values
+    # Calculate 21-period HMA on 1d close for trend
+    hma_21_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
     
-    # Weekly Camarilla R1/S1: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    weekly_r1 = prev_close_12h + (prev_high_12h - prev_low_12h) * 1.1 / 12
-    weekly_s1 = prev_close_12h - (prev_high_12h - prev_low_12h) * 1.1 / 12
+    # Calculate Camarilla pivots for each 1d bar: based on previous day's high, low, close
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # Align to LTF (6h)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_12h, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_12h, weekly_s1)
+    # Calculate Camarilla pivots for each 1d bar: based on previous day's high, low, close
+    # We need to shift to avoid look-ahead: use previous day's data to calculate today's levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate Williams Alligator on 6h close: SMAs of median price
-    median_price = (high + low) / 2
-    # JAW: 13-period SMMA shifted 8 bars
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    # TEETH: 8-period SMMA shifted 5 bars
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    # LIPS: 5-period SMMA shifted 3 bars
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Camarilla formulas:
+    # H3 = close + (high - low) * 1.1/6
+    # L3 = close - (high - low) * 1.1/6
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    
+    # Align to LTF (4h) - no extra delay needed as pivots are based on completed 1d bar
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Calculate volume spike: current volume > 2.0 * 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,13 +74,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for alligator, volume MA, and to avoid NaN from shift
-    start_idx = max(21, 20) + 1  # 13+8 shift = 21, 20 for vol MA
+    # Start index: need enough for HMA, volume MA, and to avoid NaN from shift
+    start_idx = max(21, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
+        if (np.isnan(hma_21_1d_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -74,29 +90,17 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        r1_level = weekly_r1_aligned[i]
-        s1_level = weekly_s1_aligned[i]
+        hma_trend = hma_21_1d_aligned[i]
+        h3_level = camarilla_h3_aligned[i]
+        l3_level = camarilla_l3_aligned[i]
         vol_spike = volume_spike[i]
-        
-        # Alligator conditions
-        # Sleeping downtrend: JAW > TEETH > LIPS
-        sleeping_down = jaw_val > teeth_val and teeth_val > lips_val
-        # Sleeping uptrend: JAW < TEETH < LIPS
-        sleeping_up = jaw_val < teeth_val and teeth_val < lips_val
-        # Awakened bullish: LIPS > TEETH > JAW
-        awakened_bull = lips_val > teeth_val and teeth_val > jaw_val
-        # Awakened bearish: LIPS < TEETH < JAW
-        awakened_bear = lips_val < teeth_val and teeth_val < jaw_val
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above weekly R1 with volume spike AND (sleeping uptrend OR awakened bullish)
-            long_entry = (curr_close > r1_level) and vol_spike and (sleeping_up or awakened_bull)
-            # Short: price breaks below weekly S1 with volume spike AND (sleeping downtrend OR awakened bearish)
-            short_entry = (curr_close < s1_level) and vol_spike and (sleeping_down or awakened_bear)
+            # Long: price breaks above H3 resistance AND volume spike AND price > 1d HMA21 (uptrend)
+            long_entry = (curr_close > h3_level) and vol_spike and (curr_close > hma_trend)
+            # Short: price breaks below L3 support AND volume spike AND price < 1d HMA21 (downtrend)
+            short_entry = (curr_close < l3_level) and vol_spike and (curr_close < hma_trend)
             
             if long_entry:
                 signals[i] = 0.25
@@ -108,16 +112,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below weekly S1 OR alligator turns bearish (LIPS < TEETH)
-            if (curr_close < s1_level) or (lips_val < teeth_val):
+            # Exit: price crosses below L3 support (broken support) OR price crosses below HMA (trend change)
+            if (curr_close < l3_level) or (curr_close < hma_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price crosses above weekly R1 OR alligator turns bullish (LIPS > TEETH)
-            if (curr_close > r1_level) or (lips_val > teeth_val):
+            # Exit: price crosses above H3 resistance (broken resistance) OR price crosses above HMA (trend change)
+            if (curr_close > h3_level) or (curr_close > hma_trend):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -125,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_WeeklyPivot_R1S1_Breakout_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_H3L3_Breakout_1dHMA21_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
