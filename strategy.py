@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike + ATR Trail
-Hypothesis: Donchian breakouts capture momentum, 1d EMA34 filters trend direction, volume confirms strength, ATR trail manages risk. Designed for 12h to avoid overtrading while working in both bull (breakouts up) and bear (breakouts down) markets via symmetric logic.
+12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Trail
+Hypothesis: Camarilla H3/L3 levels act as strong support/resistance; breakouts with volume confirmation and 1d EMA34 trend filter capture momentum moves in both bull and bear markets. ATR-based trailing stop manages risk. Designed for 12h timeframe to limit trade frequency (target: 12-37 trades/year) and avoid fee drag, while working across BTC/ETH/SOL via symmetric long/short logic.
 """
 
 import numpy as np
@@ -41,30 +41,35 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Calculate Donchian channels (20-period) on 12h data
+    # Get 12h data for Camarilla levels (call ONCE before loop)
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
+    # Calculate Camarilla levels (H3, L3) from previous 12h bar
     high_12h = pd.Series(df_12h['high'])
     low_12h = pd.Series(df_12h['low'])
-    donchian_high_20 = high_12h.rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = low_12h.rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_20)
+    close_12h = pd.Series(df_12h['close'])
+    
+    # Camarilla: H3 = close + 1.1*(high-low)/6, L3 = close - 1.1*(high-low)/6
+    camarilla_high = close_12h + (1.1 * (high_12h - low_12h) / 6)
+    camarilla_low = close_12h - (1.1 * (high_12h - low_12h) / 6)
+    
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_12h, camarilla_high.values)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_12h, camarilla_low.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Start index: need enough for EMA34, ATR, volume MA, Donchian
-    start_idx = max(34, 14, 20, 20)
+    # Start index: need enough for EMA34, ATR, volume MA, Camarilla
+    start_idx = max(34, 14, 20, 2)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i])):
+            np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,8 +84,8 @@ def generate_signals(prices):
         ema_34_val = ema_34_1d_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
-        donchian_high = donchian_high_aligned[i]
-        donchian_low = donchian_low_aligned[i]
+        camarilla_high = camarilla_high_aligned[i]
+        camarilla_low = camarilla_low_aligned[i]
         
         # Trend filter: price relative to 1d EMA34
         uptrend = curr_close > ema_34_val
@@ -90,11 +95,11 @@ def generate_signals(prices):
         volume_confirm = curr_volume > 1.5 * vol_ma
         
         if position == 0:
-            # Look for breakout signals at Donchian levels
-            # Long: price breaks above Donchian high with volume confirmation in uptrend
-            long_breakout = (curr_close > donchian_high) and volume_confirm and uptrend
-            # Short: price breaks below Donchian low with volume confirmation in downtrend
-            short_breakout = (curr_close < donchian_low) and volume_confirm and downtrend
+            # Look for breakout signals at Camarilla levels
+            # Long: price breaks above Camarilla H3 with volume confirmation in uptrend
+            long_breakout = (curr_close > camarilla_high) and volume_confirm and uptrend
+            # Short: price breaks below Camarilla L3 with volume confirmation in downtrend
+            short_breakout = (curr_close < camarilla_low) and volume_confirm and downtrend
             
             if long_breakout:
                 signals[i] = 0.25
@@ -110,8 +115,8 @@ def generate_signals(prices):
             # Long position management
             # Update highest price since entry
             highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit conditions: price closes below Donchian low OR 2*ATR trailing stop OR EMA34 trend turns down
-            if curr_close < donchian_low or curr_close < (highest_since_entry - 2.0 * atr_val) or curr_close < ema_34_val:
+            # Exit conditions: price closes below Camarilla L3 OR 2*ATR trailing stop OR EMA34 trend turns down
+            if curr_close < camarilla_low or curr_close < (highest_since_entry - 2.0 * atr_val) or curr_close < ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 highest_since_entry = 0.0
@@ -121,8 +126,8 @@ def generate_signals(prices):
             # Short position management
             # Update lowest price since entry
             lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit conditions: price closes above Donchian high OR 2*ATR trailing stop OR EMA34 trend turns up
-            if curr_close > donchian_high or curr_close > (lowest_since_entry + 2.0 * atr_val) or curr_close > ema_34_val:
+            # Exit conditions: price closes above Camarilla H3 OR 2*ATR trailing stop OR EMA34 trend turns up
+            if curr_close > camarilla_high or curr_close > (lowest_since_entry + 2.0 * atr_val) or curr_close > ema_34_val:
                 signals[i] = 0.0
                 position = 0
                 lowest_since_entry = 0.0
@@ -131,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail"
+name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRTrail"
 timeframe = "12h"
 leverage = 1.0
