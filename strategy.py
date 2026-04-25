@@ -1,85 +1,108 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_12hEMA50_Trend_VolumeSpike_ATRStop
-Hypothesis: Donchian(20) breakouts on 4h capture strong momentum. Trend filter from 12h EMA50 ensures alignment with higher timeframe direction. Volume spike confirms breakout strength. ATR-based stoploss limits drawdown. Works in bull markets (breakouts continuation) and bear markets (breakdown continuation). Uses discrete position sizing (0.25) to limit fee drag and drawdown. Target: 20-50 trades/year per symbol.
+1d_KAMA_Trend_With_RSI_Filter
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) adapts to market noise, providing a reliable trend filter. Combined with RSI(14) for momentum confirmation and a choppiness regime filter to avoid whipsaws in ranging markets, this strategy captures strong directional moves in both bull and bear markets. Discrete position sizing (0.25) limits fee drag and drawdown. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_donchian(high, low, window):
-    """Calculate Donchian channel upper and lower bands."""
-    upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
-    lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
-    return upper, lower
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change) > 1 else np.zeros_like(change)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast_period+1) - 2/(slow_period+1)) + 2/(slow_period+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """Calculate Choppiness Index."""
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    hh = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    ll = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    chop = np.where((hh - ll) != 0, 100 * np.log10(atr / (hh - ll)) / np.log10(period), 50)
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA50 trend filter (loaded ONCE)
-    df_12h = get_htf_data(prices, '12h')
+    # 1d data for KAMA trend and RSI (loaded ONCE)
+    df_1d = get_htf_data(prices, '1d')
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d KAMA for trend
+    kama_1d = calculate_kama(df_1d['close'].values, er_period=10, fast_period=2, slow_period=30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Align HTF indicator to LTF (4h)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d RSI for momentum
+    rsi_1d = calculate_rsi(df_1d['close'].values, period=14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # 4h Donchian(20) for breakout signals
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    # 1d choppiness for regime filter
+    chop_1d = calculate_choppiness(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # 4h volume spike: current volume > 2.0 * 20-period volume MA
+    # Volume confirmation: current volume > 1.5 * 20-period volume MA
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
-    
-    # 4h ATR for dynamic stoploss
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # first bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_confirmed = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0  # track entry price for stoploss
+    entry_price = 0.0
     
-    # Start index: need Donchian (20) + volume MA (20) + ATR (14) + aligned HTF arrays
-    start_idx = max(20, 20, 14, 0)
+    # Start index: need KAMA, RSI, chop, volume MA
+    start_idx = max(30, 14, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         curr_volume = volume[i]
-        curr_atr = atr[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper with volume spike and 12h uptrend
-            long_breakout = (curr_close > donchian_upper[i]) and vol_spike[i] and (curr_close > ema_50_12h_aligned[i])
-            # Short: price breaks below Donchian lower with volume spike and 12h downtrend
-            short_breakout = (curr_close < donchian_lower[i]) and vol_spike[i] and (curr_close < ema_50_12h_aligned[i])
+            # Long: price > KAMA, RSI > 50, low chop (trending), volume confirmed
+            long_condition = (curr_close > kama_1d_aligned[i]) and (rsi_1d_aligned[i] > 50) and (chop_1d_aligned[i] < 50) and vol_confirmed[i]
+            # Short: price < KAMA, RSI < 50, low chop (trending), volume confirmed
+            short_condition = (curr_close < kama_1d_aligned[i]) and (rsi_1d_aligned[i] < 50) and (chop_1d_aligned[i] < 50) and vol_confirmed[i]
             
-            if long_breakout:
+            if long_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            elif short_breakout:
+            elif short_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -88,20 +111,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: price breaks below Donchian lower OR trend turns down OR ATR stoploss hit
-            if (curr_close < donchian_lower[i]) or (curr_close < ema_50_12h_aligned[i]) or (curr_close < entry_price - 2.0 * curr_atr):
+            # Exit: price < KAMA OR RSI < 40 OR chop > 61.8 (rangy)
+            if (curr_close < kama_1d_aligned[i]) or (rsi_1d_aligned[i] < 40) or (chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: price breaks above Donchian upper OR trend turns up OR ATR stoploss hit
-            if (curr_close > donchian_upper[i]) or (curr_close > ema_50_12h_aligned[i]) or (curr_close > entry_price + 2.0 * curr_atr):
+            # Exit: price > KAMA OR RSI > 60 OR chop > 61.8 (rangy)
+            if (curr_close > kama_1d_aligned[i]) or (rsi_1d_aligned[i] > 60) or (chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Donchian20_Breakout_12hEMA50_Trend_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
