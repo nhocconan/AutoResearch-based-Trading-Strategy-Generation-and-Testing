@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume confirmation. In bullish 1d trend, buy breakouts above R1; in bearish 1d trend, sell breakdowns below S1. Uses volume spike (1.8x 30-bar avg) to confirm institutional interest. Designed for 4h timeframe with tight entries (~20-50/year) to minimize fee drag while capturing strong directional moves in both bull and bear markets.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v2
+Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d EMA34 trend filter and volume confirmation. In bullish 1d trend, buy breakouts above R1; in bearish 1d trend, sell breakdowns below S1. Uses volume spike (1.8x 30-bar avg) to confirm institutional interest. Designed for 12h timeframe with tight entries (~15-25/year) to minimize fee drag while capturing strong directional moves in both bull and bear markets.
 """
 
 import numpy as np
@@ -38,7 +38,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12.0
     camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12.0
     
-    # Align Camarilla levels to 4h timeframe (yesterday's levels available today)
+    # Align Camarilla levels to 12h timeframe (yesterday's levels available today)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm_v2"
+timeframe = "12h"
 leverage = 1.0
