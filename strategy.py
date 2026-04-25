@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike
-Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
-Designed for low turnover (~20-50 trades/year) by requiring confluence of: 1) price breaks R1/S1 levels, 
-2) aligned with 1d EMA trend, 3) volume > 2x 20-period average. Uses discrete position sizing (0.25) 
-to minimize fee churn. Works in bull/bear via trend alignment and institutional volume confirmation.
+6h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_RegimeTight
+Hypothesis: 6h Camarilla R1/S1 breakout with 1d EMA34 trend filter, volume spike confirmation, and chop regime filter.
+Targets 12-37 trades/year by requiring: 1) price breaks R1/S1 levels, 2) aligned with 1d EMA trend, 3) volume > 2.5x 20-period average (strict), 4) choppy market filter (CHOP > 61.8) for mean reversion edge in bear markets.
+Designed to reduce overtrading vs prior 6h variants while maintaining edge in both bull/bear via regime adaptation.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -40,20 +39,34 @@ def generate_signals(prices):
     R1 = prev_close + 1.1 * prev_range * (1.0/12.0)  # R1 = C + 1.1*(HL/12)
     S1 = prev_close - 1.1 * prev_range * (1.0/12.0)  # S1 = C - 1.1*(HL/12)
     
-    # Align 1d pivot levels to 4h timeframe
+    # Align 1d pivot levels to 6h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average (strict spike)
+    # Volume confirmation: current volume > 2.5 * 20-period average (strict spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 2.0)
+    volume_confirm = volume > (vol_ma * 2.5)
+    
+    # Chop regime filter: CHOP > 61.8 = choppy/range (mean reversion favorable)
+    # True range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Chop = 100 * log10(sum(ATR14) / (n * max(high-low))) over period
+    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    max_hl = pd.Series(high - low).rolling(window=14, min_periods=14).max().values
+    chop = 100 * np.log10(sum_atr14 / (14 * max_hl))
+    chop_filter = chop > 61.8  # choppy market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for 1d EMA34 (34)
-    start_idx = 34
+    # Start index: need enough for 1d EMA34 (34) and chop calculation (14+14-1=27)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if not in trading session
@@ -63,7 +76,7 @@ def generate_signals(prices):
         
         # Skip if any data not ready
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(ema_34_1d_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -76,11 +89,11 @@ def generate_signals(prices):
         downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals with volume confirmation and trend alignment
-            # Long breakout: price breaks above R1 with uptrend and volume confirmation
-            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i]
-            # Short breakout: price breaks below S1 with downtrend and volume confirmation
-            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i]
+            # Look for entry signals with volume confirmation, trend alignment, and chop filter
+            # Long breakout: price breaks above R1 with uptrend and volume confirmation in choppy market
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i] and chop_filter[i]
+            # Short breakout: price breaks below S1 with downtrend and volume confirmation in choppy market
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i] and chop_filter[i]
             
             if long_breakout:
                 signals[i] = 0.25
@@ -94,7 +107,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Stoploss: 2.5 * ATR below entry (using 4h ATR)
+            # Stoploss: 2.5 * ATR below entry (using 6h ATR)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -104,15 +117,15 @@ def generate_signals(prices):
             if curr_close < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks below S1 (mean reversion) or trend changes
-            elif curr_close < S1_aligned[i] or not uptrend:
+            # Exit if price breaks below S1 (mean reversion) or trend changes or chop ends
+            elif curr_close < S1_aligned[i] or not uptrend or not chop_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Calculate 4h ATR (same as above)
+            # Calculate 6h ATR (same as above)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
@@ -122,8 +135,8 @@ def generate_signals(prices):
             if curr_close > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-            # Exit if price breaks above R1 (mean reversion) or trend changes
-            elif curr_close > R1_aligned[i] or not downtrend:
+            # Exit if price breaks above R1 (mean reversion) or trend changes or chop ends
+            elif curr_close > R1_aligned[i] or not downtrend or not chop_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -131,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_RegimeTight"
+timeframe = "6h"
 leverage = 1.0
