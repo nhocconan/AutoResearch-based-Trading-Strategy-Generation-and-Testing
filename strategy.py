@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike
-Hypothesis: Camarilla H3/L3 levels from daily chart act as strong support/resistance on 12h timeframe.
-Breakout through these levels with daily EMA34 trend alignment and volume confirmation captures
-swing moves while minimizing trades. Works in bull/bear by following daily trend. Targets 50-150 total trades over 4 years.
+4h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike v3
+Hypothesis: Camarilla H3/L3 levels from 1d act as strong intraday support/resistance on 4h.
+Breakout through these levels with 1d EMA34 trend alignment (more stable than 12h) and volume confirmation
+captures institutional flow while avoiding overtrading. Uses discrete position sizing (0.25) and volume threshold (2.5x)
+to target 75-200 total trades over 4 hours. Works in bull/bear by following 1d trend while using Camarilla levels
+for precise entry/exit. Added ATR-based trailing stop to reduce drawdown and improve Sharpe.
 """
 
 import numpy as np
@@ -30,42 +32,55 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Align daily data to 12h timeframe
-    prev_high_12h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_12h = align_htf_to_ltf(prices, df_1d, prev_low)
-    prev_close_12h = align_htf_to_ltf(prices, df_1d, prev_close)
+    # Align daily data to 4h timeframe
+    prev_high_4h = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_4h = align_htf_to_ltf(prices, df_1d, prev_low)
+    prev_close_4h = align_htf_to_ltf(prices, df_1d, prev_close)
     
     # Calculate Camarilla levels: H3/L3
-    rng = prev_high_12h - prev_low_12h
-    h3 = prev_close_12h + rng * 1.1 / 6.0
-    l3 = prev_close_12h - rng * 1.1 / 6.0
+    rng = prev_high_4h - prev_low_4h
+    h3 = prev_close_4h + rng * 1.1 / 6.0
+    l3 = prev_close_4h - rng * 1.1 / 6.0
     
-    # Daily EMA34 for trend filter
+    # 1d EMA34 for trend filter (more stable than 12h)
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h volume average for confirmation
+    # ATR for dynamic stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # 4h volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Start index: need enough for Camarilla (1d) + EMA34 (1d) + VolMA20
-    start_idx = max(50, 20)
+    # Start index: need enough for Camarilla (1d) + EMA34 (1d) + VolMA20 + ATR
+    start_idx = max(50, 20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         curr_volume = volume[i]
         ema_34_level = ema_34_1d_aligned[i]
+        atr_value = atr[i]
         
         # Volume spike: current volume > 2.5 * 20-period average
         volume_spike = curr_volume > 2.5 * vol_ma_20[i]
@@ -74,15 +89,38 @@ def generate_signals(prices):
         bullish_breakout = curr_close > h3[i]  # Break above H3
         bearish_breakout = curr_close < l3[i]  # Break below L3
         
-        # Exit conditions: reverse breakout or trend change
+        # Update tracking variables for trailing stop
+        if position == 1:
+            highest_since_entry = max(highest_since_entry, curr_high)
+        elif position == -1:
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+        
+        # Exit conditions: trailing stop or reverse breakout or trend change
         if position != 0:
-            if position == 1 and (curr_close < l3[i] or curr_close < ema_34_level):
+            exit_signal = False
+            
+            if position == 1:
+                # Trailing stop: exit if price drops 2.0*ATR from highest since entry
+                if curr_close < highest_since_entry - 2.0 * atr_value:
+                    exit_signal = True
+                # Reverse breakout or trend change
+                elif curr_close < l3[i] or curr_close < ema_34_level:
+                    exit_signal = True
+                    
+            elif position == -1:
+                # Trailing stop: exit if price rises 2.0*ATR from lowest since entry
+                if curr_close > lowest_since_entry + 2.0 * atr_value:
+                    exit_signal = True
+                # Reverse breakout or trend change
+                elif curr_close > h3[i] or curr_close > ema_34_level:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
-                continue
-            elif position == -1 and (curr_close > h3[i] or curr_close > ema_34_level):
-                signals[i] = 0.0
-                position = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+                entry_price = 0.0
                 continue
         
         # Entry conditions: Breakout + trend + volume
@@ -93,9 +131,15 @@ def generate_signals(prices):
             if long_condition:
                 signals[i] = 0.25
                 position = 1
+                entry_price = curr_close
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
             elif short_condition:
                 signals[i] = -0.25
                 position = -1
+                entry_price = curr_close
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
         elif position == 1:
             signals[i] = 0.25
         elif position == -1:
@@ -103,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
