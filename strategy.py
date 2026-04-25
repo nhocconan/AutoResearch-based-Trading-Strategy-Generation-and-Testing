@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1w EMA50 trend filter and volume spike confirmation.
-- In weekly uptrend (price > 1w EMA50): buy breakouts above R1, sell breakdowns below S1.
-- In weekly downtrend (price < 1w EMA50): fade extremes at R1/S1 with mean reversion.
-- Volume confirmation: require volume > 2.0x 50-period average to avoid false breakouts.
-- Position size: 0.25. Target: 75-150 total trades over 4 years = 19-38/year.
-- Works in both bull and bear: weekly trend filter adapts to market regime, volume filters noise.
+4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v3
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d ATR-based trend filter and volume spike confirmation.
+- Trend filter: price > 1d close + 0.5*ATR(14) = bullish, price < 1d close - 0.5*ATR(14) = bearish, else ranging.
+- In trending markets: buy breakouts above R1, sell breakdowns below S1.
+- In ranging markets: fade extremes at R1/S1 with mean reversion to pivot.
+- Volume confirmation: require volume > 1.5x 20-period average to avoid false breakouts.
+- Position size: 0.25. Target: 75-200 total trades over 4 years = 19-50/year.
+- Works in both bull and bear: ATR trend filter adapts to volatility regime, volume filters noise.
 """
 
 import numpy as np
@@ -23,27 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for HTF trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d ATR(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_14_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     # Calculate daily Camarilla pivot levels (using previous day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close[0] = df_1d['close'].values[0]
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
     pivot = (prev_high + prev_low + prev_close) / 3.0
     range_ = prev_high - prev_low
@@ -54,49 +62,49 @@ def generate_signals(prices):
     r3 = pivot + (range_ * 1.1 / 4)
     s3 = pivot - (range_ * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume spike confirmation: volume > 2.0x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (2.0 * vol_ma_50)
+    # Volume spike confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and volume MA (50)
-    start_idx = 50
+    # Start index: need warmup for ATR(14) and volume MA (20)
+    start_idx = max(14, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(atr_14_1d_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
             np.isnan(r3_aligned[i]) or
             np.isnan(s3_aligned[i]) or
             np.isnan(pivot_aligned[i]) or
-            np.isnan(vol_ma_50[i])):
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend (bullish = price above 1w EMA50)
-        htf_1w_bullish = close[i] > ema_50_1w_aligned[i]
-        htf_1w_bearish = close[i] < ema_50_1w_aligned[i]
+        # Determine 1d HTF trend using ATR bands
+        htf_1d_bullish = close[i] > (close_1d_aligned := align_htf_to_ltf(prices, df_1d, close_1d)[i]) + (0.5 * atr_14_1d_aligned[i])
+        htf_1d_bearish = close[i] < (close_1d_aligned := align_htf_to_ltf(prices, df_1d, close_1d)[i]) - (0.5 * atr_14_1d_aligned[i])
+        # Note: close_1d_aligned is computed twice but it's cheap; could optimize but clarity first
         
-        # Determine if we are in trending or ranging market based on distance from EMA
-        ema_distance = abs(close[i] - ema_50_1w_aligned[i]) / ema_50_1w_aligned[i]
-        trending_market = ema_distance > 0.03  # >3% away from EMA = trending
-        ranging_market = ema_distance <= 0.03   # <=3% away from EMA = ranging
+        # Determine if we are in trending or ranging market based on ATR bands
+        trending_market = htf_1d_bullish or htf_1d_bearish
+        ranging_market = not trending_market
         
         if position == 0:
             if trending_market:
                 # Trending market: trade breakout continuation
-                long_setup = (close[i] > r1_aligned[i]) and htf_1w_bullish and volume_spike[i]
-                short_setup = (close[i] < s1_aligned[i]) and htf_1w_bearish and volume_spike[i]
+                long_setup = (close[i] > r1_aligned[i]) and htf_1d_bullish and volume_spike[i]
+                short_setup = (close[i] < s1_aligned[i]) and htf_1d_bearish and volume_spike[i]
             else:
                 # Ranging market: trade mean reversion at extremes
                 long_setup = (close[i] < s1_aligned[i]) and (close[i] > s3_aligned[i]) and volume_spike[i]  # Oversold bounce
@@ -116,7 +124,7 @@ def generate_signals(prices):
             # Exit conditions
             if trending_market:
                 # In trending market: exit on trend reversal or touch of S1
-                exit_signal = (not htf_1w_bullish) or (close[i] < s1_aligned[i])
+                exit_signal = (not htf_1d_bullish) or (close[i] < s1_aligned[i])
             else:
                 # In ranging market: exit on mean reversion to pivot or touch of R1
                 exit_signal = (close[i] > pivot_aligned[i]) or (close[i] > r1_aligned[i])
@@ -130,7 +138,7 @@ def generate_signals(prices):
             # Exit conditions
             if trending_market:
                 # In trending market: exit on trend reversal or touch of R1
-                exit_signal = htf_1w_bullish or (close[i] > r1_aligned[i])
+                exit_signal = htf_1d_bullish or (close[i] > r1_aligned[i])
             else:
                 # In ranging market: exit on mean reversion to pivot or touch of S1
                 exit_signal = (close[i] < pivot_aligned[i]) or (close[i] < s1_aligned[i])
@@ -141,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dATR_Trend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
