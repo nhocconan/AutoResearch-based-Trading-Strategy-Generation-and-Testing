@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d EMA34 Trend Filter + Volume Spike Confirmation
-Hypothesis: Donchian breakouts capture strong momentum, while 1d EMA34 filter ensures alignment with higher timeframe trend.
-Volume spike (>2x 20-bar MA) confirms institutional participation. Works in bull markets via upside breakouts
-and bear markets via downside breakdowns. Discrete sizing (0.25) limits fee drag. Target: 75-200 total trades over 4 years.
+4h Camarilla R3/S3 Breakout with 1d EMA34 Trend Filter and Volume Spike Confirmation
+Hypothesis: Camarilla pivot levels (R3/S3) act as strong intraday support/resistance. A breakout above R3 or below S3 with 1d EMA34 trend alignment and volume spike (>1.5x 20-bar vol MA) captures strong momentum with controlled trade frequency. Works in bull markets via upside breakouts and in bear markets via downside breakdowns. Discrete sizing (0.25) limits fee drag. Target: 75-200 total trades over 4 years on 4h timeframe.
 """
 
 import numpy as np
@@ -38,8 +36,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian calculation, EMA34, and volume MA
-    start_idx = max(35, 20)  # 35 for EMA34 (34 + 1 for safety), 20 for volume MA
+    # Start index: need enough for EMA34 and volume MA
+    start_idx = max(35, 20)  # 35 for EMA34, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -57,19 +55,32 @@ def generate_signals(prices):
         ema_34_val = ema_34_1d_aligned[i]
         vol_ma = vol_ma_20[i]
         
-        # Donchian(20) channels: highest high and lowest low of last 20 bars (including current)
-        lookback_start = max(0, i - 19)
-        highest_high = np.max(high[lookback_start:i+1])
-        lowest_low = np.min(low[lookback_start:i+1])
+        # Calculate Camarilla pivot levels for today (using previous day's OHLC)
+        # Camarilla levels: based on previous day's range
+        if i >= 1:
+            prev_close = close[i-1]
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_range = prev_high - prev_low
+            
+            # Camarilla levels
+            R3 = prev_close + (prev_range * 1.1 / 4)
+            S3 = prev_close - (prev_range * 1.1 / 4)
+        else:
+            # Not enough data for previous day
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > 2.0 * vol_ma
+        # Volume confirmation: current volume > 1.5 * 20-period average
+        volume_confirm = curr_volume > 1.5 * vol_ma
         
         if position == 0:
-            # Long: break above upper Donchian + price above 1d EMA34 + volume confirmation
-            long_signal = (curr_close > highest_high) and (curr_close > ema_34_val) and volume_confirm
-            # Short: break below lower Donchian + price below 1d EMA34 + volume confirmation
-            short_signal = (curr_close < lowest_low) and (curr_close < ema_34_val) and volume_confirm
+            # Long: break above R3 + price above 1d EMA34 + volume confirmation
+            long_signal = (curr_close > R3) and (curr_close > ema_34_val) and volume_confirm
+            # Short: break below S3 + price below 1d EMA34 + volume confirmation
+            short_signal = (curr_close < S3) and (curr_close < ema_34_val) and volume_confirm
             
             if long_signal:
                 signals[i] = 0.25
@@ -78,15 +89,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses back below lower Donchian OR price crosses below 1d EMA34
-            if (curr_close < lowest_low) or (curr_close < ema_34_val):
+            # Exit long: price crosses back below R3 OR price crosses below 1d EMA34
+            if (curr_close < R3) or (curr_close < ema_34_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses back above upper Donchian OR price crosses above 1d EMA34
-            if (curr_close > highest_high) or (curr_close > ema_34_val):
+            # Exit short: price crosses back above S3 OR price crosses above 1d EMA34
+            if (curr_close > S3) or (curr_close > ema_34_val):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -94,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
