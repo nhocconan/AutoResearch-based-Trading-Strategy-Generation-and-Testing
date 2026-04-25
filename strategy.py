@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ATRstop_v2
-Hypothesis: 12-hour Camarilla R3/S3 breakout with 1-day EMA34 trend filter and volume spike confirmation.
+6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: 6-hour Camarilla R3/S3 breakout with 1-day EMA34 trend filter and volume spike confirmation.
 Long when price breaks above R3 in 1-day uptrend (close > 1d EMA34) with volume > 2.0x 20-period average.
 Short when price breaks below S3 in 1-day downtrend (close < 1d EMA34) with volume > 2.0x 20-period average.
 Exit via opposite Camarilla level (S3 for longs, R3 for shorts) or ATR stop (2.5*ATR from extreme).
@@ -59,7 +59,7 @@ def generate_signals(prices):
     camarilla_r3_1d = c_1d + ((h_1d - l_1d) * 1.1 / 4)
     camarilla_s3_1d = c_1d - ((h_1d - l_1d) * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 6h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
@@ -133,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_ATRstop_v2"
-timeframe = "12h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
