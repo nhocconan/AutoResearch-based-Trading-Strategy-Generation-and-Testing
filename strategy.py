@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike
-Hypothesis: Donchian channel breakouts capture significant price moves with institutional participation.
-1d EMA50 provides trend filter to avoid counter-trend trades. Volume spike confirms breakout authenticity.
-Designed for 12h timeframe to minimize fee drag while capturing multi-day trends in BTC/ETH.
-Target: 12-37 trades/year on 12h (50-150 total over 4 years).
-Works in bull markets via trend-following breakouts and in bear markets via short breakouts during downtrends.
+4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike
+Hypothesis: Donchian channel breakouts capture strong momentum. 1d EMA50 filters for higher-timeframe trend alignment.
+Volume spike confirms institutional participation. Works in bull/bear via trend filter.
+Target: 20-50 trades/year on 4h (75-200 total over 4 years).
 """
 
 import numpy as np
@@ -14,19 +12,18 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
     # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     # Calculate 1d EMA50 for trend filter
@@ -46,11 +43,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Start index: need enough for Donchian(20) and EMA50 alignment
-    start_idx = 50
+    # Start index: need enough for Donchian(20) and EMA50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data not ready
@@ -58,8 +53,6 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
             continue
         
         curr_close = close[i]
@@ -69,20 +62,23 @@ def generate_signals(prices):
         ema_50 = ema_50_1d_aligned[i]
         atr_val = atr[i]
         
-        # Calculate Donchian channels (20-period) using only historical data
+        # Donchian(20) breakout levels (based on previous 20 bars)
         if i >= 20:
-            donchian_high = np.max(high[i-19:i+1])
-            donchian_low = np.min(low[i-19:i+1])
+            donch_high = np.max(high[i-20:i])  # highest high of previous 20 bars
+            donch_low = np.min(low[i-20:i])    # lowest low of previous 20 bars
         else:
-            donchian_high = np.max(high[:i+1])
-            donchian_low = np.min(low[:i+1])
+            # Not enough data for Donchian calculation
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        # Volume spike: current volume > 1.8 * 20-period average
+        # Volume spike: current volume > 2.0 * 20-period average
         if i >= 20:
             vol_ma_20 = np.mean(volume[i-19:i+1])
         else:
             vol_ma_20 = np.mean(volume[:i+1])
-        volume_spike = curr_volume > 1.8 * vol_ma_20
+        volume_spike = curr_volume > 2.0 * vol_ma_20
         
         # Trend filter
         uptrend = curr_close > ema_50
@@ -90,47 +86,35 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above Donchian high AND volume spike AND uptrend
-            long_condition = (curr_high > donchian_high) and volume_spike and uptrend
+            long_condition = (curr_high > donch_high) and volume_spike and uptrend
             # Short: price breaks below Donchian low AND volume spike AND downtrend
-            short_condition = (curr_low < donchian_low) and volume_spike and downtrend
+            short_condition = (curr_low < donch_low) and volume_spike and downtrend
             
             if long_condition:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-                highest_since_entry = curr_high
-                lowest_since_entry = curr_low
             elif short_condition:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
-                highest_since_entry = curr_high
-                lowest_since_entry = curr_low
         elif position == 1:
-            # Update highest high since entry
-            highest_since_entry = max(highest_since_entry, curr_high)
-            # Exit long: stoploss (2.5*ATR below highest) or trend reversal
-            if curr_close <= highest_since_entry - 2.5 * atr_val or not uptrend:
+            # Exit long: stoploss (2.5*ATR below entry) or trend reversal
+            if curr_close <= entry_price - 2.5 * atr_val or not uptrend:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Update lowest low since entry
-            lowest_since_entry = min(lowest_since_entry, curr_low)
-            # Exit short: stoploss (2.5*ATR above lowest) or trend reversal
-            if curr_close >= lowest_since_entry + 2.5 * atr_val or not downtrend:
+            # Exit short: stoploss (2.5*ATR above entry) or trend reversal
+            if curr_close >= entry_price + 2.5 * atr_val or not downtrend:
                 signals[i] = 0.0
                 position = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
     
     return signals
 
-name = "12h_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
