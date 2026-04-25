@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Trade 12h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and 1d volume spike (>2.0x 20-bar MA). Uses 1d for stronger trend confirmation and volume spike to capture institutional interest. Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years) with low fee drag. Works in bull/bear via 1d trend filter + volume confirmation.
+4h_Camarilla_H3L3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Trade 4h Camarilla H3/L3 breakouts with 1d EMA34 trend filter and 1d volume spike (>2.0x 20-bar MA). Uses 1d for stronger trend confirmation than 4h alone, reducing false signals. Volume spike confirms institutional interest. Discrete sizing 0.25 to balance return and fee drag. Target 20-50 trades/year on 4h timeframe. Works in bull/bear via trend filter + volume confirmation + Camarilla structure.
 """
 
 import numpy as np
@@ -32,16 +32,16 @@ def generate_signals(prices):
     volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
     volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Calculate Camarilla levels from previous 12h bar (for 12h entry timing)
+    # Calculate Camarilla levels from previous 4h bar (for 4h entry timing)
     camarilla_range = (high - low) * 1.1 / 12.0
-    camarilla_R1 = close + camarilla_range
-    camarilla_S1 = close - camarilla_range
+    camarilla_H3 = close + camarilla_range * 1.125  # H3 = C + (high-low)*1.1/12*1.125
+    camarilla_L3 = close - camarilla_range * 1.125  # L3 = C - (high-low)*1.1/12*1.125
     
-    # Shift by 1 to use only completed 12h bar for Camarilla calculation (no look-ahead)
-    camarilla_R1 = np.roll(camarilla_R1, 1)
-    camarilla_S1 = np.roll(camarilla_S1, 1)
-    camarilla_R1[0] = np.nan
-    camarilla_S1[0] = np.nan
+    # Shift by 1 to use only completed 4h bar for Camarilla calculation (no look-ahead)
+    camarilla_H3 = np.roll(camarilla_H3, 1)
+    camarilla_L3 = np.roll(camarilla_L3, 1)
+    camarilla_H3[0] = np.nan
+    camarilla_L3[0] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,18 +53,18 @@ def generate_signals(prices):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_spike_1d_aligned[i]) or 
-            np.isnan(camarilla_R1[i]) or 
-            np.isnan(camarilla_S1[i])):
+            np.isnan(camarilla_H3[i]) or 
+            np.isnan(camarilla_L3[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 + above 1d EMA34 + 1d volume spike
-            long_setup = (close[i] > camarilla_R1[i]) and \
+            # Long: price breaks above Camarilla H3 + above 1d EMA34 + 1d volume spike
+            long_setup = (close[i] > camarilla_H3[i]) and \
                          (close[i] > ema_34_1d_aligned[i]) and \
                          volume_spike_1d_aligned[i]
-            # Short: price breaks below Camarilla S1 + below 1d EMA34 + 1d volume spike
-            short_setup = (close[i] < camarilla_S1[i]) and \
+            # Short: price breaks below Camarilla L3 + below 1d EMA34 + 1d volume spike
+            short_setup = (close[i] < camarilla_L3[i]) and \
                           (close[i] < ema_34_1d_aligned[i]) and \
                           volume_spike_1d_aligned[i]
             
@@ -79,22 +79,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price closes below Camarilla S1 OR below 1d EMA34
-            if (close[i] < camarilla_S1[i]) or \
+            # Exit: price closes below Camarilla L3 OR below 1d EMA34
+            if (close[i] < camarilla_L3[i]) or \
                (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price closes above Camarilla R1 OR above 1d EMA34
-            if (close[i] > camarilla_R1[i]) or \
+            # Exit: price closes above Camarilla H3 OR above 1d EMA34
+            if (close[i] > camarilla_H3[i]) or \
                (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
