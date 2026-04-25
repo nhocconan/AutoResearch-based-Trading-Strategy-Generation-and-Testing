@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_ChopFilter
-Hypothesis: 1d KAMA trend direction combined with RSI(2) extremes and choppiness regime filter.
-Long when KAMA trend up, RSI(2) < 10, and CHOP(14) > 61.8 (range regime).
-Short when KAMA trend down, RSI(2) > 90, and CHOP(14) > 61.8 (range regime).
-Uses weekly EMA34 for trend confirmation to avoid counter-trend trades.
-Targets 7-25 trades/year on 1d timeframe to minimize fee drag while capturing mean reversion in ranging markets.
-Works in both bull and bear markets by fading extremes only in range regimes.
+12h_KAMA_Trend_RSI_ChopFilter_VolumeConfirm
+Hypothesis: On 12h timeframe, use KAMA for adaptive trend direction, RSI(14) for momentum filter,
+Choppiness Index (CHOP) for regime detection, and volume confirmation to avoid false signals.
+Long when KAMA upward, RSI > 50, CHOP < 61.8 (trending), and volume spike.
+Short when KAMA downward, RSI < 50, CHOP < 61.8 (trending), and volume spike.
+Uses 1d EMA50 as higher timeframe trend filter to avoid counter-trend trades.
+Targets 12-30 trades/year on 12h timeframe to minimize fee drag while capturing strong trends.
+Works in both bull and bear markets by following the 1d EMA50 trend direction and using CHOP filter.
 """
 
 import numpy as np
@@ -21,68 +22,98 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1d KAMA for trend direction
+    # 1d EMA50 for higher timeframe trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    # KAMA: ER = |net change| / sum|abs change|, SC = [ER*(fastest-slowest)+slowest]^2
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = pd.Series(change).rolling(window=10, min_periods=1).sum().values
-    net_change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    er = np.where(volatility > 0, net_change / volatility, 0)
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly EMA34 for trend confirmation (avoid counter-trend)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # KAMA calculation (adaptive moving average)
+    # Efficiency Ratio (ER) = |close - close[10]| / sum(|close - close[1]|) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close - close[10]|
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=1)  # sum of absolute changes
+    # Pad arrays to match length
+    change_padded = np.concatenate([np.full(9, np.nan), change])
+    volatility_padded = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility_padded != 0, change_padded / volatility_padded, 0)
+    # Smoothing constants: fastest EMA(2), slowest EMA(30)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Initialize KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # Start after 10 periods
+    for i in range(10, n):
+        if not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = close[i]
     
-    # RSI(2) for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
+    # RSI(14)
+    delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    # Pad first element
+    gain_padded = np.concatenate([[np.nan], gain])
+    loss_padded = np.concatenate([[np.nan], loss])
+    avg_gain = pd.Series(gain_padded).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss_padded).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Choppiness Index regime filter: CHOP > 61.8 = ranging (mean revert)
-    atr_raw = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    atr = pd.Series(atr_raw).rolling(window=14, min_periods=14).mean().values
-    high_roll = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    low_roll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr * 14 / np.log10((high_roll - low_roll) + 1e-10)) / np.log10(14)
+    # Choppiness Index (CHOP) - 14 period
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr14 / (hh14 - ll14)) / np.log10(14)
+    # Handle division by zero and invalid values
+    chop = np.where((hh14 - ll14) != 0, chop, 50)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # Align HTF indicators
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)  # KAMA is 1d indicator
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)   # RSI is 1d indicator
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop) # CHOP is 1d indicator
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for 1d KAMA, 1w EMA34, RSI(2), and CHOP(14)
-    start_idx = max(10, 34, 2, 14)  # KAMA needs 10, EMA34 needs 34, RSI needs 2, CHOP needs 14
+    # Start index: need warmup for 1d indicators (EMA50, KAMA, RSI, CHOP) and volume MA
+    start_idx = max(50, 14, 20) + 10  # EMA50 needs 50, KAMA/RSI/CHOP need 14, volume MA needs 20, plus KAMA ER lookback
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: KAMA up, RSI(2) oversold (<10), ranging regime (CHOP>61.8)
+            # Long: KAMA upward (price > KAMA), RSI > 50, CHOP < 61.8 (trending), volume spike, and 1d uptrend
             long_setup = (close[i] > kama_aligned[i]) and \
-                         (rsi[i] < 10) and \
-                         (chop[i] > 61.8)
-            # Short: KAMA down, RSI(2) overbought (>90), ranging regime (CHOP>61.8)
+                         (rsi_aligned[i] > 50) and \
+                         (chop_aligned[i] < 61.8) and \
+                         volume_spike[i] and \
+                         (close[i] > ema_50_1d_aligned[i])
+            # Short: KAMA downward (price < KAMA), RSI < 50, CHOP < 61.8 (trending), volume spike, and 1d downtrend
             short_setup = (close[i] < kama_aligned[i]) and \
-                          (rsi[i] > 90) and \
-                          (chop[i] > 61.8)
+                          (rsi_aligned[i] < 50) and \
+                          (chop_aligned[i] < 61.8) and \
+                          volume_spike[i] and \
+                          (close[i] < ema_50_1d_aligned[i])
             
             if long_setup:
                 signals[i] = 0.25
@@ -95,24 +126,26 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: KAMA turns down OR RSI(2) > 50 (mean reversion complete) OR chop < 38.2 (trend regime)
+            # Exit: KAMA turns downward OR RSI < 40 OR CHOP > 61.8 (choppy) OR 1d trend turns down
             if (close[i] < kama_aligned[i]) or \
-               (rsi[i] > 50) or \
-               (chop[i] < 38.2):
+               (rsi_aligned[i] < 40) or \
+               (chop_aligned[i] > 61.8) or \
+               (close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: KAMA turns up OR RSI(2) < 50 (mean reversion complete) OR chop < 38.2 (trend regime)
+            # Exit: KAMA turns upward OR RSI > 60 OR CHOP > 61.8 (choppy) OR 1d trend turns up
             if (close[i] > kama_aligned[i]) or \
-               (rsi[i] < 50) or \
-               (chop[i] < 38.2):
+               (rsi_aligned[i] > 60) or \
+               (chop_aligned[i] > 61.8) or \
+               (close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_KAMA_Trend_RSI_ChopFilter"
-timeframe = "1d"
+name = "12h_KAMA_Trend_RSI_ChopFilter_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
