@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_H4L4_Breakout_1dEMA34_VolumeSpike_ATRStop
-Hypothesis: Camarilla H4/L4 breakout from prior 1d bar with 1d EMA34 trend filter and volume spike confirmation.
+1d_Camarilla_H4L4_Breakout_1wEMA34_VolumeSpike_ATRStop
+Hypothesis: Daily Camarilla H4/L4 breakout with weekly EMA34 trend filter and volume spike confirmation.
 Uses ATR-based trailing stoploss to reduce whipsaw and improve bear market performance.
 H4/L4 levels are stronger support/resistance than H3/L3, reducing false breakouts.
-1d EMA34 provides reliable long-term trend filter. Volume spike confirms institutional participation.
+Weekly EMA34 provides reliable long-term trend filter. Volume spike confirms institutional participation.
 ATR stoploss adapts to volatility, cutting losses quickly in ranging markets while letting winners run in trends.
-Designed for 19-50 trades/year (75-200 over 4 years) to minimize fee drag.
+Designed for 7-25 trades/year (30-100 over 4 years) to minimize fee drag.
 Works in bull markets via breakout continuation and bear markets via trend following with tight stops.
 """
 
@@ -24,12 +24,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla calculation and EMA34 (loaded ONCE)
+    # 1d data for Camarilla calculation (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA34 trend filter (loaded ONCE)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w data for EMA34 trend filter (loaded ONCE)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # 1w EMA34 trend filter (loaded ONCE)
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Prior 1d bar OHLC for Camarilla calculation
     prev_close = df_1d['close'].shift(1).values
@@ -41,7 +44,7 @@ def generate_signals(prices):
     h4 = prev_close + camarilla_range * 1.1 / 2
     l4 = prev_close - camarilla_range * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar)
+    # Align Camarilla levels to 1d timeframe (completed 1d bar)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
@@ -67,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(h4_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(h4_aligned[i]) or 
             np.isnan(l4_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -78,13 +81,13 @@ def generate_signals(prices):
         curr_volume = volume[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla H4/L4 breakout + volume spike + 1d EMA34 trend alignment
+            # Look for entry signals - require: Camarilla H4/L4 breakout + volume spike + 1w EMA34 trend alignment
             long_breakout = curr_high > h4_aligned[i]
             short_breakout = curr_low < l4_aligned[i]
             
-            # Trend filter: price must be on correct side of 1d EMA34
-            long_trend = curr_close > ema_34_1d_aligned[i]
-            short_trend = curr_close < ema_34_1d_aligned[i]
+            # Trend filter: price must be on correct side of 1w EMA34
+            long_trend = curr_close > ema_34_1w_aligned[i]
+            short_trend = curr_close < ema_34_1w_aligned[i]
             
             long_entry = (long_breakout and volume_spike[i] and long_trend)
             short_entry = (short_breakout and volume_spike[i] and short_trend)
@@ -106,7 +109,7 @@ def generate_signals(prices):
             highest_since_entry = max(highest_since_entry, curr_high)
             # Exit when price closes below Camarilla H4 (failed breakout) or trend reverses or ATR stop hit
             atr_stop = highest_since_entry - 2.5 * atr[i]
-            if curr_close < h4_aligned[i] or curr_close < ema_34_1d_aligned[i] or curr_close < atr_stop:
+            if curr_close < h4_aligned[i] or curr_close < ema_34_1w_aligned[i] or curr_close < atr_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -116,7 +119,7 @@ def generate_signals(prices):
             lowest_since_entry = min(lowest_since_entry, curr_low)
             # Exit when price closes above Camarilla L4 (failed breakout) or trend reverses or ATR stop hit
             atr_stop = lowest_since_entry + 2.5 * atr[i]
-            if curr_close > l4_aligned[i] or curr_close > ema_34_1d_aligned[i] or curr_close > atr_stop:
+            if curr_close > l4_aligned[i] or curr_close > ema_34_1w_aligned[i] or curr_close > atr_stop:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -124,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H4L4_Breakout_1dEMA34_VolumeSpike_ATRStop"
-timeframe = "4h"
+name = "1d_Camarilla_H4L4_Breakout_1wEMA34_VolumeSpike_ATRStop"
+timeframe = "1d"
 leverage = 1.0
