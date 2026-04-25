@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_WeeklyPivot_Direction_v2
-Hypothesis: Trade 6h Donchian(20) breakouts in the direction of the weekly Camarilla pivot bias.
-Only long when price breaks above Donchian(20) high AND weekly bias is bullish (close > weekly H3 level).
-Only short when price breaks below Donchian(20) low AND weekly bias is bearish (close < weekly L3 level).
-Volume confirmation (volume > 1.5 * ATR6h) filters weak breakouts.
-Uses discrete sizing 0.25 to limit fee drag. Target: 12-30 trades/year.
-Weekly pivot bias provides structural edge in both bull and bear markets by aligning with higher-timeframe institutional levels.
+6h_Donchian20_WeeklyATR_Breakout_v1
+Hypothesis: Trade 6h Donchian(20) breakouts confirmed by weekly ATR expansion and volume spike.
+Only long when price breaks above Donchian(20) high AND weekly ATR(14) > 1.2 * weekly ATR(50) AND volume > 2.0 * ATR6h.
+Only short when price breaks below Donchian(20) low AND same weekly ATR expansion condition AND volume > 2.0 * ATR6h.
+Weekly ATR expansion identifies periods of institutional participation, filtering low-volume false breakouts.
+Works in both bull and bear markets by trading breakouts with momentum confirmation.
 """
 
 import numpy as np
@@ -23,25 +22,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot bias
+    # Get weekly data for ATR expansion filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    if len(df_1w) < 60:  # need enough for ATR(50)
         return np.zeros(n)
     
-    # Calculate weekly OHLC for Camarilla levels (H3/L3)
-    o_1w = df_1w['open'].values
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
+    # Calculate weekly ATR(14) and ATR(50) for expansion filter
+    tr1_w = np.maximum(df_1w['high'][1:] - df_1w['low'][1:], np.abs(df_1w['high'][1:] - df_1w['close'][:-1]))
+    tr2_w = np.maximum(np.abs(df_1w['low'][1:] - df_1w['close'][:-1]), tr1_w)
+    tr_w = np.concatenate([[np.inf], tr2_w])
+    atr14_w = pd.Series(tr_w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr50_w = pd.Series(tr_w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla H3 = C + (H-L)*1.1/4
-    # Camarilla L3 = C - (H-L)*1.1/4
-    camarilla_h3_1w = c_1w + (h_1w - l_1w) * 1.1 / 4
-    camarilla_l3_1w = c_1w - (h_1w - l_1w) * 1.1 / 4
+    # Align weekly ATR values to 6h timeframe
+    atr14_w_aligned = align_htf_to_ltf(prices, df_1w, atr14_w)
+    atr50_w_aligned = align_htf_to_ltf(prices, df_1w, atr50_w)
     
-    # Align weekly Camarilla levels to 6h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3_1w)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3_1w)
+    # Weekly ATR expansion: ATR(14) > 1.2 * ATR(50)
+    weekly_atr_expansion = atr14_w_aligned > (1.2 * atr50_w_aligned)
     
     # Calculate Donchian(20) on 6h data
     lookback = 20
@@ -57,44 +55,29 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for Donchian(20) and ATR(14)
-    start_idx = max(lookback, 14)
+    # Start index: need warmup for Donchian(20), ATR(14), and weekly ATR
+    start_idx = max(lookback, 14, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(highest[i]) or np.isnan(lowest[i]) or 
-            np.isnan(atr[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(atr14_w_aligned[i]) or 
+            np.isnan(atr50_w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * ATR
-        volume_confirm = volume[i] > 1.5 * atr[i]
+        # Volume confirmation: current volume > 2.0 * ATR (stronger filter)
+        volume_confirm = volume[i] > (2.0 * atr[i])
         
-        # Determine weekly bias from Camarilla H3/L3
-        # Bullish bias: weekly close > H3 (strong upside bias)
-        # Bearish bias: weekly close < L3 (strong downside bias)
-        weekly_close = c_1w[-1] if len(c_1w) > 0 else 0  # placeholder, will be replaced by aligned close
-        # Use aligned weekly close for bias calculation
-        df_1w_close = get_htf_data(prices, '1w')['close'].values
-        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, df_1w_close)
-        if np.isnan(weekly_close_aligned[i]):
-            signals[i] = 0.0
-            continue
-            
-        if weekly_close_aligned[i] > camarilla_h3_aligned[i]:
-            weekly_bias = 'bullish'  # only allow longs
-        elif weekly_close_aligned[i] < camarilla_l3_aligned[i]:
-            weekly_bias = 'bearish'  # only allow shorts
-        else:
-            weekly_bias = 'neutral'  # no trades in neutral zone
+        # Weekly ATR expansion filter
+        atr_expand = weekly_atr_expansion[i]
         
         if position == 0:
-            # Long setup: price breaks above Donchian high AND volume confirm AND bullish weekly bias
-            long_setup = (close[i] > highest[i]) and volume_confirm and (weekly_bias == 'bullish')
+            # Long setup: price breaks above Donchian high AND volume confirm AND ATR expansion
+            long_setup = (close[i] > highest[i]) and volume_confirm and atr_expand
             
-            # Short setup: price breaks below Donchian low AND volume confirm AND bearish weekly bias
-            short_setup = (close[i] < lowest[i]) and volume_confirm and (weekly_bias == 'bearish')
+            # Short setup: price breaks below Donchian low AND volume confirm AND ATR expansion
+            short_setup = (close[i] < lowest[i]) and volume_confirm and atr_expand
             
             if long_setup:
                 signals[i] = 0.25
@@ -107,20 +90,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price breaks below Donchian low OR weekly bias turns bearish
-            if (close[i] < lowest[i]) or (weekly_bias == 'bearish'):
+            # Exit: price breaks below Donchian low OR ATR expansion ends
+            if (close[i] < lowest[i]) or (not atr_expand):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price breaks above Donchian high OR weekly bias turns bullish
-            if (close[i] > highest[i]) or (weekly_bias == 'bullish'):
+            # Exit: price breaks above Donchian high OR ATR expansion ends
+            if (close[i] > highest[i]) or (not atr_expand):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Donchian20_WeeklyPivot_Direction_v2"
+name = "6h_Donchian20_WeeklyATR_Breakout_v1"
 timeframe = "6h"
 leverage = 1.0
