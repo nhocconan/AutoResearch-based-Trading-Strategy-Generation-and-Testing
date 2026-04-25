@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v4
-Hypothesis: 4h Camarilla R1/S1 breakouts with 1d EMA50 trend filter and volume spike confirmation.
-Primary timeframe 4h targets 20-50 trades/year (75-200 total over 4 years) to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime_v1
+Hypothesis: 12h Camarilla R1/S1 breakouts with 1d EMA50 trend filter and volume spike confirmation.
+Primary timeframe 12h targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
 1d EMA50 provides strong trend alignment that works in both bull and bear markets by filtering counter-trend breakouts.
 Volume spike (>2.0x 20-bar average) confirms breakout momentum and reduces false signals.
 Designed for BTC/ETH with discrete sizing (0.25) to manage drawdown and avoid overtrading.
@@ -43,7 +43,7 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Calculate 20-bar average volume for confirmation on 4h
+    # Calculate 20-bar average volume for confirmation on 12h
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeSpike_v4"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
