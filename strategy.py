@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Stoploss
+12h Camarilla H3/L3 Breakout + 1d EMA34 Trend + Volume Spike + ATR Stoploss
 Hypothesis: Camarilla H3/L3 levels from 1d chart provide institutional breakout levels.
 Breakouts in direction of 1d EMA34 trend with volume confirmation capture strong moves.
-ATR-based stoploss limits drawdown during sideways/choppy periods. Designed for 4h
-timeframe targeting 19-50 trades/year. Uses discrete position sizing (0.25) to minimize fee churn.
+ATR-based stoploss limits drawdown during sideways/choppy periods. Designed for 12h
+timeframe targeting 12-37 trades/year. Uses discrete position sizing (0.25) to minimize fee churn.
 Works in bull markets via breakout continuation and in bear markets via mean-reversion from extreme
 levels when 1d trend aligns. Uses proper MTF loading with get_htf_data called once before loop.
 """
@@ -42,7 +42,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for stoploss on 4h data
+    # Calculate ATR(14) for stoploss on 12h data
     if len(close) >= 14:
         tr1 = np.abs(np.diff(close, prepend=close[0]))
         tr2 = np.abs(high - np.roll(close, 1))
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_H3_L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_H3_L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
