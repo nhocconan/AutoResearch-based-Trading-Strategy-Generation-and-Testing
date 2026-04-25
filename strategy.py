@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_WilliamsAlligator_1dTrend_VolumeBreakout
-Hypothesis: 12h Williams Alligator (jaw/teeth/lips) with 1d EMA50 trend filter and volume confirmation (>1.5x 24-bar avg). 
-Enters long when Alligator is bullish (lips > teeth > jaw) AND price breaks above Alligator lips in 1d uptrend.
-Enters short when Alligator is bearish (lips < teeth < jaw) AND price breaks below Alligator lips in 1d downtrend.
-Uses ATR-based stoploss (2.0x ATR) and discrete sizing (0.25) to limit fee churn. Designed for 12h timeframe with ~12-37 trades/year.
-Works in bull/bear by following 1d trend filter and requiring Alligator alignment + volume spike for entries.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v5
+Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation (>2x 20-bar avg). Enters long when price breaks above R1 in 1d uptrend, short when breaks below S1 in 1d downtrend. Uses ATR-based stoploss and discrete sizing (0.30) to limit fee churn. Designed for 4h timeframe with ~20-50 trades/year, works in bull/bear by following 1d trend filter. Fixed alignment issues and added proper HTF data handling to generate sufficient trades.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -28,104 +24,104 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator on 12h timeframe (using SMAs)
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    # SMMA calculation using EMA as approximation (common implementation)
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
-    
-    # ATR for stoploss (using 14 periods)
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
+    # Calculate ATR for stoploss (using 14 periods)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume spike: current volume > 1.5x 24-period average (24*12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Calculate 1d Camarilla levels (R1, S1) using previous day's OHLC
+    # We need to shift the 1d data by 1 to get previous day's values
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    # Set first value to avoid NaN
+    prev_close_1d[0] = close_1d[0]
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    
+    range_1d = prev_high_1d - prev_low_1d
+    camarilla_r1_1d = prev_close_1d + (range_1d * 1.1 / 12)
+    camarilla_s1_1d = prev_close_1d - (range_1d * 1.1 / 12)
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     atr_stop = 0.0
     
-    # Start index: need sufficient data for Alligator (13), ATR (14), volume MA (24), 1d EMA (50)
-    start_idx = max(24, 50)
+    # Start index: need 20-period data for volume MA and 34 for 1d EMA
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(vol_ma[i]) or
-            np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or 
-            np.isnan(lips[i])):
+            np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
         
-        # Alligator conditions
-        alligator_bullish = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        alligator_bearish = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-        
-        # Price relative to Alligator lips
-        price_above_lips = curr_close > lips[i]
-        price_below_lips = curr_close < lips[i]
-        
         if position == 0:
-            # Long: Alligator bullish AND price breaks above lips AND 1d uptrend AND volume spike
-            bullish_entry = alligator_bullish and price_above_lips and \
-                           (close_1d[i] > ema_50_1d_aligned[i]) and \
-                           volume_spike[i]
-            # Short: Alligator bearish AND price breaks below lips AND 1d downtrend AND volume spike
-            bearish_entry = alligator_bearish and price_below_lips and \
-                           (close_1d[i] < ema_50_1d_aligned[i]) and \
-                           volume_spike[i]
+            # Long: price breaks above R1 in 1d uptrend with volume confirmation
+            bullish_breakout = (curr_close > camarilla_r1_aligned[i]) and \
+                              (close_1d[i] > ema_34_1d_aligned[i]) and \
+                              volume_spike[i]
+            # Short: price breaks below S1 in 1d downtrend with volume confirmation
+            bearish_breakout = (curr_close < camarilla_s1_aligned[i]) and \
+                              (close_1d[i] < ema_34_1d_aligned[i]) and \
+                              volume_spike[i]
             
-            if bullish_entry:
-                signals[i] = 0.25
+            if bullish_breakout:
+                signals[i] = 0.30
                 position = 1
                 entry_price = curr_close
-                atr_stop = entry_price - (2.0 * atr[i])
-            elif bearish_entry:
-                signals[i] = -0.25
+                atr_stop = entry_price - (1.5 * atr[i])
+            elif bearish_breakout:
+                signals[i] = -0.30
                 position = -1
                 entry_price = curr_close
-                atr_stop = entry_price + (2.0 * atr[i])
+                atr_stop = entry_price + (1.5 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
-            # Exit: Alligator turns bearish OR price breaks below lips OR stoploss hit OR 1d trend turns down
-            if (not alligator_bullish) or \
-               (curr_close < lips[i]) or \
+            signals[i] = 0.30
+            # Exit: price breaks below S1 OR stoploss hit OR trend turns down
+            if (curr_close < camarilla_s1_aligned[i]) or \
                (curr_close < atr_stop) or \
-               (close_1d[i] < ema_50_1d_aligned[i]):
+               (close_1d[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
-            # Exit: Alligator turns bullish OR price breaks above lips OR stoploss hit OR 1d trend turns up
-            if (not alligator_bearish) or \
-               (curr_close > lips[i]) or \
+            signals[i] = -0.30
+            # Exit: price breaks above R1 OR stoploss hit OR trend turns up
+            if (curr_close > camarilla_r1_aligned[i]) or \
                (curr_close > atr_stop) or \
-               (close_1d[i] > ema_50_1d_aligned[i]):
+               (close_1d[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_WilliamsAlligator_1dTrend_VolumeBreakout"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v5"
+timeframe = "4h"
 leverage = 1.0
