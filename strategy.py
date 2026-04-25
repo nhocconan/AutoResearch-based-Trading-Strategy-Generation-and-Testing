@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Camarilla R3S3 Breakout + 1d EMA34 Trend + Volume Spike + Chop Filter
-Hypothesis: Camarilla pivot breakouts on 12h timeframe capture institutional order flow, 
-1d EMA34 filters long-term trend, volume spike confirms participation, and chop filter 
-avoids extreme ranging/choppy markets. Works in bull/bear via trend filter. Target: 12-37 trades/year on 12h.
+4h Donchian Breakout + Volume Spike + ATR Filter
+Hypothesis: Donchian channel breakouts capture institutional order flow, volume confirms participation,
+and ATR volatility filter ensures trades occur during sufficient momentum. Works in bull/bear via breakout logic.
+Target: 20-50 trades/year on 4h.
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for HTF trend filter and Camarilla calculation
+    # Load 1d data ONCE before loop for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -30,71 +30,48 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Previous day's OHLC for Camarilla calculation (using 1d data)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume confirmation: current volume > 2.0 * 24-period average (more conservative)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: current volume > 2.0 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # Choppiness Index filter (avoid ranging markets) - simplified version
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    # Handle first value where roll gives same index
-    tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    price_range_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values - pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    chop = np.zeros_like(close)
-    mask = price_range_14 > 0
-    chop[mask] = 100 * np.log10(atr_14[mask] * 14 / price_range_14[mask]) / np.log10(14)
-    # Filter: trade when market is not too choppy (CHOP < 61.8) and not too trending (CHOP > 38.2)
-    chop_filter = (chop > 38.2) & (chop < 61.8)
+    # ATR filter: ensure sufficient volatility
+    atr_14 = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    atr_filter = atr_14 > (atr_ma * 0.8)  # Trade when volatility is above 80% of its 50-period MA
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for all indicators
-    start_idx = max(34, 24, 14) + 1  # +1 for previous bar reference
+    start_idx = max(20, 20, 14, 50) + 1
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_filter[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         vol_spike = volume_spike[i]
-        chop_ok = chop_filter[i]
+        atr_ok = atr_filter[i]
         
-        # Camarilla breakout conditions
-        breakout_long = curr_high > camarilla_r3_aligned[i]  # Break above R3
-        breakout_short = curr_low < camarilla_s3_aligned[i]  # Break below S3
+        # Donchian breakout conditions
+        breakout_long = curr_close > donchian_high[i-1]  # Break above previous period's high
+        breakout_short = curr_close < donchian_low[i-1]  # Break below previous period's low
         
         # Trend filter: price above/below 1d EMA34
         uptrend = curr_close > ema_34_1d_aligned[i]
         downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals - require: Camarilla breakout + trend alignment + volume + chop filter
-            long_entry = breakout_long and uptrend and vol_spike and chop_ok
-            short_entry = breakout_short and downtrend and vol_spike and chop_ok
+            # Look for entry signals - require: Donchian breakout + trend alignment + volume + ATR filter
+            long_entry = breakout_long and uptrend and vol_spike and atr_ok
+            short_entry = breakout_short and downtrend and vol_spike and atr_ok
             
             if long_entry:
                 signals[i] = 0.25
@@ -106,16 +83,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price retouches S3 level OR trend reverses
-            if curr_close < camarilla_s3_aligned[i] or not uptrend:
+            # Exit: price retouches Donchian low OR trend reverses
+            if curr_close < donchian_low[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position management
-            # Exit: price retouches R3 level OR trend reverses
-            if curr_close > camarilla_r3_aligned[i] or not downtrend:
+            # Exit: price retouches Donchian high OR trend reverses
+            if curr_close > donchian_high[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_ChopFilter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_VolumeSpike_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
