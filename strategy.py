@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot Fade + 1d EMA50 Trend + Volume Confirmation
-Hypothesis: In ranging markets (2025+), weekly pivot levels (R2/S2) act as strong support/resistance.
-Fade at these levels with trend filter (1d EMA50) and volume confirmation works in both bull/bear:
-- Bull: Fade at S2 with uptrend (long)
-- Bear: Fade at R2 with downtrend (short)
-- Range: Fade both sides
-Uses 6h timeframe to limit trades (target: 12-37/year) and reduce fee drag.
-Weekly pivots calculated from prior week OHLC, aligned with 2-bar delay for confirmation.
+12h Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike
+Hypothesis: Donchian breakouts on 12h chart with 1w EMA50 trend filter and volume confirmation.
+Works in bull markets via breakout continuation and in bear markets via mean-reversion from extreme levels when trend aligns.
+Designed for low trade frequency (target: 12-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -24,36 +20,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Get 1w data for weekly pivot points (call ONCE before loop)
+    # Get 1w data for EMA50 trend (call ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R2 = P + (H-L), S2 = P - (H-L)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    # Calculate Donchian channels (20-period) on 12h data
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(n):
+        start_idx = max(0, i - 19)
+        highest_high[i] = np.max(high[start_idx:i+1])
+        lowest_low[i] = np.min(low[start_idx:i+1])
     
-    # Williams fractal needs 2 extra 1d bars after the center bar for confirmation
-    # But for weekly pivot, we use the completed weekly bar only (no extra delay needed)
-    # align_htf_to_ltf() already waits for the weekly bar to close
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
-    
-    # Calculate ATR(14) for stoploss on 6h data
+    # Calculate ATR(14) for stoploss
     if len(close) >= 14:
         tr1 = np.abs(np.diff(close, prepend=close[0]))
         tr2 = np.abs(high - np.roll(close, 1))
@@ -68,7 +52,7 @@ def generate_signals(prices):
     else:
         atr = np.full(n, np.nan)
     
-    # Calculate 20-period volume MA for volume confirmation
+    # Calculate 20-period volume MA for volume spike detection
     vol_ma_20 = np.full(n, np.nan)
     for i in range(n):
         start_idx = max(0, i - 19)
@@ -78,14 +62,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA50_1d, ATR, and volume MA to propagate
-    start_idx = max(50, 14, 20)
+    # Start index: need enough for EMA50_1w, Donchian, ATR, and volume MA to propagate
+    start_idx = max(50, 20, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(weekly_r2_aligned[i]) or 
-            np.isnan(weekly_s2_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -97,20 +81,20 @@ def generate_signals(prices):
         curr_high = high[i]
         curr_low = low[i]
         curr_volume = volume[i]
-        ema50_1d = ema_50_1d_aligned[i]
-        r2 = weekly_r2_aligned[i]
-        s2 = weekly_s2_aligned[i]
+        ema50_1w = ema_50_1w_aligned[i]
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        volume_confirm = curr_volume > 1.5 * vol_ma
+        # Volume spike: current volume > 2.0 * 20-period average
+        volume_spike = curr_volume > 2.0 * vol_ma
         
         if position == 0:
-            # Long: price at S2 (within 0.2% tolerance) AND uptrend (price > 1d EMA50) AND volume confirm
-            long_condition = (abs(curr_close - s2) / s2 < 0.002) and (curr_close > ema50_1d) and volume_confirm
-            # Short: price at R2 (within 0.2% tolerance) AND downtrend (price < 1d EMA50) AND volume confirm
-            short_condition = (abs(curr_close - r2) / r2 < 0.002) and (curr_close < ema50_1d) and volume_confirm
+            # Long: price breaks above upper channel AND uptrend (price > 1w EMA50) AND volume spike
+            long_condition = (curr_close > upper_channel) and (curr_close > ema50_1w) and volume_spike
+            # Short: price breaks below lower channel AND downtrend (price < 1w EMA50) AND volume spike
+            short_condition = (curr_close < lower_channel) and (curr_close < ema50_1w) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -121,15 +105,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or price reaches R2 (profit target)
-            if curr_close <= entry_price - 2.0 * atr_val or curr_close >= r2:
+            # Exit long: stoploss (2.5*ATR below entry) or price breaks below lower channel (reversal signal)
+            if curr_close <= entry_price - 2.5 * atr_val or curr_close < lower_channel:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or price reaches S2 (profit target)
-            if curr_close >= entry_price + 2.0 * atr_val or curr_close <= s2:
+            # Exit short: stoploss (2.5*ATR above entry) or price breaks above upper channel (reversal signal)
+            if curr_close >= entry_price + 2.5 * atr_val or curr_close > upper_channel:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -137,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Fade_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
