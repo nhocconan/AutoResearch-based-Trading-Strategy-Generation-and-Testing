@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Volume-Weighted Donchian Breakout with ATR Trailing Stop
-Hypothesis: Donchian(20) breakouts capture institutional participation when confirmed by volume spikes.
+12h Donchian Breakout with Volume Spike and ATR Trailing Stop
+Hypothesis: Donchian(20) breakouts on 12h timeframe capture major trend moves when confirmed by volume spikes.
 ATR trailing stop manages risk in both bull/bear markets. Volume filter ensures real money involvement.
-Target: 25-40 trades/year on 4h (100-160 total over 4 years) to minimize fee drag.
+Target: 15-25 trades/year on 12h (60-100 total over 4 years) to minimize fee drag.
+Works in bull markets via breakout continuation and bear markets via short breakdowns.
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,9 +25,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    volume_spike = volume > (vol_ma * 2.0)
     
     # ATR for volatility filter and trailing stop
     tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
@@ -62,11 +63,11 @@ def generate_signals(prices):
             short_entry = breakout_short and vol_spike
             
             if long_entry:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry = curr_high
             elif short_entry:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry = curr_low
             else:
@@ -80,7 +81,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Short position management: ATR trailing stop
             lowest_since_entry = min(lowest_since_entry, curr_low)
@@ -90,10 +91,10 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
 
-name = "4h_Volume_Weighted_Donchian_Breakout_ATR_Trail"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_VolumeSpike_ATR_Trail"
+timeframe = "12h"
 leverage = 1.0
