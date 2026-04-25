@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyCamarilla_H3L3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Weekly Camarilla H3/L3 breakout on 6h with 1d EMA34 trend filter and volume confirmation.
-Uses weekly pivots for longer-term structure, reducing false breakouts. Works in bull markets (breakouts with trend) and bear markets (fades from extremes with volume).
-Targets 12-30 trades/year (50-120 over 4 years) with discrete sizing (0.25) to minimize fee drag.
+12h_WeeklyCamarilla_H3L3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Weekly Camarilla H3/L3 breakout on 12h timeframe with 1d EMA34 trend filter and volume confirmation.
+Uses discrete position sizing (0.30) to limit fee drag. Targets 20-40 trades/year.
+Works in bull markets (breakouts with trend) and bear markets (fades from extremes with volume).
+Weekly HTF provides strong structural levels, 1d EMA filters counter-trend noise.
 """
 
 import numpy as np
@@ -20,34 +21,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Get 1w data for weekly Camarilla levels
+    # Get weekly data for Camarilla levels
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
     # Weekly Camarilla levels: H3/L3
-    camarilla_h3_1w = close_1w + (high_1w - low_1w) * 1.1 / 4
-    camarilla_l3_1w = close_1w - (high_1w - low_1w) * 1.1 / 4
+    camarilla_h3 = close_1w + (high_1w - low_1w) * 1.1 / 4
+    camarilla_l3 = close_1w - (high_1w - low_1w) * 1.1 / 4
     
-    # Align weekly levels to 6h timeframe (completed 1w bar only)
-    camarilla_h3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3_1w)
-    camarilla_l3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3_1w)
+    # Align to 12h timeframe (completed weekly bar only)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (stricter for 6h)
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,50 +55,50 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_h3_1w_aligned[i]) or 
-            np.isnan(camarilla_l3_1w_aligned[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price closes above weekly H3 + 1d uptrend + volume spike
-            long_setup = (close[i] > camarilla_h3_1w_aligned[i]) and \
+            # Long: price closes above H3 + 1d uptrend + volume spike
+            long_setup = (close[i] > camarilla_h3_aligned[i]) and \
                          (close[i] > ema_34_1d_aligned[i]) and \
                          volume_spike[i]
-            # Short: price closes below weekly L3 + 1d downtrend + volume spike
-            short_setup = (close[i] < camarilla_l3_1w_aligned[i]) and \
+            # Short: price closes below L3 + 1d downtrend + volume spike
+            short_setup = (close[i] < camarilla_l3_aligned[i]) and \
                           (close[i] < ema_34_1d_aligned[i]) and \
                           volume_spike[i]
             
             if long_setup:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_setup:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long: hold position
-            signals[i] = 0.25
-            # Exit: price closes below weekly L3 OR 1d trend turns down
-            if (close[i] < camarilla_l3_1w_aligned[i]) or \
+            signals[i] = 0.30
+            # Exit: price closes below L3 OR 1d trend turns down
+            if (close[i] < camarilla_l3_aligned[i]) or \
                (close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
-            signals[i] = -0.25
-            # Exit: price closes above weekly H3 OR 1d trend turns up
-            if (close[i] > camarilla_h3_1w_aligned[i]) or \
+            signals[i] = -0.30
+            # Exit: price closes above H3 OR 1d trend turns up
+            if (close[i] > camarilla_h3_aligned[i]) or \
                (close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_WeeklyCamarilla_H3L3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_WeeklyCamarilla_H3L3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
