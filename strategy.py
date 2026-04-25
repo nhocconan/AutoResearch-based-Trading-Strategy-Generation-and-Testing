@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike + ATR Stoploss
-Hypothesis: Daily timeframe reduces noise and overtrading. Donchian breakouts capture strong momentum.
-When aligned with weekly EMA50 trend and confirmed by volume spikes, these breakouts have higher
-follow-through. ATR-based stops limit drawdown. Works in bull markets via breakout continuation and
-in bear markets by avoiding counter-trend breakouts. Discrete position sizing (0.25) minimizes fee churn.
-Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years).
+6h Ichimoku Cloud + TK Cross + Volume Spike
+Hypothesis: Ichimoku cloud acts as dynamic support/resistance. TK cross (Tenkan/Kijun) signals momentum shifts.
+Long when price above cloud + TK cross bullish + volume spike. Short when price below cloud + TK cross bearish + volume spike.
+Cloud from 1d timeframe provides higher-timeframe structure. Works in bull via trend continuation, bear via counter-trend cloud breaks.
+Discrete sizing (0.25) controls drawdown and fee churn. Target: 12-30 trades/year on 6h.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,14 +21,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Ichimoku cloud (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Ichimoku components on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    max_high_9 = np.full(len(high_1d), np.nan)
+    min_low_9 = np.full(len(low_1d), np.nan)
+    for i in range(period_tenkan-1, len(high_1d)):
+        max_high_9[i] = np.max(high_1d[i-(period_tenkan-1):i+1])
+        min_low_9[i] = np.min(low_1d[i-(period_tenkan-1):i+1])
+    tenkan_sen = (max_high_9 + min_low_9) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    max_high_26 = np.full(len(high_1d), np.nan)
+    min_low_26 = np.full(len(low_1d), np.nan)
+    for i in range(period_kijun-1, len(high_1d)):
+        max_high_26[i] = np.max(high_1d[i-(period_kijun-1):i+1])
+        min_low_26[i] = np.min(low_1d[i-(period_kijun-1):i+1])
+    kijun_sen = (max_high_26 + min_low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = (tenkan_sen + kijun_sen) / 2
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_52 = np.full(len(high_1d), np.nan)
+    min_low_52 = np.full(len(low_1d), np.nan)
+    for i in range(period_senkou_b-1, len(high_1d)):
+        max_high_52[i] = np.max(high_1d[i-(period_senkou_b-1):i+1])
+        min_low_52[i] = np.min(low_1d[i-(period_senkou_b-1):i+1])
+    senkou_b = (max_high_52 + min_low_52) / 2
+    
+    # Align Ichimoku components to 6h timeframe (wait for completed 1d bar)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
     
     # Calculate ATR(14) for stoploss
     if len(close) >= 14:
@@ -51,26 +86,20 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Calculate Donchian channels (20-period) for breakout signals
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for EMA50_1w, ATR, Donchian, and volume MA to propagate
-    start_idx = max(50, 14, 20, 20)
+    # Start index: need enough for Ichimoku, ATR, and volume MA to propagate
+    start_idx = max(52, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or 
+            np.isnan(senkou_b_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -78,23 +107,30 @@ def generate_signals(prices):
             continue
         
         curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
         curr_volume = volume[i]
-        ema50_1w = ema_50_1w_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
+        tenkan = tenkan_aligned[i]
+        kijun = kijun_aligned[i]
+        senkou_a = senkou_a_aligned[i]
+        senkou_b = senkou_b_aligned[i]
         atr_val = atr[i]
         vol_ma = vol_ma_20[i]
+        
+        # Cloud boundaries (Senkou Span A/B form the cloud)
+        cloud_top = max(senkou_a, senkou_b)
+        cloud_bottom = min(senkou_a, senkou_b)
+        
+        # TK cross signals
+        tk_bullish = tenkan > kijun
+        tk_bearish = tenkan < kijun
         
         # Volume spike: current volume > 2.0 * 20-period average
         volume_spike = curr_volume > 2.0 * vol_ma
         
         if position == 0:
-            # Long: price breaks above upper Donchian AND uptrend (close > weekly EMA50) AND volume spike
-            long_condition = (curr_close > upper) and (curr_close > ema50_1w) and volume_spike
-            # Short: price breaks below lower Donchian AND downtrend (close < weekly EMA50) AND volume spike
-            short_condition = (curr_close < lower) and (curr_close < ema50_1w) and volume_spike
+            # Long: price above cloud + TK cross bullish + volume spike
+            long_condition = (curr_close > cloud_top) and tk_bullish and volume_spike
+            # Short: price below cloud + TK cross bearish + volume spike
+            short_condition = (curr_close < cloud_bottom) and tk_bearish and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
@@ -105,15 +141,15 @@ def generate_signals(prices):
                 position = -1
                 entry_price = curr_close
         elif position == 1:
-            # Exit long: stoploss (2.0*ATR below entry) or price breaks below lower Donchian (reversal signal)
-            if curr_close <= entry_price - 2.0 * atr_val or curr_close < lower:
+            # Exit long: stoploss (2.0*ATR below entry) or price breaks below cloud bottom (trend change)
+            if curr_close <= entry_price - 2.0 * atr_val or curr_close < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: stoploss (2.0*ATR above entry) or price breaks above upper Donchian (reversal signal)
-            if curr_close >= entry_price + 2.0 * atr_val or curr_close > upper:
+            # Exit short: stoploss (2.0*ATR above entry) or price breaks above cloud top (trend change)
+            if curr_close >= entry_price + 2.0 * atr_val or curr_close > cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -121,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_TK_Cross_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
