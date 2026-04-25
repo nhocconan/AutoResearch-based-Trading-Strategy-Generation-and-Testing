@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-1d KAMA + RSI + Chop Regime Filter
-Hypothesis: Kaufman Adaptive Moving Average (KAMA) identifies trend direction,
-RSI(14) filters overbought/oversold extremes, and Choppiness Index (CHOP) regime
-filter avoids whipsaws in range markets. Works in bull/bear via KAMA trend.
-Discrete sizing (0.25) targets 50-100 trades over 4 years to minimize fee drag.
+6h Williams Fractal Breakout with 1d EMA50 Trend and Volume Spike
+Hypothesis: Williams fractals identify significant swing points. Breakouts above recent bullish fractals or below bearish fractals with 1d EMA50 trend alignment and volume confirmation capture strong momentum moves. Works in bull/bear via trend filter and uses discrete sizing (0.25) to limit fee drag (~50-120 trades over 4 years).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,114 +18,122 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and chop regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA50 trend and Williams fractals
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly KAMA for trend filter
-    def calculate_kama(close, length=10, fast=2, slow=30):
-        close_s = pd.Series(close)
-        change = np.abs(close_s.diff(length))
-        volatility = close_s.diff().abs().rolling(length, min_periods=1).sum()
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    close_1w = df_1w['close'].values
-    kama_1w = calculate_kama(close_1w, length=10, fast=2, slow=30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Calculate Williams fractals on 1d data (requires 2-bar confirmation delay)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Align with 2-bar delay for fractal confirmation (needs 2 future 1d bars to confirm)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
-    # Calculate weekly Choppiness Index for regime filter
-    def calculate_chop(high, low, close, length=14):
-        high_s, low_s, close_s = pd.Series(high), pd.Series(low), pd.Series(close)
-        atr = np.maximum(high_s - low_s, 
-                         np.maximum(np.abs(high_s - close_s.shift(1)), 
-                                    np.abs(low_s - close_s.shift(1))))
-        atr_sum = atr.rolling(length, min_periods=length).sum()
-        highest_high = high_s.rolling(length, min_periods=length).max()
-        lowest_low = low_s.rolling(length, min_periods=length).min()
-        chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(length)
-        return chop.values
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    chop_1w = calculate_chop(high_1w, low_1w, close_1w, length=14)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
-    
-    # Calculate daily RSI for entry timing
-    def calculate_rsi(close, length=14):
-        close_s = pd.Series(close)
-        delta = close_s.diff()
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).ewm(alpha=1/length, adjust=False, min_periods=length).mean()
-        avg_loss = pd.Series(loss).ewm(alpha=1/length, adjust=False, min_periods=length).mean()
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi.values
-    
-    rsi_1d = calculate_rsi(close, length=14)
+    # Calculate ATR for stop loss (using 20 periods)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Start index: need enough for indicators
-    start_idx = 50
+    # Start index: need enough for ATR (20) and EMA50 (50)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(kama_1w_aligned[i]) or np.isnan(chop_1w_aligned[i]) or 
-            np.isnan(rsi_1d[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        kama_trend = kama_1w_aligned[i]
-        chop_value = chop_1w_aligned[i]
-        rsi_value = rsi_1d[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        ema_trend = ema_50_aligned[i]
+        atr_value = atr[i]
+        bear_fract = bearish_fractal_aligned[i]
+        bull_fract = bullish_fractal_aligned[i]
         
-        # Regime filter: CHOP > 61.8 = range (mean revert), CHOP < 38.2 = trending (trend follow)
-        # We'll use trend-following logic when CHOP < 50 (more permissive to capture trends)
-        trending_regime = chop_value < 50
+        # Volume spike: current volume > 2.0 * 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-19:i+1])
+        else:
+            vol_ma_20 = np.mean(volume[:i+1])
+        volume_spike = curr_volume > 2.0 * vol_ma_20
         
-        # Exit conditions: opposite signal or regime change to range
+        # Breakout conditions: price breaks above recent bullish fractal or below bearish fractal
+        bullish_breakout = curr_close > bull_fract
+        bearish_breakout = curr_close < bear_fract
+        
+        # Update tracking variables for trailing stop logic
+        if position == 1:
+            highest_since_entry = max(highest_since_entry, curr_high)
+        elif position == -1:
+            lowest_since_entry = min(lowest_since_entry, curr_low)
+        
+        # Exit conditions: trailing stop or reverse breakout
         if position != 0:
             exit_signal = False
             
             if position == 1:
-                # Exit long: price below KAMA OR RSI overbought OR regime becomes range
-                if curr_close < kama_trend or rsi_value > 70 or not trending_regime:
+                # Trailing stop: exit if price drops 3.0*ATR from highest since entry
+                if curr_close < highest_since_entry - 3.0 * atr_value:
                     exit_signal = True
+                # Reverse breakout or trend rejection
+                elif curr_close < bear_fract or curr_close < ema_trend:
+                    exit_signal = True
+                    
             elif position == -1:
-                # Exit short: price above KAMA OR RSI oversold OR regime becomes range
-                if curr_close > kama_trend or rsi_value < 30 or not trending_regime:
+                # Trailing stop: exit if price rises 3.0*ATR from lowest since entry
+                if curr_close > lowest_since_entry + 3.0 * atr_value:
+                    exit_signal = True
+                # Reverse breakout or trend rejection
+                elif curr_close > bull_fract or curr_close > ema_trend:
                     exit_signal = True
             
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
                 continue
         
-        # Entry conditions: KAMA alignment + RSI extreme + trending regime
+        # Entry conditions: Williams fractal breakout + trend alignment + volume
         if position == 0:
-            # Long: price above KAMA AND RSI oversold AND trending regime
-            long_condition = (curr_close > kama_trend) and (rsi_value < 30) and trending_regime
-            # Short: price below KAMA AND RSI overbought AND trending regime
-            short_condition = (curr_close < kama_trend) and (rsi_value > 70) and trending_regime
+            # Long: break above bullish fractal AND price above 1d EMA50
+            long_condition = bullish_breakout and (curr_close > ema_trend) and volume_spike
+            # Short: break below bearish fractal AND price below 1d EMA50
+            short_condition = bearish_breakout and (curr_close < ema_trend) and volume_spike
             
             if long_condition:
                 signals[i] = 0.25
                 position = 1
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
             elif short_condition:
                 signals[i] = -0.25
                 position = -1
+                highest_since_entry = curr_high
+                lowest_since_entry = curr_low
         elif position == 1:
             signals[i] = 0.25
         elif position == -1:
@@ -136,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_ChopRegime_v1"
-timeframe = "1d"
+name = "6h_WilliamsFractal_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
