@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Williams_VIX_Fix_MeanReversion_1dTrendFilter
-Hypothesis: Williams VIX Fix identifies volatility spikes and mean reversion opportunities in 4h timeframe. 
-Long when VIX Fix > upper band AND price < 1d EMA200 (oversold in uptrend).
-Short when VIX Fix > upper band AND price > 1d EMA200 (overbought in downtrend).
-Exit when VIX Fix < middle band or opposite condition met.
-Uses 1d trend filter to avoid counter-trend trades in strong markets. Designed for ~80-150 trades over 4 years (20-38/year) via volatility mean reversion with trend alignment.
+12h_Donchian20_Breakout_1dTrend_VolumeConfirmation
+Hypothesis: 12-hour Donchian channel (20-period) breakout with 1-day trend filter (price > 1d EMA50) and volume confirmation (>1.5x 20-period average).
+Long when price breaks above upper Donchian band in 1-day uptrend with volume confirmation.
+Short when price breaks below lower Donchian band in 1-day downtrend with volume confirmation.
+Exit via opposite Donchian band or ATR trailing stop (2.5*ATR from extreme).
+Designed for ~50-150 trades over 4 years (12-37/year) via tight breakout conditions.
+Works in both bull and bear markets by following 1-day trend and requiring volume confirmation.
 """
 
 import numpy as np
@@ -20,78 +21,107 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get 1d data for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:  # need 200 for EMA
+    if len(df_1d) < 50:  # need 50 for EMA
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams VIX Fix calculation (22-period)
-    # VIX Fix = ((Highest Close in period - Low) / (Highest Close in period)) * 100
-    vixfix_period = 22
-    highest_close = pd.Series(close).rolling(window=vixfix_period, min_periods=vixfix_period).max().values
-    vixfix = ((highest_close - low) / highest_close) * 100
+    # Calculate Donchian channels on 12h data (primary timeframe)
+    donchian_period = 20
+    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Bollinger Bands on VIX Fix (20-period, 2 std dev)
-    vixfix_ma = pd.Series(vixfix).rolling(window=20, min_periods=20).mean().values
-    vixfix_std = pd.Series(vixfix).rolling(window=20, min_periods=20).std().values
-    upper_band = vixfix_ma + (2 * vixfix_std)
-    middle_band = vixfix_ma
-    lower_band = vixfix_ma - (2 * vixfix_std)
+    # ATR for stoploss (14-period)
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Volume regime: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_regime = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    long_extreme = 0.0   # highest close since long entry
+    short_extreme = 0.0  # lowest close since short entry
     
     # Start index: need warmup for calculations
-    start_idx = max(100, vixfix_period, 20, 200)
+    start_idx = max(100, donchian_period, atr_period, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(vixfix[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(middle_band[i]) or np.isnan(lower_band[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        ema_trend = ema_200_1d_aligned[i]
-        vixfix_val = vixfix[i]
-        upper = upper_band[i]
-        middle = middle_band[i]
-        lower = lower_band[i]
+        ema_trend = ema_50_1d_aligned[i]
+        upper_band = highest_high[i]
+        lower_band = lowest_low[i]
         
         if position == 0:
-            # Long: VIX Fix above upper band (high volatility) AND price below 1d EMA200 (oversold in uptrend)
-            if (vixfix_val > upper) and (close[i] < ema_trend):
+            # Only trade in trending regimes (1d EMA50 filter)
+            if close[i] > ema_trend:  # 1d uptrend regime
+                # Long: break above upper Donchian band with volume confirmation
+                long_signal = (close[i] > upper_band) and vol_regime[i]
+            else:  # 1d downtrend regime
+                # Short: break below lower Donchian band with volume confirmation
+                short_signal = (close[i] < lower_band) and vol_regime[i]
+            
+            if 'long_signal' in locals() and long_signal:
                 signals[i] = 0.25
                 position = 1
-            # Short: VIX Fix above upper band (high volatility) AND price above 1d EMA200 (overbought in downtrend)
-            elif (vixfix_val > upper) and (close[i] > ema_trend):
+                long_extreme = close[i]
+            elif 'short_signal' in locals() and short_signal:
                 signals[i] = -0.25
                 position = -1
+                short_extreme = close[i]
             else:
                 signals[i] = 0.0
+                # Clear signal variables for next iteration
+                if 'long_signal' in locals(): del long_signal
+                if 'short_signal' in locals(): del short_signal
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit when VIX Fix returns to middle band (mean reversion complete) OR flip to short signal
-            if vixfix_val < middle or ((vixfix_val > upper) and (close[i] > ema_trend)):
+            # Update extreme for trailing stop
+            if close[i] > long_extreme:
+                long_extreme = close[i]
+            # Exit conditions: 
+            # 1. ATR trailing stop (2.5*ATR from extreme)
+            atr_stop = long_extreme - 2.5 * atr[i]
+            # 2. Price breaks below lower Donchian band (opposite band)
+            if close[i] <= atr_stop or close[i] < lower_band:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit when VIX Fix returns to middle band (mean reversion complete) OR flip to long signal
-            if vixfix_val < middle or ((vixfix_val > upper) and (close[i] < ema_trend)):
+            # Update extreme for trailing stop
+            if close[i] < short_extreme:
+                short_extreme = close[i]
+            # Exit conditions:
+            # 1. ATR trailing stop (2.5*ATR from extreme)
+            atr_stop = short_extreme + 2.5 * atr[i]
+            # 2. Price breaks above upper Donchian band (opposite band)
+            if close[i] >= atr_stop or close[i] > upper_band:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "4h_Williams_VIX_Fix_MeanReversion_1dTrendFilter"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
