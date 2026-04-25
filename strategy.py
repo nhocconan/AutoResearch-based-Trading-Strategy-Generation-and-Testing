@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d Donchian Channel Breakout with Weekly EMA50 Trend Filter and Volume Spike
-Hypothesis: Donchian(20) breakouts on daily timeframe capture significant momentum moves.
-Weekly EMA50 ensures alignment with major trend. Volume spike confirms institutional participation.
-This strategy works in bull markets (trend continuation breaks) and bear markets (failed breaks 
-and reversals to channel bounds). Daily timeframe targets 15-30 trades/year to minimize fee drag
-while capturing major moves. Uses discrete position sizing (0.25) to reduce churn.
+12h Donchian(20) Breakout + Daily EMA50 Trend + Volume Spike
+Hypothesis: Donchian channel breakouts on 12h capture medium-term trends, filtered by daily EMA50 trend alignment and volume spikes to avoid false breakouts. Works in bull markets (trend continuation) and bear markets (failed breaks reverse to opposite band). 12h timeframe targets 12-37 trades/year to minimize fee drag while allowing sufficient samples.
 """
 
 import numpy as np
@@ -22,46 +18,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Donchian channels (primary timeframe)
+    # Daily data for EMA50 trend filter (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
-    # Donchian Channel (20-period)
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Daily EMA50 trend
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly EMA50 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for Donchian (20) + weekly EMA (50) + volume MA (20)
-    start_idx = max(50, 20, 20) + 5
+    # Start index: need enough for daily EMA and volume MA
+    start_idx = max(50, 20) + 5
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
+        
+        # Calculate Donchian bands from last 20 periods (including current)
+        lookback_start = max(0, i - 19)
+        period_high = np.max(high[lookback_start:i+1])
+        period_low = np.min(low[lookback_start:i+1])
         
         curr_close = close[i]
         vol_spike = volume_spike[i]
         
         # Breakout conditions
-        breakout_long = curr_close > donchian_high[i]
-        breakout_short = curr_close < donchian_low[i]
+        breakout_long = curr_close > period_high
+        breakout_short = curr_close < period_low
         
         if position == 0:
-            # Look for entry signals - require: Donchian breakout + volume spike + weekly EMA50 trend alignment
-            long_entry = breakout_long and vol_spike and (curr_close > ema_50_1w_aligned[i])
-            short_entry = breakout_short and vol_spike and (curr_close < ema_50_1w_aligned[i])
+            # Look for entry signals - require: Donchian breakout + volume spike + daily EMA50 trend alignment
+            long_entry = breakout_long and vol_spike and (curr_close > ema_50_1d_aligned[i])
+            short_entry = breakout_short and vol_spike and (curr_close < ema_50_1d_aligned[i])
             
             if long_entry:
                 signals[i] = 0.25
@@ -72,15 +67,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long position: exit on Donchian lower band retrace or trend change
-            if curr_close < donchian_low[i] or curr_close < ema_50_1w_aligned[i]:
+            # Long position: exit on close below Donchian low or trend change
+            if curr_close < period_low or curr_close < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short position: exit on Donchian upper band retrace or trend change
-            if curr_close > donchian_high[i] or curr_close > ema_50_1w_aligned[i]:
+            # Short position: exit on close above Donchian high or trend change
+            if curr_close > period_high or curr_close > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_VolumeSpike"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_1dEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
