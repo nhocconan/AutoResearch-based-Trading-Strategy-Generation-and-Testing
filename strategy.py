@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v4
-Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level with 1d uptrend (price > EMA34) and volume spike (>3.0x avg); enter short when price breaks below S1 level with 1d downtrend (price < EMA34) and volume spike. Exit on opposite Camarilla level touch or trend reversal. Uses discrete sizing (0.25) to minimize fee churn. Tighter volume threshold (>3.0x) reduces overtrading vs v3, targeting 20-40 trades/year. Works in bull/bear via 1d trend filter.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v5
+Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level with 1d uptrend (price > EMA34) and volume spike (>3.0x avg); enter short when price breaks below S1 level with 1d downtrend (price < EMA34) and volume spike. Exit on opposite Camarilla level touch or trend reversal. Uses discrete sizing (0.25) to minimize fee churn. Added stricter volume confirmation (>4.0x) and EMA50 trend filter to reduce overtrading vs v4, targeting 15-30 trades/year. Works in bull/bear via 1d trend filter.
 """
 
 import numpy as np
@@ -20,13 +20,13 @@ def generate_signals(prices):
     
     # Get 1d data for HTF trend and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter (more stable than EMA34)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 1d Camarilla levels (based on previous day's OHLC)
     # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
@@ -42,32 +42,32 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Calculate 4h volume ratio (current vs 24-period average = 6h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate 4h volume ratio (current vs 30-period average = 7.5h)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need warmup for EMA and volume MA
-    start_idx = max(40, 34, 24)
+    start_idx = max(50, 30)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
             
-        # Determine 1d trend (bullish = price above EMA34)
+        # Determine 1d trend (bullish = price above EMA50)
         df_1d_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
         if np.isnan(df_1d_close_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
-        htf_1d_bullish = df_1d_close_aligned[i] > ema_34_1d_aligned[i]
-        htf_1d_bearish = df_1d_close_aligned[i] < ema_34_1d_aligned[i]
+        htf_1d_bullish = df_1d_close_aligned[i] > ema_50_1d_aligned[i]
+        htf_1d_bearish = df_1d_close_aligned[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation: need significant spike (vol_ratio > 3.0)
-        volume_confirmed = vol_ratio[i] > 3.0
+        # Volume confirmation: need significant spike (vol_ratio > 4.0) - stricter than v4
+        volume_confirmed = vol_ratio[i] > 4.0
         
         if position == 0:
             # Long setup: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v4"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v5"
 timeframe = "4h"
 leverage = 1.0
