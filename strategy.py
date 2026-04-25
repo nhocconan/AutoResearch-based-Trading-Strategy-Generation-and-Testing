@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_v1
-Hypothesis: Trade daily Camarilla R1/S1 breakouts with 1-week EMA50 trend filter and volume spike confirmation. 
-Camarilla R1/S1 provide key daily support/resistance levels derived from previous day's range. 
-In bull markets (price > 1w EMA50): buy when price breaks above R1 with volume > 2.0x 20-day average. 
-In bear markets (price < 1w EMA50): sell when price breaks below S1 with volume > 2.0x 20-day average. 
-Exit on opposite Camarilla level touch or trend reversal. 
-Position size: 0.25 to balance reward and risk and minimize fee churn. 
-Target: 30-100 total trades over 4 years = 7-25/year (within 1d optimal range). 
-Uses 1w HTF for more stable trend alignment vs shorter HTF, which should improve performance in both bull and bear markets by reducing whipsaw.
+6h_Ichimoku_TK_Cross_CloudTwist_v1
+Hypothesis: Trade 6h Ichimoku TK cross with 1d cloud twist filter. The cloud twist (Senkou Span A/B cross) 
+indicates future Kumo direction change. Long when TK crosses up AND future cloud is bullish (Senkou A > Senkou B). 
+Short when TK crosses down AND future cloud is bearish (Senkou A < Senkou B). 
+Uses 6h for primary timeframe and 1d for HTF Ichimoku components. 
+Position size: 0.25 discrete levels to minimize fee churn. 
+Target: 80-120 total trades over 4 years = 20-30/year (balanced for 6h).
 """
 
 import numpy as np
@@ -23,76 +21,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA50 for HTF trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get 1d data for Camarilla levels and volume confirmation
+    # Get 1d data for HTF Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate 20-day average volume for confirmation (using 1d data resampled to 1d frequency)
-    # Since we're on 1d timeframe, volume is already daily
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate daily Camarilla levels from previous day's OHLC
+    # Calculate 1d Ichimoku components
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels use previous day's range
-    hl_range_1d = high_1d - low_1d
-    # Daily Camarilla R1 and S1 (key intraday resistance/support)
-    r1_1d = close_1d + (1.1 * hl_range_1d / 12)  # R1 = close + 1.1*(high-low)/12
-    s1_1d = close_1d - (1.1 * hl_range_1d / 12)  # S1 = close - 1.1*(high-low)/12
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_sen = (high_tenkan + low_tenkan) / 2
     
-    # Since we're on 1d timeframe, no alignment needed - values are already per bar
-    r1_aligned = r1_1d
-    s1_aligned = s1_1d
-    ema_50_1w_aligned = ema_50_1w  # Already aligned via align_htf_to_ltf
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_sen = (high_kijun + low_kijun) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((high_senkou_b + low_senkou_b) / 2)
+    
+    # Align Ichimoku components to 6h prices (no additional delay needed for Senkou as it's already leading)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and volume MA (20)
-    start_idx = 50
+    # Start index: need warmup for Ichimoku calculations
+    start_idx = 52
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or
+            np.isnan(senkou_b_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend (bullish = price above 1w EMA50)
-        htf_1w_bullish = close[i] > ema_50_1w_aligned[i]
-        htf_1w_bearish = close[i] < ema_50_1w_aligned[i]
+        # TK cross signals
+        tk_cross_up = (tenkan_aligned[i] > kijun_aligned[i]) and (tenkan_aligned[i-1] <= kijun_aligned[i-1])
+        tk_cross_down = (tenkan_aligned[i] < kijun_aligned[i]) and (tenkan_aligned[i-1] >= kijun_aligned[i-1])
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirm = volume[i] > 2.0 * vol_ma_20[i]
+        # Cloud twist: Senkou A > Senkou B = bullish future cloud, Senkou A < Senkou B = bearish future cloud
+        cloud_bullish = senkou_a_aligned[i] > senkou_b_aligned[i]
+        cloud_bearish = senkou_a_aligned[i] < senkou_b_aligned[i]
         
         if position == 0:
-            # Long setup: price breaks above daily Camarilla R1 + 1w uptrend + volume confirmation
-            long_setup = (close[i] > r1_aligned[i]) and htf_1w_bullish and volume_confirm
-            
-            # Short setup: price breaks below daily Camarilla S1 + 1w downtrend + volume confirmation
-            short_setup = (close[i] < s1_aligned[i]) and htf_1w_bearish and volume_confirm
-            
-            if long_setup:
+            # Long: TK cross up AND future cloud bullish
+            if tk_cross_up and cloud_bullish:
                 signals[i] = 0.25
                 position = 1
-            elif short_setup:
+            # Short: TK cross down AND future cloud bearish
+            elif tk_cross_down and cloud_bearish:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -100,20 +96,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches daily Camarilla S1 (stop) OR 1w trend turns bearish
-            if (close[i] <= s1_aligned[i]) or (not htf_1w_bullish):
+            # Exit: TK cross down OR cloud turns bearish
+            if tk_cross_down or cloud_bearish:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches daily Camarilla R1 (stop) OR 1w trend turns bullish
-            if (close[i] >= r1_aligned[i]) or (htf_1w_bullish):
+            # Exit: TK cross up OR cloud turns bullish
+            if tk_cross_up or cloud_bullish:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_TK_Cross_CloudTwist_v1"
+timeframe = "6h"
 leverage = 1.0
