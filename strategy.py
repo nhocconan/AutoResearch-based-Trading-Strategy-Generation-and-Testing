@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: 12h Camarilla R1/S1 breakout with 1d trend filter and volume spike confirmation.
-Goes long when price breaks above R1 with 1d uptrend and volume > 2.0x 20-period average,
-short when price breaks below S1 with 1d downtrend and volume > 2.0x 20-period average.
+Hypothesis: 12h Camarilla R1/S1 breakout with 1d trend filter (EMA50) and volume spike confirmation.
+Goes long when price breaks above R1 with 1d uptrend and volume > 1.5x 20-period average,
+short when price breaks below S1 with 1d downtrend and volume > 1.5x 20-period average.
 Uses discrete sizing (0.25) to minimize fees. Target: 12-37 trades/year.
-Works in bull via breakouts with trend, in bear via mean reversion at extremes.
+In bull markets: trend-following breakouts work. In bear markets: mean reversion at Camarilla extremes provides edge.
+Timeframe: 12h (slower = fewer trades = less fee drag). HTF: 1d for Camarilla levels and trend.
 """
 
 import numpy as np
@@ -48,9 +49,9 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma_20)
+    vol_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
