@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v1
+4h_Camarilla_R1_S1_Breakout_1dTrendFilter_v1
 Hypothesis: Trade Camarilla R1/S1 breakouts on 4h with 1d EMA34 trend filter and volume confirmation.
 Camarilla levels from daily chart provide institutional support/resistance. Breakouts above R1 or below S1
 with 1d EMA trend alignment and volume spike capture momentum moves in both bull and bear markets.
-Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+Target: 19-50 trades/year per symbol (75-200 total over 4 years).
 """
 
 import numpy as np
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrendFilter_VolumeConfirm_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrendFilter_v1"
 timeframe = "4h"
 leverage = 1.0
