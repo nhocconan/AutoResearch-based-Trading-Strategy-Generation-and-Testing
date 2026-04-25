@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSp_V5
-Hypothesis: Revert to proven winning parameters from experiment #87660 base but increase volume confirmation threshold to 2.0x average (from 2.5x) to increase trade frequency slightly while maintaining edge. This strategy targets 20-35 trades/year per symbol by requiring Camarilla R1/S1 breakouts aligned with 1d EMA34 trend, volume spike, and ATR-based volatility filter. Designed to work in both bull and bear markets by using 1d EMA34 as trend filter and volatility filter to avoid low-volatility false breakouts.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSp_V6
+Hypothesis: Increase trade frequency slightly by reducing volume confirmation threshold from 2.0x to 1.8x average while maintaining the proven edge from V5. This balances the need for sufficient trades (>5 train, >3 test per symbol) with fee drag control. The strategy uses Camarilla R1/S1 breakouts aligned with 1d EMA34 trend, volume spike, and ATR-based volatility filter. Designed to work in both bull and bear markets by using 1d EMA34 as trend filter and volatility filter to avoid low-volatility false breakouts.
 """
 
 import numpy as np
@@ -34,9 +34,9 @@ def generate_signals(prices):
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume spike: current volume > 2.0 * 20-period average (slightly looser than V3/V4)
+    # Volume spike: current volume > 1.8 * 20-period average (slightly looser than V5 to increase trade frequency)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.8)
     
     # 1d ATR for volatility regime filter (loaded ONCE)
     tr1 = df_1d['high'].values - df_1d['low'].values
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSp_V5"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSp_V6"
 timeframe = "4h"
 leverage = 1.0
