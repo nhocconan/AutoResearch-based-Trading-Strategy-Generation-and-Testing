@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike
-Hypothesis: On 12h timeframe, Camarilla R1/S1 breakouts with 1-week EMA50 trend filter and volume spike (>2.0x 24-bar avg) captures strong institutional moves with low trade frequency. R1/S1 levels provide sensitive entry points while 1-week trend ensures alignment with higher timeframe momentum. Volume spike confirms participation. Designed for 12-37 trades/year to minimize fee drag. Works in both bull and bear markets via trend filter.
+4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_Regime
+Hypothesis: On 4h timeframe, Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg) plus choppiness regime filter (CHOP > 38.2 = trending) captures strong institutional moves with low trade frequency. Uses 1d HTF for Camarilla levels and trend alignment to avoid look-ahead. Designed for 20-50 trades/year to minimize fee drag. Works in both bull and bear markets via trend and regime filters.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,18 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate EMA50 on 1w for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get 1d data for Camarilla calculation (more stable than 12h for pivots)
+    # Get 1d data for HTF trend and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -37,6 +26,10 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate EMA34 on 1d for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous 1d bar (R1, S1)
     # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
@@ -49,26 +42,43 @@ def generate_signals(prices):
     r1 = prev_close + 1.1 * camarilla_range / 12
     s1 = prev_close - 1.1 * camarilla_range / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume average (24-period = 12h * 2) for volume spike filter
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume average (20-period) for volume spike filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Choppiness Index regime filter (14-period)
+    # CHOP = 100 * log10(sum(ATR(14) over 14) / log10(highest_high - lowest_low over 14))
+    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    hh14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr14 * 14 / np.log10(hh14 - ll14 + 1e-10)) / np.log10(14)
+    # Only consider trending regime: CHOP < 38.2
+    trending_regime = chop < 38.2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start index: need warmup for calculations
-    start_idx = max(50, 24)  # EMA50, vol MA
+    start_idx = max(50, 20, 14)  # EMA34, vol MA, CHOP
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or 
             np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i]) or 
+            np.isnan(chop[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -79,7 +89,7 @@ def generate_signals(prices):
             continue
         
         # Get aligned values
-        ema_val = ema_50_aligned[i]
+        ema_val = ema_34_aligned[i]
         r1_val = r1_aligned[i]
         s1_val = s1_aligned[i]
         vol_ma_val = vol_ma[i]
@@ -87,15 +97,27 @@ def generate_signals(prices):
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
+        regime_val = trending_regime[i]
         
-        # Volume spike condition: current volume > 2.0x 24-period average
+        # Volume spike condition: current volume > 2.0x 20-period average
         volume_spike = vol_val > 2.0 * vol_ma_val
+        
+        # Only trade in trending regime
+        if not regime_val:
+            # In ranging regime, stay flat or reduce position
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.10  # reduce long
+            else:
+                signals[i] = -0.10  # reduce short
+            continue
         
         if position == 0:
             # Look for entry signals: Camarilla R1/S1 breakout with trend and volume
-            # Long: price breaks above R1 with uptrend (close > EMA50) and volume spike
+            # Long: price breaks above R1 with uptrend (close > EMA34) and volume spike
             long_signal = (high_val > r1_val) and (close_val > ema_val) and volume_spike
-            # Short: price breaks below S1 with downtrend (close < EMA50) and volume spike
+            # Short: price breaks below S1 with downtrend (close < EMA34) and volume spike
             short_signal = (low_val < s1_val) and (close_val < ema_val) and volume_spike
             
             if long_signal:
@@ -117,6 +139,11 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+            # 2. Trend reversal: close below EMA34
+            elif close_val < ema_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
@@ -126,9 +153,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+            # 2. Trend reversal: close above EMA34
+            elif close_val > ema_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
     
     return signals
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
