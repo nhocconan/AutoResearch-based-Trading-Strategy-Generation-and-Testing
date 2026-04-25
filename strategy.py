@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike and ATR volatility filter.
-- Primary timeframe: 12h targeting 50-150 total trades over 4 years (12-37/year).
-- HTF: 1d for Camarilla pivot levels and volume spike filter.
+Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA trend filter and volume confirmation.
+- Primary timeframe: 4h targeting 75-200 total trades over 4 years (19-50/year).
+- HTF: 12h for EMA50 trend direction, 1d for Camarilla pivot levels.
 - Camarilla Pivots: H3, L3 levels from prior 1d OHLC for breakout logic.
-- Volume Filter: Current 12h volume > 1.8 * 20-period average 12h volume (avoid low-vol fakeouts).
-- ATR Filter: Current ATR(14) < 1.8 * 20-period average ATR(14) to avoid extreme volatility whipsaws.
-- Entry: Long when close > H3 AND volume confirmation AND ATR filter.
-         Short when close < L3 AND volume confirmation AND ATR filter.
+- Trend Filter: 12h EMA50 must align with breakout direction (long: close > EMA50, short: close < EMA50).
+- Volume Filter: Current 4h volume > 1.5 * 20-period average 4h volume to confirm momentum.
+- Entry: Long when close > H3 AND close > 12h EMA50 AND volume confirmation.
+         Short when close < L3 AND close < 12h EMA50 AND volume confirmation.
 - Exit: Opposite Camarilla break (long exits when close < L3, short exits when close > H3).
 - Signal size: 0.25 discrete to minimize fee drag.
-- Designed to capture momentum bursts in both bull and bear markets while filtering chop/whipsaws.
+- Designed to capture momentum bursts aligned with higher timeframe trend while filtering chop/whipsaws.
 """
 
 import numpy as np
@@ -43,33 +43,32 @@ def generate_signals(prices):
     h3 = prev_close + camarilla_range * 1.1 / 2
     l3 = prev_close - camarilla_range * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (waits for 1d bar close)
+    # Align Camarilla levels to 4h timeframe (waits for 1d bar close)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Calculate 12h volume average for confirmation (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
+        return np.zeros(n)
     
-    # Calculate ATR(14) and its 20-period average for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0  # First bar has no previous close
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_20 = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate 4h volume average for confirmation (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from index where all indicators are ready
-    start_idx = max(20, 14)  # Need 20 for volume/ATR MA, 14 for ATR
+    start_idx = max(50, 20)  # Need 50 for EMA, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready (check for NaN from alignment or calculations)
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(atr_ma_20[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,19 +76,20 @@ def generate_signals(prices):
         
         curr_close = close[i]
         curr_volume = volume[i]
-        curr_atr = atr[i]
         h3_level = h3_aligned[i]
         l3_level = l3_aligned[i]
+        ema_50_level = ema_50_12h_aligned[i]
         
-        # Volume confirmation: current volume > 1.8 * 20-period average volume
-        volume_confirm = curr_volume > 1.8 * vol_ma_20[i]
-        
-        # ATR filter: current ATR < 1.8 * 20-period average ATR (avoid extreme volatility)
-        atr_filter = curr_atr < 1.8 * atr_ma_20[i]
+        # Volume confirmation: current volume > 1.5 * 20-period average volume
+        volume_confirm = curr_volume > 1.5 * vol_ma_20[i]
         
         # Camarilla breakout conditions
         broke_above_h3 = curr_close > h3_level
         broke_below_l3 = curr_close < l3_level
+        
+        # Trend alignment conditions
+        above_ema = curr_close > ema_50_level
+        below_ema = curr_close < ema_50_level
         
         # Exit conditions: opposite Camarilla break
         if position != 0:
@@ -106,13 +106,13 @@ def generate_signals(prices):
                     position = 0
                     continue
         
-        # Entry conditions: Camarilla breakout with volume and ATR filters
+        # Entry conditions: Camarilla breakout with trend and volume filters
         if position == 0:
-            # Long: break above H3 AND volume confirmation AND ATR filter
-            long_condition = broke_above_h3 and volume_confirm and atr_filter
+            # Long: break above H3 AND above EMA50 AND volume confirmation
+            long_condition = broke_above_h3 and above_ema and volume_confirm
             
-            # Short: break below L3 AND volume confirmation AND ATR filter
-            short_condition = broke_below_l3 and volume_confirm and atr_filter
+            # Short: break below L3 AND below EMA50 AND volume confirmation
+            short_condition = broke_below_l3 and below_ema and volume_confirm
             
             if long_condition:
                 signals[i] = 0.25
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dVolSpike_ATRVolFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_12hEMA50_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
