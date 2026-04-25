@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4S4_Breakout_1dTrend_AdxFilter
-Hypothesis: 6h Camarilla R4/S4 breakout with daily trend filter (EMA50) and ADX regime filter.
-Long when price breaks above R4 in strong uptrend (ADX>25 & close>daily EMA50).
-Short when price breaks below S4 in strong downtrend (ADX>25 & close<daily EMA50).
-Exit when price re-enters H3-L3 range or trend weakens (ADX<20).
-Uses discrete position sizing (0.25) to minimize fee churn. Designed for 15-25 trades/year on 6h.
-Works in bull markets via trend-following breakouts and in bear markets via avoided false signals.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 12h Camarilla R1/S1 breakout with daily EMA50 trend filter and volume spike confirmation.
+Long when price breaks above R1 in uptrend (close > daily EMA50) with volume spike (>2.0x 20-bar average).
+Short when price breaks below S1 in downtrend (close < daily EMA50) with volume spike.
+Exit when price re-enters H3-L3 range or trend reverses.
+Designed for 12-25 trades/year on 12h timeframe with tight entry conditions to minimize fee drag.
+Works in bull markets via trend-following breakouts and in bear markets via counter-trend fades on extreme volume spikes.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for HTF indicators
+    # Get daily data for Camarilla pivot calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -39,57 +39,24 @@ def generate_signals(prices):
     
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
-    r4 = prev_close + range_hl * 1.1 / 2
-    s4 = prev_close - range_hl * 1.1 / 2
+    r1 = prev_close + range_hl * 1.1 / 12
+    s1 = prev_close - range_hl * 1.1 / 12
     h3 = prev_close + range_hl * 1.1 / 4
     l3 = prev_close - range_hl * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Daily trend filter: EMA50
+    # Get daily data for trend filter (EMA50)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # ADX calculation on daily data (trend strength)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
-            minus_dm[i] = max(low[i-1] - low[i], 0) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(tr)
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        
-        atr[period] = np.nansum(tr[1:period+1])
-        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.nansum(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(tr)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
-        
-        plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-        minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = np.zeros_like(dx)
-        adx[2*period] = np.nanmean(dx[period:2*period+1])
-        for i in range(2*period+1, len(dx)):
-            adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
-        return adx
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -99,27 +66,26 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         ema_trend = ema_50_1d_aligned[i]
-        adx_val = adx_1d_aligned[i]
         
         if position == 0:
             # Regime-based entry logic
-            if adx_val > 25:  # Strong trend
-                if close[i] > ema_trend:  # Uptrend regime
-                    # Long: break above R4
-                    long_signal = close[i] > r4_aligned[i]
-                else:  # Downtrend regime
-                    # Short: break below S4
-                    short_signal = close[i] < s4_aligned[i]
-            else:
-                long_signal = False
-                short_signal = False
+            if close[i] > ema_trend:  # Uptrend regime (daily)
+                # Long: break above R1 with volume spike
+                long_signal = (close[i] > r1_aligned[i]) and vol_spike[i]
+                # Short: break below S1 only if extreme volume spike (counter-trend fade)
+                short_signal = (close[i] < s1_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
+            else:  # Downtrend regime (daily)
+                # Short: break below S1 with volume spike
+                short_signal = (close[i] < s1_aligned[i]) and vol_spike[i]
+                # Long: break above R1 only if extreme volume spike (counter-trend fade)
+                long_signal = (close[i] > r1_aligned[i]) and vol_spike[i] and (volume[i] > (4.0 * vol_ma_20[i]))
             
             if long_signal:
                 signals[i] = 0.25
@@ -132,22 +98,22 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit conditions: re-enter H3-L3 range or trend weakens
-            exit_signal = (close[i] < h3_aligned[i] and close[i] > l3_aligned[i]) or (adx_val < 20)
+            # Exit conditions: re-enter H3-L3 range or trend reversal
+            exit_signal = (close[i] < h3_aligned[i] and close[i] > l3_aligned[i]) or (close[i] < ema_trend * 0.99)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit conditions: re-enter H3-L3 range or trend weakens
-            exit_signal = (close[i] > l3_aligned[i] and close[i] < h3_aligned[i]) or (adx_val < 20)
+            # Exit conditions: re-enter H3-L3 range or trend reversal
+            exit_signal = (close[i] > l3_aligned[i] and close[i] < h3_aligned[i]) or (close[i] > ema_trend * 1.01)
             if exit_signal:
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "6h_Camarilla_R4S4_Breakout_1dTrend_AdxFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
