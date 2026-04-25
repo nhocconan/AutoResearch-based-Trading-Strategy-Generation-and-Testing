@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d ATR Regime + Volume Spike
-Hypothesis: Donchian channel breakouts capture strong momentum. ATR regime filter (ATR(7)/ATR(30) > 1.5) ensures we only trade in volatile regimes where breakouts are meaningful. Volume confirmation ensures participation. Works in bull (long on upper break) and bear (short on lower break). Target: 30-60 trades/year on 4h.
+1d KAMA + RSI + Chop Regime Filter
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) captures trend with low lag. 
+Long when price > KAMA and RSI < 70 (avoid overbought), short when price < KAMA and RSI > 30 (avoid oversold).
+Choppiness Index (CHOP) > 61.8 = range market (fade extremes), CHOP < 38.2 = trending (follow KAMA).
+Uses 1d primary timeframe with 1w HTF for regime confirmation (weekly CHOP > 50 = range -> reduce size).
+Target: 15-25 trades/year on 1d, discrete sizing 0.25, max drawdown controlled by regime filter.
 """
 
 import numpy as np
@@ -10,112 +14,126 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for ATR regime and Donchian channels (call ONCE before loop)
+    # Get 1d data for KAMA, RSI, CHOP (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR(7) and ATR(30) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate KAMA on 1d (ER=10, FAST=2, SLOW=30)
+    close_1d = pd.Series(df_1d['close'])
+    change = abs(close_1d.diff(10)).values
+    volatility = close_1d.diff(1).abs().rolling(10, min_periods=1).sum().values
+    er = np.where(volatility > 0, change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.full_like(close_1d, np.nan, dtype=float)
+    kama[0] = close_1d.iloc[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d.iloc[i] - kama[i-1])
+    kama_1d = kama
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # True Range calculation
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    # Calculate RSI(14) on 1d
+    delta = close_1d.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_1d = rsi.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # ATR(7) and ATR(30)
-    atr_7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr_7 / atr_30  # ATR(7)/ATR(30) ratio
+    # Calculate Choppiness Index(14) on 1d
+    atr = pd.Series(np.maximum(np.maximum(df_1d['high'] - df_1d['low'], 
+                                          abs(df_1d['high'] - df_1d['close'].shift())),
+                               abs(df_1d['low'] - df_1d['close'].shift())))
+    atr_sum = atr.rolling(14, min_periods=14).sum()
+    high_max = df_1d['high'].rolling(14, min_periods=14).max()
+    low_min = df_1d['low'].rolling(14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (high_max - low_min)) / np.log10(14)
+    chop_1d = chop.values
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Align ATR ratio to 4h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Get 1w data for weekly chop regime (additional delay for stability)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
-    donch_h = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_l = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_h_aligned = align_htf_to_ltf(prices, df_1d, donch_h)
-    donch_l_aligned = align_htf_to_ltf(prices, df_1d, donch_l)
-    
-    # Calculate 4h volume MA for volume confirmation (20-period)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Weekly chop for regime filter
+    atr_w = pd.Series(np.maximum(np.maximum(df_1w['high'] - df_1w['low'],
+                                           abs(df_1w['high'] - df_1w['close'].shift())),
+                                 abs(df_1w['low'] - df_1w['close'].shift())))
+    atr_sum_w = atr_w.rolling(14, min_periods=14).sum()
+    high_max_w = df_1w['high'].rolling(14, min_periods=14).max()
+    low_min_w = df_1w['low'].rolling(14, min_periods=14).min()
+    chop_w = 100 * np.log10(atr_sum_w / (high_max_w - low_min_w)) / np.log10(14)
+    chop_w_1d = chop_w.values
+    chop_w_1d_aligned = align_htf_to_ltf(prices, df_1w, chop_w_1d, additional_delay_bars=1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need enough for ATR, Donchian, volume MA
-    start_idx = max(30, 20)
+    # Start index: need enough for all indicators
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(donch_h_aligned[i]) or 
-            np.isnan(donch_l_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or np.isnan(chop_w_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         curr_close = close[i]
-        curr_volume = volume[i]
-        atr_ratio_val = atr_ratio_aligned[i]
-        donch_h_val = donch_h_aligned[i]
-        donch_l_val = donch_l_aligned[i]
-        vol_ma = vol_ma_20[i]
+        kama_val = kama_1d_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
+        chop_val = chop_1d_aligned[i]
+        chop_w_val = chop_w_1d_aligned[i]
         
-        # Volume confirmation: current volume > 2.0 * 20-period average
-        volume_confirm = curr_volume > 2.0 * vol_ma
-        
-        # Regime filter: only trade when ATR(7)/ATR(30) > 1.5 (volatile regime)
-        volatile_regime = atr_ratio_val > 1.5
+        # Regime filter: weekly chop > 50 = range market -> reduce size or avoid
+        is_range = chop_w_val > 50
+        size = 0.15 if is_range else 0.25  # smaller size in ranging markets
         
         if position == 0:
             # Look for entry signals
-            # Long: price > upper Donchian, volatile regime, volume confirmation
-            long_entry = (curr_close > donch_h_val) and volatile_regime and volume_confirm
-            # Short: price < lower Donchian, volatile regime, volume confirmation
-            short_entry = (curr_close < donch_l_val) and volatile_regime and volume_confirm
+            # Long: price > KAMA, RSI < 70 (not overbought), and not extreme chop
+            long_entry = (curr_close > kama_val) and (rsi_val < 70) and (chop_val < 80)
+            # Short: price < KAMA, RSI > 30 (not oversold), and not extreme chop
+            short_entry = (curr_close < kama_val) and (rsi_val > 30) and (chop_val < 80)
             
             if long_entry:
-                signals[i] = 0.30
+                signals[i] = size
                 position = 1
             elif short_entry:
-                signals[i] = -0.30
+                signals[i] = -size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price crosses below lower Donchian (stop and reverse)
-            if curr_close < donch_l_val:
+            # Exit: price crosses below KAMA OR RSI > 75 (overbought exit)
+            if curr_close < kama_val or rsi_val > 75:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = size
         elif position == -1:
             # Short position management
-            # Exit: price crosses above upper Donchian (stop and reverse)
-            if curr_close > donch_h_val:
+            # Exit: price crosses above KAMA OR RSI < 25 (oversold exit)
+            if curr_close > kama_val or rsi_val < 25:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -size
     
     return signals
 
-name = "4h_Donchian20_Breakout_1dATRRegime_VolumeSpike"
-timeframe = "4h"
+name = "1d_KAMA_RSI_ChopRegime"
+timeframe = "1d"
 leverage = 1.0
