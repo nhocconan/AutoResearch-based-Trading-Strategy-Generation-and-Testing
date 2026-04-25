@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1wTrendFilter_VolumeConfirm_v1
-Hypothesis: Trade Camarilla H3/L3 breakouts on 12h with 1w EMA50 trend filter and volume confirmation.
-Camarilla levels provide high-probability reversal/breakout points; 1w trend ensures alignment with major market direction.
-Volume confirmation filters false breakouts. Designed for low turnover (12-37 trades/year) to minimize fee drag.
-Works in both bull and bear markets by following 1w trend direction.
+1d_Donchian20_Breakout_1wTrendFilter_VolumeConfirm_v1
+Hypothesis: Trade Donchian(20) breakouts on daily timeframe with 1-week EMA50 trend filter and volume confirmation.
+Donchian channels identify volatility-based breakouts; 1-week EMA50 ensures alignment with higher timeframe trend;
+volume spike filters false breakouts. Works in both bull and bear markets by capturing momentum bursts.
+Target: 7-25 trades/year per symbol (30-100 total over 4 years).
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,56 +31,40 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for Camarilla calculation (standard practice)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate Donchian(20) channels on 1d data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: H3/L3 are key breakout levels
-    # H3 = close + 1.1*(high-low)/4
-    # L3 = close - 1.1*(high-low)/4
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
-    
-    # Align Camarilla levels to 12h timeframe (no additional delay needed as they're based on completed 1d bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    if len(volume) >= 20:
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_confirm = volume > (vol_ma * 1.5)
-    else:
-        volume_confirm = np.ones(n, dtype=bool)  # No volume filter if insufficient data
+    # Calculate 20-period average volume for volume confirmation
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for EMA50 (50) and Camarilla (need at least 1 1d bar)
-    start_idx = max(50, 1)
+    # Start index: need warmup for Donchian(20) and EMA50
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i])):
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend
+        # Determine 1w HTF trend (bullish = price above EMA50)
         htf_1w_bullish = close[i] > ema_50_1w_aligned[i]
         htf_1w_bearish = close[i] < ema_50_1w_aligned[i]
         
+        # Volume confirmation: current volume > 1.5 * 20-period average volume
+        volume_confirm = volume[i] > 1.5 * avg_volume[i]
+        
         if position == 0:
-            # Long setup: price breaks above H3 + 1w uptrend + volume confirmation
-            long_setup = (close[i] > camarilla_h3_aligned[i]) and htf_1w_bullish and volume_confirm[i]
+            # Long setup: price breaks above Donchian upper + 1w uptrend + volume confirmation
+            long_setup = (close[i] > highest_high[i]) and htf_1w_bullish and volume_confirm
             
-            # Short setup: price breaks below L3 + 1w downtrend + volume confirmation
-            short_setup = (close[i] < camarilla_l3_aligned[i]) and htf_1w_bearish and volume_confirm[i]
+            # Short setup: price breaks below Donchian lower + 1w downtrend + volume confirmation
+            short_setup = (close[i] < lowest_low[i]) and htf_1w_bearish and volume_confirm
             
             if long_setup:
                 signals[i] = 0.25
@@ -93,20 +77,20 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches L3 (stop) OR 1w trend turns bearish
-            if (close[i] <= camarilla_l3_aligned[i]) or (not htf_1w_bullish):
+            # Exit: price touches Donchian lower (stop) OR 1w trend turns bearish
+            if (close[i] <= lowest_low[i]) or (not htf_1w_bullish):
                 signals[i] = 0.0
                 position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches H3 (stop) OR 1w trend turns bullish
-            if (close[i] >= camarilla_h3_aligned[i]) or (htf_1w_bullish):
+            # Exit: price touches Donchian upper (stop) OR 1w trend turns bullish
+            if (close[i] >= highest_high[i]) or (htf_1w_bullish):
                 signals[i] = 0.0
                 position = 0
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1wTrendFilter_VolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wTrendFilter_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
