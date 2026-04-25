@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_H3L3_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: 6-hour Camarilla H3/L3 breakout with 1-day EMA34 trend filter and volume spike confirmation.
-Targets 12-37 trades/year by requiring: 1) price breaks daily H3/L3 levels (strong intraday breakout),
-2) aligned with 1d EMA34 trend, 3) volume > 2.0x 20-period average. Uses 6h timeframe to minimize
-fee drag while capturing significant moves in both bull and bear markets. H3/L3 levels provide
-better signal quality than R1/S1 for lower timeframe strategies.
-Version 2: Reduced trade frequency by increasing volume threshold from 2.0x to 3.0x and requiring
-consecutive session bars for entry to avoid whipsaws.
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 4-hour Camarilla R1/S1 breakout with 1-day EMA34 trend filter and volume spike confirmation.
+Targets 19-50 trades/year by requiring: 1) price breaks daily R1/S1 levels (strong intraday breakout),
+2) aligned with 1d EMA34 trend, 3) volume > 2.0x 20-period average. Uses 4h timeframe to balance
+trade frequency and fee drag while capturing significant moves in both bull and bear markets.
+R1/S1 levels provide better signal quality for 4h strategies than H3/L3.
 """
 
 import numpy as np
@@ -39,17 +37,17 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_range = prev_high - prev_low
     
-    # Camarilla H3 and L3 levels (H3 = C + 1.1*(HL/2), L3 = C - 1.1*(HL/2))
-    H3 = prev_close + 1.1 * prev_range * (1.0/2.0)
-    L3 = prev_close - 1.1 * prev_range * (1.0/2.0)
+    # Camarilla R1 and S1 levels (R1 = C + 1.1*(HL/12), S1 = C - 1.1*(HL/12))
+    R1 = prev_close + 1.1 * prev_range * (1.0/12.0)
+    S1 = prev_close - 1.1 * prev_range * (1.0/12.0)
     
-    # Align 1d levels to 6h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align 1d levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume confirmation: current volume > 3.0 * 20-period average (increased from 2.0x)
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 3.0)
+    volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,7 +63,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any data not ready
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i]) or
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
             np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -80,13 +78,10 @@ def generate_signals(prices):
         
         if position == 0:
             # Look for entry signals with volume confirmation, trend alignment
-            # Require consecutive session bar for entry to avoid whipsaws
-            prev_in_session = in_session[i-1] if i > 0 else False
-            
-            # Long breakout: price breaks above H3 with uptrend and volume confirmation
-            long_breakout = (curr_close > H3_aligned[i]) and uptrend and volume_confirm[i] and prev_in_session
-            # Short breakout: price breaks below L3 with downtrend and volume confirmation
-            short_breakout = (curr_close < L3_aligned[i]) and downtrend and volume_confirm[i] and prev_in_session
+            # Long breakout: price breaks above R1 with uptrend and volume confirmation
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_confirm[i]
+            # Short breakout: price breaks below S1 with downtrend and volume confirmation
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_confirm[i]
             
             if long_breakout:
                 signals[i] = 0.25
@@ -100,16 +95,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Exit if price breaks below L3 (mean reversion) or trend changes
-            if curr_close < L3_aligned[i] or not uptrend:
+            # Exit if price breaks below S1 (mean reversion) or trend changes
+            if curr_close < S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Exit if price breaks above H3 (mean reversion) or trend changes
-            if curr_close > H3_aligned[i] or not downtrend:
+            # Exit if price breaks above R1 (mean reversion) or trend changes
+            if curr_close > R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -117,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_H3L3_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
