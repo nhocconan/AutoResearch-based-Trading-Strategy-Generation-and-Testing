@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume spike confirmation.
-1d EMA34 provides long-term trend filter reducing whipsaws in choppy markets. R1/S1 are primary support/resistance levels.
-Only trade in direction of 1d trend to avoid counter-trend whipsaws. Discrete sizing 0.30 to manage fee drag.
-Target: 20-50 trades/year (~80-200 over 4 years) to stay within 4h fee drag limits.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_WithRegime
+Hypothesis: Trade 4h Camarilla R1/S1 breakouts with 1d EMA34 trend filter, volume spike, and choppiness regime filter.
+Long when price breaks above R1, 1d EMA34 trend bullish, volume spike, and choppy market (CHOP > 61.8).
+Short when price breaks below S1, 1d EMA34 trend bearish, volume spike, and choppy market.
+Exit when price re-enters H3/L3 range or 1d trend reverses.
+Uses discrete position sizing 0.30 to limit fee drag. Target 20-40 trades/year.
 """
 
 import numpy as np
@@ -52,30 +53,43 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
+    # Choppiness Index regime filter (14-period)
+    # CHOP > 61.8 = choppy/range (favor mean reversion/breakout)
+    # CHOP < 38.2 = trending (favor trend following)
+    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # first bar
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_14 * 14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop_regime = chop > 61.8  # choppy market regime
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for 1d EMA34 (34) and volume MA (20)
-    start_idx = max(34, 20)
+    # Start index: need warmup for 1d EMA34 (34), volume MA (20), and CHOP (14)
+    start_idx = max(34, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND 1d trend bullish (close > EMA34) AND volume spike
+            # Long: price breaks above R1 AND 1d trend bullish AND volume spike AND choppy regime
             long_setup = (close[i] > r1_aligned[i]) and \
                          (close[i] > ema_34_1d_aligned[i]) and \
-                         volume_spike[i]
-            # Short: price breaks below S1 AND 1d trend bearish (close < EMA34) AND volume spike
+                         volume_spike[i] and \
+                         chop_regime[i]
+            # Short: price breaks below S1 AND 1d trend bearish AND volume spike AND choppy regime
             short_setup = (close[i] < s1_aligned[i]) and \
                           (close[i] < ema_34_1d_aligned[i]) and \
-                          volume_spike[i]
+                          volume_spike[i] and \
+                          chop_regime[i]
             
             if long_setup:
                 signals[i] = 0.30
@@ -104,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike_WithRegime"
 timeframe = "4h"
 leverage = 1.0
