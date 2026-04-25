@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v8
-Hypothesis: Trade 4h Camarilla R1/S1 breakouts in the direction of the daily EMA34 trend with volume confirmation.
-Uses tighter volume filter (2.0 * ATR) and adds a minimum hold period of 3 bars to reduce overtrading.
-Only long when price breaks above Camarilla R1 AND daily close > daily EMA34 AND volume > 2.0 * ATR4h.
-Only short when price breaks below Camarilla S1 AND daily close < daily EMA34 AND volume > 2.0 * ATR4h.
+1d_Camarilla_Pivot_VolumeSpike_1wTrend_v2
+Hypothesis: Trade 1d Camarilla R3/S3 breakouts in the direction of weekly EMA50 trend with volume confirmation.
+Uses tighter volume filter (3.0 * ATR) and adds a minimum hold period of 2 bars to reduce overtrading.
+Only long when price breaks above Camarilla R3 AND weekly close > weekly EMA50 AND volume > 3.0 * ATR1d.
+Only short when price breaks below Camarilla S3 AND weekly close < weekly EMA50 AND volume > 3.0 * ATR1d.
 Discrete sizing 0.25 to limit fee drag. Target: 20-40 trades/year.
 """
 
@@ -22,31 +22,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels and EMA34 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily OHLC for Camarilla levels (R1/S1)
+    # Calculate weekly EMA50 for trend filter
+    c_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(c_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate daily OHLC for Camarilla levels (R3/S3)
     o_1d = df_1d['open'].values
     h_1d = df_1d['high'].values
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
     
-    # Camarilla R1 = C + (H-L)*1.1/12
-    # Camarilla S1 = C - (H-L)*1.1/12
-    camarilla_r1_1d = c_1d + (h_1d - l_1d) * 1.1 / 12
-    camarilla_s1_1d = c_1d - (h_1d - l_1d) * 1.1 / 12
+    # Camarilla R3 = C + (H-L)*1.1/4
+    # Camarilla S3 = C - (H-L)*1.1/4
+    camarilla_r3_1d = c_1d + (h_1d - l_1d) * 1.1 / 4
+    camarilla_s3_1d = c_1d - (h_1d - l_1d) * 1.1 / 4
     
-    # Align daily Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    # Align daily Camarilla levels to 1d timeframe (no shift needed)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(c_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate ATR for volume confirmation (using 4h data)
+    # Calculate ATR for volume confirmation (using 1d data)
     tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
     tr2 = np.maximum(np.abs(low[1:] - close[:-1]), tr1)
     tr = np.concatenate([[np.inf], tr2])
@@ -56,41 +62,41 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0  # track bars in position for minimum hold
     
-    # Start index: need warmup for EMA34 and ATR
-    start_idx = max(34, 14)
+    # Start index: need warmup for EMA50 and ATR
+    start_idx = max(50, 14)
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             bars_since_entry = 0
             continue
         
-        # Volume confirmation: current volume > 2.0 * ATR (tighter filter)
-        volume_confirm = volume[i] > 2.0 * atr[i]
+        # Volume confirmation: current volume > 3.0 * ATR (tighter filter)
+        volume_confirm = volume[i] > 3.0 * atr[i]
         
-        # Determine daily trend from EMA34
-        daily_close_aligned = align_htf_to_ltf(prices, df_1d, c_1d)[i]
-        if np.isnan(daily_close_aligned):
+        # Determine weekly trend from EMA50
+        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, c_1w)[i]
+        if np.isnan(weekly_close_aligned):
             signals[i] = 0.0
             bars_since_entry = 0
             continue
             
-        if daily_close_aligned > ema_34_aligned[i]:
-            daily_trend = 'bullish'  # only allow longs
-        elif daily_close_aligned < ema_34_aligned[i]:
-            daily_trend = 'bearish'  # only allow shorts
+        if weekly_close_aligned > ema_50_aligned[i]:
+            weekly_trend = 'bullish'  # only allow longs
+        elif weekly_close_aligned < ema_50_aligned[i]:
+            weekly_trend = 'bearish'  # only allow shorts
         else:
-            daily_trend = 'neutral'  # no trades in neutral zone
+            weekly_trend = 'neutral'  # no trades in neutral zone
         
         if position == 0:
             bars_since_entry = 0
-            # Long setup: price breaks above Camarilla R1 AND volume confirm AND bullish daily trend
-            long_setup = (close[i] > camarilla_r1_aligned[i]) and volume_confirm and (daily_trend == 'bullish')
+            # Long setup: price breaks above Camarilla R3 AND volume confirm AND bullish weekly trend
+            long_setup = (close[i] > camarilla_r3_aligned[i]) and volume_confirm and (weekly_trend == 'bullish')
             
-            # Short setup: price breaks below Camarilla S1 AND volume confirm AND bearish daily trend
-            short_setup = (close[i] < camarilla_s1_aligned[i]) and volume_confirm and (daily_trend == 'bearish')
+            # Short setup: price breaks below Camarilla S3 AND volume confirm AND bearish weekly trend
+            short_setup = (close[i] < camarilla_s3_aligned[i]) and volume_confirm and (weekly_trend == 'bearish')
             
             if long_setup:
                 signals[i] = 0.25
@@ -104,9 +110,9 @@ def generate_signals(prices):
             bars_since_entry += 1
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price breaks below Camarilla S1 OR daily trend turns bearish OR min hold (3 bars) + adverse move
-            if bars_since_entry >= 3:
-                if (close[i] < camarilla_s1_aligned[i]) or (daily_trend == 'bearish'):
+            # Exit: price breaks below Camarilla S3 OR weekly trend turns bearish OR min hold (2 bars) + adverse move
+            if bars_since_entry >= 2:
+                if (close[i] < camarilla_s3_aligned[i]) or (weekly_trend == 'bearish'):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -114,15 +120,15 @@ def generate_signals(prices):
             bars_since_entry += 1
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price breaks above Camarilla R1 OR daily trend turns bullish OR min hold (3 bars) + adverse move
-            if bars_since_entry >= 3:
-                if (close[i] > camarilla_r1_aligned[i]) or (daily_trend == 'bullish'):
+            # Exit: price breaks above Camarilla R3 OR weekly trend turns bullish OR min hold (2 bars) + adverse move
+            if bars_since_entry >= 2:
+                if (close[i] > camarilla_r3_aligned[i]) or (weekly_trend == 'bullish'):
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
     
     return signals
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrendFilter_VolumeSpike_v8"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_VolumeSpike_1wTrend_v2"
+timeframe = "1d"
 leverage = 1.0
