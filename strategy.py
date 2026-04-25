@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
-Hypothesis: 12-hour Camarilla R3/S3 breakout with 1-week EMA50 trend filter and volume spike confirmation.
+4h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: 4-hour Camarilla R3/S3 breakout with 1-week EMA50 trend filter and volume spike confirmation.
 Long when price breaks above R3 in 1-week uptrend (close > 1w EMA50) with volume > 2.0x 20-period average.
 Short when price breaks below S3 in 1-week downtrend (close < 1w EMA50) with volume > 2.0x 20-period average.
 Exit via opposite Camarilla level (S3 for longs, R3 for shorts) or ATR stop (2.5*ATR from extreme).
-Designed for ~12-37 trades/year via tight breakout conditions and volume confirmation.
-Works in bull/bear markets via 1w EMA50 filter; avoids false breakouts via volume confirmation.
+Designed for ~20-50 trades/year via tight breakout conditions, 1-week trend filter, and volume confirmation.
+Uses 1-week HTF for stronger trend bias that works in both bull and bear markets via multi-timeframe alignment.
 """
 
 import numpy as np
@@ -47,28 +47,23 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_regime = volume > (2.0 * vol_ma_20)
     
-    # Calculate Camarilla levels from previous week
-    # Get weekly OHLC
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d OHLC for Camarilla levels (more stable than 1w for pivot calculation)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    o_1w = df_1w['open'].values
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
+    o_1d = df_1d['open'].values
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels
-    # R4 = c + ((h-l)*1.1/2)
-    # R3 = c + ((h-l)*1.1/4)
-    # S3 = c - ((h-l)*1.1/4)
-    # S4 = c - ((h-l)*1.1/2)
-    camarilla_r3_1w = c_1w + ((h_1w - l_1w) * 1.1 / 4)
-    camarilla_s3_1w = c_1w - ((h_1w - l_1w) * 1.1 / 4)
+    # Calculate Camarilla levels from previous day
+    camarilla_r3_1d = c_1d + ((h_1d - l_1d) * 1.1 / 4)
+    camarilla_s3_1d = c_1d - ((h_1d - l_1d) * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -140,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
