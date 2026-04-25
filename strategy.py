@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1
-Hypothesis: Trade Camarilla R1/S1 breakouts on daily timeframe with weekly EMA34 trend filter and volume confirmation.
-In bull markets: buy when price breaks above Camarilla R1 and price > weekly EMA34.
-In bear markets: sell when price breaks below Camarilla S1 and price < weekly EMA34.
-Requires volume > 1.5x 20-period average for confirmation.
-Exit on opposite Camarilla level touch or trend reversal.
-Position size: 0.25 to limit drawdown.
-Target: 30-100 total trades over 4 years = 7-25/year.
-Works in bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets.
+6h_AsymmetricRegime_ADX_EMA21_v2
+Hypothesis: Asymmetric strategy for 6h timeframe using ADX regime detection and EMA21 trend filter. 
+In trending markets (ADX > 25): trade pullbacks to EMA21 in trend direction. 
+In ranging markets (ADX < 20): fade moves to Bollinger Bands (20,2) with RSI confirmation. 
+Uses 12h HTF for regime confirmation to reduce whipsaw. Position size 0.25.
+Target: 80-120 total trades over 4 years = 20-30/year.
 """
 
 import numpy as np
@@ -17,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,67 +22,126 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need sufficient data for EMA
+    # Get 12h data for HTF regime filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 for HTF trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate ADX on 12h for regime detection
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1d data for Camarilla levels and volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need sufficient data for volume average
-        return np.zeros(n)
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])
     
-    # Calculate 20-period average volume for confirmation (1d)
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Directional Movement
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Calculate Camarilla levels for each 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Smoothed values
+    def WilderSmooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[1:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1]/period) + data[i]
+        return result
     
-    hl_range_1d = high_1d - low_1d
-    r1_1d = close_1d + (1.1 * hl_range_1d / 12)  # R1 = close + 1.1*(high-low)/12
-    s1_1d = close_1d - (1.1 * hl_range_1d / 12)  # S1 = close - 1.1*(high-low)/12
+    period = 14
+    tr_period = WilderSmooth(tr, period)
+    plus_dm_period = WilderSmooth(plus_dm, period)
+    minus_dm_period = WilderSmooth(minus_dm, period)
     
-    # Align Camarilla levels to match prices index
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Avoid division by zero
+    plus_di = np.where(tr_period != 0, (plus_dm_period / tr_period) * 100, 0)
+    minus_di = np.where(tr_period != 0, (minus_dm_period / tr_period) * 100, 0)
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = WilderSmooth(dx, period)
+    
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # Calculate 12h EMA200 for long-term trend filter
+    ema_200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
+    
+    # Calculate 6h indicators
+    # EMA21 for pullback entries
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Bollinger Bands (20,2) for mean reversion
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma_20 + (bb_std * std_20)
+    lower_band = sma_20 - (bb_std * std_20)
+    
+    # RSI(14) for mean reversion confirmation
+    rsi_period = 14
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    if len(gain) >= rsi_period:
+        avg_gain[rsi_period-1] = np.nanmean(gain[1:rsi_period])
+        avg_loss[rsi_period-1] = np.nanmean(loss[1:rsi_period])
+        for i in range(rsi_period, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start index: need warmup for weekly EMA34 (34) and 1d volume MA (20)
-    start_idx = 34
+    # Start index: need warmup for the longest indicator
+    start_idx = max(50, 200)  # EMA200 needs most bars
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(ema_200_12h_aligned[i]) or
+            np.isnan(ema_21[i]) or
+            np.isnan(sma_20[i]) or
+            np.isnan(std_20[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 1w HTF trend (bullish = price above weekly EMA34)
-        htf_1w_bullish = close[i] > ema_34_1w_aligned[i]
-        htf_1w_bearish = close[i] < ema_34_1w_aligned[i]
+        # Determine regime from 12h ADX
+        is_trending = adx_aligned[i] > 25
+        is_ranging = adx_aligned[i] < 20
         
-        # Volume confirmation: current volume > 1.5x 20-period average (1d)
-        volume_confirm = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Long-term trend filter from 12h EMA200
+        long_term_uptrend = close[i] > ema_200_12h_aligned[i]
+        long_term_downtrend = close[i] < ema_200_12h_aligned[i]
         
         if position == 0:
-            # Long setup: price breaks above Camarilla R1 + 1w uptrend + volume confirmation
-            long_setup = (close[i] > r1_aligned[i]) and htf_1w_bullish and volume_confirm
-            
-            # Short setup: price breaks below Camarilla S1 + 1w downtrend + volume confirmation
-            short_setup = (close[i] < s1_aligned[i]) and htf_1w_bearish and volume_confirm
+            if is_trending:
+                # Trending regime: pullback to EMA21 in trend direction
+                long_setup = (close[i] <= ema_21[i] * 1.005) and long_term_uptrend and (close[i] > ema_21[i])
+                short_setup = (close[i] >= ema_21[i] * 0.995) and long_term_downtrend and (close[i] < ema_21[i])
+            elif is_ranging:
+                # Ranging regime: fade Bollinger Bands with RSI confirmation
+                long_setup = (close[i] <= lower_band[i]) and (rsi[i] < 30)
+                short_setup = (close[i] >= upper_band[i]) and (rsi[i] > 70)
+            else:
+                # Transition regime: no trades
+                long_setup = False
+                short_setup = False
             
             if long_setup:
                 signals[i] = 0.25
@@ -98,20 +154,34 @@ def generate_signals(prices):
         elif position == 1:
             # Long: hold position
             signals[i] = 0.25
-            # Exit: price touches Camarilla S1 (stop) OR 1w trend turns bearish
-            if (close[i] <= s1_aligned[i]) or (not htf_1w_bullish):
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions
+            if is_trending:
+                # In trend: exit on trend reversal or extended move
+                if not long_term_uptrend or (close[i] >= ema_21[i] * 1.02):
+                    signals[i] = 0.0
+                    position = 0
+            else:
+                # In range or transition: exit at mean reversion
+                if close[i] >= sma_20[i] or rsi[i] > 50:
+                    signals[i] = 0.0
+                    position = 0
         elif position == -1:
             # Short: hold position
             signals[i] = -0.25
-            # Exit: price touches Camarilla R1 (stop) OR 1w trend turns bullish
-            if (close[i] >= r1_aligned[i]) or (htf_1w_bullish):
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions
+            if is_trending:
+                # In trend: exit on trend reversal or extended move
+                if not long_term_downtrend or (close[i] <= ema_21[i] * 0.98):
+                    signals[i] = 0.0
+                    position = 0
+            else:
+                # In range or transition: exit at mean reversion
+                if close[i] <= sma_20[i] or rsi[i] < 50:
+                    signals[i] = 0.0
+                    position = 0
     
     return signals
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_AsymmetricRegime_ADX_EMA21_v2"
+timeframe = "6h"
 leverage = 1.0
