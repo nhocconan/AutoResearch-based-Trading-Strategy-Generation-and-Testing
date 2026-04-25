@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Irwin_Breakout_1dTrend_VolumeSpike
-Hypothesis: Irwin Oscillator (EMA5-EMA34) on 6h with 1d EMA34 trend filter and volume spike confirmation.
-Irwin Oscillator > 0 indicates bullish momentum, < 0 bearish. Enter on zero-cross with trend alignment and volume spike.
-Targets 15-30 trades/year by requiring confluence of momentum, trend, and volume. Works in bull/bear via trend filter.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R1/S1 breakouts on 12h timeframe with 1d EMA trend filter and volume spike confirmation (2.0x average). Uses discrete position sizing (0.25) to minimize fee churn. Designed for lower trade frequency (target 12-37/year) to avoid fee drag while capturing breakouts in both bull and bear markets via trend alignment.
 """
 
 import numpy as np
@@ -12,72 +10,72 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter (loaded ONCE)
+    # 1d data for Camarilla pivots, EMA34, and volume MA (loaded ONCE)
     df_1d = get_htf_data(prices, '1d')
     
-    # Irwin Oscillator on 6h: EMA(5) - EMA(34)
-    close_s = pd.Series(close)
-    ema5 = close_s.ewm(span=5, adjust=False, min_periods=5).mean().values
-    ema34 = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
-    irwin = ema5 - ema34  # >0 bullish, <0 bearish
+    # 1d Camarilla pivot levels (based on previous day's OHLC)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # 1d EMA34 for trend filter (loaded ONCE)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    R1 = prev_close + 0.5 * prev_range
+    S1 = prev_close - 0.5 * prev_range
+    
+    # Align 1d pivot levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # ATR for stoploss (using 6h data)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1d EMA34 for trend filter (loaded ONCE)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start index: need enough for Irwin EMA34 (34), 1d EMA34 (34), volume MA (20)
+    # Start index: need enough for 1d EMA34 (34) and volume MA (20)
     start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(irwin[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema_34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         curr_close = close[i]
-        curr_irwin = irwin[i]
-        prev_irwin = irwin[i-1]
+        curr_high = high[i]
+        curr_low = low[i]
         
         # Trend filter: price relative to 1d EMA34
         uptrend = curr_close > ema_34_1d_aligned[i]
         downtrend = curr_close < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Look for entry signals: Irwin zero-cross with trend and volume
-            # Long: Irwin crosses above zero with uptrend and volume spike
-            long_entry = (prev_irwin <= 0 and curr_irwin > 0) and uptrend and volume_spike[i]
-            # Short: Irwin crosses below zero with downtrend and volume spike
-            short_entry = (prev_irwin >= 0 and curr_irwin < 0) and downtrend and volume_spike[i]
+            # Look for entry signals with volume spike and trend alignment
+            # Long breakout: price breaks above R1 with uptrend and volume spike
+            long_breakout = (curr_close > R1_aligned[i]) and uptrend and volume_spike[i]
+            # Short breakout: price breaks below S1 with downtrend and volume spike
+            short_breakout = (curr_close < S1_aligned[i]) and downtrend and volume_spike[i]
             
-            if long_entry:
+            if long_breakout:
                 signals[i] = 0.25
                 position = 1
                 entry_price = curr_close
-            elif short_entry:
+            elif short_breakout:
                 signals[i] = -0.25
                 position = -1
                 entry_price = curr_close
@@ -85,31 +83,52 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Stoploss: 2.5 * ATR below entry
-            if curr_close < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.5 * ATR below entry (using 12h ATR)
+            # Calculate ATR for stoploss using 12h data
+            if i >= 1:
+                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+                if i == start_idx:
+                    atr_val = tr
+                else:
+                    atr_val = 0.9 * atr_prev + 0.1 * tr  # Wilder's smoothing
+            else:
+                atr_val = 0.0
+            
+            if curr_close < entry_price - 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
-            # Exit if Irwin crosses below zero (momentum loss) or trend changes
-            elif curr_irwin < 0 or not uptrend:
+            # Exit if price breaks below S1 (mean reversion) or trend changes
+            elif curr_close < S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+            atr_prev = atr_val
         elif position == -1:
             # Short position: exit conditions
             # Stoploss: 2.5 * ATR above entry
-            if curr_close > entry_price + 2.5 * atr[i]:
+            if i >= 1:
+                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+                if i == start_idx:
+                    atr_val = tr
+                else:
+                    atr_val = 0.9 * atr_prev + 0.1 * tr
+            else:
+                atr_val = 0.0
+                
+            if curr_close > entry_price + 2.5 * atr_val:
                 signals[i] = 0.0
                 position = 0
-            # Exit if Irwin crosses above zero (momentum loss) or trend changes
-            elif curr_irwin > 0 or not downtrend:
+            # Exit if price breaks above R1 (mean reversion) or trend changes
+            elif curr_close > R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
+            atr_prev = atr_val
     
     return signals
 
-name = "6h_Irwin_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
