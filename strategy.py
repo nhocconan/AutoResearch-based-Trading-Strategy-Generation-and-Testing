@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_Regime
-Hypothesis: 12h Camarilla H3/L3 breakout with 1d EMA34 trend filter and choppiness regime filter.
-Designed for 12-25 trades/year on BTC/ETH by using tight entry conditions (breakout + trend + volume + regime).
-Uses 1d EMA34 for strong trend direction (works in bull/bear markets) and chop filter to avoid false breakouts in ranging markets.
-Volume confirmation ensures breakouts have conviction. Discrete position sizing (0.25) minimizes fee churn.
+4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_Filter
+Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA34 trend filter and stricter volume confirmation.
+Designed to reduce trade frequency by requiring stronger volume spikes and avoiding choppy markets.
+Target: 20-35 trades/year on BTC/ETH with controlled risk and low fee drag.
 """
 
 import numpy as np
@@ -40,13 +39,13 @@ def generate_signals(prices):
     H3 = prev_close + 1.1 * prev_range * 0.5  # H3 = C + 1.1*(HL/2)
     L3 = prev_close - 1.1 * prev_range * 0.5  # L3 = C - 1.1*(HL/2)
     
-    # Align 1d pivot levels to 12h timeframe
+    # Align 1d pivot levels to 4h timeframe
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Volume confirmation: current volume > 1.8 * 20-period average (stricter spike)
+    # Volume confirmation: current volume > 2.0 * 20-period average (stricter spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.8)
+    volume_confirm = volume > (vol_ma * 2.0)
     
     # Choppiness regime filter: CHOP > 61.8 = ranging (avoid breakouts)
     # Calculate True Range
@@ -115,13 +114,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Long position: exit conditions
-            # Stoploss: 2.0 * ATR below entry
+            # Calculate 4h ATR for stoploss
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
             tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
             atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
             
+            # Stoploss: 2.0 * ATR below entry
             if curr_close < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
@@ -133,13 +133,14 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # Short position: exit conditions
-            # Calculate 12h ATR (same as above)
+            # Calculate 4h ATR (same as above)
             tr1 = high[1:] - low[1:]
             tr2 = np.abs(high[1:] - close[:-1])
             tr3 = np.abs(low[1:] - close[:-1])
             tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
             atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
             
+            # Stoploss: 2.0 * ATR above entry
             if curr_close > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
@@ -152,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_Breakout_1dEMA34_Trend_Regime"
-timeframe = "12h"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
