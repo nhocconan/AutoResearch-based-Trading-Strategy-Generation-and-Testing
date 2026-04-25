@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout with Weekly EMA34 Trend and Volume Spike
-Hypothesis: Donchian channel breakouts capture strong momentum moves. 
-Weekly EMA34 filter ensures trading with the higher timeframe trend, 
-reducing whipsaws in both bull and bear markets. Volume spike confirms 
-institutional participation. Daily timeframe targets 7-25 trades/year, 
-minimizing fee drag while providing sufficient sample size.
+4h Camarilla H3L3 Breakout with 1d EMA34 Trend and Volume Spike
+Hypothesis: Camarilla H3/L3 levels from daily data act as significant intraday support/resistance. 
+Breakouts above H3 or below L3, aligned with daily EMA34 trend and confirmed by volume spikes,
+capture strong momentum moves in both bull and bear markets. 4h timeframe targets 20-50 trades/year,
+minimizing fee drag while allowing for proper trend alignment.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,16 +21,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate Camarilla levels from daily OHLC
+    # H3 = close + 1.1*(high-low)/4
+    # L3 = close - 1.1*(high-low)/4
+    daily_range = df_1d['high'] - df_1d['low']
+    camarilla_h3 = df_1d['close'] + 1.1 * daily_range / 4
+    camarilla_l3 = df_1d['close'] - 1.1 * daily_range / 4
     
-    # Donchian channels (20-period) on daily data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 4h timeframe (no extra delay needed for pivot levels)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3.values)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3.values)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -41,12 +47,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start index: need enough for calculations
-    start_idx = max(34, 20)  # EMA34 and Donchian need 20 periods
+    start_idx = max(34, 20)  # EMA34 + volume MA
     
     for i in range(start_idx, n):
         # Skip if any data not ready
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -56,44 +62,44 @@ def generate_signals(prices):
         curr_volume = volume[i]
         vol_spike = volume_spike[i]
         
-        # Weekly trend filter: price above/below EMA34
+        # Daily trend filter: price above/below EMA34
         uptrend = ema_34_aligned[i] is not None and curr_close > ema_34_aligned[i]
         downtrend = ema_34_aligned[i] is not None and curr_close < ema_34_aligned[i]
         
         if position == 0:
             # Look for entry signals
-            # Long: price breaks above Donchian high AND uptrend AND volume spike
-            long_entry = (curr_high > highest_high[i]) and uptrend and vol_spike
-            # Short: price breaks below Donchian low AND downtrend AND volume spike
-            short_entry = (curr_low < lowest_low[i]) and downtrend and vol_spike
+            # Long: price breaks above H3 AND uptrend AND volume spike
+            long_entry = (curr_high > h3_aligned[i]) and uptrend and vol_spike
+            # Short: price breaks below L3 AND downtrend AND volume spike
+            short_entry = (curr_low < l3_aligned[i]) and downtrend and vol_spike
             
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Long position management
-            # Exit: price falls below Donchian low OR loss of trend (price < EMA34)
-            if (curr_low < lowest_low[i]) or (curr_close < ema_34_aligned[i]):
+            # Exit: price falls below L3 OR loss of trend (price < EMA34)
+            if (curr_low < l3_aligned[i]) or (curr_close < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Short position management
-            # Exit: price rises above Donchian high OR loss of trend (price > EMA34)
-            if (curr_high > highest_high[i]) or (curr_close > ema_34_aligned[i]):
+            # Exit: price rises above H3 OR loss of trend (price > EMA34)
+            if (curr_high > h3_aligned[i]) or (curr_close > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
 
-name = "1d_Donchian20_Breakout_1wEMA34_VolumeSpike"
-timeframe = "1d"
+name = "4h_Camarilla_H3L3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
