@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_ATRstop_v1
-Hypothesis: 6h Camarilla R4/S4 breakouts with 1d trend filter and volume spike capture strong institutional moves while avoiding false breakouts. Uses discrete sizing (0.25) and ATR-based stoploss (2.0) with 6-bar minimum hold. Works in both bull/bear by only taking breakouts in the direction of the 1d trend, filtering out counter-trend noise. Targets 12-37 trades/year on 6f timeframe.
+6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_ATRstop_v2
+Hypothesis: 6h Camarilla R4/S4 breakouts with 1d EMA50 trend filter and volume spike capture institutional moves. Uses discrete sizing (0.25) and ATR stop (2.0) with 6-bar minimum hold. Only trades breakouts in 1d trend direction to avoid counter-trend whipsaw. Targets 12-37 trades/year on 6h timeframe.
 """
 
 import numpy as np
@@ -48,8 +48,7 @@ def generate_signals(prices):
     low_6h = df_6h['low'].values
     close_6h = df_6h['close'].values
     
-    # Calculate Camarilla levels for 6h
-    # Camarilla levels based on previous bar's range
+    # Calculate Camarilla levels for 6h based on previous bar
     prev_high = np.roll(high_6h, 1)
     prev_low = np.roll(low_6h, 1)
     prev_close = np.roll(close_6h, 1)
@@ -156,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_ATRstop_v1"
+name = "6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike_ATRstop_v2"
 timeframe = "6h"
 leverage = 1.0
